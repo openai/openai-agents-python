@@ -7,7 +7,7 @@ Realtime agents are in beta. Expect some breaking changes as we improve the impl
 
 ## Prerequisites
 
--   Python 3.9 or higher
+-   Python 3.10 or higher
 -   OpenAI API key
 -   Basic familiarity with the OpenAI Agents SDK
 
@@ -105,9 +105,9 @@ def _truncate_str(s: str, max_length: int) -> str:
     return s
 ```
 
-## Complete example
+## Full example (same flow in one file)
 
-Here's a complete working example:
+This is the same quickstart flow rewritten as a single script.
 
 ```python
 import asyncio
@@ -184,19 +184,23 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## Configuration options
+## Configuration and deployment notes
+
+Use these options after you have a basic session running.
 
 ### Model settings
 
 -   `model_name`: Choose from available realtime models (e.g., `gpt-realtime`)
 -   `voice`: Select voice (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
 -   `modalities`: Enable text or audio (`["text"]` or `["audio"]`)
+-   `output_modalities`: Optionally constrain output to text and/or audio (`["text"]`, `["audio"]`, or both)
 
 ### Audio settings
 
 -   `input_audio_format`: Format for input audio (`pcm16`, `g711_ulaw`, `g711_alaw`)
 -   `output_audio_format`: Format for output audio
 -   `input_audio_transcription`: Transcription configuration
+-   `input_audio_noise_reduction`: Input noise-reduction config (`near_field` or `far_field`)
 
 ### Turn detection
 
@@ -205,15 +209,15 @@ if __name__ == "__main__":
 -   `silence_duration_ms`: Silence duration to detect turn end
 -   `prefix_padding_ms`: Audio padding before speech
 
-## Next steps
+### Run settings
 
--   [Learn more about realtime agents](guide.md)
--   Check out working examples in the [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) folder
--   Add tools to your agent
--   Implement handoffs between agents
--   Set up guardrails for safety
+-   `async_tool_calls`: Whether function tools run asynchronously (defaults to `True`)
+-   `guardrails_settings.debounce_text_length`: Minimum accumulated transcript size before output guardrails run (defaults to `100`)
+-   `tool_error_formatter`: Callback to customize model-visible tool error messages
 
-## Authentication
+For the full schema, see the API reference for [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] and [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings].
+
+### Authentication
 
 Make sure your OpenAI API key is set in your environment:
 
@@ -226,3 +230,39 @@ Or pass it directly when creating the session:
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})
 ```
+
+### Azure OpenAI endpoint format
+
+If you connect to Azure OpenAI instead of OpenAI's default endpoint, pass a GA Realtime URL in
+`model_config["url"]` and set auth headers explicitly.
+
+```python
+session = await runner.run(
+    model_config={
+        "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
+        "headers": {"api-key": "<your-azure-api-key>"},
+    }
+)
+```
+
+You can also use a bearer token:
+
+```python
+session = await runner.run(
+    model_config={
+        "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
+        "headers": {"authorization": f"Bearer {token}"},
+    }
+)
+```
+
+Avoid using the legacy beta path (`/openai/realtime?api-version=...`) with realtime agents. The
+SDK expects the GA Realtime interface.
+
+## Next steps
+
+-   [Learn more about realtime agents](guide.md)
+-   Check out working examples in the [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) folder
+-   Add tools to your agent
+-   Implement handoffs between agents
+-   Set up guardrails for safety

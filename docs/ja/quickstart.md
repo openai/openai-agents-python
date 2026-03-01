@@ -6,7 +6,7 @@ search:
 
 ## プロジェクトと仮想環境の作成
 
-これは一度だけ実施します。
+これは一度だけ実行すれば十分です。
 
 ```bash
 mkdir my_project
@@ -16,7 +16,7 @@ python -m venv .venv
 
 ### 仮想環境の有効化
 
-新しいターミナル セッションを開始するたびに実施します。
+新しいターミナルセッションを開始するたびにこれを実行してください。
 
 ```bash
 source .venv/bin/activate
@@ -30,7 +30,7 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 ### OpenAI API キーの設定
 
-まだ持っていない場合は、[これらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)に従って OpenAI API キーを作成してください。
+まだお持ちでない場合は、 OpenAI API キーを作成するために [こちらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key) に従ってください。
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -38,20 +38,77 @@ export OPENAI_API_KEY=sk-...
 
 ## 最初のエージェントの作成
 
-エージェントは instructions、名前、任意の設定（`model_config` など）で定義します。
+エージェントは instructions 、名前、および特定のモデルなどの任意の設定で定義します。
 
 ```python
 from agents import Agent
 
 agent = Agent(
-    name="Math Tutor",
-    instructions="You provide help with math problems. Explain your reasoning at each step and include examples",
+    name="History Tutor",
+    instructions="You answer history questions clearly and concisely.",
 )
 ```
 
-## さらにいくつかのエージェントの追加
+## 最初のエージェントの実行
 
-追加のエージェントも同様に定義できます。`handoff_descriptions` は、ハンドオフのルーティングを判断するための追加コンテキストを提供します。
+[`Runner`][agents.run.Runner] を使用してエージェントを実行し、 [`RunResult`][agents.result.RunResult] を取得します。
+
+```python
+import asyncio
+from agents import Agent, Runner
+
+agent = Agent(
+    name="History Tutor",
+    instructions="You answer history questions clearly and concisely.",
+)
+
+async def main():
+    result = await Runner.run(agent, "When did the Roman Empire fall?")
+    print(result.final_output)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+2 回目のターンでは、 `result.to_input_list()` を `Runner.run(...)` に再び渡すか、 [session](sessions/index.md) を関連付けるか、 `conversation_id` / `previous_response_id` を使って OpenAI サーバー管理の状態を再利用できます。 [running agents](running_agents.md) ガイドでは、これらの方法を比較しています。
+
+## エージェントへのツール付与
+
+エージェントには、情報を検索したりアクションを実行したりするためのツールを与えられます。
+
+```python
+import asyncio
+from agents import Agent, Runner, function_tool
+
+
+@function_tool
+def history_fun_fact() -> str:
+    """Return a short history fact."""
+    return "Sharks are older than trees."
+
+
+agent = Agent(
+    name="History Tutor",
+    instructions="Answer history questions clearly. Use history_fun_fact when it helps.",
+    tools=[history_fun_fact],
+)
+
+
+async def main():
+    result = await Runner.run(
+        agent,
+        "Tell me something surprising about ancient life on Earth.",
+    )
+    print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## 追加エージェントの作成
+
+追加のエージェントも同じ方法で定義できます。 `handoff_description` は、いつ委譲するべきかについてルーティングエージェントに追加のコンテキストを与えます。
 
 ```python
 from agents import Agent
@@ -59,145 +116,66 @@ from agents import Agent
 history_tutor_agent = Agent(
     name="History Tutor",
     handoff_description="Specialist agent for historical questions",
-    instructions="You provide assistance with historical queries. Explain important events and context clearly.",
+    instructions="You answer history questions clearly and concisely.",
 )
 
 math_tutor_agent = Agent(
     name="Math Tutor",
     handoff_description="Specialist agent for math questions",
-    instructions="You provide help with math problems. Explain your reasoning at each step and include examples",
+    instructions="You explain math step by step and include worked examples.",
 )
 ```
 
 ## ハンドオフの定義
 
-各エージェントで、タスクを前進させる方法を決めるために選択できる、送信側のハンドオフ オプションの一覧を定義できます。
+エージェントでは、タスク解決中に選択できる外向きハンドオフオプションの一覧を定義できます。
 
 ```python
 triage_agent = Agent(
     name="Triage Agent",
-    instructions="You determine which agent to use based on the user's homework question",
-    handoffs=[history_tutor_agent, math_tutor_agent]
+    instructions="Route each homework question to the right specialist.",
+    handoffs=[history_tutor_agent, math_tutor_agent],
 )
 ```
 
-## エージェントのオーケストレーションの実行
+## エージェントオーケストレーションの実行
 
-ワークフローが実行され、トリアージ エージェントが 2 つの専門エージェント間を正しくルーティングすることを確認しましょう。
+ランナーは、個々のエージェントの実行、あらゆるハンドオフ、およびあらゆるツール呼び出しを処理します。
 
 ```python
+import asyncio
 from agents import Runner
 
+
 async def main():
-    result = await Runner.run(triage_agent, "who was the first president of the united states?")
+    result = await Runner.run(
+        triage_agent,
+        "Who was the first president of the United States?",
+    )
     print(result.final_output)
-```
+    print(f"Answered by: {result.last_agent.name}")
 
-## ガードレールの追加
-
-入力または出力に対して実行するカスタム ガードレールを定義できます。
-
-```python
-from agents import GuardrailFunctionOutput, Agent, Runner
-from pydantic import BaseModel
-
-
-class HomeworkOutput(BaseModel):
-    is_homework: bool
-    reasoning: str
-
-guardrail_agent = Agent(
-    name="Guardrail check",
-    instructions="Check if the user is asking about homework.",
-    output_type=HomeworkOutput,
-)
-
-async def homework_guardrail(ctx, agent, input_data):
-    result = await Runner.run(guardrail_agent, input_data, context=ctx.context)
-    final_output = result.final_output_as(HomeworkOutput)
-    return GuardrailFunctionOutput(
-        output_info=final_output,
-        tripwire_triggered=not final_output.is_homework,
-    )
-```
-
-## すべてを組み合わせる
-
-すべてを組み合わせて、ハンドオフと入力ガードレールを使用しながら、ワークフロー全体を実行しましょう。
-
-```python
-from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
-from agents.exceptions import InputGuardrailTripwireTriggered
-from pydantic import BaseModel
-import asyncio
-
-class HomeworkOutput(BaseModel):
-    is_homework: bool
-    reasoning: str
-
-guardrail_agent = Agent(
-    name="Guardrail check",
-    instructions="Check if the user is asking about homework.",
-    output_type=HomeworkOutput,
-)
-
-math_tutor_agent = Agent(
-    name="Math Tutor",
-    handoff_description="Specialist agent for math questions",
-    instructions="You provide help with math problems. Explain your reasoning at each step and include examples",
-)
-
-history_tutor_agent = Agent(
-    name="History Tutor",
-    handoff_description="Specialist agent for historical questions",
-    instructions="You provide assistance with historical queries. Explain important events and context clearly.",
-)
-
-
-async def homework_guardrail(ctx, agent, input_data):
-    result = await Runner.run(guardrail_agent, input_data, context=ctx.context)
-    final_output = result.final_output_as(HomeworkOutput)
-    return GuardrailFunctionOutput(
-        output_info=final_output,
-        tripwire_triggered=not final_output.is_homework,
-    )
-
-triage_agent = Agent(
-    name="Triage Agent",
-    instructions="You determine which agent to use based on the user's homework question",
-    handoffs=[history_tutor_agent, math_tutor_agent],
-    input_guardrails=[
-        InputGuardrail(guardrail_function=homework_guardrail),
-    ],
-)
-
-async def main():
-    # Example 1: History question
-    try:
-        result = await Runner.run(triage_agent, "who was the first president of the united states?")
-        print(result.final_output)
-    except InputGuardrailTripwireTriggered as e:
-        print("Guardrail blocked this input:", e)
-
-    # Example 2: General/philosophical question
-    try:
-        result = await Runner.run(triage_agent, "What is the meaning of life?")
-        print(result.final_output)
-    except InputGuardrailTripwireTriggered as e:
-        print("Guardrail blocked this input:", e)
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## トレースの表示
+## コード例の参照
 
-エージェントの実行中に何が起きたか確認するには、OpenAI ダッシュボードのトレース ビューアーに移動して、実行のトレースを表示します。
+リポジトリには、同じ主要パターンに対応する完全なスクリプトが含まれています。
+
+-   最初の実行向け: [`examples/basic/hello_world.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/hello_world.py)
+-   関数ツール向け: [`examples/basic/tools.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/tools.py)
+-   マルチエージェントルーティング向け: [`examples/agent_patterns/routing.py`](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/routing.py)
+
+## トレースの確認
+
+エージェント実行中に何が起きたかを確認するには、 [OpenAI Dashboard の Trace viewer](https://platform.openai.com/traces) に移動して、エージェント実行のトレースを表示してください。
 
 ## 次のステップ
 
-より複雑なエージェント フローの構築方法を学びましょう:
+より複雑な agentic フローの構築方法を学びましょう。
 
--   [エージェント](agents.md)の設定について学ぶ
--   [エージェントの実行](running_agents.md)について学ぶ
--   [ツール](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md)について学ぶ
+-   [Agents](agents.md) の設定方法を学ぶ。
+-   [running agents](running_agents.md) と [sessions](sessions/index.md) について学ぶ。
+-   [tools](tools.md) 、 [guardrails](guardrails.md) 、 [models](models/index.md) について学ぶ。

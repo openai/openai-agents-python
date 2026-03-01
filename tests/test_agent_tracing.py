@@ -1,15 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+from uuid import uuid4
 
 import pytest
 from inline_snapshot import snapshot
 
-from agents import Agent, RunConfig, Runner, trace
+from agents import Agent, RunConfig, Runner, RunState, function_tool, trace
 
 from .fake_model import FakeModel
-from .test_responses import get_text_message
-from .testing_processor import assert_no_traces, fetch_normalized_spans
+from .test_responses import get_function_tool_call, get_text_message
+from .testing_processor import (
+    assert_no_traces,
+    fetch_events,
+    fetch_normalized_spans,
+    fetch_ordered_spans,
+    fetch_traces,
+)
+
+
+def _make_approval_agent(model: FakeModel) -> Agent[None]:
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        return "ok"
+
+    return Agent(name="test_agent", model=model, tools=[approval_tool])
 
 
 @pytest.mark.asyncio
@@ -92,6 +107,142 @@ async def test_multiple_runs_are_multiple_traces():
             },
         ]
     )
+
+
+@pytest.mark.asyncio
+async def test_resumed_run_reuses_original_trace_without_duplicate_trace_start():
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("approval_tool", "{}", call_id="call-1")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = _make_approval_agent(model)
+
+    first = await Runner.run(agent, input="first_test")
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    resumed = await Runner.run(agent, state)
+
+    assert resumed.final_output == "done"
+    traces = fetch_traces()
+    assert len(traces) == 1
+    assert fetch_events().count("trace_start") == 1
+    assert fetch_events().count("trace_end") == 1
+    assert all(span.trace_id == traces[0].trace_id for span in fetch_ordered_spans())
+
+
+@pytest.mark.asyncio
+async def test_resumed_run_from_serialized_state_reuses_original_trace():
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("approval_tool", "{}", call_id="call-1")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = _make_approval_agent(model)
+
+    first = await Runner.run(agent, input="first_test")
+    assert first.interruptions
+
+    restored_state = await RunState.from_string(agent, first.to_state().to_string())
+    restored_interruptions = restored_state.get_interruptions()
+    assert len(restored_interruptions) == 1
+    restored_state.approve(restored_interruptions[0])
+
+    resumed = await Runner.run(agent, restored_state)
+
+    assert resumed.final_output == "done"
+    traces = fetch_traces()
+    assert len(traces) == 1
+    assert fetch_events().count("trace_start") == 1
+    assert fetch_events().count("trace_end") == 1
+    assert all(span.trace_id == traces[0].trace_id for span in fetch_ordered_spans())
+
+
+@pytest.mark.asyncio
+async def test_resumed_run_from_serialized_state_preserves_explicit_trace_key():
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("approval_tool", "{}", call_id="call-1")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = _make_approval_agent(model)
+
+    first = await Runner.run(
+        agent,
+        input="first_test",
+        run_config=RunConfig(tracing={"api_key": "trace-key"}),
+    )
+    assert first.interruptions
+
+    restored_state = await RunState.from_string(agent, first.to_state().to_string())
+    restored_interruptions = restored_state.get_interruptions()
+    assert len(restored_interruptions) == 1
+    restored_state.approve(restored_interruptions[0])
+
+    resumed = await Runner.run(
+        agent,
+        restored_state,
+        run_config=RunConfig(tracing={"api_key": "trace-key"}),
+    )
+
+    assert resumed.final_output == "done"
+    traces = fetch_traces()
+    assert len(traces) == 1
+    assert traces[0].tracing_api_key == "trace-key"
+    assert fetch_events().count("trace_start") == 1
+    assert fetch_events().count("trace_end") == 1
+    assert all(span.trace_id == traces[0].trace_id for span in fetch_ordered_spans())
+    assert all(span.tracing_api_key == "trace-key" for span in fetch_ordered_spans())
+
+
+@pytest.mark.asyncio
+async def test_resumed_run_with_workflow_override_starts_new_trace() -> None:
+    trace_id = f"trace_{uuid4().hex}"
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("approval_tool", "{}", call_id="call-1")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = _make_approval_agent(model)
+
+    first = await Runner.run(
+        agent,
+        input="first_test",
+        run_config=RunConfig(
+            workflow_name="original_workflow",
+            trace_id=trace_id,
+            group_id="group-1",
+        ),
+    )
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    resumed = await Runner.run(
+        agent,
+        state,
+        run_config=RunConfig(workflow_name="override_workflow"),
+    )
+
+    assert resumed.final_output == "done"
+    traces = fetch_traces()
+    assert len(traces) == 2
+    assert fetch_events().count("trace_start") == 2
+    assert fetch_events().count("trace_end") == 2
+    assert [trace.trace_id for trace in traces] == [trace_id, trace_id]
+    assert [trace.name for trace in traces] == ["original_workflow", "override_workflow"]
 
 
 @pytest.mark.asyncio
@@ -346,6 +497,37 @@ async def test_multiple_streamed_runs_are_multiple_traces():
             },
         ]
     )
+
+
+@pytest.mark.asyncio
+async def test_resumed_streaming_run_reuses_original_trace_without_duplicate_trace_start():
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("approval_tool", "{}", call_id="call-1")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = _make_approval_agent(model)
+
+    first = Runner.run_streamed(agent, input="first_test")
+    async for _ in first.stream_events():
+        pass
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    resumed = Runner.run_streamed(agent, state)
+    async for _ in resumed.stream_events():
+        pass
+
+    assert resumed.final_output == "done"
+    traces = fetch_traces()
+    assert len(traces) == 1
+    assert fetch_events().count("trace_start") == 1
+    assert fetch_events().count("trace_end") == 1
+    assert all(span.trace_id == traces[0].trace_id for span in fetch_ordered_spans())
 
 
 @pytest.mark.asyncio

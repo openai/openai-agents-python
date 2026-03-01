@@ -51,8 +51,8 @@ from agents.extensions.memory import (
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 
-# Mark all tests as async
-pytestmark = pytest.mark.asyncio
+# Docker-backed integration tests should stay on the serial test path.
+pytestmark = [pytest.mark.asyncio, pytest.mark.serial]
 
 
 def wait_for_dapr_health(host: str, port: int, timeout: int = 60) -> bool:

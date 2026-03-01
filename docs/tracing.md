@@ -100,7 +100,7 @@ To customize this default setup, to send traces to alternative or additional bac
 2. [`set_trace_processors()`][agents.tracing.set_trace_processors] lets you **replace** the default processors with your own trace processors. This means traces will not be sent to the OpenAI backend unless you include a `TracingProcessor` that does so.
 
 
-## Tracing with Non-OpenAI Models
+## Tracing with non-OpenAI models
 
 You can use an OpenAI API key with non-OpenAI Models to enable free tracing in the OpenAI Traces dashboard without needing to disable tracing.
 
@@ -135,11 +135,15 @@ await Runner.run(
 )
 ```
 
-## Notes
+## Additional notes
 - View free traces at Openai Traces dashboard.
 
 
-## External tracing processors list
+## Ecosystem integrations
+
+The following community and vendor integrations support the OpenAI Agents SDK tracing surface.
+
+### External tracing processors list
 
 -   [Weights & Biases](https://weave-docs.wandb.ai/guides/integrations/openai_agents)
 -   [Arize-Phoenix](https://docs.arize.com/phoenix/tracing/integrations-tracing/openai-agents-sdk)

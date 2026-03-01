@@ -11,6 +11,7 @@ from openai.types.responses import (
     Response,
     ResponseComputerToolCall,
     ResponseFileSearchToolCall,
+    ResponseFunctionShellToolCallOutput,
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
     ResponseInputItemParam,
@@ -57,6 +58,7 @@ from .tool import (
     ValidToolOutputPydanticModelsTypeAdapter,
 )
 from .usage import Usage
+from .util._json import _to_dump_compatible
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -263,6 +265,7 @@ ToolCallOutputTypes: TypeAlias = Union[
     FunctionCallOutput,
     ComputerCallOutput,
     LocalShellCallOutput,
+    ResponseFunctionShellToolCallOutput,
     dict[str, Any],
 ]
 
@@ -499,6 +502,9 @@ class ModelResponse:
     be passed to `Runner.run`.
     """
 
+    request_id: str | None = None
+    """The transport request ID for this model call, if provided by the model SDK."""
+
     def to_input_items(self) -> list[TResponseInputItem]:
         """Convert the output into a list of input items suitable for passing to the model."""
         # We happen to know that the shape of the Pydantic output items are the same as the
@@ -548,7 +554,7 @@ class ItemHelpers:
                     "role": "user",
                 }
             ]
-        return input.copy()
+        return cast(list[TResponseInputItem], _to_dump_compatible(input))
 
     @classmethod
     def text_message_outputs(cls, items: list[RunItem]) -> str:

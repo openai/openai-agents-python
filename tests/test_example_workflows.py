@@ -26,7 +26,7 @@ from agents import (
 )
 from agents.agent import ToolsToFinalOutputResult
 from agents.items import TResponseInputItem
-from agents.tool import FunctionTool, FunctionToolResult, function_tool
+from agents.tool import FunctionToolResult, function_tool
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -444,13 +444,10 @@ async def test_agent_as_tool_streaming_example_collects_events() -> None:
     async def on_stream(event: AgentToolStreamEvent) -> None:
         received.append(event)
 
-    billing_tool = cast(
-        FunctionTool,
-        billing_agent.as_tool(
-            tool_name="billing_agent",
-            tool_description="Answer billing questions",
-            on_stream=on_stream,
-        ),
+    billing_tool = billing_agent.as_tool(
+        tool_name="billing_agent",
+        tool_description="Answer billing questions",
+        on_stream=on_stream,
     )
 
     async def fake_invoke(ctx, input: str) -> str:

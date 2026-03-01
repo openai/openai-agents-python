@@ -63,7 +63,7 @@ async for event in result.stream():
         # play audio
     elif event.type == "voice_stream_event_lifecycle":
         # lifecycle
-    elif event.type == "voice_stream_event_error"
+    elif event.type == "voice_stream_event_error":
         # error
     ...
 ```

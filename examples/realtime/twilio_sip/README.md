@@ -4,7 +4,7 @@ This example shows how to handle OpenAI Realtime SIP calls with the Agents SDK. 
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.10+
 - An OpenAI API key with Realtime API access
 - A configured webhook secret for your OpenAI project
 - A Twilio account with a phone number and Elastic SIP Trunking enabled

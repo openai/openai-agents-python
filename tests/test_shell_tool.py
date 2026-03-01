@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 import pytest
@@ -13,10 +14,14 @@ from agents import (
     ShellCommandOutput,
     ShellResult,
     ShellTool,
+    UserError,
+    set_tracing_disabled,
+    trace,
 )
 from agents.items import ToolApprovalItem, ToolCallOutputItem
-from agents.run_internal.run_loop import ShellAction, ToolRunShellCall
+from agents.run_internal.run_loop import ShellAction, ToolRunShellCall, execute_shell_calls
 
+from .testing_processor import SPAN_PROCESSOR_TESTING
 from .utils.hitl import (
     HITL_REJECTION_MSG,
     make_context_wrapper,
@@ -26,6 +31,19 @@ from .utils.hitl import (
     reject_tool_call,
     require_approval,
 )
+
+
+def _get_function_span(tool_name: str) -> dict[str, Any]:
+    for span in SPAN_PROCESSOR_TESTING.get_ordered_spans(including_empty=True):
+        exported = span.export()
+        if not exported:
+            continue
+        span_data = exported.get("span_data")
+        if not isinstance(span_data, dict):
+            continue
+        if span_data.get("type") == "function" and span_data.get("name") == tool_name:
+            return exported
+    raise AssertionError(f"Function span for tool '{tool_name}' not found")
 
 
 def _shell_call(call_id: str = "call_shell") -> dict[str, Any]:
@@ -38,6 +56,169 @@ def _shell_call(call_id: str = "call_shell") -> dict[str, Any]:
             status="completed",
         ),
     )
+
+
+def test_shell_tool_defaults_to_local_environment() -> None:
+    shell_tool = ShellTool(executor=lambda request: "ok")
+
+    assert shell_tool.environment == {"type": "local"}
+    assert shell_tool.executor is not None
+
+
+def test_shell_tool_supports_hosted_environment_without_executor() -> None:
+    shell_tool = ShellTool(
+        environment={
+            "type": "container_reference",
+            "container_id": "cntr_123",
+        }
+    )
+
+    assert shell_tool.environment == {"type": "container_reference", "container_id": "cntr_123"}
+    assert shell_tool.executor is None
+
+
+def test_shell_tool_normalizes_container_auto_environment() -> None:
+    shell_tool = ShellTool(
+        environment={
+            "type": "container_auto",
+            "file_ids": ["file_123"],
+            "memory_limit": "4g",
+            "network_policy": {
+                "type": "allowlist",
+                "allowed_domains": ["example.com"],
+                "domain_secrets": [
+                    {
+                        "domain": "example.com",
+                        "name": "API_TOKEN",
+                        "value": "secret",
+                    }
+                ],
+            },
+            "skills": [
+                {"type": "skill_reference", "skill_id": "skill_123", "version": "latest"},
+                {
+                    "type": "inline",
+                    "name": "csv-workbench",
+                    "description": "Analyze CSV files.",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/zip",
+                        "data": "ZmFrZS16aXA=",
+                    },
+                },
+            ],
+        }
+    )
+
+    assert shell_tool.environment == {
+        "type": "container_auto",
+        "file_ids": ["file_123"],
+        "memory_limit": "4g",
+        "network_policy": {
+            "type": "allowlist",
+            "allowed_domains": ["example.com"],
+            "domain_secrets": [
+                {
+                    "domain": "example.com",
+                    "name": "API_TOKEN",
+                    "value": "secret",
+                }
+            ],
+        },
+        "skills": [
+            {"type": "skill_reference", "skill_id": "skill_123", "version": "latest"},
+            {
+                "type": "inline",
+                "name": "csv-workbench",
+                "description": "Analyze CSV files.",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/zip",
+                    "data": "ZmFrZS16aXA=",
+                },
+            },
+        ],
+    }
+
+
+def test_shell_tool_rejects_local_mode_without_executor() -> None:
+    with pytest.raises(UserError, match="requires an executor"):
+        ShellTool()
+
+    with pytest.raises(UserError, match="requires an executor"):
+        ShellTool(environment={"type": "local"})
+
+
+def test_shell_tool_allows_unvalidated_hosted_environment_shapes() -> None:
+    shell_tool = ShellTool(environment=cast(Any, {"type": "container_reference"}))
+    assert shell_tool.environment == {"type": "container_reference"}
+
+    shell_tool = ShellTool(
+        environment=cast(
+            Any,
+            {
+                "type": "container_auto",
+                "network_policy": {
+                    "type": "future_mode",
+                    "allowed_domains": ["example.com"],
+                    "some_new_field": True,
+                },
+                "skills": [{"type": "skill_reference"}],
+            },
+        )
+    )
+    assert isinstance(shell_tool.environment, dict)
+    assert shell_tool.environment["type"] == "container_auto"
+
+
+def test_shell_tool_rejects_local_executor_and_approval_for_hosted_environment() -> None:
+    with pytest.raises(UserError, match="does not accept an executor"):
+        ShellTool(
+            executor=lambda request: "ok",
+            environment={"type": "container_reference", "container_id": "cntr_123"},
+        )
+
+    with pytest.raises(UserError, match="does not support needs_approval or on_approval"):
+        ShellTool(
+            environment={"type": "container_reference", "container_id": "cntr_123"},
+            needs_approval=True,
+        )
+
+    with pytest.raises(UserError, match="does not support needs_approval or on_approval"):
+        ShellTool(
+            environment={"type": "container_reference", "container_id": "cntr_123"},
+            on_approval=lambda _context, _item: {"approve": True},
+        )
+
+
+@pytest.mark.asyncio
+async def test_execute_shell_calls_surfaces_missing_local_executor() -> None:
+    shell_tool = ShellTool(
+        environment={
+            "type": "container_reference",
+            "container_id": "cntr_123",
+        }
+    )
+    tool_run = ToolRunShellCall(tool_call=_shell_call(), shell_tool=shell_tool)
+    agent = Agent(name="shell-agent", tools=[shell_tool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    result = await execute_shell_calls(
+        agent=agent,
+        calls=[tool_run],
+        context_wrapper=context_wrapper,
+        hooks=RunHooks[Any](),
+        config=RunConfig(),
+    )
+
+    assert len(result) == 1
+    output_item = result[0]
+    assert isinstance(output_item, ToolCallOutputItem)
+    assert output_item.output == "Shell tool has no local executor configured."
+    raw_item = cast(dict[str, Any], output_item.raw_item)
+    assert raw_item["type"] == "shell_call_output"
+    assert raw_item["call_id"] == "call_shell"
+    assert raw_item["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -102,6 +283,71 @@ async def test_shell_tool_structured_output_is_rendered() -> None:
     assert "status" not in payload_dict
     assert "shell_output" not in payload_dict
     assert "provider_data" not in payload_dict
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_emits_function_span() -> None:
+    shell_tool = ShellTool(executor=lambda request: "shell span output")
+    tool_run = ToolRunShellCall(tool_call=_shell_call("call_shell_trace"), shell_tool=shell_tool)
+    agent = Agent(name="shell-agent", tools=[shell_tool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    set_tracing_disabled(False)
+    with trace("shell-span-test"):
+        result = await ShellAction.execute(
+            agent=agent,
+            call=tool_run,
+            hooks=RunHooks[Any](),
+            context_wrapper=context_wrapper,
+            config=RunConfig(),
+        )
+
+    assert isinstance(result, ToolCallOutputItem)
+    function_span = _get_function_span(shell_tool.name)
+    span_data = cast(dict[str, Any], function_span["span_data"])
+    assert "echo hi" in cast(str, span_data.get("input", ""))
+    assert span_data.get("output") == "shell span output"
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_redacts_span_error_when_sensitive_data_disabled() -> None:
+    secret_error = "shell secret output"
+
+    class ExplodingExecutor:
+        def __call__(self, request):
+            raise RuntimeError(secret_error)
+
+    shell_tool = ShellTool(executor=ExplodingExecutor())
+    tool_run = ToolRunShellCall(
+        tool_call=_shell_call("call_shell_trace_redacted"),
+        shell_tool=shell_tool,
+    )
+    agent = Agent(name="shell-agent", tools=[shell_tool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    set_tracing_disabled(False)
+    with trace("shell-span-redaction-test"):
+        result = await ShellAction.execute(
+            agent=agent,
+            call=tool_run,
+            hooks=RunHooks[Any](),
+            context_wrapper=context_wrapper,
+            config=RunConfig(trace_include_sensitive_data=False),
+        )
+
+    assert isinstance(result, ToolCallOutputItem)
+    function_span = _get_function_span(shell_tool.name)
+    assert function_span.get("error") == {
+        "message": "Error running tool",
+        "data": {
+            "tool_name": shell_tool.name,
+            "error": "Tool execution failed. Error details are redacted.",
+        },
+    }
+    assert secret_error not in json.dumps(function_span)
+    span_data = cast(dict[str, Any], function_span["span_data"])
+    assert span_data.get("input") is None
+    assert span_data.get("output") is None
 
 
 @pytest.mark.asyncio

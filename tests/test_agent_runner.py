@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -11,6 +12,8 @@ import httpx
 import pytest
 from openai import BadRequestError
 from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses.response_output_text import AnnotationFileCitation, ResponseOutputText
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from typing_extensions import TypedDict
 
 from agents import (
@@ -29,6 +32,7 @@ from agents import (
     RunContextWrapper,
     Runner,
     SQLiteSession,
+    ToolTimeoutError,
     UserError,
     handoff,
 )
@@ -37,6 +41,7 @@ from agents.computer import Computer
 from agents.items import (
     HandoffOutputItem,
     ModelResponse,
+    ReasoningItem,
     RunItem,
     ToolApprovalItem,
     ToolCallOutputItem,
@@ -48,6 +53,7 @@ from agents.run_config import _default_trace_include_sensitive_data
 from agents.run_internal.items import (
     drop_orphan_function_calls,
     ensure_input_item_format,
+    fingerprint_input_item,
     normalize_input_items_for_api,
     normalize_resumed_input,
 )
@@ -63,6 +69,7 @@ from agents.run_internal.tool_execution import execute_approved_tools
 from agents.run_internal.tool_use_tracker import AgentToolUseTracker
 from agents.run_state import RunState
 from agents.tool import ComputerTool, FunctionToolResult, function_tool
+from agents.tool_context import ToolContext
 from agents.usage import Usage
 
 from .fake_model import FakeModel
@@ -328,6 +335,14 @@ def testnormalize_input_items_for_api_preserves_provider_data():
     assert second["provider_data"] == {"trace": "remove"}
 
 
+def test_fingerprint_input_item_returns_none_when_model_dump_fails():
+    class _BrokenModelDump:
+        def model_dump(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("model_dump failed")
+
+    assert fingerprint_input_item(_BrokenModelDump()) is None
+
+
 def test_server_conversation_tracker_tracks_previous_response_id():
     tracker = OpenAIServerConversationTracker(conversation_id=None, previous_response_id="resp_a")
     response = ModelResponse(
@@ -347,6 +362,17 @@ def _as_message(item: Any) -> dict[str, Any]:
     assert isinstance(role, str)
     assert role in {"assistant", "user", "system", "developer"}
     return cast(dict[str, Any], item)
+
+
+def _find_reasoning_input_item(
+    items: str | list[TResponseInputItem] | Any,
+) -> dict[str, Any] | None:
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            return cast(dict[str, Any], item)
+    return None
 
 
 @pytest.mark.asyncio
@@ -435,6 +461,178 @@ async def test_tool_call_runs():
         "should have five inputs: the original input, the message, the tool call, the tool result "
         "and the done message"
     )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_item_id_policy_omits_follow_up_reasoning_ids() -> None:
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("foo", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                ResponseReasoningItem(
+                    id="rs_first",
+                    type="reasoning",
+                    summary=[Summary(text="Thinking...", type="summary_text")],
+                ),
+                get_function_tool_call("foo", json.dumps({"a": "b"}), call_id="call_first"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent,
+        input="hello",
+        run_config=RunConfig(reasoning_item_id_policy="omit"),
+    )
+
+    assert result.final_output == "done"
+    second_request_reasoning = _find_reasoning_input_item(model.last_turn_args.get("input"))
+    assert second_request_reasoning is not None
+    assert "id" not in second_request_reasoning
+
+    history_reasoning = _find_reasoning_input_item(result.to_input_list())
+    assert history_reasoning is not None
+    assert "id" not in history_reasoning
+
+
+@pytest.mark.asyncio
+async def test_call_model_input_filter_can_reintroduce_reasoning_ids() -> None:
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("foo", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                ResponseReasoningItem(
+                    id="rs_filter",
+                    type="reasoning",
+                    summary=[Summary(text="Thinking...", type="summary_text")],
+                ),
+                get_function_tool_call("foo", json.dumps({"a": "b"}), call_id="call_filter"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    def reintroduce_reasoning_id(data: Any) -> Any:
+        updated_input: list[TResponseInputItem] = []
+        for item in data.model_data.input:
+            if isinstance(item, dict) and item.get("type") == "reasoning" and "id" not in item:
+                updated_input.append(cast(TResponseInputItem, {**item, "id": "rs_reintroduced"}))
+            else:
+                updated_input.append(item)
+        data.model_data.input = updated_input
+        return data.model_data
+
+    result = await Runner.run(
+        agent,
+        input="hello",
+        run_config=RunConfig(
+            reasoning_item_id_policy="omit",
+            call_model_input_filter=reintroduce_reasoning_id,
+        ),
+    )
+
+    assert result.final_output == "done"
+    second_request_reasoning = _find_reasoning_input_item(model.last_turn_args.get("input"))
+    assert second_request_reasoning is not None
+    assert second_request_reasoning.get("id") == "rs_reintroduced"
+
+    history_reasoning = _find_reasoning_input_item(result.to_input_list())
+    assert history_reasoning is not None
+    assert "id" not in history_reasoning
+
+
+@pytest.mark.asyncio
+async def test_resumed_run_uses_serialized_reasoning_item_id_policy() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        return "ok"
+
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[approval_tool],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                ResponseReasoningItem(
+                    id="rs_resume",
+                    type="reasoning",
+                    summary=[Summary(text="Thinking...", type="summary_text")],
+                ),
+                get_function_tool_call(
+                    "approval_tool",
+                    json.dumps({}),
+                    call_id="call_resume",
+                ),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first_run = await Runner.run(
+        agent,
+        input="hello",
+        run_config=RunConfig(reasoning_item_id_policy="omit"),
+    )
+    assert len(first_run.interruptions) == 1
+
+    state = first_run.to_state()
+    state.approve(first_run.interruptions[0])
+    restored_state = await RunState.from_string(agent, state.to_string())
+
+    resumed = await Runner.run(agent, restored_state)
+    assert resumed.final_output == "done"
+
+    second_request_reasoning = _find_reasoning_input_item(model.last_turn_args.get("input"))
+    assert second_request_reasoning is not None
+    assert "id" not in second_request_reasoning
+
+
+@pytest.mark.asyncio
+async def test_tool_call_context_includes_current_agent() -> None:
+    model = FakeModel()
+    captured_contexts: list[ToolContext[Any]] = []
+
+    @function_tool(name_override="foo")
+    def foo(context: ToolContext[Any]) -> str:
+        captured_contexts.append(context)
+        return "tool_result"
+
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[foo],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("foo", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="user_message")
+
+    assert result.final_output == "done"
+    assert len(captured_contexts) == 1
+    assert captured_contexts[0].agent is agent
 
 
 @pytest.mark.asyncio
@@ -540,6 +738,60 @@ async def test_nested_handoff_filters_model_input_but_preserves_session_items():
         for item in session_items
     )
     assert has_function_call_output
+
+
+@pytest.mark.asyncio
+async def test_nested_handoff_filters_reasoning_items_from_model_input():
+    model = FakeModel()
+    delegate = Agent(
+        name="delegate",
+        model=model,
+    )
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[delegate],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                ResponseReasoningItem(
+                    id="reasoning_1",
+                    type="reasoning",
+                    summary=[Summary(text="Thinking about a handoff.", type="summary_text")],
+                ),
+                get_handoff_tool_call(delegate),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    captured_inputs: list[list[dict[str, Any]]] = []
+
+    def capture_model_input(data):
+        if isinstance(data.model_data.input, list):
+            captured_inputs.append(
+                [item for item in data.model_data.input if isinstance(item, dict)]
+            )
+        return data.model_data
+
+    result = await Runner.run(
+        triage,
+        input="user_message",
+        run_config=RunConfig(
+            nest_handoff_history=True,
+            call_model_input_filter=capture_model_input,
+        ),
+    )
+
+    assert result.final_output == "done"
+    assert len(captured_inputs) >= 2
+    handoff_input = captured_inputs[1]
+    handoff_input_types = [
+        item["type"] for item in handoff_input if isinstance(item.get("type"), str)
+    ]
+    assert "reasoning" not in handoff_input_types
 
 
 @pytest.mark.asyncio
@@ -1279,6 +1531,29 @@ def test_ensure_api_input_item_handles_model_dump_objects():
     assert converted["output"] == "dumped"
 
 
+def test_ensure_api_input_item_avoids_pydantic_serialization_warnings():
+    annotation = AnnotationFileCitation.model_construct(
+        type="container_file_citation",
+        file_id="file_123",
+        filename="result.txt",
+        index=0,
+    )
+    output_text = ResponseOutputText.model_construct(
+        type="output_text",
+        text="done",
+        annotations=[annotation],
+    )
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        converted = ensure_input_item_format(cast(Any, output_text))
+
+    converted_payload = cast(dict[str, Any], converted)
+    assert captured == []
+    assert converted_payload["type"] == "output_text"
+    assert converted_payload["annotations"][0]["type"] == "container_file_citation"
+
+
 def test_ensure_api_input_item_preserves_object_output():
     payload = cast(
         TResponseInputItem,
@@ -1680,6 +1955,37 @@ async def test_save_result_to_session_counts_sanitized_openai_items() -> None:
     assert len(session.saved_items) == 1
     saved = cast(dict[str, Any], session.saved_items[0])
     assert "provider_data" not in saved
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_session_omits_reasoning_ids_when_policy_is_omit() -> None:
+    session = SimpleListSession()
+    agent = Agent(name="agent", model=FakeModel())
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    run_state.set_reasoning_item_id_policy("omit")
+
+    reasoning_item = ReasoningItem(
+        agent=agent,
+        raw_item=ResponseReasoningItem(type="reasoning", id="rs_stream", summary=[]),
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [reasoning_item]),
+        run_state,
+    )
+
+    assert saved_count == 1
+    assert len(session.saved_items) == 1
+    saved_reasoning = cast(dict[str, Any], session.saved_items[0])
+    assert saved_reasoning.get("type") == "reasoning"
+    assert "id" not in saved_reasoning
 
 
 @pytest.mark.asyncio
@@ -3006,3 +3312,53 @@ async def test_execute_approved_tools_instance_method():
     assert len(generated_items) == 1
     assert isinstance(generated_items[0], ToolCallOutputItem)
     assert generated_items[0].output == "tool_result"
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_timeout_returns_error_as_result() -> None:
+    async def slow_tool() -> str:
+        await asyncio.sleep(0.2)
+        return "tool_result"
+
+    tool = function_tool(slow_tool, name_override="test_tool", timeout=0.01)
+    _, agent = make_model_and_agent(tools=[tool])
+
+    tool_call = get_function_tool_call("test_tool", json.dumps({}))
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=True,
+    )
+
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert "timed out" in generated_items[0].output.lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_timeout_can_raise_exception() -> None:
+    async def slow_tool() -> str:
+        await asyncio.sleep(0.2)
+        return "tool_result"
+
+    tool = function_tool(
+        slow_tool,
+        name_override="test_tool",
+        timeout=0.01,
+        timeout_behavior="raise_exception",
+    )
+    _, agent = make_model_and_agent(tools=[tool])
+
+    tool_call = get_function_tool_call("test_tool", json.dumps({}))
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+    with pytest.raises(ToolTimeoutError, match="timed out"):
+        await run_execute_approved_tools(
+            agent=agent,
+            approval_item=approval_item,
+            approve=True,
+        )

@@ -9,11 +9,13 @@ from inline_snapshot import snapshot
 from agents.tracing import (
     Span,
     Trace,
+    TracingProcessor,
     agent_span,
     custom_span,
     function_span,
     generation_span,
     handoff_span,
+    set_trace_processors,
     trace,
 )
 from agents.tracing.spans import SpanError
@@ -408,6 +410,64 @@ def test_trace_and_spans_use_tracing_config_key():
         assert tr.tracing_api_key == "tracing-key"
         with custom_span(name="span_with_key") as span:
             assert span.tracing_api_key == "tracing-key"
+
+
+def test_trace_metadata_propagates_to_spans():
+    metadata = {"source": "run"}
+    with trace(workflow_name="test", metadata=metadata) as current_trace:
+        with custom_span(name="direct_child", parent=current_trace) as direct_child:
+            assert direct_child.trace_metadata == metadata
+        with custom_span(name="parent") as parent:
+            assert parent.trace_metadata == metadata
+            with custom_span(name="child", parent=parent) as child:
+                assert child.trace_metadata == metadata
+
+
+def test_processor_can_lookup_trace_metadata_by_span_trace_id():
+    class MetadataPropagatingProcessor(TracingProcessor):
+        def __init__(self) -> None:
+            self.trace_metadata_by_id: dict[str, dict[str, Any]] = {}
+            self.looked_up_metadata: dict[str, Any] | None = None
+            self.span_trace_metadata: dict[str, Any] | None = None
+
+        def on_trace_start(self, trace: Trace) -> None:
+            trace_metadata = getattr(trace, "metadata", None)
+            if trace_metadata:
+                self.trace_metadata_by_id[trace.trace_id] = dict(trace_metadata)
+
+        def on_trace_end(self, trace: Trace) -> None:
+            return None
+
+        def on_span_start(self, span: Span[Any]) -> None:
+            return None
+
+        def on_span_end(self, span: Span[Any]) -> None:
+            if span.span_data.type != "agent":
+                return
+            self.looked_up_metadata = self.trace_metadata_by_id.get(span.trace_id)
+            self.span_trace_metadata = span.trace_metadata
+
+        def shutdown(self) -> None:
+            return None
+
+        def force_flush(self) -> None:
+            return None
+
+    metadata = {
+        "user_id": "u_123",
+        "chat_type": "support",
+    }
+    processor = MetadataPropagatingProcessor()
+    set_trace_processors([processor])
+    try:
+        with trace(workflow_name="workflow", metadata=metadata):
+            with agent_span(name="agent"):
+                pass
+    finally:
+        set_trace_processors([SPAN_PROCESSOR_TESTING])
+
+    assert processor.looked_up_metadata == metadata
+    assert processor.span_trace_metadata == metadata
 
 
 def test_trace_to_json_only_includes_tracing_api_key_when_requested():

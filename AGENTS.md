@@ -86,7 +86,7 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
 
 ### Prerequisites
 
-- Python 3.9+.
+- Python 3.10+.
 - `uv` installed for dependency management (`uv sync`) and `uv run` for Python commands.
 - `make` available to run repository tasks.
 
@@ -172,9 +172,10 @@ make tests
   ```bash
   make sync
   ```
-- Run tests against Python 3.9 in an isolated environment:
+- Run tests against the oldest supported version (Python 3.10) in an isolated environment:
   ```bash
-  make old_version_tests
+  UV_PROJECT_ENVIRONMENT=.venv_310 uv sync --python 3.10 --all-extras --all-packages --group dev
+  UV_PROJECT_ENVIRONMENT=.venv_310 uv run --python 3.10 -m pytest
   ```
 - Documentation workflows:
   ```bash

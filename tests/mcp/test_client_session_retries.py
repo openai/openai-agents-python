@@ -4,6 +4,7 @@ import pytest
 from mcp import ClientSession, Tool as MCPTool
 from mcp.types import CallToolResult, ListToolsResult
 
+from agents.exceptions import UserError
 from agents.mcp.server import _MCPServerWithClientSession
 
 
@@ -62,3 +63,88 @@ async def test_list_tools_unlimited_retries():
     assert len(tools) == 1
     assert tools[0].name == "tool"
     assert session.list_tools_attempts == 4
+
+
+@pytest.mark.asyncio
+async def test_call_tool_validates_required_parameters_before_remote_call():
+    session = DummySession()
+    server = DummyServer(session=session, retries=0)
+    server._tools_list = [  # noqa: SLF001
+        MCPTool(
+            name="tool",
+            inputSchema={
+                "type": "object",
+                "properties": {"param_a": {"type": "string"}},
+                "required": ["param_a"],
+            },
+        )
+    ]
+
+    with pytest.raises(UserError, match="missing required parameters: param_a"):
+        await server.call_tool("tool", {})
+
+    assert session.call_tool_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_call_tool_with_required_parameters_still_calls_remote_tool():
+    session = DummySession()
+    server = DummyServer(session=session, retries=0)
+    server._tools_list = [  # noqa: SLF001
+        MCPTool(
+            name="tool",
+            inputSchema={
+                "type": "object",
+                "properties": {"param_a": {"type": "string"}},
+                "required": ["param_a"],
+            },
+        )
+    ]
+
+    result = await server.call_tool("tool", {"param_a": "value"})
+    assert isinstance(result, CallToolResult)
+    assert session.call_tool_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_call_tool_skips_validation_when_tool_is_missing_from_cache():
+    session = DummySession()
+    server = DummyServer(session=session, retries=0)
+    server._tools_list = [MCPTool(name="different_tool", inputSchema={"required": ["param_a"]})]  # noqa: SLF001
+
+    await server.call_tool("tool", {})
+    assert session.call_tool_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_call_tool_skips_validation_when_required_list_is_absent():
+    session = DummySession()
+    server = DummyServer(session=session, retries=0)
+    server._tools_list = [MCPTool(name="tool", inputSchema={"type": "object"})]  # noqa: SLF001
+
+    await server.call_tool("tool", None)
+    assert session.call_tool_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_call_tool_validates_required_parameters_when_arguments_is_none():
+    session = DummySession()
+    server = DummyServer(session=session, retries=0)
+    server._tools_list = [MCPTool(name="tool", inputSchema={"required": ["param_a"]})]  # noqa: SLF001
+
+    with pytest.raises(UserError, match="missing required parameters: param_a"):
+        await server.call_tool("tool", None)
+
+    assert session.call_tool_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_call_tool_rejects_non_object_arguments_before_remote_call():
+    session = DummySession()
+    server = DummyServer(session=session, retries=0)
+    server._tools_list = [MCPTool(name="tool", inputSchema={"required": ["param_a"]})]  # noqa: SLF001
+
+    with pytest.raises(UserError, match="arguments must be an object"):
+        await server.call_tool("tool", cast(dict[str, object] | None, ["bad"]))
+
+    assert session.call_tool_attempts == 0

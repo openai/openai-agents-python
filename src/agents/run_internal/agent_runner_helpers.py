@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 from ..agent import Agent
+from ..agent_tool_state import set_agent_tool_state_scope
 from ..exceptions import UserError
 from ..guardrail import InputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
@@ -141,10 +142,12 @@ def resolve_resumed_context(
     """Return the context wrapper for a resumed run, overriding when provided."""
     if context is not None:
         context_wrapper = ensure_context_wrapper(context)
+        set_agent_tool_state_scope(context_wrapper, run_state._agent_tool_state_scope_id)
         run_state._context = context_wrapper
         return context_wrapper
     if run_state._context is None:
         run_state._context = ensure_context_wrapper(context)
+    set_agent_tool_state_scope(run_state._context, run_state._agent_tool_state_scope_id)
     return run_state._context
 
 

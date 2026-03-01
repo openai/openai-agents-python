@@ -111,7 +111,7 @@ In this example, `prompt_approval` is synchronous because it uses `input()` and 
 
 To stream output while waiting for approvals, call `Runner.run_streamed`, consume `result.stream_events()` until it completes, and then follow the same `result.to_state()` and resume steps shown above.
 
-## Other patterns in this repository
+## Repository patterns and examples
 
 - **Streaming approvals**: `examples/agent_patterns/human_in_the_loop_stream.py` shows how to drain `stream_events()` and then approve pending tool calls before resuming with `Runner.run_streamed(agent, state)`.
 - **Agent as tool approvals**: `Agent.as_tool(..., needs_approval=...)` applies the same interruption flow when delegated agent tasks need review.
@@ -123,7 +123,21 @@ To stream output while waiting for approvals, call `Runner.run_streamed`, consum
 
 ## Long-running approvals
 
-`RunState` is designed to be durable. Use `state.to_json()` or `state.to_string()` to store pending work in a database or queue and recreate it later with `RunState.from_json(...)` or `RunState.from_string(...)`. Pass `context_override` if you do not want to persist sensitive context data in the serialized payload.
+`RunState` is designed to be durable. Use `state.to_json()` or `state.to_string()` to store pending work in a database or queue and recreate it later with `RunState.from_json(...)` or `RunState.from_string(...)`.
+
+Useful serialization options:
+
+-   `context_serializer`: Customize how non-mapping context objects are serialized.
+-   `strict_context=True`: Fail serialization or deserialization unless the context is already a
+    mapping or you provide the appropriate serializer/deserializer.
+-   `context_override`: Replace the serialized context when loading state. This is useful when you
+    do not want to restore the original context object, but it does not remove that context from an
+    already serialized payload.
+-   `include_tracing_api_key=True`: Include the tracing API key in the serialized trace payload
+    when you need resumed work to keep exporting traces with the same credentials.
+
+`RunState` also preserves trace metadata and server-managed conversation settings, so a resumed run
+can continue the same trace and the same `conversation_id` / `previous_response_id` chain.
 
 ## Versioning pending tasks
 

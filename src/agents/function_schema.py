@@ -210,6 +210,15 @@ def _extract_description_from_metadata(metadata: tuple[Any, ...]) -> str | None:
     return None
 
 
+def _extract_field_info_from_metadata(metadata: tuple[Any, ...]) -> FieldInfo | None:
+    """Returns the first FieldInfo in Annotated metadata, or None."""
+
+    for item in metadata:
+        if isinstance(item, FieldInfo):
+            return item
+    return None
+
+
 def function_schema(
     func: Callable[..., Any],
     docstring_style: DocstringStyle | None = None,
@@ -252,6 +261,7 @@ def function_schema(
     type_hints_with_extras = get_type_hints(func, include_extras=True)
     type_hints: dict[str, Any] = {}
     annotated_param_descs: dict[str, str] = {}
+    param_metadata: dict[str, tuple[Any, ...]] = {}
 
     for name, annotation in type_hints_with_extras.items():
         if name == "return":
@@ -259,6 +269,7 @@ def function_schema(
 
         stripped_ann, metadata = _strip_annotated(annotation)
         type_hints[name] = stripped_ann
+        param_metadata[name] = metadata
 
         description = _extract_description_from_metadata(metadata)
         if description is not None:
@@ -356,7 +367,20 @@ def function_schema(
 
         else:
             # Normal parameter
-            if default == inspect._empty:
+            metadata = param_metadata.get(name, ())
+            field_info_from_annotated = _extract_field_info_from_metadata(metadata)
+
+            if field_info_from_annotated is not None:
+                merged = FieldInfo.merge_field_infos(
+                    field_info_from_annotated,
+                    description=field_description or field_info_from_annotated.description,
+                )
+                if default != inspect._empty and not isinstance(default, FieldInfo):
+                    merged = FieldInfo.merge_field_infos(merged, default=default)
+                elif isinstance(default, FieldInfo):
+                    merged = FieldInfo.merge_field_infos(merged, default)
+                fields[name] = (ann, merged)
+            elif default == inspect._empty:
                 # Required field
                 fields[name] = (
                     ann,

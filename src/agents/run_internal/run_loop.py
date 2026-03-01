@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, cast
 
 from openai.types.responses import (
+    Response,
     ResponseCompletedEvent,
     ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
@@ -44,7 +45,7 @@ from ..lifecycle import RunHooks
 from ..logger import logger
 from ..memory import Session
 from ..result import RunResultStreaming
-from ..run_config import RunConfig
+from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
 from ..run_state import RunState
@@ -264,6 +265,7 @@ async def _save_resumed_stream_items(
         items=items,
         persisted_count=streamed_result._current_turn_persisted_item_count,
         response_id=response_id,
+        reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
         store=store,
     )
     if run_state is not None:
@@ -411,11 +413,21 @@ async def start_streaming(
             auto_previous_response_id=auto_previous_response_id,
         )
 
+    resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
+        run_config.reasoning_item_id_policy
+        if run_config.reasoning_item_id_policy is not None
+        else (run_state._reasoning_item_id_policy if run_state is not None else None)
+    )
+    if run_state is not None:
+        run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+    streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+
     if conversation_id is not None or previous_response_id is not None or auto_previous_response_id:
         server_conversation_tracker = OpenAIServerConversationTracker(
             conversation_id=conversation_id,
             previous_response_id=previous_response_id,
             auto_previous_response_id=auto_previous_response_id,
+            reasoning_item_id_policy=resolved_reasoning_item_id_policy,
         )
     else:
         server_conversation_tracker = None
@@ -445,6 +457,7 @@ async def start_streaming(
             previous_response_id=previous_response_id,
             auto_previous_response_id=auto_previous_response_id,
         )
+        run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
         streamed_result._state = run_state
     elif streamed_result._state is None:
         streamed_result._state = run_state
@@ -717,6 +730,7 @@ async def start_streaming(
                     new_items=streamed_result.new_items,
                     raw_responses=streamed_result.raw_responses,
                     last_agent=current_agent,
+                    reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
                 )
                 handler_result = await resolve_run_error_handler_result(
                     error_handlers=error_handlers,
@@ -850,6 +864,7 @@ async def start_streaming(
                         if session is not None and server_conversation_tracker is None
                         else None
                     ),
+                    reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                 )
                 logger.debug(
                     "Turn %s complete, next_step type=%s",
@@ -1045,6 +1060,7 @@ async def run_single_turn_streamed(
     session: Session | None = None,
     session_items_to_rewind: list[TResponseInputItem] | None = None,
     pending_server_items: list[RunItem] | None = None,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> SingleStepResult:
     """Run a single streamed turn and emit events as results arrive."""
     emitted_tool_call_ids: set[str] = set()
@@ -1107,7 +1123,11 @@ async def run_single_turn_streamed(
         )
     else:
         input = ItemHelpers.input_to_new_input_list(streamed_result.input)
-        append_input_items_excluding_approvals(input, streamed_result._model_input_items)
+        append_input_items_excluding_approvals(
+            input,
+            streamed_result._model_input_items,
+            reasoning_item_id_policy,
+        )
 
     if isinstance(input, list):
         input = normalize_input_items_for_api(input)
@@ -1188,23 +1208,32 @@ async def run_single_turn_streamed(
     ):
         streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
+        terminal_response: Response | None = None
         if isinstance(event, ResponseCompletedEvent):
+            terminal_response = event.response
+        elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
+            maybe_response = getattr(event, "response", None)
+            if isinstance(maybe_response, Response):
+                terminal_response = maybe_response
+
+        if terminal_response is not None:
             usage = (
                 Usage(
                     requests=1,
-                    input_tokens=event.response.usage.input_tokens,
-                    output_tokens=event.response.usage.output_tokens,
-                    total_tokens=event.response.usage.total_tokens,
-                    input_tokens_details=event.response.usage.input_tokens_details,
-                    output_tokens_details=event.response.usage.output_tokens_details,
+                    input_tokens=terminal_response.usage.input_tokens,
+                    output_tokens=terminal_response.usage.output_tokens,
+                    total_tokens=terminal_response.usage.total_tokens,
+                    input_tokens_details=terminal_response.usage.input_tokens_details,
+                    output_tokens_details=terminal_response.usage.output_tokens_details,
                 )
-                if event.response.usage
+                if terminal_response.usage
                 else Usage()
             )
             final_response = ModelResponse(
-                output=event.response.output,
+                output=terminal_response.output,
                 usage=usage,
-                response_id=event.response.id,
+                response_id=terminal_response.id,
+                request_id=getattr(terminal_response, "_request_id", None),
             )
             context_wrapper.usage.add(usage)
 
@@ -1343,6 +1372,7 @@ async def run_single_turn(
     server_conversation_tracker: OpenAIServerConversationTracker | None = None,
     session: Session | None = None,
     session_items_to_rewind: list[TResponseInputItem] | None = None,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> SingleStepResult:
     """Run a single non-streaming turn of the agent loop."""
     try:
@@ -1379,10 +1409,18 @@ async def run_single_turn(
     else:
         input = ItemHelpers.input_to_new_input_list(original_input)
         if isinstance(input, list):
-            append_input_items_excluding_approvals(input, generated_items)
+            append_input_items_excluding_approvals(
+                input,
+                generated_items,
+                reasoning_item_id_policy,
+            )
         else:
             input = ItemHelpers.input_to_new_input_list(input)
-            append_input_items_excluding_approvals(input, generated_items)
+            append_input_items_excluding_approvals(
+                input,
+                generated_items,
+                reasoning_item_id_policy,
+            )
 
     if isinstance(input, list):
         input = normalize_input_items_for_api(input)

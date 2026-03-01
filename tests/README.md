@@ -8,6 +8,9 @@ Before running any tests, make sure you have `uv` installed (and ideally run `ma
 make tests
 ```
 
+`make tests` runs the shard-safe suite in parallel and then runs tests marked `serial`
+in a separate serial pass.
+
 ## Snapshots
 
 We use [inline-snapshots](https://15r10nk.github.io/inline-snapshot/latest/) for some tests. If your code adds new snapshot tests or breaks existing ones, you can fix/create them. After fixing/creating snapshots, run `make tests` again to verify the tests pass.

@@ -34,20 +34,77 @@ export OPENAI_API_KEY=sk-...
 
 ## Create your first agent
 
-Agents are defined with instructions, a name, and optional config (such as `model_config`)
+Agents are defined with instructions, a name, and optional configuration such as a specific model.
 
 ```python
 from agents import Agent
 
 agent = Agent(
-    name="Math Tutor",
-    instructions="You provide help with math problems. Explain your reasoning at each step and include examples",
+    name="History Tutor",
+    instructions="You answer history questions clearly and concisely.",
 )
+```
+
+## Run your first agent
+
+Use [`Runner`][agents.run.Runner] to execute the agent and get a [`RunResult`][agents.result.RunResult] back.
+
+```python
+import asyncio
+from agents import Agent, Runner
+
+agent = Agent(
+    name="History Tutor",
+    instructions="You answer history questions clearly and concisely.",
+)
+
+async def main():
+    result = await Runner.run(agent, "When did the Roman Empire fall?")
+    print(result.final_output)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+For a second turn, you can either pass `result.to_input_list()` back into `Runner.run(...)`, attach a [session](sessions/index.md), or reuse OpenAI server-managed state with `conversation_id` / `previous_response_id`. The [running agents](running_agents.md) guide compares these approaches.
+
+## Give your agent tools
+
+You can give an agent tools to look up information or perform actions.
+
+```python
+import asyncio
+from agents import Agent, Runner, function_tool
+
+
+@function_tool
+def history_fun_fact() -> str:
+    """Return a short history fact."""
+    return "Sharks are older than trees."
+
+
+agent = Agent(
+    name="History Tutor",
+    instructions="Answer history questions clearly. Use history_fun_fact when it helps.",
+    tools=[history_fun_fact],
+)
+
+
+async def main():
+    result = await Runner.run(
+        agent,
+        "Tell me something surprising about ancient life on Earth.",
+    )
+    print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ## Add a few more agents
 
-Additional agents can be defined in the same way. `handoff_descriptions` provide additional context for determining handoff routing
+Additional agents can be defined in the same way. `handoff_description` gives the routing agent extra context about when to delegate.
 
 ```python
 from agents import Agent
@@ -55,136 +112,57 @@ from agents import Agent
 history_tutor_agent = Agent(
     name="History Tutor",
     handoff_description="Specialist agent for historical questions",
-    instructions="You provide assistance with historical queries. Explain important events and context clearly.",
+    instructions="You answer history questions clearly and concisely.",
 )
 
 math_tutor_agent = Agent(
     name="Math Tutor",
     handoff_description="Specialist agent for math questions",
-    instructions="You provide help with math problems. Explain your reasoning at each step and include examples",
+    instructions="You explain math step by step and include worked examples.",
 )
 ```
 
 ## Define your handoffs
 
-On each agent, you can define an inventory of outgoing handoff options that the agent can choose from to decide how to make progress on their task.
+On an agent, you can define an inventory of outgoing handoff options that it can choose from while solving the task.
 
 ```python
 triage_agent = Agent(
     name="Triage Agent",
-    instructions="You determine which agent to use based on the user's homework question",
-    handoffs=[history_tutor_agent, math_tutor_agent]
+    instructions="Route each homework question to the right specialist.",
+    handoffs=[history_tutor_agent, math_tutor_agent],
 )
 ```
 
 ## Run the agent orchestration
 
-Let's check that the workflow runs and the triage agent correctly routes between the two specialist agents.
+The runner handles executing individual agents, any handoffs, and any tool calls.
 
 ```python
+import asyncio
 from agents import Runner
 
+
 async def main():
-    result = await Runner.run(triage_agent, "who was the first president of the united states?")
+    result = await Runner.run(
+        triage_agent,
+        "Who was the first president of the United States?",
+    )
     print(result.final_output)
-```
+    print(f"Answered by: {result.last_agent.name}")
 
-## Add a guardrail
-
-You can define custom guardrails to run on the input or output.
-
-```python
-from agents import GuardrailFunctionOutput, Agent, Runner
-from pydantic import BaseModel
-
-
-class HomeworkOutput(BaseModel):
-    is_homework: bool
-    reasoning: str
-
-guardrail_agent = Agent(
-    name="Guardrail check",
-    instructions="Check if the user is asking about homework.",
-    output_type=HomeworkOutput,
-)
-
-async def homework_guardrail(ctx, agent, input_data):
-    result = await Runner.run(guardrail_agent, input_data, context=ctx.context)
-    final_output = result.final_output_as(HomeworkOutput)
-    return GuardrailFunctionOutput(
-        output_info=final_output,
-        tripwire_triggered=not final_output.is_homework,
-    )
-```
-
-## Put it all together
-
-Let's put it all together and run the entire workflow, using handoffs and the input guardrail.
-
-```python
-from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
-from agents.exceptions import InputGuardrailTripwireTriggered
-from pydantic import BaseModel
-import asyncio
-
-class HomeworkOutput(BaseModel):
-    is_homework: bool
-    reasoning: str
-
-guardrail_agent = Agent(
-    name="Guardrail check",
-    instructions="Check if the user is asking about homework.",
-    output_type=HomeworkOutput,
-)
-
-math_tutor_agent = Agent(
-    name="Math Tutor",
-    handoff_description="Specialist agent for math questions",
-    instructions="You provide help with math problems. Explain your reasoning at each step and include examples",
-)
-
-history_tutor_agent = Agent(
-    name="History Tutor",
-    handoff_description="Specialist agent for historical questions",
-    instructions="You provide assistance with historical queries. Explain important events and context clearly.",
-)
-
-
-async def homework_guardrail(ctx, agent, input_data):
-    result = await Runner.run(guardrail_agent, input_data, context=ctx.context)
-    final_output = result.final_output_as(HomeworkOutput)
-    return GuardrailFunctionOutput(
-        output_info=final_output,
-        tripwire_triggered=not final_output.is_homework,
-    )
-
-triage_agent = Agent(
-    name="Triage Agent",
-    instructions="You determine which agent to use based on the user's homework question",
-    handoffs=[history_tutor_agent, math_tutor_agent],
-    input_guardrails=[
-        InputGuardrail(guardrail_function=homework_guardrail),
-    ],
-)
-
-async def main():
-    # Example 1: History question
-    try:
-        result = await Runner.run(triage_agent, "who was the first president of the united states?")
-        print(result.final_output)
-    except InputGuardrailTripwireTriggered as e:
-        print("Guardrail blocked this input:", e)
-
-    # Example 2: General/philosophical question
-    try:
-        result = await Runner.run(triage_agent, "What is the meaning of life?")
-        print(result.final_output)
-    except InputGuardrailTripwireTriggered as e:
-        print("Guardrail blocked this input:", e)
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
+
+## Reference examples
+
+The repository includes full scripts for the same core patterns:
+
+-   [`examples/basic/hello_world.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/hello_world.py) for the first run.
+-   [`examples/basic/tools.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/tools.py) for function tools.
+-   [`examples/agent_patterns/routing.py`](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/routing.py) for multi-agent routing.
 
 ## View your traces
 
@@ -195,5 +173,5 @@ To review what happened during your agent run, navigate to the [Trace viewer in 
 Learn how to build more complex agentic flows:
 
 -   Learn about how to configure [Agents](agents.md).
--   Learn about [running agents](running_agents.md).
+-   Learn about [running agents](running_agents.md) and [sessions](sessions/index.md).
 -   Learn about [tools](tools.md), [guardrails](guardrails.md) and [models](models/index.md).

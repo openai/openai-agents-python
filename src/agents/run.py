@@ -9,6 +9,7 @@ from typing_extensions import Unpack
 
 from . import _debug
 from .agent import Agent
+from .agent_tool_state import set_agent_tool_state_scope
 from .exceptions import (
     AgentsException,
     InputGuardrailTripwireTriggered,
@@ -33,6 +34,7 @@ from .run_config import (
     CallModelData,
     CallModelInputFilter,
     ModelInputData,
+    ReasoningItemIdPolicy,
     RunConfig,
     RunOptions,
     ToolErrorFormatter,
@@ -105,8 +107,8 @@ from .run_internal.tool_use_tracker import (
 from .run_state import RunState
 from .tool import dispose_resolved_computers
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
-from .tracing import Span, SpanError, agent_span, get_current_trace, trace
-from .tracing.context import TraceCtxManager
+from .tracing import Span, SpanError, agent_span, get_current_trace
+from .tracing.context import TraceCtxManager, create_trace_for_run
 from .tracing.span_data import AgentSpanData
 from .util import _error_tracing
 
@@ -123,6 +125,7 @@ __all__ = [
     "ModelInputData",
     "CallModelData",
     "CallModelInputFilter",
+    "ReasoningItemIdPolicy",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "DEFAULT_MAX_TURNS",
@@ -489,6 +492,14 @@ class AgentRunner:
                 )
                 original_input_for_state = prepared_input
 
+        resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
+            run_config.reasoning_item_id_policy
+            if run_config.reasoning_item_id_policy is not None
+            else (run_state._reasoning_item_id_policy if run_state is not None else None)
+        )
+        if run_state is not None:
+            run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+
         # Check whether to enable OpenAI server-managed conversation
         if (
             conversation_id is not None
@@ -499,6 +510,7 @@ class AgentRunner:
                 conversation_id=conversation_id,
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,
+                reasoning_item_id_policy=resolved_reasoning_item_id_policy,
             )
         else:
             server_conversation_tracker = None
@@ -537,6 +549,8 @@ class AgentRunner:
             metadata=trace_metadata,
             tracing=trace_config,
             disabled=run_config.tracing_disabled,
+            trace_state=run_state._trace_state if run_state is not None else None,
+            reattach_resumed_trace=is_resumed_state,
         ):
             if is_resumed_state and run_state is not None:
                 run_state.set_trace(get_current_trace())
@@ -555,6 +569,7 @@ class AgentRunner:
                 session_items = []
                 model_responses = []
                 context_wrapper = ensure_context_wrapper(context)
+                set_agent_tool_state_scope(context_wrapper, None)
                 run_state = RunState(
                     context=context_wrapper,
                     original_input=original_input,
@@ -564,7 +579,14 @@ class AgentRunner:
                     previous_response_id=previous_response_id,
                     auto_previous_response_id=auto_previous_response_id,
                 )
+                run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
                 run_state.set_trace(get_current_trace())
+
+            def _with_reasoning_item_id_policy(result: RunResult) -> RunResult:
+                result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+                if run_state is not None:
+                    run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+                return result
 
             pending_server_items: list[RunItem] | None = None
             input_guardrail_results: list[InputGuardrailResult] = (
@@ -673,6 +695,9 @@ class AgentRunner:
                                             run_state._current_turn_persisted_item_count
                                         ),
                                         response_id=turn_result.model_response.response_id,
+                                        reasoning_item_id_policy=(
+                                            run_state._reasoning_item_id_policy
+                                        ),
                                         store=store_setting,
                                     )
                                 )
@@ -725,7 +750,7 @@ class AgentRunner:
                                     original_input=original_input,
                                 )
                                 return finalize_conversation_tracking(
-                                    result,
+                                    _with_reasoning_item_id_policy(result),
                                     server_conversation_tracker=server_conversation_tracker,
                                     run_state=run_state,
                                 )
@@ -790,7 +815,7 @@ class AgentRunner:
                                     )
                                 result._original_input = copy_input_items(original_input)
                                 return finalize_conversation_tracking(
-                                    result,
+                                    _with_reasoning_item_id_policy(result),
                                     server_conversation_tracker=server_conversation_tracker,
                                     run_state=run_state,
                                 )
@@ -850,6 +875,7 @@ class AgentRunner:
                             new_items=session_items,
                             raw_responses=model_responses,
                             last_agent=current_agent,
+                            reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                         )
                         handler_result = await resolve_run_error_handler_result(
                             error_handlers=error_handlers,
@@ -919,7 +945,7 @@ class AgentRunner:
                             )
                         result._original_input = copy_input_items(original_input)
                         return finalize_conversation_tracking(
-                            result,
+                            _with_reasoning_item_id_policy(result),
                             server_conversation_tracker=server_conversation_tracker,
                             run_state=run_state,
                         )
@@ -993,6 +1019,7 @@ class AgentRunner:
                                     if not is_resumed_state and session_persistence_enabled
                                     else None
                                 ),
+                                reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                             )
                         )
 
@@ -1046,6 +1073,7 @@ class AgentRunner:
                                 if not is_resumed_state and session_persistence_enabled
                                 else None
                             ),
+                            reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                         )
 
                     # Start hooks should only run on the first turn unless reset by a handoff.
@@ -1114,6 +1142,9 @@ class AgentRunner:
                                         items_to_save_turn,
                                         None,
                                         response_id=turn_result.model_response.response_id,
+                                        reasoning_item_id_policy=(
+                                            run_state._reasoning_item_id_policy
+                                        ),
                                         store=store_setting,
                                     )
                                     run_state._current_turn_persisted_item_count += saved_count
@@ -1179,7 +1210,7 @@ class AgentRunner:
                             )
                             result._original_input = copy_input_items(original_input)
                             return finalize_conversation_tracking(
-                                result,
+                                _with_reasoning_item_id_policy(result),
                                 server_conversation_tracker=server_conversation_tracker,
                                 run_state=run_state,
                             )
@@ -1240,7 +1271,7 @@ class AgentRunner:
                                 original_input=original_input,
                             )
                             return finalize_conversation_tracking(
-                                result,
+                                _with_reasoning_item_id_policy(result),
                                 server_conversation_tracker=server_conversation_tracker,
                                 run_state=run_state,
                             )
@@ -1458,6 +1489,7 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
             )
             context_wrapper = ensure_context_wrapper(context)
+            set_agent_tool_state_scope(context_wrapper, None)
             # input_for_state is the same as input_for_result here
             input_for_state = input_for_result
             run_state = RunState(
@@ -1470,6 +1502,14 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
             )
 
+        resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
+            run_config.reasoning_item_id_policy
+            if run_config.reasoning_item_id_policy is not None
+            else (run_state._reasoning_item_id_policy if run_state is not None else None)
+        )
+        if run_state is not None:
+            run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+
         (
             trace_workflow_name,
             trace_id,
@@ -1481,17 +1521,15 @@ class AgentRunner:
         # If there's already a trace, we don't create a new one. In addition, we can't end the
         # trace here, because the actual work is done in `stream_events` and this method ends
         # before that.
-        new_trace = (
-            None
-            if get_current_trace()
-            else trace(
-                workflow_name=trace_workflow_name,
-                trace_id=trace_id,
-                group_id=trace_group_id,
-                metadata=trace_metadata,
-                tracing=trace_config,
-                disabled=run_config.tracing_disabled,
-            )
+        new_trace = create_trace_for_run(
+            workflow_name=trace_workflow_name,
+            trace_id=trace_id,
+            group_id=trace_group_id,
+            metadata=trace_metadata,
+            tracing=trace_config,
+            disabled=run_config.tracing_disabled,
+            trace_state=run_state._trace_state if run_state is not None else None,
+            reattach_resumed_trace=is_resumed_state,
         )
         if run_state is not None:
             run_state.set_trace(new_trace or get_current_trace())
@@ -1548,6 +1586,7 @@ class AgentRunner:
         streamed_result._model_input_items = (
             list(run_state._generated_items) if run_state is not None else []
         )
+        streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
         if run_state is not None:
             streamed_result._trace_state = run_state._trace_state
         # Store run_state in streamed_result._state so it's accessible throughout streaming

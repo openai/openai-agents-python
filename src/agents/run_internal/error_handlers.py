@@ -14,7 +14,6 @@ from ..items import (
     MessageOutputItem,
     ModelResponse,
     RunItem,
-    ToolApprovalItem,
     TResponseInputItem,
 )
 from ..models.fake_id import FAKE_RESPONSES_ID
@@ -25,6 +24,7 @@ from ..run_error_handlers import (
     RunErrorHandlerResult,
     RunErrorHandlers,
 )
+from .items import ReasoningItemIdPolicy, run_item_to_input_item
 from .turn_preparation import get_output_schema
 
 
@@ -34,13 +34,15 @@ def build_run_error_data(
     new_items: list[RunItem],
     raw_responses: list[ModelResponse],
     last_agent: Agent[Any],
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> RunErrorData:
     history = ItemHelpers.input_to_new_input_list(input)
     output = []
     for item in new_items:
-        if isinstance(item, ToolApprovalItem):
+        converted = run_item_to_input_item(item, reasoning_item_id_policy)
+        if converted is None:
             continue
-        output.append(item.to_input_item())
+        output.append(converted)
     history = history + list(output)
     return RunErrorData(
         input=input,

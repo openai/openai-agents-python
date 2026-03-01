@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, cast
 
 import pytest
 
-from agents import Agent, ApplyPatchTool, RunConfig, RunContextWrapper, RunHooks
+from agents import (
+    Agent,
+    ApplyPatchTool,
+    RunConfig,
+    RunContextWrapper,
+    RunHooks,
+    set_tracing_disabled,
+    trace,
+)
 from agents.editor import ApplyPatchOperation, ApplyPatchResult
 from agents.items import ToolApprovalItem, ToolCallOutputItem
 from agents.run_internal.run_loop import ApplyPatchAction, ToolRunApplyPatchCall
 
+from .testing_processor import SPAN_PROCESSOR_TESTING
 from .utils.hitl import (
     HITL_REJECTION_MSG,
     make_context_wrapper,
@@ -17,6 +27,19 @@ from .utils.hitl import (
     reject_tool_call,
     require_approval,
 )
+
+
+def _get_function_span(tool_name: str) -> dict[str, Any]:
+    for span in SPAN_PROCESSOR_TESTING.get_ordered_spans(including_empty=True):
+        exported = span.export()
+        if not exported:
+            continue
+        span_data = exported.get("span_data")
+        if not isinstance(span_data, dict):
+            continue
+        if span_data.get("type") == "function" and span_data.get("name") == tool_name:
+            return exported
+    raise AssertionError(f"Function span for tool '{tool_name}' not found")
 
 
 def _call(call_id: str, operation: dict[str, Any]) -> DummyApplyPatchCall:
@@ -122,6 +145,71 @@ async def test_apply_patch_tool_failure() -> None:
     payload_dict = cast(dict[str, Any], input_payload)
     assert payload_dict["type"] == "apply_patch_call_output"
     assert payload_dict["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_tool_emits_function_span() -> None:
+    editor = RecordingEditor()
+    tool = ApplyPatchTool(editor=editor)
+    agent, context_wrapper, tool_run = build_apply_patch_call(
+        tool, "call_apply_trace", {"type": "update_file", "path": "tasks.md", "diff": "-a\n+b\n"}
+    )
+
+    set_tracing_disabled(False)
+    with trace("apply-patch-span-test"):
+        result = await ApplyPatchAction.execute(
+            agent=agent,
+            call=tool_run,
+            hooks=RunHooks[Any](),
+            context_wrapper=context_wrapper,
+            config=RunConfig(),
+        )
+
+    assert isinstance(result, ToolCallOutputItem)
+    function_span = _get_function_span(tool.name)
+    span_data = cast(dict[str, Any], function_span["span_data"])
+    assert "tasks.md" in cast(str, span_data.get("input", ""))
+    assert "Updated tasks.md" in cast(str, span_data.get("output", ""))
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_tool_redacts_span_error_when_sensitive_data_disabled() -> None:
+    secret_error = "patch secret output"
+
+    class ExplodingEditor(RecordingEditor):
+        def update_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
+            raise RuntimeError(secret_error)
+
+    tool = ApplyPatchTool(editor=ExplodingEditor())
+    agent, context_wrapper, tool_run = build_apply_patch_call(
+        tool,
+        "call_apply_trace_redacted",
+        {"type": "update_file", "path": "tasks.md", "diff": "-a\n+b\n"},
+    )
+
+    set_tracing_disabled(False)
+    with trace("apply-patch-span-redaction-test"):
+        result = await ApplyPatchAction.execute(
+            agent=agent,
+            call=tool_run,
+            hooks=RunHooks[Any](),
+            context_wrapper=context_wrapper,
+            config=RunConfig(trace_include_sensitive_data=False),
+        )
+
+    assert isinstance(result, ToolCallOutputItem)
+    function_span = _get_function_span(tool.name)
+    assert function_span.get("error") == {
+        "message": "Error running tool",
+        "data": {
+            "tool_name": tool.name,
+            "error": "Tool execution failed. Error details are redacted.",
+        },
+    }
+    assert secret_error not in json.dumps(function_span)
+    span_data = cast(dict[str, Any], function_span["span_data"])
+    assert span_data.get("input") is None
+    assert span_data.get("output") is None
 
 
 @pytest.mark.asyncio

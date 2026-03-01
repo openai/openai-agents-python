@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel
 
 from ..agent_tool_state import drop_agent_tool_run_result
-from ..items import ItemHelpers, ToolCallOutputItem, TResponseInputItem
+from ..items import ItemHelpers, RunItem, ToolCallOutputItem, TResponseInputItem
 from ..models.fake_id import FAKE_RESPONSES_ID
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, ToolOrigin
 
@@ -27,10 +27,13 @@ _TOOL_CALL_TO_OUTPUT_TYPE: dict[str, str] = {
 }
 
 __all__ = [
+    "ReasoningItemIdPolicy",
     "REJECTION_MESSAGE",
     "copy_input_items",
     "drop_orphan_function_calls",
     "ensure_input_item_format",
+    "run_item_to_input_item",
+    "run_items_to_input_items",
     "normalize_input_items_for_api",
     "normalize_resumed_input",
     "fingerprint_input_item",
@@ -44,9 +47,42 @@ __all__ = [
 ]
 
 
+ReasoningItemIdPolicy = Literal["preserve", "omit"]
+
+
 def copy_input_items(value: str | list[TResponseInputItem]) -> str | list[TResponseInputItem]:
     """Return a shallow copy of input items so mutations do not leak between turns."""
     return value if isinstance(value, str) else value.copy()
+
+
+def run_item_to_input_item(
+    run_item: RunItem,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+) -> TResponseInputItem | None:
+    """Convert a run item to model input, optionally stripping reasoning IDs."""
+    if run_item.type == "tool_approval_item":
+        return None
+    to_input = getattr(run_item, "to_input_item", None)
+    input_item = to_input() if callable(to_input) else cast(TResponseInputItem, run_item.raw_item)
+    if (
+        _should_omit_reasoning_item_ids(reasoning_item_id_policy)
+        and run_item.type == "reasoning_item"
+    ):
+        return _without_reasoning_item_id(input_item)
+    return cast(TResponseInputItem, input_item)
+
+
+def run_items_to_input_items(
+    run_items: Sequence[RunItem],
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+) -> list[TResponseInputItem]:
+    """Convert run items to model input items while skipping approvals."""
+    converted: list[TResponseInputItem] = []
+    for run_item in run_items:
+        item = run_item_to_input_item(run_item, reasoning_item_id_policy)
+        if item is not None:
+            converted.append(item)
+    return converted
 
 
 def drop_orphan_function_calls(items: list[TResponseInputItem]) -> list[TResponseInputItem]:
@@ -116,8 +152,11 @@ def fingerprint_input_item(item: Any, *, ignore_ids_for_matching: bool = False) 
         return None
 
     try:
+        payload: Any
         if hasattr(item, "model_dump"):
-            payload = item.model_dump(exclude_unset=True)
+            payload = _model_dump_without_warnings(item)
+            if payload is None:
+                return None
         elif isinstance(item, dict):
             payload = dict(item)
             if ignore_ids_for_matching:
@@ -161,6 +200,22 @@ def _dedupe_key(item: TResponseInputItem) -> str | None:
     return None
 
 
+def _should_omit_reasoning_item_ids(reasoning_item_id_policy: ReasoningItemIdPolicy | None) -> bool:
+    return reasoning_item_id_policy == "omit"
+
+
+def _without_reasoning_item_id(item: TResponseInputItem) -> TResponseInputItem:
+    if not isinstance(item, dict):
+        return item
+    if item.get("type") != "reasoning":
+        return item
+    if "id" not in item:
+        return item
+    sanitized = dict(item)
+    sanitized.pop("id", None)
+    return cast(TResponseInputItem, sanitized)
+
+
 def deduplicate_input_items(items: Sequence[TResponseInputItem]) -> list[TResponseInputItem]:
     """Remove duplicate items that share stable identifiers to avoid re-sending tool outputs."""
     seen_keys: set[str] = set()
@@ -192,10 +247,11 @@ def function_rejection_item(
     *,
     rejection_message: str = REJECTION_MESSAGE,
     tool_origin: ToolOrigin | None = None,
+    scope_id: str | None = None,
 ) -> ToolCallOutputItem:
     """Build a ToolCallOutputItem representing a rejected function tool call."""
     if isinstance(tool_call, ResponseFunctionToolCall):
-        drop_agent_tool_run_result(tool_call)
+        drop_agent_tool_run_result(tool_call, scope_id=scope_id)
     return ToolCallOutputItem(
         output=rejection_message,
         raw_item=ItemHelpers.tool_call_output_item(tool_call, rejection_message),
@@ -316,13 +372,25 @@ def _coerce_to_dict(value: object) -> dict[str, Any] | None:
     if isinstance(value, dict):
         return dict(value)
     if isinstance(value, BaseModel):
-        try:
-            return value.model_dump(exclude_unset=True)
-        except Exception:
-            return None
+        return _model_dump_without_warnings(value)
     if hasattr(value, "model_dump"):
+        return _model_dump_without_warnings(value)
+    return None
+
+
+def _model_dump_without_warnings(value: object) -> dict[str, Any] | None:
+    """Best-effort model_dump that avoids noisy serialization warnings from third-party models."""
+    if not hasattr(value, "model_dump"):
+        return None
+
+    model_dump = cast(Any, value).model_dump
+    try:
+        return cast(dict[str, Any], model_dump(exclude_unset=True, warnings=False))
+    except TypeError:
+        # Some model_dump-compatible objects only accept exclude_unset.
         try:
-            return cast(dict[str, Any], value.model_dump(exclude_unset=True))
+            return cast(dict[str, Any], model_dump(exclude_unset=True))
         except Exception:
             return None
-    return None
+    except Exception:
+        return None

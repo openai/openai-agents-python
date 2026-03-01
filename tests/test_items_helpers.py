@@ -21,6 +21,7 @@ from openai.types.responses.response_function_web_search import (
     ResponseFunctionWebSearch,
 )
 from openai.types.responses.response_function_web_search_param import ResponseFunctionWebSearchParam
+from openai.types.responses.response_input_item_param import ResponseInputItemParam
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_message_param import ResponseOutputMessageParam
 from openai.types.responses.response_output_refusal import ResponseOutputRefusal
@@ -435,7 +436,7 @@ def test_to_input_items_for_reasoning() -> None:
 
 
 def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:
-    # Given a list of message dictionaries, ensure the returned list is a deep copy.
+    """Validated input items should be copied and made JSON dump compatible."""
     original = ResponseOutputMessageParam(
         id="a75654dc-7492-4d1c-bce0-89e8312fbdd7",
         content=[
@@ -450,17 +451,21 @@ def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:
         status="completed",
         type="message",
     )
-    original_json = json.dumps(original)
-    output_item = TypeAdapter(ResponseOutputMessageParam).validate_json(original_json)
-    new_list = ItemHelpers.input_to_new_input_list([output_item])
+    validated = TypeAdapter(list[ResponseInputItemParam]).validate_python([original])
+
+    new_list = ItemHelpers.input_to_new_input_list(validated)
     assert len(new_list) == 1
     assert new_list[0]["id"] == original["id"]  # type: ignore
-    size = 0
-    for i, item in enumerate(original["content"]):
-        size += 1  # pydantic_core._pydantic_core.ValidatorIterator does not support len()
-        assert item["type"] == original["content"][i]["type"]  # type: ignore
-        assert item["text"] == original["content"][i]["text"]  # type: ignore
-    assert size == 1
     assert new_list[0]["role"] == original["role"]  # type: ignore
     assert new_list[0]["status"] == original["status"]  # type: ignore
     assert new_list[0]["type"] == original["type"]
+    assert isinstance(new_list[0]["content"], list)
+
+    first_content = cast(dict[str, object], new_list[0]["content"][0])
+    assert first_content["type"] == "output_text"
+    assert first_content["text"] == "Hey, what's up?"
+    assert isinstance(first_content["annotations"], list)
+    assert isinstance(first_content["logprobs"], list)
+
+    # This used to fail when validated payloads retained ValidatorIterator fields.
+    json.dumps(new_list)

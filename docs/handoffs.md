@@ -39,6 +39,7 @@ The [`handoff()`][agents.handoffs.handoff] function lets you customize things.
 -   `input_type`: The type of input expected by the handoff (optional).
 -   `input_filter`: This lets you filter the input received by the next agent. See below for more.
 -   `is_enabled`: Whether the handoff is enabled. This can be a boolean or a function that returns a boolean, allowing you to dynamically enable or disable the handoff at runtime.
+-   `nest_handoff_history`: Optional per-call override for the RunConfig-level `nest_handoff_history` setting. If `None`, the value defined in the active run configuration is used instead.
 
 ```python
 from agents import Agent, handoff, RunContextWrapper

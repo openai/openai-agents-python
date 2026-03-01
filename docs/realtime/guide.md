@@ -1,4 +1,4 @@
-# Guide
+# Realtime agents guide
 
 This guide provides an in-depth look at building voice-enabled AI agents using the OpenAI Agents SDK's realtime capabilities.
 
@@ -53,6 +53,16 @@ The session configuration allows you to control the underlying realtime model be
 ### Audio configuration
 
 Audio settings control how the session handles voice input and output. You can configure input audio transcription using models like Whisper, set language preferences, and provide transcription prompts to improve accuracy for domain-specific terms. Turn detection settings control when the agent should start and stop responding, with options for voice activity detection thresholds, silence duration, and padding around detected speech.
+
+Additional configuration options you can set on `RealtimeRunner(config=...)` include:
+
+-   `model_settings.output_modalities` to constrain output to text and/or audio.
+-   `model_settings.input_audio_noise_reduction` to tune noise reduction for near-field or far-field audio.
+-   `guardrails_settings.debounce_text_length` to control how frequently output guardrails run.
+-   `async_tool_calls` to run function tools concurrently.
+-   `tool_error_formatter` to customize model-visible tool error messages.
+
+See [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] and [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings] for the complete typed configuration.
 
 ## Tools and Functions
 
@@ -113,7 +123,9 @@ main_agent = RealtimeAgent(
 )
 ```
 
-## Event handling
+## Runtime behavior and session handling
+
+### Event handling
 
 The session streams events that you can listen to by iterating over the session object. Events include audio output chunks, transcription results, tool execution start and end, agent handoffs, and errors. Key events to handle include:
 
@@ -126,7 +138,7 @@ The session streams events that you can listen to by iterating over the session 
 
 For complete event details, see [`RealtimeSessionEvent`][agents.realtime.events.RealtimeSessionEvent].
 
-## Guardrails
+### Guardrails
 
 Only output guardrails are supported for realtime agents. These guardrails are debounced and run periodically (not on every word) to avoid performance issues during real-time generation. The default debounce length is 100 characters, but this is configurable.
 
@@ -150,13 +162,15 @@ agent = RealtimeAgent(
 
 When a guardrail is triggered, it generates a `guardrail_tripped` event and can interrupt the agent's current response. The debounce behavior helps balance safety with real-time performance requirements. Unlike text agents, realtime agents do **not** raise an Exception when guardrails are tripped.
 
-## Audio processing
+### Audio processing
 
 Send audio to the session using [`session.send_audio(audio_bytes)`][agents.realtime.session.RealtimeSession.send_audio] or send text using [`session.send_message()`][agents.realtime.session.RealtimeSession.send_message].
 
 For audio output, listen for `audio` events and play the audio data through your preferred audio library. Make sure to listen for `audio_interrupted` events to stop playback immediately and clear any queued audio when the user interrupts the agent.
 
-## SIP integration
+## Advanced integrations and low-level access
+
+### SIP integration
 
 You can attach realtime agents to phone calls that arrive via the [Realtime Calls API](https://platform.openai.com/docs/guides/realtime-sip). The SDK provides [`OpenAIRealtimeSIPModel`][agents.realtime.openai_realtime.OpenAIRealtimeSIPModel], which reuses the same agent flow while negotiating media over SIP.
 
@@ -185,7 +199,7 @@ async with await runner.run(
 
 When the caller hangs up, the SIP session ends and the realtime connection closes automatically. For a complete telephony example, see [`examples/realtime/twilio_sip`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/twilio_sip).
 
-## Direct model access
+### Direct model access
 
 You can access the underlying model to add custom listeners or perform advanced operations:
 
@@ -196,6 +210,20 @@ session.model.add_listener(my_custom_listener)
 
 This gives you direct access to the [`RealtimeModel`][agents.realtime.model.RealtimeModel] interface for advanced use cases where you need lower-level control over the connection.
 
-## Examples
+### Examples and further reading
 
 For complete working examples, check out the [examples/realtime directory](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) which includes demos with and without UI components.
+
+### Azure OpenAI endpoint format
+
+When connecting to Azure OpenAI, use the GA Realtime endpoint format and pass credentials via
+headers in `model_config`:
+
+```python
+model_config = {
+    "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
+    "headers": {"api-key": "<your-azure-api-key>"},
+}
+```
+
+For token-based auth, use `{"authorization": f"Bearer {token}"}` in `headers`.

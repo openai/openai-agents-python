@@ -5,9 +5,11 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, Union, cast
+from uuid import uuid4
 
 from openai.types.responses import (
     ResponseComputerToolCall,
@@ -95,8 +97,13 @@ ContextOverride = Union[Mapping[str, Any], RunContextWrapper[Any]]
 ContextSerializer = Callable[[Any], Mapping[str, Any]]
 ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 
-# Schema version for serialization compatibility
-CURRENT_SCHEMA_VERSION = "1.0"
+# RunState schema policy.
+# 1. Bump CURRENT_SCHEMA_VERSION when serialized shape/semantics change.
+# 2. Keep older readable versions in SUPPORTED_SCHEMA_VERSIONS for backward reads.
+# 3. to_json() always emits CURRENT_SCHEMA_VERSION.
+# 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer versions).
+CURRENT_SCHEMA_VERSION = "1.4"
+SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2", "1.3", CURRENT_SCHEMA_VERSION})
 
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
 _COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(ComputerCallOutput)
@@ -112,7 +119,19 @@ _MISSING_CONTEXT_SENTINEL = object()
 
 @dataclass
 class RunState(Generic[TContext, TAgent]):
-    """Serializable snapshot of an agent run, including context, usage, and interruptions."""
+    """Serializable snapshot of an agent run, including context, usage, and interruptions.
+
+    ``RunState`` is the durable pause/resume boundary for human-in-the-loop flows. It stores
+    enough information to continue an interrupted run, including model responses, generated
+    items, approval state, and optional server-managed conversation identifiers.
+
+    Context serialization is intentionally conservative:
+
+    - Mapping contexts round-trip directly.
+    - Custom contexts may require a serializer and deserializer.
+    - When no safe serializer is available, the snapshot is still written but emits warnings and
+      records metadata describing what is required to rebuild the original context type.
+    """
 
     _current_turn: int = 0
     """Current turn number in the conversation."""
@@ -147,6 +166,9 @@ class RunState(Generic[TContext, TAgent]):
     _auto_previous_response_id: bool = False
     """Whether the previous response id should be automatically tracked."""
 
+    _reasoning_item_id_policy: Literal["preserve", "omit"] | None = None
+    """How reasoning item IDs are represented in next-turn model input."""
+
     _input_guardrail_results: list[InputGuardrailResult] = field(default_factory=list)
     """Results from input guardrails applied to the run."""
 
@@ -174,6 +196,9 @@ class RunState(Generic[TContext, TAgent]):
     _trace_state: TraceState | None = field(default=None, repr=False)
     """Serialized trace metadata for resuming tracing context."""
 
+    _agent_tool_state_scope_id: str | None = field(default=None, repr=False)
+    """Private scope id used to isolate agent-tool pending state per RunState instance."""
+
     def __init__(
         self,
         context: RunContextWrapper[TContext],
@@ -193,6 +218,7 @@ class RunState(Generic[TContext, TAgent]):
         self._conversation_id = conversation_id
         self._previous_response_id = previous_response_id
         self._auto_previous_response_id = auto_previous_response_id
+        self._reasoning_item_id_policy = None
         self._model_responses = []
         self._generated_items = []
         self._session_items = []
@@ -206,6 +232,9 @@ class RunState(Generic[TContext, TAgent]):
         self._current_turn_persisted_item_count = 0
         self._tool_use_tracker_snapshot = {}
         self._trace_state = None
+        from .agent_tool_state import get_agent_tool_state_scope
+
+        self._agent_tool_state_scope_id = get_agent_tool_state_scope(context)
 
     def get_interruptions(self) -> list[ToolApprovalItem]:
         """Return pending interruptions if the current step is an interruption."""
@@ -251,6 +280,7 @@ class RunState(Generic[TContext, TAgent]):
                 "usage": serialize_usage(resp.usage),
                 "output": [_serialize_raw_item_value(item) for item in resp.output],
                 "response_id": resp.response_id,
+                "request_id": resp.request_id,
             }
             for resp in self._model_responses
         ]
@@ -281,7 +311,13 @@ class RunState(Generic[TContext, TAgent]):
         context_serializer: ContextSerializer | None = None,
         strict_context: bool = False,
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-        """Validate and serialize the stored run context."""
+        """Validate and serialize the stored run context.
+
+        The returned metadata captures how the context was serialized so restore-time code can
+        decide whether a deserializer or override is required. This lets RunState remain durable
+        for simple mapping contexts without silently pretending that richer custom objects can be
+        reconstructed automatically.
+        """
         if self._context is None:
             return None, _build_context_meta(
                 None,
@@ -538,6 +574,7 @@ class RunState(Generic[TContext, TAgent]):
             "conversation_id": self._conversation_id,
             "previous_response_id": self._previous_response_id,
             "auto_previous_response_id": self._auto_previous_response_id,
+            "reasoning_item_id_policy": self._reasoning_item_id_policy,
         }
 
         generated_items = self._merge_generated_items_with_processed()
@@ -546,7 +583,12 @@ class RunState(Generic[TContext, TAgent]):
         result["current_step"] = self._serialize_current_step()
         result["last_model_response"] = _serialize_last_model_response(model_responses)
         result["last_processed_response"] = (
-            self._serialize_processed_response(self._last_processed_response)
+            self._serialize_processed_response(
+                self._last_processed_response,
+                context_serializer=context_serializer,
+                strict_context=strict_context,
+                include_tracing_api_key=include_tracing_api_key,
+            )
             if self._last_processed_response
             else None
         )
@@ -558,7 +600,12 @@ class RunState(Generic[TContext, TAgent]):
         return result
 
     def _serialize_processed_response(
-        self, processed_response: ProcessedResponse
+        self,
+        processed_response: ProcessedResponse,
+        *,
+        context_serializer: ContextSerializer | None = None,
+        strict_context: bool = False,
+        include_tracing_api_key: bool = False,
     ) -> dict[str, Any]:
         """Serialize a ProcessedResponse to JSON format.
 
@@ -570,6 +617,15 @@ class RunState(Generic[TContext, TAgent]):
         """
 
         action_groups = _serialize_tool_action_groups(processed_response)
+        _serialize_pending_nested_agent_tool_runs(
+            parent_state=self,
+            function_entries=action_groups.get("functions", []),
+            function_runs=processed_response.functions,
+            scope_id=self._agent_tool_state_scope_id,
+            context_serializer=context_serializer,
+            strict_context=strict_context,
+            include_tracing_api_key=include_tracing_api_key,
+        )
 
         interruptions_data = [
             _serialize_tool_approval_interruption(interruption, include_tool_name=True)
@@ -741,6 +797,10 @@ class RunState(Generic[TContext, TAgent]):
                 continue
             normalized[agent_name] = [tool for tool in tools if isinstance(tool, str)]
         self._tool_use_tracker_snapshot = normalized
+
+    def set_reasoning_item_id_policy(self, policy: Literal["preserve", "omit"] | None) -> None:
+        """Store how reasoning item IDs should appear in next-turn model input."""
+        self._reasoning_item_id_policy = policy
 
     def get_tool_use_tracker_snapshot(self) -> dict[str, list[str]]:
         """Return a defensive copy of the tool-use tracker snapshot."""
@@ -1147,6 +1207,83 @@ def _serialize_tool_action_groups(
     return serialized
 
 
+def _serialize_pending_nested_agent_tool_runs(
+    *,
+    parent_state: RunState[Any, Any],
+    function_entries: Sequence[dict[str, Any]],
+    function_runs: Sequence[Any],
+    scope_id: str | None = None,
+    context_serializer: ContextSerializer | None = None,
+    strict_context: bool = False,
+    include_tracing_api_key: bool = False,
+) -> None:
+    """Attach serialized nested run state for pending agent-as-tool interruptions."""
+    if not function_entries or not function_runs:
+        return
+
+    from .agent_tool_state import peek_agent_tool_run_result
+
+    for entry, function_run in zip(function_entries, function_runs):
+        tool_call = getattr(function_run, "tool_call", None)
+        if not isinstance(tool_call, ResponseFunctionToolCall):
+            continue
+
+        pending_run_result = peek_agent_tool_run_result(tool_call, scope_id=scope_id)
+        if pending_run_result is None:
+            continue
+
+        interruptions = getattr(pending_run_result, "interruptions", None)
+        if not isinstance(interruptions, list) or not interruptions:
+            continue
+
+        to_state = getattr(pending_run_result, "to_state", None)
+        if not callable(to_state):
+            continue
+
+        try:
+            nested_state = to_state()
+        except Exception:
+            if strict_context:
+                raise
+            logger.warning(
+                "Failed to capture nested agent run state for tool call %s.",
+                tool_call.call_id,
+            )
+            continue
+
+        if not isinstance(nested_state, RunState):
+            continue
+        if nested_state is parent_state:
+            # Defensive guard against accidental self-referential serialization loops.
+            continue
+
+        try:
+            entry["agent_run_state"] = nested_state.to_json(
+                context_serializer=context_serializer,
+                strict_context=strict_context,
+                include_tracing_api_key=include_tracing_api_key,
+            )
+        except Exception:
+            if strict_context:
+                raise
+            logger.warning(
+                "Failed to serialize nested agent run state for tool call %s.",
+                tool_call.call_id,
+            )
+
+
+class _SerializedAgentToolRunResult:
+    """Minimal run-result wrapper used to restore nested agent-as-tool resumptions."""
+
+    def __init__(self, state: RunState[Any, Agent[Any]]) -> None:
+        self._state = state
+        self.interruptions = list(state.get_interruptions())
+        self.final_output = None
+
+    def to_state(self) -> RunState[Any, Agent[Any]]:
+        return self._state
+
+
 def _serialize_guardrail_results(
     results: Sequence[InputGuardrailResult | OutputGuardrailResult],
 ) -> list[dict[str, Any]]:
@@ -1224,11 +1361,67 @@ def _build_handoffs_map(current_agent: Agent[Any]) -> dict[str, Handoff[Any, Age
     return handoffs_map
 
 
+async def _restore_pending_nested_agent_tool_runs(
+    *,
+    current_agent: Agent[Any],
+    function_entries: Sequence[Any],
+    function_runs: Sequence[Any],
+    scope_id: str | None = None,
+    context_deserializer: ContextDeserializer | None = None,
+    strict_context: bool = False,
+) -> None:
+    """Rehydrate nested agent-as-tool run state into the ephemeral tool-call cache."""
+    if not function_entries or not function_runs:
+        return
+
+    from .agent_tool_state import drop_agent_tool_run_result, record_agent_tool_run_result
+
+    for entry, function_run in zip(function_entries, function_runs):
+        if not isinstance(entry, Mapping):
+            continue
+        nested_state_data = entry.get("agent_run_state")
+        if not isinstance(nested_state_data, Mapping):
+            continue
+
+        tool_call = getattr(function_run, "tool_call", None)
+        if not isinstance(tool_call, ResponseFunctionToolCall):
+            continue
+
+        try:
+            nested_state = await _build_run_state_from_json(
+                initial_agent=current_agent,
+                state_json=dict(nested_state_data),
+                context_deserializer=context_deserializer,
+                strict_context=strict_context,
+            )
+        except Exception:
+            if strict_context:
+                raise
+            logger.warning(
+                "Failed to deserialize nested agent run state for tool call %s.",
+                tool_call.call_id,
+            )
+            continue
+
+        pending_result = _SerializedAgentToolRunResult(nested_state)
+        if not pending_result.interruptions:
+            continue
+
+        # Replace any stale cache entry with the same signature so resumed runs do not read
+        # older pending interruptions after consuming this restored entry.
+        drop_agent_tool_run_result(tool_call, scope_id=scope_id)
+        record_agent_tool_run_result(tool_call, cast(Any, pending_result), scope_id=scope_id)
+
+
 async def _deserialize_processed_response(
     processed_response_data: dict[str, Any],
     current_agent: Agent[Any],
     context: RunContextWrapper[Any],
     agent_map: dict[str, Agent[Any]],
+    *,
+    scope_id: str | None = None,
+    context_deserializer: ContextDeserializer | None = None,
+    strict_context: bool = False,
 ) -> ProcessedResponse:
     """Deserialize a ProcessedResponse from JSON data.
 
@@ -1411,6 +1604,15 @@ async def _deserialize_processed_response(
     local_shell_actions = action_groups["local_shell_actions"]
     shell_actions = action_groups["shell_actions"]
     apply_patch_actions = action_groups["apply_patch_actions"]
+
+    await _restore_pending_nested_agent_tool_runs(
+        current_agent=current_agent,
+        function_entries=processed_response_data.get("functions", []),
+        function_runs=functions,
+        scope_id=scope_id,
+        context_deserializer=context_deserializer,
+        strict_context=strict_context,
+    )
 
     mcp_approval_requests: list[ToolRunMCPApprovalRequest] = []
     for request_data in processed_response_data.get("mcp_approval_requests", []):
@@ -1731,14 +1933,27 @@ async def _build_run_state_from_json(
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
 ) -> RunState[Any, Agent[Any]]:
-    """Shared helper to rebuild RunState from JSON payload."""
+    """Shared helper to rebuild RunState from JSON payload.
+
+    Context restoration follows this precedence order:
+
+    1. ``context_override`` when supplied.
+    2. ``context_deserializer`` applied to serialized mapping data.
+    3. Direct mapping restore for contexts that were serialized as plain mappings.
+
+    When the snapshot metadata indicates that the original context type could not round-trip
+    safely, this function warns or raises (in ``strict_context`` mode) rather than silently
+    claiming that the rebuilt mapping is equivalent to the original object.
+    """
     schema_version = state_json.get("$schemaVersion")
     if not schema_version:
         raise UserError("Run state is missing schema version")
-    if schema_version != CURRENT_SCHEMA_VERSION:
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        supported_versions = ", ".join(sorted(SUPPORTED_SCHEMA_VERSIONS))
         raise UserError(
             f"Run state schema version {schema_version} is not supported. "
-            f"Please use version {CURRENT_SCHEMA_VERSION}"
+            f"Supported versions are: {supported_versions}. "
+            f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
         )
 
     agent_map = _build_agent_map(initial_agent)
@@ -1825,6 +2040,10 @@ async def _build_run_state_from_json(
         previous_response_id=state_json.get("previous_response_id"),
         auto_previous_response_id=bool(state_json.get("auto_previous_response_id", False)),
     )
+    from .agent_tool_state import set_agent_tool_state_scope
+
+    state._agent_tool_state_scope_id = uuid4().hex
+    set_agent_tool_state_scope(context, state._agent_tool_state_scope_id)
 
     state._current_turn = state_json["current_turn"]
     state._model_responses = _deserialize_model_responses(state_json.get("model_responses", []))
@@ -1833,7 +2052,13 @@ async def _build_run_state_from_json(
     last_processed_response_data = state_json.get("last_processed_response")
     if last_processed_response_data and state._context is not None:
         state._last_processed_response = await _deserialize_processed_response(
-            last_processed_response_data, current_agent, state._context, agent_map
+            last_processed_response_data,
+            current_agent,
+            state._context,
+            agent_map,
+            scope_id=state._agent_tool_state_scope_id,
+            context_deserializer=context_deserializer,
+            strict_context=strict_context,
         )
     else:
         state._last_processed_response = None
@@ -1878,6 +2103,11 @@ async def _build_run_state_from_json(
     state._current_turn_persisted_item_count = state_json.get(
         "current_turn_persisted_item_count", 0
     )
+    serialized_policy = state_json.get("reasoning_item_id_policy")
+    if serialized_policy in {"preserve", "omit"}:
+        state._reasoning_item_id_policy = cast(Literal["preserve", "omit"], serialized_policy)
+    else:
+        state._reasoning_item_id_policy = None
     state.set_tool_use_tracker_snapshot(state_json.get("tool_use_tracker", {}))
     trace_data = state_json.get("trace")
     if isinstance(trace_data, Mapping):
@@ -1898,10 +2128,10 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
         Dictionary mapping agent names to agent instances.
     """
     agent_map: dict[str, Agent[Any]] = {}
-    queue = [initial_agent]
+    queue: deque[Agent[Any]] = deque([initial_agent])
 
     while queue:
-        current = queue.pop(0)
+        current = queue.popleft()
         if current.name in agent_map:
             continue
         agent_map[current.name] = current
@@ -2062,12 +2292,14 @@ def _deserialize_model_responses(responses_data: list[dict[str, Any]]) -> list[M
         output = output_adapter.validate_python(normalized_output)
 
         response_id = resp_data.get("response_id")
+        request_id = resp_data.get("request_id")
 
         result.append(
             ModelResponse(
                 usage=usage,
                 output=output,
                 response_id=response_id,
+                request_id=request_id,
             )
         )
 

@@ -5,6 +5,18 @@ The Agents SDK comes with out-of-the-box support for OpenAI models in two flavor
 -   **Recommended**: the [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel], which calls OpenAI APIs using the new [Responses API](https://platform.openai.com/docs/api-reference/responses).
 -   The [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel], which calls OpenAI APIs using the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat).
 
+## Choosing a model setup
+
+Use this page in the following order depending on your setup:
+
+| Goal | Start here |
+| --- | --- |
+| Use OpenAI-hosted models with SDK defaults | [OpenAI models](#openai-models) |
+| Use OpenAI Responses API over websocket transport | [Responses WebSocket transport](#responses-websocket-transport) |
+| Use non-OpenAI providers | [Non-OpenAI models](#non-openai-models) |
+| Mix models/providers in one workflow | [Advanced model selection and mixing](#advanced-model-selection-and-mixing) and [Mixing models across providers](#mixing-models-across-providers) |
+| Debug provider compatibility issues | [Troubleshooting non-OpenAI providers](#troubleshooting-non-openai-providers) |
+
 ## OpenAI models
 
 When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-4.1`](https://platform.openai.com/docs/models/gpt-4.1) for compatibility and low latency. If you have access, we recommend setting your agents to [`gpt-5.2`](https://platform.openai.com/docs/models/gpt-5.2) for higher quality while keeping explicit `model_settings`.
@@ -61,6 +73,49 @@ For lower latency, using `reasoning.effort="none"` with `gpt-5.2` is recommended
 
 If you pass a non–GPT-5 model name without custom `model_settings`, the SDK reverts to generic `ModelSettings` compatible with any model.
 
+### Responses WebSocket transport
+
+By default, OpenAI Responses API requests use HTTP transport. You can opt in to websocket transport when using OpenAI-backed models.
+
+```python
+from agents import set_default_openai_responses_transport
+
+set_default_openai_responses_transport("websocket")
+```
+
+This affects OpenAI Responses models resolved by the default OpenAI provider (including string model names such as `"gpt-5.2"`).
+
+Transport selection happens when the SDK resolves a model name into a model instance. If you pass a concrete [`Model`][agents.models.interface.Model] object, its transport is already fixed: [`OpenAIResponsesWSModel`][agents.models.openai_responses.OpenAIResponsesWSModel] uses websocket, [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] uses HTTP, and [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] stays on Chat Completions. If you pass `RunConfig(model_provider=...)`, that provider controls transport selection instead of the global default.
+
+You can also configure websocket transport per provider or per run:
+
+```python
+from agents import Agent, OpenAIProvider, RunConfig, Runner
+
+provider = OpenAIProvider(
+    use_responses_websocket=True,
+    # Optional; if omitted, OPENAI_WEBSOCKET_BASE_URL is used when set.
+    websocket_base_url="wss://your-proxy.example/v1",
+)
+
+agent = Agent(name="Assistant")
+result = await Runner.run(
+    agent,
+    "Hello",
+    run_config=RunConfig(model_provider=provider),
+)
+```
+
+If you need prefix-based model routing (for example mixing `openai/...` and `litellm/...` model names in one run), use [`MultiProvider`][agents.MultiProvider] and set `openai_use_responses_websocket=True` there instead.
+
+If you use a custom OpenAI-compatible endpoint or proxy, websocket transport also requires a compatible websocket `/responses` endpoint. In those setups you may need to set `websocket_base_url` explicitly.
+
+Notes:
+
+-   This is the Responses API over websocket transport, not the [Realtime API](../realtime/guide.md). It does not apply to Chat Completions or non-OpenAI providers unless they support the Responses websocket `/responses` endpoint.
+-   Install the `websockets` package if it is not already available in your environment.
+-   You can use [`Runner.run_streamed()`][agents.run.Runner.run_streamed] directly after enabling websocket transport. For multi-turn workflows where you want to reuse the same websocket connection across turns (and nested agent-as-tool calls), the [`responses_websocket_session()`][agents.responses_websocket_session] helper is recommended. See the [Running agents](../running_agents.md) guide and [`examples/basic/stream_ws.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/stream_ws.py).
+
 ## Non-OpenAI models
 
 You can use most other non-OpenAI models via the [LiteLLM integration](./litellm.md). First, install the litellm dependency group:
@@ -90,7 +145,7 @@ In cases where you do not have an API key from `platform.openai.com`, we recomme
 
     In these examples, we use the Chat Completions API/model, because most LLM providers don't yet support the Responses API. If your LLM provider does support it, we recommend using Responses.
 
-## Mixing and matching models
+## Advanced model selection and mixing
 
 Within a single workflow, you may want to use different models for each agent. For example, you could use a smaller, faster model for triage, while using a larger, more capable model for complex tasks. When configuring an [`Agent`][agents.Agent], you can select a specific model by either:
 
@@ -165,7 +220,7 @@ english_agent = Agent(
 )
 ```
 
-## Common issues with using other LLM providers
+## Troubleshooting non-OpenAI providers
 
 ### Tracing client error 401
 

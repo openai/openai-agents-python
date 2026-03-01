@@ -51,6 +51,7 @@ class CallModelData(Generic[TContext]):
 
 
 CallModelInputFilter = Callable[[CallModelData[Any]], MaybeAwaitable[ModelInputData]]
+ReasoningItemIdPolicy = Literal["preserve", "omit"]
 
 
 @dataclass
@@ -183,6 +184,13 @@ class RunConfig:
     settings. Used to control session behavior like the number of items to retrieve.
     """
 
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None
+    """Controls how reasoning items are converted to next-turn model input.
+
+    - ``None`` / ``"preserve"`` keeps reasoning item IDs as-is.
+    - ``"omit"`` strips reasoning item IDs from model input built by the runner.
+    """
+
 
 class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
@@ -220,6 +228,7 @@ __all__ = [
     "CallModelData",
     "CallModelInputFilter",
     "ModelInputData",
+    "ReasoningItemIdPolicy",
     "RunConfig",
     "RunOptions",
     "ToolErrorFormatter",

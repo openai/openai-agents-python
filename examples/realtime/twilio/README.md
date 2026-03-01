@@ -4,7 +4,7 @@ This example demonstrates how to connect the OpenAI Realtime API to a phone call
 
 ## Prerequisites
 
--   Python 3.9+
+-   Python 3.10+
 -   OpenAI API key with [Realtime API](https://platform.openai.com/docs/guides/realtime) access
 -   [Twilio](https://www.twilio.com/docs/voice) account with a phone number
 -   A tunneling service like [ngrok](https://ngrok.com/) to expose your local server

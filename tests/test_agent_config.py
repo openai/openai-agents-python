@@ -192,8 +192,8 @@ class TestAgentValidation:
         with pytest.raises(TypeError, match="Agent tool_use_behavior must be"):
             Agent(name="test", tool_use_behavior=123)  # type: ignore
 
-    def test_hooks_validation_python39_compatibility(self):
-        """Test hooks validation works with Python 3.9 - fixes generic type issues"""
+    def test_hooks_validation_type_compatibility(self):
+        """Test hooks validation works with generic type validation."""
 
         class MockHooks(AgentHooksBase):
             pass

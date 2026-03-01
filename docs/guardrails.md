@@ -47,7 +47,7 @@ Tool guardrails wrap **function tools** and let you validate or block tool calls
 
 - Input tool guardrails run before the tool executes and can skip the call, replace the output with a message, or raise a tripwire.
 - Output tool guardrails run after the tool executes and can replace the output or raise a tripwire.
-- Tool guardrails apply only to function tools created with [`function_tool`][agents.function_tool]; hosted tools (`WebSearchTool`, `FileSearchTool`, `HostedMCPTool`, `CodeInterpreterTool`, `ImageGenerationTool`) and local runtime tools (`ComputerTool`, `ShellTool`, `ApplyPatchTool`, `LocalShellTool`) do not use this guardrail pipeline.
+- Tool guardrails apply only to function tools created with [`function_tool`][agents.function_tool]; hosted tools (`WebSearchTool`, `FileSearchTool`, `HostedMCPTool`, `CodeInterpreterTool`, `ImageGenerationTool`) and built-in execution tools (`ComputerTool`, `ShellTool`, `ApplyPatchTool`, `LocalShellTool`) do not use this guardrail pipeline.
 
 See the code snippet below for details.
 

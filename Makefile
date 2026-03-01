@@ -20,8 +20,15 @@ mypy:
 	uv run mypy . --exclude site
 
 .PHONY: tests
-tests: 
-	uv run pytest 
+tests: tests-parallel tests-serial
+
+.PHONY: tests-parallel
+tests-parallel:
+	uv run pytest -n auto --dist loadfile -m "not serial"
+
+.PHONY: tests-serial
+tests-serial:
+	uv run pytest -m serial
 
 .PHONY: coverage
 coverage:
@@ -37,11 +44,6 @@ snapshots-fix:
 .PHONY: snapshots-create 
 snapshots-create: 
 	uv run pytest --inline-snapshot=create 
-
-.PHONY: old_version_tests
-old_version_tests:
-	UV_PROJECT_ENVIRONMENT=.venv_39 uv sync --python 3.9 --all-extras --all-packages --group dev
-	UV_PROJECT_ENVIRONMENT=.venv_39 uv run --python 3.9 -m pytest
 
 .PHONY: build-docs
 build-docs:

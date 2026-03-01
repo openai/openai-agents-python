@@ -14,6 +14,7 @@ from agents import (
     RunContextWrapper,
     RunResult,
     RunResultStreaming,
+    SessionSettings,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
     ToolOutputGuardrailData,
@@ -32,6 +33,63 @@ def test_run_config_positional_arguments_remain_backward_compatible() -> None:
 
     assert config.handoff_input_filter is keep_handoff_input
     assert config.session_settings is None
+
+
+def test_run_config_session_settings_positional_binding_is_preserved() -> None:
+    session_settings = SessionSettings(limit=123)
+    config = RunConfig(
+        None,
+        MultiProvider(),
+        None,
+        None,
+        False,
+        None,
+        None,
+        None,
+        False,
+        None,
+        True,
+        "Agent workflow",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        session_settings,
+    )
+
+    assert config.session_settings == session_settings
+    assert config.reasoning_item_id_policy is None
+
+
+def test_run_config_reasoning_item_id_policy_positional_binding() -> None:
+    session_settings = SessionSettings(limit=123)
+    config = RunConfig(
+        None,
+        MultiProvider(),
+        None,
+        None,
+        False,
+        None,
+        None,
+        None,
+        False,
+        None,
+        True,
+        "Agent workflow",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        session_settings,
+        "omit",
+    )
+
+    assert config.session_settings == session_settings
+    assert config.reasoning_item_id_policy == "omit"
 
 
 def test_function_tool_positional_arguments_keep_guardrail_positions() -> None:
@@ -65,6 +123,9 @@ def test_function_tool_positional_arguments_keep_guardrail_positions() -> None:
     assert tool.tool_output_guardrails is not None
     assert tool.tool_input_guardrails[0] is allow_input
     assert tool.tool_output_guardrails[0] is allow_output
+    assert tool.timeout_seconds is None
+    assert tool.timeout_behavior == "error_as_result"
+    assert tool.timeout_error_function is None
 
 
 def test_agent_hook_context_third_positional_argument_is_turn_input() -> None:
@@ -83,6 +144,19 @@ def test_tool_context_v070_positional_constructor_still_works() -> None:
     assert context.tool_name == "tool_name"
     assert context.tool_call_id == "call_id"
     assert context.tool_arguments == '{"x":1}'
+    assert context.agent is None
+
+
+def test_tool_context_supports_agent_keyword_argument() -> None:
+    usage = Usage()
+    agent = Agent(name="agent")
+    context = ToolContext(None, usage, "tool_name", "call_id", '{"x":1}', None, agent=agent)
+
+    assert context.usage is usage
+    assert context.tool_name == "tool_name"
+    assert context.tool_call_id == "call_id"
+    assert context.tool_arguments == '{"x":1}'
+    assert context.agent is agent
 
 
 def test_run_result_v070_positional_constructor_still_works() -> None:

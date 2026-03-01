@@ -8,6 +8,9 @@ from collections.abc import AsyncIterator
 from dataclasses import InitVar, dataclass, field
 from typing import Any, Literal, TypeVar, cast
 
+from pydantic import GetCoreSchemaHandler
+from pydantic_core import core_schema
+
 from .agent import Agent
 from .agent_output import AgentOutputSchemaBase
 from .exceptions import (
@@ -26,6 +29,7 @@ from .items import (
 )
 from .logger import logger
 from .run_context import RunContextWrapper
+from .run_internal.items import run_item_to_input_item
 from .run_internal.run_steps import (
     NextStepInterruption,
     ProcessedResponse,
@@ -75,6 +79,7 @@ def _populate_state_from_result(
     state._conversation_id = conversation_id
     state._previous_response_id = previous_response_id
     state._auto_previous_response_id = auto_previous_response_id
+    state._reasoning_item_id_policy = getattr(result, "_reasoning_item_id_policy", None)
 
     interruptions = list(getattr(result, "interruptions", []))
     if interruptions:
@@ -123,6 +128,16 @@ class RunResultBase(abc.ABC):
 
     _trace_state: TraceState | None = field(default=None, init=False, repr=False)
     """Serialized trace metadata captured during the run."""
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        _source_type: Any,
+        _handler: GetCoreSchemaHandler,
+    ) -> core_schema.CoreSchema:
+        # RunResult objects are runtime values; schema generation should treat them as instances
+        # instead of recursively traversing internal dataclass annotations.
+        return core_schema.is_instance_schema(cls)
 
     @property
     @abc.abstractmethod
@@ -180,10 +195,12 @@ class RunResultBase(abc.ABC):
         """Creates a new input list, merging the original input with all the new items generated."""
         original_items: list[TResponseInputItem] = ItemHelpers.input_to_new_input_list(self.input)
         new_items: list[TResponseInputItem] = []
+        reasoning_item_id_policy = getattr(self, "_reasoning_item_id_policy", None)
         for item in self.new_items:
-            if isinstance(item, ToolApprovalItem):
+            converted = run_item_to_input_item(item, reasoning_item_id_policy)
+            if converted is None:
                 continue
-            new_items.append(item.to_input_item())
+            new_items.append(converted)
 
         return original_items + new_items
 
@@ -224,6 +241,10 @@ class RunResult(RunResultBase):
     """Response identifier returned by the server for the last turn."""
     _auto_previous_response_id: bool = field(default=False, repr=False)
     """Whether automatic previous response tracking was enabled."""
+    _reasoning_item_id_policy: Literal["preserve", "omit"] | None = field(
+        default=None, init=False, repr=False
+    )
+    """How reasoning IDs should be represented when converting to input history."""
     max_turns: int = 10
     """The maximum number of turns allowed for this run."""
     interruptions: list[ToolApprovalItem] = field(default_factory=list)
@@ -386,6 +407,10 @@ class RunResultStreaming(RunResultBase):
     """Response identifier returned by the server for the last turn."""
     _auto_previous_response_id: bool = field(default=False, repr=False)
     """Whether automatic previous response tracking was enabled."""
+    _reasoning_item_id_policy: Literal["preserve", "omit"] | None = field(
+        default=None, init=False, repr=False
+    )
+    """How reasoning IDs should be represented when converting to input history."""
     _run_impl_task: InitVar[asyncio.Task[Any] | None] = None
 
     def __post_init__(self, _run_impl_task: asyncio.Task[Any] | None) -> None:
@@ -480,7 +505,10 @@ class RunResultStreaming(RunResultBase):
         try:
             while True:
                 self._check_errors()
-                if self._stored_exception:
+                should_drain_queued_events = isinstance(self._stored_exception, MaxTurnsExceeded)
+                if self._stored_exception and (
+                    not should_drain_queued_events or self._event_queue.empty()
+                ):
                     logger.debug("Breaking due to stored exception")
                     self.is_complete = True
                     break

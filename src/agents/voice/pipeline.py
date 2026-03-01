@@ -84,24 +84,20 @@ class VoicePipeline:
         )
 
     async def _run_single_turn(self, audio_input: AudioInput) -> StreamedAudioResult:
-        # Since this is single turn, we can use the TraceCtxManager to manage starting/ending the
-        # trace
-        with TraceCtxManager(
-            workflow_name=self.config.workflow_name or "Voice Agent",
-            trace_id=None,  # Automatically generated
-            group_id=self.config.group_id,
-            metadata=self.config.trace_metadata,
-            tracing=self.config.tracing,
-            disabled=self.config.tracing_disabled,
-        ):
-            input_text = await self._process_audio_input(audio_input)
+        output = StreamedAudioResult(self._get_tts_model(), self.config.tts_settings, self.config)
 
-            output = StreamedAudioResult(
-                self._get_tts_model(), self.config.tts_settings, self.config
-            )
-
-            async def stream_events():
+        async def stream_events():
+            # Keep the trace scope active for the entire async processing lifecycle.
+            with TraceCtxManager(
+                workflow_name=self.config.workflow_name or "Voice Agent",
+                trace_id=None,  # Automatically generated
+                group_id=self.config.group_id,
+                metadata=self.config.trace_metadata,
+                tracing=self.config.tracing,
+                disabled=self.config.tracing_disabled,
+            ):
                 try:
+                    input_text = await self._process_audio_input(audio_input)
                     async for text_event in self.workflow.run(input_text):
                         await output._add_text(text_event)
                     await output._turn_done()
@@ -111,37 +107,37 @@ class VoicePipeline:
                     await output._add_error(e)
                     raise e
 
-            output._set_task(asyncio.create_task(stream_events()))
-            return output
+        output._set_task(asyncio.create_task(stream_events()))
+        return output
 
     async def _run_multi_turn(self, audio_input: StreamedAudioInput) -> StreamedAudioResult:
-        with TraceCtxManager(
-            workflow_name=self.config.workflow_name or "Voice Agent",
-            trace_id=None,
-            group_id=self.config.group_id,
-            metadata=self.config.trace_metadata,
-            tracing=self.config.tracing,
-            disabled=self.config.tracing_disabled,
-        ):
-            output = StreamedAudioResult(
-                self._get_tts_model(), self.config.tts_settings, self.config
-            )
+        output = StreamedAudioResult(self._get_tts_model(), self.config.tts_settings, self.config)
 
-            try:
-                async for intro_text in self.workflow.on_start():
-                    await output._add_text(intro_text)
-            except Exception as e:
-                logger.warning(f"on_start() failed: {e}")
-
-            transcription_session = await self._get_stt_model().create_session(
-                audio_input,
-                self.config.stt_settings,
-                self.config.trace_include_sensitive_data,
-                self.config.trace_include_sensitive_audio_data,
-            )
-
-            async def process_turns():
+        async def process_turns():
+            # Keep the trace scope active for the full streamed session.
+            with TraceCtxManager(
+                workflow_name=self.config.workflow_name or "Voice Agent",
+                trace_id=None,
+                group_id=self.config.group_id,
+                metadata=self.config.trace_metadata,
+                tracing=self.config.tracing,
+                disabled=self.config.tracing_disabled,
+            ):
+                transcription_session = None
                 try:
+                    try:
+                        async for intro_text in self.workflow.on_start():
+                            await output._add_text(intro_text)
+                    except Exception as e:
+                        logger.warning(f"on_start() failed: {e}")
+
+                    transcription_session = await self._get_stt_model().create_session(
+                        audio_input,
+                        self.config.stt_settings,
+                        self.config.trace_include_sensitive_data,
+                        self.config.trace_include_sensitive_audio_data,
+                    )
+
                     async for input_text in transcription_session.transcribe_turns():
                         result = self.workflow.run(input_text)
                         async for text_event in result:
@@ -152,8 +148,9 @@ class VoicePipeline:
                     await output._add_error(e)
                     raise e
                 finally:
-                    await transcription_session.close()
+                    if transcription_session is not None:
+                        await transcription_session.close()
                     await output._done()
 
-            output._set_task(asyncio.create_task(process_turns()))
-            return output
+        output._set_task(asyncio.create_task(process_turns()))
+        return output

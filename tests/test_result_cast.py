@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from agents import (
     Agent,
@@ -43,6 +43,16 @@ def create_run_result(
 
 class Foo(BaseModel):
     bar: int
+
+
+def test_run_result_streaming_supports_pydantic_model_rebuild() -> None:
+    class StreamingRunContainer(BaseModel):
+        query_id: str
+        run_stream: RunResultStreaming | None
+
+        model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    StreamingRunContainer.model_rebuild()
 
 
 def _create_message(text: str) -> ResponseOutputMessage:

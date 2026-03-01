@@ -6,6 +6,8 @@ from typing import Any, Callable, cast
 
 import pytest
 from openai.types.responses.response_output_item import McpApprovalRequest
+from openai.types.responses.response_output_message import ResponseOutputMessage
+from openai.types.responses.response_output_refusal import ResponseOutputRefusal
 from pydantic import BaseModel
 
 from agents import (
@@ -176,6 +178,127 @@ async def test_plaintext_agent_with_tool_call_is_run_again():
 
 
 @pytest.mark.asyncio
+async def test_plaintext_agent_hosted_shell_items_without_message_runs_again():
+    shell_tool = ShellTool(environment={"type": "container_auto"})
+    agent = Agent(name="test", tools=[shell_tool])
+    response = ModelResponse(
+        output=[
+            make_shell_call(
+                "call_shell_hosted", id_value="shell_call_hosted", commands=["echo hi"]
+            ),
+            cast(
+                Any,
+                {
+                    "type": "shell_call_output",
+                    "id": "sh_out_hosted",
+                    "call_id": "call_shell_hosted",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "stdout": "hi\n",
+                            "stderr": "",
+                            "outcome": {"type": "exit", "exit_code": 0},
+                        }
+                    ],
+                },
+            ),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    result = await get_execute_result(agent, response)
+
+    assert len(result.generated_items) == 2
+    assert isinstance(result.generated_items[0], ToolCallItem)
+    assert isinstance(result.generated_items[1], ToolCallOutputItem)
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_plaintext_agent_shell_output_only_without_message_runs_again():
+    agent = Agent(name="test")
+    response = ModelResponse(
+        output=[
+            cast(
+                Any,
+                {
+                    "type": "shell_call_output",
+                    "id": "sh_out_only",
+                    "call_id": "call_shell_only",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "stdout": "hi\n",
+                            "stderr": "",
+                            "outcome": {"type": "exit", "exit_code": 0},
+                        }
+                    ],
+                },
+            ),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    result = await get_execute_result(agent, response)
+
+    assert len(result.generated_items) == 1
+    assert isinstance(result.generated_items[0], ToolCallOutputItem)
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_plaintext_agent_hosted_shell_with_refusal_message_is_final_output():
+    shell_tool = ShellTool(environment={"type": "container_auto"})
+    agent = Agent(name="test", tools=[shell_tool])
+    refusal_message = ResponseOutputMessage(
+        id="msg_refusal",
+        type="message",
+        role="assistant",
+        content=[ResponseOutputRefusal(type="refusal", refusal="I cannot help with that.")],
+        status="completed",
+    )
+    response = ModelResponse(
+        output=[
+            make_shell_call(
+                "call_shell_hosted_refusal",
+                id_value="shell_call_hosted_refusal",
+                commands=["echo hi"],
+            ),
+            cast(
+                Any,
+                {
+                    "type": "shell_call_output",
+                    "id": "sh_out_hosted_refusal",
+                    "call_id": "call_shell_hosted_refusal",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "stdout": "hi\n",
+                            "stderr": "",
+                            "outcome": {"type": "exit", "exit_code": 0},
+                        }
+                    ],
+                },
+            ),
+            refusal_message,
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    result = await get_execute_result(agent, response)
+
+    assert len(result.generated_items) == 3
+    assert isinstance(result.generated_items[0], ToolCallItem)
+    assert isinstance(result.generated_items[1], ToolCallOutputItem)
+    assert isinstance(result.generated_items[2], MessageOutputItem)
+    assert isinstance(result.next_step, NextStepFinalOutput)
+    assert result.next_step.output == ""
+
+
+@pytest.mark.asyncio
 async def test_multiple_tool_calls():
     agent = Agent(
         name="test",
@@ -243,6 +366,32 @@ async def test_multiple_tool_calls_with_tool_context():
     assert_item_is_function_tool_call_output(items[2], "123-1")
     assert_item_is_function_tool_call_output(items[3], "456-2")
 
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_function_tool_context_includes_run_config() -> None:
+    async def _tool_with_run_config(context: ToolContext[str]) -> str:
+        assert context.run_config is not None
+        return str(context.run_config.model)
+
+    tool = function_tool(
+        _tool_with_run_config,
+        name_override="tool_with_run_config",
+        failure_error_function=None,
+    )
+    agent = Agent(name="test", tools=[tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("tool_with_run_config", "{}", call_id="call-1")],
+        usage=Usage(),
+        response_id=None,
+    )
+    run_config = RunConfig(model="gpt-4.1-mini")
+
+    result = await get_execute_result(agent, response, run_config=run_config)
+
+    assert len(result.generated_items) == 2
+    assert_item_is_function_tool_call_output(result.generated_items[1], "gpt-4.1-mini")
     assert isinstance(result.next_step, NextStepRunAgain)
 
 

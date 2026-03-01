@@ -2,12 +2,13 @@ import asyncio
 import contextlib
 import json
 import time
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import pytest
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
+import agents.tool as tool_module
 from agents import (
     Agent,
     AgentBase,
@@ -17,6 +18,7 @@ from agents import (
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
     ToolOutputGuardrailData,
+    ToolTimeoutError,
     function_tool,
     tool_input_guardrail,
     tool_output_guardrail,
@@ -448,6 +450,25 @@ async def test_async_failure_error_function_is_awaited() -> None:
     assert result.startswith("handled:")
 
 
+@pytest.mark.asyncio
+async def test_default_failure_error_function_is_resolved_at_invoke_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(a: int) -> None:
+        raise ValueError(f"boom:{a}")
+
+    tool = function_tool(boom)
+
+    def patched_default(_ctx: RunContextWrapper[Any], error: Exception) -> str:
+        return f"patched:{error}"
+
+    monkeypatch.setattr(tool_module, "default_tool_error_function", patched_default)
+
+    ctx = ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments='{"a": 7}')
+    result = await tool.on_invoke_tool(ctx, '{"a": 7}')
+    assert result == "patched:boom:7"
+
+
 def test_function_tool_accepts_guardrail_arguments():
     tool = function_tool(
         simple_function,
@@ -469,3 +490,176 @@ def test_function_tool_decorator_accepts_guardrail_arguments():
 
     assert guarded.tool_input_guardrails == [reject_args_guardrail]
     assert guarded.tool_output_guardrails == [allow_output_guardrail]
+
+
+@pytest.mark.asyncio
+async def test_invoke_function_tool_timeout_returns_default_message() -> None:
+    @function_tool(timeout=0.01)
+    async def slow_tool() -> str:
+        await asyncio.sleep(0.2)
+        return "slow"
+
+    ctx = ToolContext(None, tool_name=slow_tool.name, tool_call_id="slow", tool_arguments="{}")
+    result = await tool_module.invoke_function_tool(
+        function_tool=slow_tool,
+        context=ctx,
+        arguments="{}",
+    )
+
+    assert isinstance(result, str)
+    assert "timed out" in result.lower()
+    assert "0.01" in result
+
+
+@pytest.mark.asyncio
+async def test_invoke_function_tool_timeout_uses_custom_error_function() -> None:
+    def custom_timeout_error(_ctx: RunContextWrapper[Any], error: Exception) -> str:
+        assert isinstance(error, ToolTimeoutError)
+        return f"custom_timeout:{error.tool_name}:{error.timeout_seconds:g}"
+
+    @function_tool(timeout=0.01, timeout_error_function=custom_timeout_error)
+    async def slow_tool() -> str:
+        await asyncio.sleep(0.2)
+        return "slow"
+
+    ctx = ToolContext(None, tool_name=slow_tool.name, tool_call_id="slow", tool_arguments="{}")
+    result = await tool_module.invoke_function_tool(
+        function_tool=slow_tool,
+        context=ctx,
+        arguments="{}",
+    )
+
+    assert result == "custom_timeout:slow_tool:0.01"
+
+
+@pytest.mark.asyncio
+async def test_invoke_function_tool_timeout_can_raise_exception() -> None:
+    @function_tool(timeout=0.01, timeout_behavior="raise_exception")
+    async def slow_tool() -> str:
+        await asyncio.sleep(0.2)
+        return "slow"
+
+    ctx = ToolContext(None, tool_name=slow_tool.name, tool_call_id="slow", tool_arguments="{}")
+    with pytest.raises(ToolTimeoutError, match="timed out"):
+        await tool_module.invoke_function_tool(
+            function_tool=slow_tool,
+            context=ctx,
+            arguments="{}",
+        )
+
+
+@pytest.mark.asyncio
+async def test_invoke_function_tool_does_not_rewrite_tool_raised_timeout_error() -> None:
+    @function_tool(timeout=1.0, failure_error_function=None)
+    async def timeout_tool() -> str:
+        raise TimeoutError("tool_internal_timeout")
+
+    ctx = ToolContext(
+        None, tool_name=timeout_tool.name, tool_call_id="timeout", tool_arguments="{}"
+    )
+    with pytest.raises(TimeoutError, match="tool_internal_timeout"):
+        await tool_module.invoke_function_tool(
+            function_tool=timeout_tool,
+            context=ctx,
+            arguments="{}",
+        )
+
+
+@pytest.mark.asyncio
+async def test_invoke_function_tool_does_not_rewrite_manual_tool_raised_timeout_error() -> None:
+    async def on_invoke_tool(_ctx: ToolContext[Any], _args: str) -> str:
+        raise TimeoutError("manual_tool_internal_timeout")
+
+    manual_tool = FunctionTool(
+        name="manual_timeout_tool",
+        description="manual timeout",
+        params_json_schema={},
+        on_invoke_tool=on_invoke_tool,
+        timeout_seconds=1.0,
+    )
+
+    ctx = ToolContext(None, tool_name=manual_tool.name, tool_call_id="timeout", tool_arguments="{}")
+    with pytest.raises(TimeoutError, match="manual_tool_internal_timeout"):
+        await tool_module.invoke_function_tool(
+            function_tool=manual_tool,
+            context=ctx,
+            arguments="{}",
+        )
+
+
+async def _noop_on_invoke_tool(_ctx: ToolContext[Any], _args: str) -> str:
+    return "ok"
+
+
+def test_function_tool_timeout_seconds_must_be_positive_number() -> None:
+    with pytest.raises(ValueError, match="greater than 0"):
+        FunctionTool(
+            name="bad_timeout",
+            description="bad",
+            params_json_schema={},
+            on_invoke_tool=_noop_on_invoke_tool,
+            timeout_seconds=0.0,
+        )
+
+    with pytest.raises(TypeError, match="positive number"):
+        FunctionTool(
+            name="bad_timeout_type",
+            description="bad",
+            params_json_schema={},
+            on_invoke_tool=_noop_on_invoke_tool,
+            timeout_seconds=cast(Any, "1"),
+        )
+
+    with pytest.raises(ValueError, match="finite number"):
+        FunctionTool(
+            name="bad_timeout_inf",
+            description="bad",
+            params_json_schema={},
+            on_invoke_tool=_noop_on_invoke_tool,
+            timeout_seconds=float("inf"),
+        )
+
+    with pytest.raises(ValueError, match="finite number"):
+        FunctionTool(
+            name="bad_timeout_nan",
+            description="bad",
+            params_json_schema={},
+            on_invoke_tool=_noop_on_invoke_tool,
+            timeout_seconds=float("nan"),
+        )
+
+
+def test_function_tool_timeout_not_supported_for_sync_handlers() -> None:
+    def sync_tool() -> str:
+        return "ok"
+
+    with pytest.raises(ValueError, match="only supported for async @function_tool handlers"):
+        function_tool(sync_tool, timeout=1.0)
+
+    with pytest.raises(ValueError, match="only supported for async @function_tool handlers"):
+
+        @function_tool(timeout=1.0)
+        def sync_tool_decorator_style() -> str:
+            return "ok"
+
+
+def test_function_tool_timeout_behavior_must_be_supported() -> None:
+    with pytest.raises(ValueError, match="timeout_behavior must be one of"):
+        FunctionTool(
+            name="bad_timeout_behavior",
+            description="bad",
+            params_json_schema={},
+            on_invoke_tool=_noop_on_invoke_tool,
+            timeout_behavior=cast(Any, "unsupported"),
+        )
+
+
+def test_function_tool_timeout_error_function_must_be_callable() -> None:
+    with pytest.raises(TypeError, match="timeout_error_function must be callable"):
+        FunctionTool(
+            name="bad_timeout_error_function",
+            description="bad",
+            params_json_schema={},
+            on_invoke_tool=_noop_on_invoke_tool,
+            timeout_error_function=cast(Any, "not-callable"),
+        )

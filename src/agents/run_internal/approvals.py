@@ -13,6 +13,7 @@ from openai.types.responses import ResponseFunctionToolCall
 
 from ..agent import Agent
 from ..items import ItemHelpers, RunItem, ToolApprovalItem, ToolCallOutputItem, TResponseInputItem
+from .items import ReasoningItemIdPolicy, run_item_to_input_item
 
 # --------------------------
 # Public helpers
@@ -55,12 +56,14 @@ def approvals_from_step(step: Any) -> list[ToolApprovalItem]:
 def append_input_items_excluding_approvals(
     base_input: list[TResponseInputItem],
     items: Sequence[RunItem],
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> None:
     """Append tool outputs to model input while skipping approval placeholders."""
     for item in items:
-        if item.type == "tool_approval_item":
+        converted = run_item_to_input_item(item, reasoning_item_id_policy)
+        if converted is None:
             continue
-        base_input.append(item.to_input_item())
+        base_input.append(converted)
 
 
 # --------------------------

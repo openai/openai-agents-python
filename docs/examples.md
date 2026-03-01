@@ -23,6 +23,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Agent lifecycle management
     -   Dynamic system prompts
     -   Streaming outputs (text, items, function call args)
+    -   Responses websocket transport with a shared session helper across turns (`examples/basic/stream_ws.py`)
     -   Prompt templates
     -   File handling (local and remote, images and PDFs)
     -   Usage tracking
@@ -69,6 +70,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Web applications
     -   Command-line interfaces
     -   Twilio integration
+    -   Twilio SIP integration
 
 -   **[reasoning_content](https://github.com/openai/openai-agents-python/tree/main/examples/reasoning_content):**
     Examples demonstrating how to work with reasoning content and structured outputs.
@@ -82,6 +84,8 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Web search and web search with filters
     -   File search
     -   Code interpreter
+    -   Hosted container shell with inline skills (`examples/tools/container_shell_inline_skill.py`)
+    -   Hosted container shell with skill references (`examples/tools/container_shell_skill_reference.py`)
     -   Computer use
     -   Image generation
     -   Experimental Codex tool workflows (`examples/tools/codex.py`)

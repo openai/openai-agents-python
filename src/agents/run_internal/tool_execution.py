@@ -10,7 +10,7 @@ import dataclasses
 import inspect
 import json
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_input_item_param import (
@@ -20,7 +20,11 @@ from openai.types.responses.response_input_param import McpApprovalResponse
 from openai.types.responses.response_output_item import McpApprovalRequest
 
 from ..agent import Agent
-from ..agent_tool_state import consume_agent_tool_run_result, peek_agent_tool_run_result
+from ..agent_tool_state import (
+    consume_agent_tool_run_result,
+    get_agent_tool_state_scope,
+    peek_agent_tool_run_result,
+)
 from ..editor import ApplyPatchOperation, ApplyPatchResult
 from ..exceptions import (
     AgentsException,
@@ -53,6 +57,7 @@ from ..tool import (
     ShellCommandOutput,
     Tool,
     _get_tool_origin_info,
+    invoke_function_tool,
     resolve_computer,
 )
 from ..tool_context import ToolContext
@@ -62,7 +67,7 @@ from ..tool_guardrails import (
     ToolOutputGuardrailData,
     ToolOutputGuardrailResult,
 )
-from ..tracing import SpanError, function_span
+from ..tracing import Span, SpanError, function_span, get_current_trace
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
 from .approvals import append_approval_error_output
@@ -104,6 +109,8 @@ __all__ = [
     "normalize_max_output_length",
     "normalize_shell_output_entries",
     "format_shell_error",
+    "get_trace_tool_error",
+    "with_tool_function_span",
     "build_litellm_json_tool_call",
     "process_hosted_mcp_approvals",
     "collect_manual_mcp_approvals",
@@ -120,6 +127,9 @@ __all__ = [
     "execute_computer_actions",
     "execute_approved_tools",
 ]
+
+REDACTED_TOOL_ERROR_MESSAGE = "Tool execution failed. Error details are redacted."
+TToolSpanResult = TypeVar("TToolSpanResult")
 
 
 # --------------------------
@@ -531,6 +541,27 @@ def format_shell_error(error: Exception | BaseException | Any) -> str:
         return repr(error)
 
 
+def get_trace_tool_error(*, trace_include_sensitive_data: bool, error_message: str) -> str:
+    """Return a trace-safe tool error string based on the sensitive-data setting."""
+    return error_message if trace_include_sensitive_data else REDACTED_TOOL_ERROR_MESSAGE
+
+
+async def with_tool_function_span(
+    *,
+    config: RunConfig,
+    tool_name: str,
+    fn: Callable[[Span[Any] | None], Any],
+) -> TToolSpanResult:
+    """Execute a tool callback in a function span when tracing is active."""
+    if config.tracing_disabled or get_current_trace() is None:
+        result = fn(None)
+        return await result if inspect.isawaitable(result) else cast(TToolSpanResult, result)
+
+    with function_span(tool_name) as span:
+        result = fn(span)
+        return await result if inspect.isawaitable(result) else cast(TToolSpanResult, result)
+
+
 def build_litellm_json_tool_call(output: ResponseFunctionToolCall) -> FunctionTool:
     """Wrap a JSON string result in a FunctionTool so LiteLLM can stream it."""
 
@@ -814,6 +845,7 @@ async def execute_function_tool_calls(
     """Execute function tool calls with approvals, guardrails, and hooks."""
     tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
     tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
+    tool_state_scope_id = get_agent_tool_state_scope(context_wrapper)
 
     async def run_single_tool(func_tool: FunctionTool, tool_call: ResponseFunctionToolCall) -> Any:
         with function_span(func_tool.name) as span_fn:
@@ -821,6 +853,8 @@ async def execute_function_tool_calls(
                 context_wrapper,
                 tool_call.call_id,
                 tool_call=tool_call,
+                agent=agent,
+                run_config=config,
             )
             agent_hooks = agent.hooks
             if config.trace_include_sensitive_data:
@@ -877,6 +911,7 @@ async def execute_function_tool_calls(
                                 tool_call,
                                 rejection_message=rejection_message,
                                 tool_origin=tool_origin,
+                                scope_id=tool_state_scope_id,
                             ),
                         )
 
@@ -898,7 +933,11 @@ async def execute_function_tool_calls(
                             else _coro.noop_coroutine()
                         ),
                     )
-                    real_result = await func_tool.on_invoke_tool(tool_context, tool_call.arguments)
+                    real_result = await invoke_function_tool(
+                        function_tool=func_tool,
+                        context=tool_context,
+                        arguments=tool_call.arguments,
+                    )
 
                     final_result = await _execute_tool_output_guardrails(
                         func_tool=func_tool,
@@ -942,7 +981,10 @@ async def execute_function_tool_calls(
     function_tool_results = []
     for tool_run, result in zip(tool_runs, results):
         if isinstance(result, FunctionToolResult):
-            nested_run_result = consume_agent_tool_run_result(tool_run.tool_call)
+            nested_run_result = consume_agent_tool_run_result(
+                tool_run.tool_call,
+                scope_id=tool_state_scope_id,
+            )
             if nested_run_result:
                 result.agent_run_result = nested_run_result
                 nested_interruptions_from_result: list[ToolApprovalItem] = (
@@ -955,7 +997,10 @@ async def execute_function_tool_calls(
 
             function_tool_results.append(result)
         else:
-            nested_run_result = peek_agent_tool_run_result(tool_run.tool_call)
+            nested_run_result = peek_agent_tool_run_result(
+                tool_run.tool_call,
+                scope_id=tool_state_scope_id,
+            )
             nested_interruptions: list[ToolApprovalItem] = []
             if nested_run_result:
                 nested_interruptions = (
@@ -964,9 +1009,15 @@ async def execute_function_tool_calls(
                     else []
                 )
             if nested_run_result and not nested_interruptions:
-                nested_run_result = consume_agent_tool_run_result(tool_run.tool_call)
+                nested_run_result = consume_agent_tool_run_result(
+                    tool_run.tool_call,
+                    scope_id=tool_state_scope_id,
+                )
             elif nested_run_result is None:
-                nested_run_result = consume_agent_tool_run_result(tool_run.tool_call)
+                nested_run_result = consume_agent_tool_run_result(
+                    tool_run.tool_call,
+                    scope_id=tool_state_scope_id,
+                )
                 if nested_run_result:
                     nested_interruptions = (
                         nested_run_result.interruptions

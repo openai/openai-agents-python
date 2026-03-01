@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, TypeVar, cast
@@ -14,6 +15,7 @@ from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputMessage,
     ResponseOutputText,
+    ResponseReasoningItem,
 )
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
@@ -23,7 +25,7 @@ from openai.types.responses.response_output_item import LocalShellCall, McpAppro
 from openai.types.responses.tool_param import Mcp
 from pydantic import BaseModel
 
-from agents import Agent, Runner, handoff, trace
+from agents import Agent, Model, ModelSettings, Runner, handoff, trace
 from agents.computer import Computer
 from agents.exceptions import UserError
 from agents.guardrail import (
@@ -39,13 +41,16 @@ from agents.items import (
     ItemHelpers,
     MessageOutputItem,
     ModelResponse,
+    ReasoningItem,
     RunItem,
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
     TResponseInputItem,
+    TResponseStreamEvent,
 )
 from agents.run_context import RunContextWrapper
+from agents.run_internal.items import run_items_to_input_items
 from agents.run_internal.run_loop import (
     NextStepInterruption,
     ProcessedResponse,
@@ -59,6 +64,7 @@ from agents.run_internal.run_loop import (
 )
 from agents.run_state import (
     CURRENT_SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
     RunState,
     _build_agent_map,
     _deserialize_items,
@@ -231,6 +237,34 @@ class TestRunState:
         assert isinstance(str_data, str)
         assert json.loads(str_data) == json_data
 
+    async def test_reasoning_item_id_policy_survives_serialization(self):
+        """RunState should preserve reasoning item input policy across serialization."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="AgentReasoningPolicy")
+        state = make_state(agent, context=context, original_input="input1", max_turns=2)
+        state.set_reasoning_item_id_policy("omit")
+        state._generated_items = [
+            ReasoningItem(
+                agent=agent,
+                raw_item=ResponseReasoningItem(type="reasoning", id="rs_state", summary=[]),
+            )
+        ]
+
+        json_data = state.to_json()
+        assert json_data["reasoning_item_id_policy"] == "omit"
+
+        restored = await RunState.from_string(agent, state.to_string())
+        assert restored._reasoning_item_id_policy == "omit"
+
+        restored_history = run_items_to_input_items(
+            restored._generated_items,
+            restored._reasoning_item_id_policy,
+        )
+        assert len(restored_history) == 1
+        assert isinstance(restored_history[0], dict)
+        assert restored_history[0].get("type") == "reasoning"
+        assert "id" not in restored_history[0]
+
     @pytest.mark.asyncio
     async def test_tool_input_survives_serialization_round_trip(self):
         """Structured tool input should be preserved through serialization."""
@@ -255,20 +289,34 @@ class TestRunState:
         default_json = state.to_json()
         assert default_json["trace"] is not None
         assert "tracing_api_key" not in default_json["trace"]
+        assert default_json["trace"]["tracing_api_key_hash"]
+        assert default_json["trace"]["tracing_api_key_hash"] != "trace-key"
 
         opt_in_json = state.to_json(include_tracing_api_key=True)
         assert opt_in_json["trace"] is not None
         assert opt_in_json["trace"]["tracing_api_key"] == "trace-key"
+        assert (
+            opt_in_json["trace"]["tracing_api_key_hash"]
+            == default_json["trace"]["tracing_api_key_hash"]
+        )
 
         restored_with_key = await RunState.from_string(
             agent, state.to_string(include_tracing_api_key=True)
         )
         assert restored_with_key._trace_state is not None
         assert restored_with_key._trace_state.tracing_api_key == "trace-key"
+        assert (
+            restored_with_key._trace_state.tracing_api_key_hash
+            == default_json["trace"]["tracing_api_key_hash"]
+        )
 
         restored_without_key = await RunState.from_string(agent, state.to_string())
         assert restored_without_key._trace_state is not None
         assert restored_without_key._trace_state.tracing_api_key is None
+        assert (
+            restored_without_key._trace_state.tracing_api_key_hash
+            == default_json["trace"]["tracing_api_key_hash"]
+        )
 
     async def test_throws_error_if_schema_version_is_missing_or_invalid(self):
         """Test that deserialization fails with missing or invalid schema version."""
@@ -284,11 +332,13 @@ class TestRunState:
             await RunState.from_string(agent, str_data)
 
         json_data["$schemaVersion"] = "0.1"
+        supported_versions = ", ".join(sorted(SUPPORTED_SCHEMA_VERSIONS))
         with pytest.raises(
             Exception,
             match=(
                 f"Run state schema version 0.1 is not supported. "
-                f"Please use version {CURRENT_SCHEMA_VERSION}"
+                f"Supported versions are: {supported_versions}. "
+                f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
             ),
         ):
             await RunState.from_string(agent, json.dumps(json_data))
@@ -1633,6 +1683,7 @@ class TestDeserializeHelpers:
                 )
             ],
             response_id="resp123",
+            request_id="req123",
         )
         state._model_responses.append(response)
 
@@ -1642,6 +1693,7 @@ class TestDeserializeHelpers:
 
         assert len(restored._model_responses) == 1
         assert restored._model_responses[0].response_id == "resp123"
+        assert restored._model_responses[0].request_id == "req123"
         assert restored._model_responses[0].usage.requests == 1
         assert restored._model_responses[0].usage.input_tokens == 10
 
@@ -1700,6 +1752,162 @@ class TestDeserializeHelpers:
         assert len(interruptions) == 1
         assert interruptions[0].agent.name == "InnerAgent"
         assert interruptions[0].raw_item.name == "sensitive_tool"  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio
+    async def test_nested_agent_tool_hitl_resume_survives_json_round_trip_after_gc(self) -> None:
+        """Nested agent-tool resumptions should survive RunState JSON round-trips."""
+
+        def _has_function_call_output(input_data: str | list[TResponseInputItem]) -> bool:
+            if not isinstance(input_data, list):
+                return False
+            for item in input_data:
+                if isinstance(item, dict):
+                    if item.get("type") == "function_call_output":
+                        return True
+                    continue
+                if getattr(item, "type", None) == "function_call_output":
+                    return True
+            return False
+
+        class ResumeAwareToolModel(Model):
+            def __init__(
+                self, *, tool_name: str, tool_arguments: str, final_text: str, call_prefix: str
+            ) -> None:
+                self.tool_name = tool_name
+                self.tool_arguments = tool_arguments
+                self.final_text = final_text
+                self.call_prefix = call_prefix
+                self.call_count = 0
+
+            async def get_response(
+                self,
+                system_instructions: str | None,
+                input: str | list[TResponseInputItem],
+                model_settings: ModelSettings,
+                tools: list[Any],
+                output_schema: Any,
+                handoffs: list[Any],
+                tracing: Any,
+                *,
+                previous_response_id: str | None,
+                conversation_id: str | None,
+                prompt: Any | None,
+            ) -> ModelResponse:
+                del (
+                    system_instructions,
+                    model_settings,
+                    tools,
+                    output_schema,
+                    handoffs,
+                    tracing,
+                    previous_response_id,
+                    conversation_id,
+                    prompt,
+                )
+                if _has_function_call_output(input):
+                    return ModelResponse(
+                        output=[get_text_message(self.final_text)],
+                        usage=Usage(),
+                        response_id=f"{self.call_prefix}-done",
+                    )
+
+                self.call_count += 1
+                return ModelResponse(
+                    output=[
+                        ResponseFunctionToolCall(
+                            type="function_call",
+                            name=self.tool_name,
+                            call_id=f"{self.call_prefix}-{id(self)}-{self.call_count}",
+                            arguments=self.tool_arguments,
+                        )
+                    ],
+                    usage=Usage(),
+                    response_id=f"{self.call_prefix}-call-{self.call_count}",
+                )
+
+            async def stream_response(
+                self,
+                system_instructions: str | None,
+                input: str | list[TResponseInputItem],
+                model_settings: ModelSettings,
+                tools: list[Any],
+                output_schema: Any,
+                handoffs: list[Any],
+                tracing: Any,
+                *,
+                previous_response_id: str | None,
+                conversation_id: str | None,
+                prompt: Any | None,
+            ) -> AsyncIterator[TResponseStreamEvent]:
+                del (
+                    system_instructions,
+                    input,
+                    model_settings,
+                    tools,
+                    output_schema,
+                    handoffs,
+                    tracing,
+                    previous_response_id,
+                    conversation_id,
+                    prompt,
+                )
+                if False:
+                    yield cast(TResponseStreamEvent, {})
+                raise RuntimeError("Streaming is not supported in this test.")
+
+        tool_calls: list[str] = []
+
+        @function_tool(name_override="inner_sensitive_tool", needs_approval=True)
+        async def inner_sensitive_tool(text: str) -> str:
+            tool_calls.append(text)
+            return f"approved:{text}"
+
+        inner_model = ResumeAwareToolModel(
+            tool_name="inner_sensitive_tool",
+            tool_arguments=json.dumps({"text": "hello"}),
+            final_text="inner-complete",
+            call_prefix="inner",
+        )
+        inner_agent = Agent(name="InnerAgent", model=inner_model, tools=[inner_sensitive_tool])
+
+        outer_tool = inner_agent.as_tool(
+            tool_name="inner_agent_tool",
+            tool_description="Inner agent tool",
+        )
+        outer_model = ResumeAwareToolModel(
+            tool_name="inner_agent_tool",
+            tool_arguments=json.dumps({"input": "hello"}),
+            final_text="outer-complete",
+            call_prefix="outer",
+        )
+        outer_agent = Agent(name="OuterAgent", model=outer_model, tools=[outer_tool])
+
+        first_result = await Runner.run(outer_agent, "start")
+        assert first_result.final_output is None
+        assert first_result.interruptions
+
+        state_json = first_result.to_state().to_json()
+        del first_result
+        gc.collect()
+
+        restored_state_one = await RunState.from_json(outer_agent, state_json)
+        restored_state_two = await RunState.from_json(outer_agent, state_json)
+
+        restored_interruptions_one = restored_state_one.get_interruptions()
+        restored_interruptions_two = restored_state_two.get_interruptions()
+        assert len(restored_interruptions_one) == 1
+        assert len(restored_interruptions_two) == 1
+        restored_state_one.approve(restored_interruptions_one[0])
+        restored_state_two.approve(restored_interruptions_two[0])
+
+        resumed_result_one = await Runner.run(outer_agent, restored_state_one)
+        resumed_result_two = await Runner.run(outer_agent, restored_state_two)
+
+        assert resumed_result_one.final_output == "outer-complete"
+        assert resumed_result_one.interruptions == []
+        assert resumed_result_two.final_output == "outer-complete"
+        assert resumed_result_two.interruptions == []
+        assert tool_calls == ["hello", "hello"]
 
     async def test_json_decode_error_handling(self):
         """Test that invalid JSON raises appropriate error."""
@@ -3171,6 +3379,31 @@ class TestRunStateSerializationEdgeCases:
 
         with pytest.raises(UserError, match="Run state schema version 2.0 is not supported"):
             await RunState.from_json(agent, state_json)
+
+    @pytest.mark.asyncio
+    async def test_from_json_accepts_previous_schema_version(self):
+        """Test that from_json accepts a previous, explicitly supported schema version."""
+        agent = Agent(name="TestAgent")
+        state_json = {
+            "$schemaVersion": "1.0",
+            "original_input": "test",
+            "current_agent": {"name": "TestAgent"},
+            "context": {
+                "context": {"foo": "bar"},
+                "usage": {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "approvals": {},
+            },
+            "max_turns": 3,
+            "current_turn": 0,
+            "model_responses": [],
+            "generated_items": [],
+        }
+
+        restored = await RunState.from_json(agent, state_json)
+        assert restored._current_agent is not None
+        assert restored._current_agent.name == "TestAgent"
+        assert restored._context is not None
+        assert restored._context.context == {"foo": "bar"}
 
     @pytest.mark.asyncio
     async def test_from_json_agent_not_found(self):

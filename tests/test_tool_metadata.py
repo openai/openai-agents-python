@@ -46,7 +46,9 @@ def test_tool_name_properties() -> None:
     assert CodeInterpreterTool(tool_config=dummy_code).name == "code_interpreter"
     assert ImageGenerationTool(tool_config=dummy_image).name == "image_generation"
     assert LocalShellTool(executor=lambda req: "ok").name == "local_shell"
-    assert ShellTool(executor=lambda req: "ok").type == "shell"
+    shell_tool = ShellTool(executor=lambda req: "ok")
+    assert shell_tool.type == "shell"
+    assert shell_tool.environment == {"type": "local"}
     assert ApplyPatchTool(editor=DummyEditor()).type == "apply_patch"
 
 
