@@ -1069,6 +1069,8 @@ async def run_single_turn_streamed(
     # execution in process_model_response, so duplicate names (e.g., MCP + local tool)
     # stream the same description that execution uses.
     tool_map = {t.name: t for t in all_tools if hasattr(t, "name") and t.name}
+    # FunctionTool-only map for tool_origin; matches process_model_response's last-wins.
+    function_map = {t.name: t for t in all_tools if isinstance(t, FunctionTool)}
 
     try:
         turn_input = ItemHelpers.input_to_new_input_list(streamed_result.input)
@@ -1260,21 +1262,9 @@ async def run_single_turn_streamed(
                     if isinstance(tool_name, str) and tool_name in tool_map:
                         tool = tool_map[tool_name]
                         tool_description = getattr(tool, "description", None)
-                        # Resolve FunctionTool for tool_origin; tool_map may have non-FunctionTool
-                        # due to name collision.
-                        func_tool = (
-                            tool
-                            if isinstance(tool, FunctionTool)
-                            else next(
-                                (
-                                    t
-                                    for t in all_tools
-                                    if isinstance(t, FunctionTool)
-                                    and getattr(t, "name", None) == tool_name
-                                ),
-                                None,
-                            )
-                        )
+                        # Use function_map for tool_origin to match process_model_response's
+                        # last-wins semantics when multiple FunctionTools share a name.
+                        func_tool = function_map.get(tool_name)
                         if func_tool is not None:
                             tool_origin = _get_tool_origin_info(func_tool)
                     elif (
