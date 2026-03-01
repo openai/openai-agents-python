@@ -4,63 +4,64 @@ search:
 ---
 # 安全防护措施
 
-安全防护措施可用于检查和验证用户输入与智能体输出。比如，假设你有一个智能体使用非常智能（因此也很慢/昂贵）的模型来处理客户请求。你不希望恶意用户让该模型帮他们做数学作业。因此，你可以用一个快速/廉价的模型先运行一层安全防护措施。如果检测到恶意使用，它可以立刻抛出错误并阻止昂贵模型的运行，从而节省时间和成本（使用阻塞式安全防护措施时；在并行安全防护措施下，昂贵模型可能会在防护完成前就已开始运行。详见下文“执行模式”）。
+安全防护措施使你能够对用户输入和智能体输出进行检查与验证。举例来说，假设你有一个智能体，它使用一个非常智能（因此也较慢/较昂贵）的模型来帮助处理客户请求。你不会希望恶意用户让模型帮他们做数学作业。因此，你可以用一个快速/便宜的模型运行安全防护措施。如果安全防护措施检测到恶意使用，它可以立即抛出错误并阻止昂贵模型运行，从而节省时间和成本（**在使用阻塞式安全防护措施时；对于并行安全防护措施，昂贵模型可能会在安全防护措施完成前就已开始运行。详情见下方“执行模式”**）。
 
-安全防护措施分为两类：
+安全防护措施有两种：
 
-1. 输入安全防护措施运行在初始用户输入上
-2. 输出安全防护措施运行在最终智能体输出上
+1. 输入安全防护措施：运行在初始用户输入上
+2. 输出安全防护措施：运行在最终智能体输出上
 
 ## 输入安全防护措施
 
-输入安全防护措施分三步运行：
+输入安全防护措施分 3 步运行：
 
-1. 首先，安全防护措施接收传给智能体的相同输入。
-2. 接着，防护函数运行以产生一个[`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput]，随后被包装为[`InputGuardrailResult`][agents.guardrail.InputGuardrailResult]。
-3. 最后，我们检查[`.tripwire_triggered`][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered]是否为 true。若为 true，将抛出[`InputGuardrailTripwireTriggered`][agents.exceptions.InputGuardrailTripwireTriggered]异常，以便你恰当地响应用户或处理异常。
+1. 首先，安全防护措施接收与传给智能体相同的输入。
+2. 接着，安全防护措施函数运行并产生一个 [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput]，随后被包装为一个 [`InputGuardrailResult`][agents.guardrail.InputGuardrailResult]
+3. 最后，我们检查 [`.tripwire_triggered`][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered] 是否为 true。若为 true，则会抛出 [`InputGuardrailTripwireTriggered`][agents.exceptions.InputGuardrailTripwireTriggered] 异常，以便你适当地响应用户或处理该异常。
 
-!!! 注意
+!!! Note
 
-    输入安全防护措施用于运行在用户输入上，因此只有当该智能体是“第一个”智能体时，它的安全防护措施才会运行。你或许会好奇，为什么是把`guardrails`属性放在智能体上，而不是传给`Runner.run`？这是因为安全防护措施往往与具体的智能体相关——不同智能体会运行不同的防护措施，因此将代码就近放置有助于可读性。
+    输入安全防护措施用于处理用户输入，因此只有当该智能体是*第一个*智能体时，智能体上的安全防护措施才会运行。你可能会问，为什么 `guardrails` 属性放在智能体上，而不是传给 `Runner.run`？这是因为安全防护措施通常与实际的 Agent 相关——不同智能体会运行不同的安全防护措施，因此将代码放在一起有助于可读性。
 
 ### 执行模式
 
 输入安全防护措施支持两种执行模式：
 
-- **并行执行**（默认，`run_in_parallel=True`）：安全防护与智能体执行并发进行。由于两者同时启动，延迟最佳。然而，如果防护失败，智能体在被取消前可能已经消耗了 token 并执行了工具。
-- **阻塞执行**（`run_in_parallel=False`）：安全防护在智能体启动之前运行并完成。如果触发了绊线，智能体将不会执行，从而避免 token 消耗与工具调用。这在成本优化以及需要避免工具调用副作用时尤为理想。
+- **并行执行**（默认，`run_in_parallel=True`）：安全防护措施与智能体执行并发运行。由于二者同时开始，这可提供最佳延迟表现。但如果安全防护措施失败，智能体在被取消前可能已经消耗了 tokens 并执行了工具调用。
+
+- **阻塞执行**（`run_in_parallel=False`）：安全防护措施会在智能体启动*之前*运行并完成。如果触发安全防护措施的跳闸条件，智能体将不会执行，从而避免 token 消耗和工具执行。这非常适合成本优化，以及你希望避免工具调用潜在副作用的场景。
 
 ## 输出安全防护措施
 
-输出安全防护措施分三步运行：
+输出安全防护措施分 3 步运行：
 
 1. 首先，安全防护措施接收智能体产生的输出。
-2. 接着，防护函数运行以产生一个[`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput]，随后被包装为[`OutputGuardrailResult`][agents.guardrail.OutputGuardrailResult]。
-3. 最后，我们检查[`.tripwire_triggered`][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered]是否为 true。若为 true，将抛出[`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered]异常，以便你恰当地响应用户或处理异常。
+2. 接着，安全防护措施函数运行并产生一个 [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput]，随后被包装为一个 [`OutputGuardrailResult`][agents.guardrail.OutputGuardrailResult]
+3. 最后，我们检查 [`.tripwire_triggered`][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered] 是否为 true。若为 true，则会抛出 [`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered] 异常，以便你适当地响应用户或处理该异常。
 
-!!! 注意
+!!! Note
 
-    输出安全防护措施用于运行在最终的智能体输出上，因此只有当该智能体是“最后一个”智能体时，它的安全防护措施才会运行。与输入安全防护类似，这是因为防护措施往往与具体的智能体相关——不同智能体会运行不同的防护措施，因此将代码就近放置有助于可读性。
+    输出安全防护措施用于处理最终智能体输出，因此只有当该智能体是*最后一个*智能体时，智能体上的安全防护措施才会运行。与输入安全防护措施类似，我们这样做是因为安全防护措施通常与实际的 Agent 相关——不同智能体会运行不同的安全防护措施，因此将代码放在一起有助于可读性。
 
-    输出安全防护措施总是在智能体完成之后运行，因此不支持`run_in_parallel`参数。
+    输出安全防护措施总是在智能体完成后运行，因此不支持 `run_in_parallel` 参数。
 
 ## 工具安全防护措施
 
-工具安全防护措施包装**工具调用**，允许你在执行前后验证或阻止工具调用。它们在工具本身进行配置，并在每次调用该工具时运行。
+工具安全防护措施封装**工具调用**，让你在执行前后验证或拦截工具调用。它们配置在工具本身上，并在每次调用该工具时运行。
 
-- 输入工具安全防护措施在工具执行前运行，可跳过调用、用一条消息替换输出，或触发绊线。
-- 输出工具安全防护措施在工具执行后运行，可替换输出或触发绊线。
-- 工具安全防护措施仅适用于通过[`function_tool`][agents.function_tool]创建的工具调用；托管工具（`WebSearchTool`、`FileSearchTool`、`HostedMCPTool`、`CodeInterpreterTool`、`ImageGenerationTool`）和本地运行时工具（`ComputerTool`、`ShellTool`、`ApplyPatchTool`、`LocalShellTool`）不使用此防护流程。
+- 输入工具安全防护措施在工具执行前运行，可跳过调用、用一条消息替换输出，或触发跳闸异常。
+- 输出工具安全防护措施在工具执行后运行，可替换输出或触发跳闸异常。
+- 工具安全防护措施仅适用于通过 [`function_tool`][agents.function_tool] 创建的工具调用；托管工具（`WebSearchTool`、`FileSearchTool`、`HostedMCPTool`、`CodeInterpreterTool`、`ImageGenerationTool`）和内置执行工具（`ComputerTool`、`ShellTool`、`ApplyPatchTool`、`LocalShellTool`）不使用该安全防护流水线。
 
 详见下方代码片段。
 
-## 绊线（Tripwires）
+## 跳闸机制
 
-若输入或输出未通过安全防护措施，安全防护可通过绊线进行信号通知。一旦检测到某个安全防护触发了绊线，我们会立刻抛出`{Input,Output}GuardrailTripwireTriggered`异常并停止智能体执行。
+如果输入或输出未通过安全防护措施，Guardrail 可通过 tripwire 发出信号。一旦我们发现某个安全防护措施已触发 tripwire，就会立即抛出 `{Input,Output}GuardrailTripwireTriggered` 异常并中止 Agent 执行。
 
-## 实现安全防护措施
+## 安全防护措施实现
 
-你需要提供一个接收输入并返回[`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput]的函数。在此示例中，我们将通过在底层运行一个智能体来完成。
+你需要提供一个接收输入并返回 [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput] 的函数。在这个示例中，我们会通过在底层运行一个 Agent 来实现。
 
 ```python
 from pydantic import BaseModel
@@ -113,10 +114,10 @@ async def main():
         print("Math homework guardrail tripped")
 ```
 
-1. 我们将在防护函数中使用这个智能体。
-2. 这是接收智能体输入/上下文并返回结果的防护函数。
-3. 我们可以在防护结果中包含额外信息。
-4. 这是定义工作流的实际智能体。
+1. 我们将在安全防护措施函数中使用这个智能体。
+2. 这是安全防护措施函数，接收智能体的输入/上下文并返回结果。
+3. 我们可以在安全防护结果中包含额外信息。
+4. 这是真正定义工作流的智能体。
 
 输出安全防护措施类似。
 
@@ -172,9 +173,9 @@ async def main():
 ```
 
 1. 这是实际智能体的输出类型。
-2. 这是安全防护的输出类型。
-3. 这是接收智能体输出并返回结果的防护函数。
-4. 这是定义工作流的实际智能体。
+2. 这是安全防护措施的输出类型。
+3. 这是安全防护措施函数，接收智能体输出并返回结果。
+4. 这是真正定义工作流的智能体。
 
 最后，以下是工具安全防护措施的示例。
 

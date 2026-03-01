@@ -4,15 +4,17 @@ search:
 ---
 # ストリーミング
 
-ストリーミングを使うと、エージェントの実行が進むにつれて更新を購読できます。これは、エンドユーザーに進捗更新や部分的な応答を表示するのに役立ちます。
+ストリーミングを使うと、エージェント実行の進行中に更新を購読できます。これは、エンドユーザーに進捗更新や部分的な応答を表示するのに便利です。
 
-ストリーミングするには、[`Runner.run_streamed()`][agents.run.Runner.run_streamed] を呼び出せます。これにより [`RunResultStreaming`][agents.result.RunResultStreaming] が得られます。`result.stream_events()` を呼び出すと、以下で説明する [`StreamEvent`][agents.stream_events.StreamEvent] オブジェクトの非同期ストリームが得られます。
+ストリーミングするには、[`Runner.run_streamed()`][agents.run.Runner.run_streamed] を呼び出します。これにより [`RunResultStreaming`][agents.result.RunResultStreaming] が得られます。`result.stream_events()` を呼び出すと、以下で説明する [`StreamEvent`][agents.stream_events.StreamEvent] オブジェクトの非同期ストリームを取得できます。
 
-## raw レスポンスイベント
+非同期イテレーターが終了するまで、`result.stream_events()` の消費を続けてください。ストリーミング実行は、イテレーターが終了するまで完了しません。また、セッション永続化、承認管理、履歴圧縮などの後処理は、最後に表示されるトークンが到着した後に完了する場合があります。ループ終了時に、`result.is_complete` が最終的な実行状態を反映します。
 
-[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] は、LLM から直接渡される raw イベントです。これらは OpenAI Responses API 形式であり、各イベントは type（`response.created`、`response.output_text.delta` など）と data を持ちます。これらのイベントは、生成され次第すぐに応答メッセージをユーザーにストリーミングしたい場合に有用です。
+## raw 応答イベント
 
-たとえば、これは LLM によって生成されたテキストをトークンごとに出力します。
+[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] は、LLM から直接渡される raw イベントです。これらは OpenAI Responses API 形式であり、各イベントは type（`response.created`、`response.output_text.delta` など）と data を持ちます。これらのイベントは、生成され次第すぐに応答メッセージをユーザーへストリーミングしたい場合に有用です。
+
+たとえば、これは LLM が生成したテキストをトークン単位で出力します。
 
 ```python
 import asyncio
@@ -35,13 +37,33 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+## ストリーミングと承認
+
+ストリーミングは、ツール承認のために一時停止する実行と互換性があります。ツールに承認が必要な場合、`result.stream_events()` は終了し、保留中の承認は [`RunResultStreaming.interruptions`][agents.result.RunResultStreaming.interruptions] で公開されます。`result.to_state()` で結果を [`RunState`][agents.run_state.RunState] に変換し、割り込みを承認または拒否してから、`Runner.run_streamed(...)` で再開してください。
+
+```python
+result = Runner.run_streamed(agent, "Delete temporary files if they are no longer needed.")
+async for _event in result.stream_events():
+    pass
+
+if result.interruptions:
+    state = result.to_state()
+    for interruption in result.interruptions:
+        state.approve(interruption)
+    result = Runner.run_streamed(agent, state)
+    async for _event in result.stream_events():
+        pass
+```
+
+一時停止/再開の完全な手順は、[human-in-the-loop ガイド](human_in_the_loop.md) を参照してください。
+
 ## 実行アイテムイベントとエージェントイベント
 
-[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] は、より高レベルなイベントです。これは、アイテムが完全に生成されたタイミングを通知します。これにより、各トークン単位ではなく、「メッセージが生成された」「ツールが実行された」などのレベルで進捗更新を送れます。同様に、[`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] は、現在のエージェントが変わったとき（例: ハンドオフの結果）に更新を提供します。
+[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] は、より高レベルのイベントです。アイテムが完全に生成されたタイミングを通知します。これにより、各トークン単位ではなく、「メッセージ生成」「ツール実行」などのレベルで進捗更新をプッシュできます。同様に、[`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] は、現在のエージェントが変更されたとき（例: ハンドオフの結果）に更新を提供します。
 
 ### 実行アイテムイベント名
 
-`RunItemStreamEvent.name` は、固定のセマンティックなイベント名セットを使用します。
+`RunItemStreamEvent.name` は、固定された意味論的イベント名のセットを使用します。
 
 -   `message_output_created`
 -   `handoff_requested`
@@ -55,7 +77,7 @@ if __name__ == "__main__":
 
 `handoff_occured` は、後方互換性のために意図的にスペルミスのままになっています。
 
-たとえば、これは raw イベントを無視し、更新をユーザーにストリーミングします。
+たとえば、これは raw イベントを無視して、更新をユーザーにストリーミングします。
 
 ```python
 import asyncio
