@@ -211,7 +211,48 @@ agent = Agent[UserContext](
 
 ## Lifecycle events (hooks)
 
-Sometimes, you want to observe the lifecycle of an agent. For example, you may want to log events, or pre-fetch data when certain events occur. You can hook into the agent lifecycle with the `hooks` property. Subclass the [`AgentHooks`][agents.lifecycle.AgentHooks] class, and override the methods you're interested in.
+Sometimes, you want to observe the lifecycle of an agent. For example, you may want to log events, pre-fetch data, or record usage when certain events occur.
+
+There are two hook scopes:
+
+-   [`RunHooks`][agents.lifecycle.RunHooks] observe the entire `Runner.run(...)` invocation, including handoffs to other agents.
+-   [`AgentHooks`][agents.lifecycle.AgentHooks] are attached to a specific agent instance via `agent.hooks`.
+
+The callback context also changes depending on the event:
+
+-   Agent start/end hooks receive [`AgentHookContext`][agents.run_context.AgentHookContext], which wraps your original context and carries the shared run usage state.
+-   LLM, tool, and handoff hooks receive [`RunContextWrapper`][agents.run_context.RunContextWrapper].
+
+Typical hook timing:
+
+-   `on_agent_start` / `on_agent_end`: when a specific agent begins or finishes producing a final output.
+-   `on_llm_start` / `on_llm_end`: immediately around each model call.
+-   `on_tool_start` / `on_tool_end`: around each local tool invocation.
+-   `on_handoff`: when control moves from one agent to another.
+
+Use `RunHooks` when you want a single observer for the whole workflow, and `AgentHooks` when one agent needs custom side effects.
+
+```python
+from agents import Agent, RunHooks, Runner
+
+
+class LoggingHooks(RunHooks):
+    async def on_agent_start(self, context, agent):
+        print(f"Starting {agent.name}")
+
+    async def on_llm_end(self, context, agent, response):
+        print(f"{agent.name} produced {len(response.output)} output items")
+
+    async def on_agent_end(self, context, agent, output):
+        print(f"{agent.name} finished with usage: {context.usage}")
+
+
+agent = Agent(name="Assistant", instructions="Be concise.")
+result = await Runner.run(agent, "Explain quines", hooks=LoggingHooks())
+print(result.final_output)
+```
+
+For the full callback surface, see the [Lifecycle API reference](ref/lifecycle.md).
 
 ## Guardrails
 

@@ -40,20 +40,39 @@ def _fingerprint_for_tracker(item: Any) -> str | None:
 
 @dataclass
 class OpenAIServerConversationTracker:
-    """Track server-side conversation state for conversation-aware runs."""
+    """Track server-side conversation state for conversation-aware runs.
+
+    This tracker keeps three complementary views of what has already been acknowledged:
+
+    - Object identity for prepared items in the current Python process.
+    - Stable server item IDs and tool call IDs returned by the provider.
+    - Content fingerprints for retry/resume paths where object identity changes.
+
+    The runner uses these sets together to decide which deltas are still safe to send when a
+    run is resumed, retried after a transient failure, or rebuilt from serialized RunState.
+    """
 
     conversation_id: str | None = None
     previous_response_id: str | None = None
     auto_previous_response_id: bool = False
+
+    # In-process object identity for items that have already been delivered or acknowledged.
     sent_items: set[int] = field(default_factory=set)
     server_items: set[int] = field(default_factory=set)
+
+    # Stable provider identifiers returned by the Responses API.
     server_item_ids: set[str] = field(default_factory=set)
     server_tool_call_ids: set[str] = field(default_factory=set)
+
+    # Content-based dedupe for resume/retry paths where objects are reconstructed.
     sent_item_fingerprints: set[str] = field(default_factory=set)
     sent_initial_input: bool = False
     remaining_initial_input: list[TResponseInputItem] | None = None
     primed_from_state: bool = False
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None
+
+    # Mapping from normalized prepared items back to their original source objects so that
+    # mark_input_as_sent() can mark the right object identities after the model call succeeds.
     prepared_item_sources: dict[int, TResponseInputItem] = field(default_factory=dict)
     prepared_item_sources_by_fingerprint: dict[str, list[TResponseInputItem]] = field(
         default_factory=dict
@@ -75,7 +94,13 @@ class OpenAIServerConversationTracker:
         model_responses: list[ModelResponse],
         session_items: list[TResponseInputItem] | None = None,
     ) -> None:
-        """Seed tracking from prior state so resumed runs do not replay already-sent content."""
+        """Seed tracking from prior state so resumed runs do not replay already-sent content.
+
+        This reconstructs the tracker from the original input, saved model responses, generated
+        run items, and optional session history. After hydration, retry logic can treat rebuilt
+        items as already acknowledged even though their Python object identities may differ from
+        the original run.
+        """
         if self.sent_initial_input:
             return
 
