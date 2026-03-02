@@ -61,7 +61,7 @@ class RealtimeInputAudioTranscriptionConfig(TypedDict):
     language: NotRequired[str]
     """The language code for transcription."""
 
-    model: NotRequired[Literal["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"] | str]
+    model: NotRequired[Literal["gpt-4o-transcribe-diarize","gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"] | str]
     """The transcription model to use."""
 
     prompt: NotRequired[str]
