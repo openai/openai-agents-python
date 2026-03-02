@@ -395,12 +395,11 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_agent_as_tool_extractor_can_access_tool_context(
+async def test_agent_as_tool_extractor_can_access_agent_tool_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     agent = Agent(name="nested_agent")
-
-    real_run_result = RunResult(
+    run_result = RunResult(
         input="hello",
         new_items=[],
         raw_responses=[],
@@ -413,7 +412,7 @@ async def test_agent_as_tool_extractor_can_access_tool_context(
             context=None,
             tool_name="nested_tool",
             tool_call_id="call_abc_123",
-            tool_arguments="{}",
+            tool_arguments='{"input": "hello"}',
         ),
         _last_agent=agent,
     )
@@ -433,16 +432,19 @@ async def test_agent_as_tool_extractor_can_access_tool_context(
     ):
         del cls, starting_agent, input, context, max_turns, hooks, run_config
         del previous_response_id, conversation_id, session
-        return real_run_result
+        return run_result
 
     monkeypatch.setattr(Runner, "run", classmethod(fake_run))
 
-    received_call_id: str | None = None
+    received_tool_call_id: str | None = None
 
     async def extractor(result: RunResult | RunResultStreaming) -> str:
-        nonlocal received_call_id
-        assert result.tool_context is not None
-        received_call_id = result.tool_context.tool_call_id
+        nonlocal received_tool_call_id
+        invocation = result.agent_tool_invocation
+        assert invocation is not None
+        received_tool_call_id = invocation.tool_call_id
+        assert invocation.tool_name == "nested_tool"
+        assert invocation.tool_arguments == '{"input": "hello"}'
         return "extracted"
 
     tool = agent.as_tool(
@@ -460,7 +462,7 @@ async def test_agent_as_tool_extractor_can_access_tool_context(
     output = await tool.on_invoke_tool(parent_tool_context, '{"input": "hello"}')
 
     assert output == "extracted"
-    assert received_call_id == "call_abc_123"
+    assert received_tool_call_id == "call_abc_123"
 
 
 @pytest.mark.asyncio
@@ -1412,7 +1414,7 @@ async def test_agent_as_tool_streaming_works_with_custom_extractor(
 
 
 @pytest.mark.asyncio
-async def test_agent_as_tool_streaming_extractor_can_access_tool_context(
+async def test_agent_as_tool_streaming_extractor_can_access_agent_tool_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     agent = Agent(name="streaming_tool_context_agent")
@@ -1441,7 +1443,13 @@ async def test_agent_as_tool_streaming_extractor_can_access_tool_context(
     streamed_instance._event_queue.put_nowait(stream_event)
     streamed_instance.is_complete = True
 
-    def fake_run_streamed(cls, /, starting_agent, input, **kwargs) -> RunResultStreaming:
+    def fake_run_streamed(
+        cls,
+        /,
+        starting_agent,
+        input,
+        **kwargs,
+    ) -> RunResultStreaming:
         del cls, starting_agent, input, kwargs
         return streamed_instance
 
@@ -1455,8 +1463,11 @@ async def test_agent_as_tool_streaming_extractor_can_access_tool_context(
 
     async def extractor(result: RunResult | RunResultStreaming) -> str:
         nonlocal received_call_id
-        assert result.tool_context is not None
-        received_call_id = result.tool_context.tool_call_id
+        invocation = result.agent_tool_invocation
+        assert invocation is not None
+        received_call_id = invocation.tool_call_id
+        assert invocation.tool_name == "stream_tool"
+        assert invocation.tool_arguments == '{"input": "go"}'
         return "custom value"
 
     async def on_stream(payload: AgentToolStreamEvent) -> None:

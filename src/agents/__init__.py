@@ -86,7 +86,7 @@ from .models.openai_responses import OpenAIResponsesModel, OpenAIResponsesWSMode
 from .prompts import DynamicPromptFunction, GenerateDynamicPromptData, Prompt
 from .repl import run_demo_loop
 from .responses_websocket_session import ResponsesWebSocketSession, responses_websocket_session
-from .result import RunResult, RunResultStreaming
+from .result import AgentToolInvocation, RunResult, RunResultStreaming
 from .run import (
     ReasoningItemIdPolicy,
     RunConfig,
@@ -359,6 +359,7 @@ __all__ = [
     "RunErrorHandlerInput",
     "RunErrorHandlerResult",
     "RunErrorHandlers",
+    "AgentToolInvocation",
     "RunResult",
     "RunResultStreaming",
     "ResponsesWebSocketSession",

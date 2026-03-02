@@ -501,7 +501,8 @@ class Agent(AgentBase, Generic[TContext]):
             tool_description: The description of the tool, which should indicate what it does and
                 when to use it.
             custom_output_extractor: A function that extracts the output from the agent. If not
-                provided, the last message from the agent will be used.
+                provided, the last message from the agent will be used. Nested run results expose
+                `agent_tool_invocation` metadata when this agent is invoked via `as_tool()`.
             is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
                 context and agent and returns whether the tool is enabled. Disabled tools are hidden
                 from the LLM at runtime.

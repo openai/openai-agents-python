@@ -46,9 +46,23 @@ from .util._pretty_print import (
 )
 
 if TYPE_CHECKING:
-    from .tool_context import ToolContext
+    pass
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class AgentToolInvocation:
+    """Immutable metadata about a nested agent-tool invocation."""
+
+    tool_name: str
+    """The nested tool name exposed to the model."""
+
+    tool_call_id: str
+    """The tool call ID for the nested invocation."""
+
+    tool_arguments: str
+    """The raw JSON arguments for the nested invocation."""
 
 
 def _populate_state_from_result(
@@ -208,13 +222,21 @@ class RunResultBase(abc.ABC):
         return original_items + new_items
 
     @property
-    def tool_context(self) -> ToolContext[Any] | None:
-        """The tool context for runs started via ``Agent.as_tool()``, if available."""
+    def agent_tool_invocation(self) -> AgentToolInvocation | None:
+        """Immutable metadata for results produced by `Agent.as_tool()`.
+
+        Returns `None` for ordinary top-level runs.
+        """
         from .tool_context import ToolContext
 
-        if isinstance(self.context_wrapper, ToolContext):
-            return self.context_wrapper
-        return None
+        if not isinstance(self.context_wrapper, ToolContext):
+            return None
+
+        return AgentToolInvocation(
+            tool_name=self.context_wrapper.tool_name,
+            tool_call_id=self.context_wrapper.tool_call_id,
+            tool_arguments=self.context_wrapper.tool_arguments,
+        )
 
     @property
     def last_response_id(self) -> str | None:
