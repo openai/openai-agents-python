@@ -4,10 +4,11 @@ The Agents SDK includes built-in tracing, collecting a comprehensive record of e
 
 !!!note
 
-    Tracing is enabled by default. There are two ways to disable tracing:
+    Tracing is enabled by default. You can disable it in three common ways:
 
     1. You can globally disable tracing by setting the env var `OPENAI_AGENTS_DISABLE_TRACING=1`
-    2. You can disable tracing for a single run by setting [`agents.run.RunConfig.tracing_disabled`][] to `True`
+    2. You can globally disable tracing in code with [`set_tracing_disabled(True)`][agents.set_tracing_disabled]
+    3. You can disable tracing for a single run by setting [`agents.run.RunConfig.tracing_disabled`][] to `True`
 
 ***For organizations operating under a Zero Data Retention (ZDR) policy using OpenAI's APIs, tracing is unavailable.***
 

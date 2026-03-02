@@ -577,6 +577,11 @@ json_tool = data_agent.as_tool(
 )
 ```
 
+Inside a custom extractor, the nested [`RunResult`][agents.result.RunResult] also exposes
+[`agent_tool_invocation`][agents.result.RunResultBase.agent_tool_invocation], which is useful when
+you need the outer tool name, call ID, or raw arguments while post-processing the nested result.
+See the [Results guide](results.md#agent-as-tool-metadata).
+
 ### Streaming nested agent runs
 
 Pass an `on_stream` callback to `as_tool` to listen to streaming events emitted by the nested agent while still returning its final output once the stream completes.
