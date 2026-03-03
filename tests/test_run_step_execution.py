@@ -477,6 +477,83 @@ async def test_multiple_tool_calls_still_raise_non_cancellation_base_exceptions(
 
 
 @pytest.mark.asyncio
+async def test_multiple_tool_calls_allow_exception_objects_as_tool_outputs():
+    async def _returns_exception() -> ValueError:
+        return ValueError("as data")
+
+    tool = function_tool(
+        _returns_exception,
+        name_override="returns_exception",
+        failure_error_function=None,
+    )
+
+    agent = Agent(name="test", tools=[tool])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("returns_exception", "{}", call_id="1"),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    result = await get_execute_result(agent, response)
+
+    assert len(result.generated_items) == 2
+    assert isinstance(result.next_step, NextStepRunAgain)
+    assert_item_is_function_tool_call(result.generated_items[0], "returns_exception", "{}")
+    assert_item_is_function_tool_call_output(result.generated_items[1], "as data")
+
+
+@pytest.mark.asyncio
+async def test_multiple_tool_calls_cancel_pending_tasks_when_parent_cancelled():
+    tool_1_started = asyncio.Event()
+    tool_2_started = asyncio.Event()
+    cancelled_tools: list[str] = []
+
+    async def _waiting_tool(name: str) -> str:
+        try:
+            if name == "tool_1":
+                tool_1_started.set()
+            else:
+                tool_2_started.set()
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled_tools.append(name)
+            raise
+
+    tool_1 = function_tool(
+        _waiting_tool,
+        name_override="tool_1",
+        failure_error_function=None,
+    )
+    tool_2 = function_tool(
+        _waiting_tool,
+        name_override="tool_2",
+        failure_error_function=None,
+    )
+
+    agent = Agent(name="test", tools=[tool_1, tool_2])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("tool_1", json.dumps({"name": "tool_1"}), call_id="1"),
+            get_function_tool_call("tool_2", json.dumps({"name": "tool_2"}), call_id="2"),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    execution_task = asyncio.create_task(get_execute_result(agent, response))
+    await asyncio.wait_for(tool_1_started.wait(), timeout=0.2)
+    await asyncio.wait_for(tool_2_started.wait(), timeout=0.2)
+
+    execution_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await execution_task
+
+    assert sorted(cancelled_tools) == ["tool_1", "tool_2"]
+
+
+@pytest.mark.asyncio
 async def test_function_tool_context_includes_run_config() -> None:
     async def _tool_with_run_config(context: ToolContext[str]) -> str:
         assert context.run_config is not None

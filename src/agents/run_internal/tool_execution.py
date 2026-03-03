@@ -968,6 +968,10 @@ async def execute_function_tool_calls(
                 span_fn.span_data.output = result
         return result
 
+    @dataclasses.dataclass
+    class _CancelledToolResult:
+        exc: asyncio.CancelledError
+
     task_to_tool_run: dict[asyncio.Task[Any], ToolRunFunction] = {}
     for tool_run in tool_runs:
         function_tool = tool_run.function_tool
@@ -976,38 +980,45 @@ async def execute_function_tool_calls(
 
     results_by_tool_run: dict[int, Any] = {}
     pending_tasks = set(task_to_tool_run)
-    while pending_tasks:
-        done_tasks, pending_tasks = await asyncio.wait(
-            pending_tasks,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in done_tasks:
-            tool_run = task_to_tool_run[task]
-            try:
-                results_by_tool_run[id(tool_run)] = task.result()
-            except asyncio.CancelledError as exc:
-                results_by_tool_run[id(tool_run)] = exc
-            except Exception:
-                for pending_task in pending_tasks:
-                    pending_task.cancel()
-                if pending_tasks:
-                    await asyncio.gather(*pending_tasks, return_exceptions=True)
-                raise
-            except BaseException:
-                for pending_task in pending_tasks:
-                    pending_task.cancel()
-                if pending_tasks:
-                    await asyncio.gather(*pending_tasks, return_exceptions=True)
-                raise
+    try:
+        while pending_tasks:
+            done_tasks, pending_tasks = await asyncio.wait(
+                pending_tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done_tasks:
+                tool_run = task_to_tool_run[task]
+                try:
+                    results_by_tool_run[id(tool_run)] = task.result()
+                except asyncio.CancelledError as exc:
+                    results_by_tool_run[id(tool_run)] = _CancelledToolResult(exc)
+                except Exception:
+                    for pending_task in pending_tasks:
+                        pending_task.cancel()
+                    if pending_tasks:
+                        await asyncio.gather(*pending_tasks, return_exceptions=True)
+                    raise
+                except BaseException:
+                    for pending_task in pending_tasks:
+                        pending_task.cancel()
+                    if pending_tasks:
+                        await asyncio.gather(*pending_tasks, return_exceptions=True)
+                    raise
+    except BaseException:
+        for pending_task in pending_tasks:
+            pending_task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+        raise
 
     function_tool_results = []
     for tool_run in tool_runs:
         result = results_by_tool_run[id(tool_run)]
-        if isinstance(result, asyncio.CancelledError):
+        if isinstance(result, _CancelledToolResult):
             error_output = (
-                f"Tool execution failed: {type(result).__name__}: {result}"
-                if str(result)
-                else f"Tool execution failed: {type(result).__name__}"
+                f"Tool execution failed: {type(result.exc).__name__}: {result.exc}"
+                if str(result.exc)
+                else f"Tool execution failed: {type(result.exc).__name__}"
             )
             function_tool_results.append(
                 FunctionToolResult(
@@ -1024,8 +1035,6 @@ async def execute_function_tool_calls(
                 )
             )
             continue
-        if isinstance(result, BaseException):
-            raise result
         if isinstance(result, FunctionToolResult):
             nested_run_result = consume_agent_tool_run_result(
                 tool_run.tool_call,
