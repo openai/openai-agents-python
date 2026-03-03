@@ -9,7 +9,7 @@ import asyncio
 import dataclasses
 import inspect
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from openai.types.responses import ResponseFunctionToolCall
@@ -136,6 +136,10 @@ _FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS = 0.1
 
 
 _FunctionToolFailureSource = Literal["direct", "cancelled_teardown", "post_invoke"]
+_FunctionToolSettlementWaiter = Callable[
+    [set[asyncio.Task[Any]], asyncio.AbstractEventLoop, float],
+    Awaitable[bool],
+]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -314,6 +318,134 @@ def _record_completed_function_tool_tasks(
     return failure
 
 
+def _collect_settled_function_tool_tasks(
+    *,
+    remaining_tasks: set[asyncio.Task[Any]],
+    task_to_tool_run: dict[asyncio.Task[Any], ToolRunFunction],
+    task_to_order: dict[asyncio.Task[Any], int],
+    results_by_tool_run: dict[int, Any],
+    failure_sources_by_task: Mapping[asyncio.Task[Any], _FunctionToolFailureSource] | None = None,
+    ignore_cancelled_tasks: set[asyncio.Task[Any]] | None = None,
+) -> tuple[_FunctionToolFailure | None, set[asyncio.Task[Any]]]:
+    """Remove completed tasks from the pending set and record their outcomes."""
+    settled_tasks = {task for task in remaining_tasks if task.done()}
+    if not settled_tasks:
+        return None, remaining_tasks
+
+    new_failure = _record_completed_function_tool_tasks(
+        completed_tasks=list(settled_tasks),
+        task_to_tool_run=task_to_tool_run,
+        task_to_order=task_to_order,
+        results_by_tool_run=results_by_tool_run,
+        failure_sources_by_task=failure_sources_by_task,
+        ignore_cancelled_tasks=ignore_cancelled_tasks,
+    )
+    return new_failure, remaining_tasks - settled_tasks
+
+
+async def _wait_for_cancelled_function_tool_task_progress(
+    remaining_tasks: set[asyncio.Task[Any]],
+    loop: asyncio.AbstractEventLoop,
+    remaining_time: float,
+    *,
+    task_to_invoke_task: Mapping[asyncio.Task[Any], asyncio.Task[Any]],
+) -> bool:
+    """Wait until a cancelled sibling can make another self-driven step."""
+    progress_deadlines = {
+        task: get_function_tool_task_progress_deadline(
+            task=task,
+            task_to_invoke_task=task_to_invoke_task,
+            loop=loop,
+        )
+        for task in remaining_tasks
+    }
+    self_progressing_tasks = {
+        task: deadline for task, deadline in progress_deadlines.items() if deadline is not None
+    }
+    if not self_progressing_tasks:
+        return False
+
+    now = loop.time()
+    next_deadline = min(self_progressing_tasks.values())
+    delay = max(0.0, next_deadline - now)
+    if delay > 0:
+        await asyncio.wait(
+            set(self_progressing_tasks),
+            timeout=min(delay, remaining_time),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    else:
+        await asyncio.sleep(0)
+    return True
+
+
+async def _wait_for_function_tool_task_completion(
+    remaining_tasks: set[asyncio.Task[Any]],
+    _loop: asyncio.AbstractEventLoop,
+    remaining_time: float,
+) -> bool:
+    """Wait briefly for a pending task to finish without forcing cancellation."""
+    done_tasks, _ = await asyncio.wait(
+        remaining_tasks,
+        timeout=remaining_time,
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    return bool(done_tasks)
+
+
+async def _settle_pending_function_tool_tasks(
+    *,
+    pending_tasks: set[asyncio.Task[Any]],
+    task_to_tool_run: dict[asyncio.Task[Any], ToolRunFunction],
+    task_to_order: dict[asyncio.Task[Any], int],
+    results_by_tool_run: dict[int, Any],
+    timeout_seconds: float,
+    wait_for_pending_tasks: _FunctionToolSettlementWaiter,
+    failure_sources_by_task: Mapping[asyncio.Task[Any], _FunctionToolFailureSource] | None = None,
+    ignore_cancelled_tasks: set[asyncio.Task[Any]] | None = None,
+) -> tuple[_FunctionToolFailure | None, set[asyncio.Task[Any]]]:
+    """Wait for pending tasks to settle within a bounded window and collect failures."""
+    if not pending_tasks:
+        return None, set()
+
+    failure: _FunctionToolFailure | None = None
+    remaining_tasks = set(pending_tasks)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+
+    while remaining_tasks:
+        new_failure, remaining_tasks = _collect_settled_function_tool_tasks(
+            remaining_tasks=remaining_tasks,
+            task_to_tool_run=task_to_tool_run,
+            task_to_order=task_to_order,
+            results_by_tool_run=results_by_tool_run,
+            failure_sources_by_task=failure_sources_by_task,
+            ignore_cancelled_tasks=ignore_cancelled_tasks,
+        )
+        failure = _select_function_tool_failure(failure, new_failure)
+        if failure is not None and not isinstance(failure.error, Exception):
+            break
+
+        remaining_time = deadline - loop.time()
+        if not remaining_tasks or remaining_time <= 0:
+            break
+
+        should_continue = await wait_for_pending_tasks(remaining_tasks, loop, remaining_time)
+        if not should_continue:
+            break
+
+    new_failure, remaining_tasks = _collect_settled_function_tool_tasks(
+        remaining_tasks=remaining_tasks,
+        task_to_tool_run=task_to_tool_run,
+        task_to_order=task_to_order,
+        results_by_tool_run=results_by_tool_run,
+        failure_sources_by_task=failure_sources_by_task,
+        ignore_cancelled_tasks=ignore_cancelled_tasks,
+    )
+    failure = _select_function_tool_failure(failure, new_failure)
+    return failure, remaining_tasks
+
+
 async def _drain_cancelled_function_tool_tasks(
     *,
     pending_tasks: set[asyncio.Task[Any]],
@@ -325,73 +457,23 @@ async def _drain_cancelled_function_tool_tasks(
     ignore_cancelled_tasks: set[asyncio.Task[Any]] | None = None,
 ) -> tuple[_FunctionToolFailure | None, set[asyncio.Task[Any]]]:
     """Drain cancelled siblings while they can continue making self-driven progress."""
-    if not pending_tasks:
-        return None, set()
-
-    failure: _FunctionToolFailure | None = None
-    remaining_tasks = set(pending_tasks)
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS
-    while remaining_tasks:
-        settled_tasks = {task for task in remaining_tasks if task.done()}
-        if settled_tasks:
-            remaining_tasks -= settled_tasks
-            new_failure = _record_completed_function_tool_tasks(
-                completed_tasks=list(settled_tasks),
-                task_to_tool_run=task_to_tool_run,
-                task_to_order=task_to_order,
-                results_by_tool_run=results_by_tool_run,
-                failure_sources_by_task=failure_sources_by_task,
-                ignore_cancelled_tasks=ignore_cancelled_tasks,
-            )
-            failure = _select_function_tool_failure(failure, new_failure)
-            if failure is not None and not isinstance(failure.error, Exception):
-                break
-            continue
-
-        now = loop.time()
-        if now >= deadline:
-            break
-
-        progress_deadlines = {
-            task: get_function_tool_task_progress_deadline(
-                task=task,
+    return await _settle_pending_function_tool_tasks(
+        pending_tasks=pending_tasks,
+        task_to_tool_run=task_to_tool_run,
+        task_to_order=task_to_order,
+        results_by_tool_run=results_by_tool_run,
+        timeout_seconds=_FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS,
+        wait_for_pending_tasks=lambda remaining, loop, remaining_time: (
+            _wait_for_cancelled_function_tool_task_progress(
+                remaining,
+                loop,
+                remaining_time,
                 task_to_invoke_task=task_to_invoke_task,
-                loop=loop,
             )
-            for task in remaining_tasks
-        }
-        self_progressing_tasks = {
-            task: deadline for task, deadline in progress_deadlines.items() if deadline is not None
-        }
-        if not self_progressing_tasks:
-            break
-
-        next_deadline = min(self_progressing_tasks.values())
-        delay = max(0.0, next_deadline - now)
-        if delay > 0:
-            await asyncio.wait(
-                set(self_progressing_tasks),
-                timeout=min(delay, deadline - now),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-        else:
-            await asyncio.sleep(0)
-
-    settled_tasks = {task for task in remaining_tasks if task.done()}
-    if settled_tasks:
-        remaining_tasks -= settled_tasks
-        new_failure = _record_completed_function_tool_tasks(
-            completed_tasks=list(settled_tasks),
-            task_to_tool_run=task_to_tool_run,
-            task_to_order=task_to_order,
-            results_by_tool_run=results_by_tool_run,
-            failure_sources_by_task=failure_sources_by_task,
-            ignore_cancelled_tasks=ignore_cancelled_tasks,
-        )
-        failure = _select_function_tool_failure(failure, new_failure)
-
-    return failure, remaining_tasks
+        ),
+        failure_sources_by_task=failure_sources_by_task,
+        ignore_cancelled_tasks=ignore_cancelled_tasks,
+    )
 
 
 async def _wait_pending_function_tool_tasks_for_timeout(
@@ -404,42 +486,15 @@ async def _wait_pending_function_tool_tasks_for_timeout(
     timeout_seconds: float,
 ) -> tuple[_FunctionToolFailure | None, set[asyncio.Task[Any]]]:
     """Wait briefly for post-invoke siblings so in-flight failures can still surface."""
-    if not pending_tasks:
-        return None, set()
-
-    failure: _FunctionToolFailure | None = None
-    remaining_tasks = set(pending_tasks)
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_seconds
-    while remaining_tasks:
-        settled_tasks = {task for task in remaining_tasks if task.done()}
-        if settled_tasks:
-            remaining_tasks -= settled_tasks
-            new_failure = _record_completed_function_tool_tasks(
-                completed_tasks=list(settled_tasks),
-                task_to_tool_run=task_to_tool_run,
-                task_to_order=task_to_order,
-                results_by_tool_run=results_by_tool_run,
-                failure_sources_by_task=failure_sources_by_task,
-            )
-            failure = _select_function_tool_failure(failure, new_failure)
-            if failure is not None and not isinstance(failure.error, Exception):
-                break
-            continue
-
-        remaining_time = deadline - loop.time()
-        if remaining_time <= 0:
-            break
-
-        done_tasks, _ = await asyncio.wait(
-            remaining_tasks,
-            timeout=remaining_time,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if not done_tasks:
-            break
-
-    return failure, remaining_tasks
+    return await _settle_pending_function_tool_tasks(
+        pending_tasks=pending_tasks,
+        task_to_tool_run=task_to_tool_run,
+        task_to_order=task_to_order,
+        results_by_tool_run=results_by_tool_run,
+        timeout_seconds=timeout_seconds,
+        wait_for_pending_tasks=_wait_for_function_tool_task_completion,
+        failure_sources_by_task=failure_sources_by_task,
+    )
 
 
 # --------------------------
@@ -1531,55 +1586,57 @@ class _FunctionToolBatchExecutor:
                 invoke_task.add_done_callback(_consume_parent_cancelled_task_result)
             raise
 
+    def _get_nested_tool_interruptions(
+        self,
+        nested_run_result: Any | None,
+    ) -> list[ToolApprovalItem]:
+        """Extract nested approval interruptions from an agent tool run result."""
+        if nested_run_result is None or not hasattr(nested_run_result, "interruptions"):
+            return []
+        return cast(list[ToolApprovalItem], nested_run_result.interruptions)
+
+    def _consume_nested_tool_run_result(
+        self,
+        tool_run: ToolRunFunction,
+    ) -> tuple[Any | None, list[ToolApprovalItem]]:
+        """Consume stored nested run state for a tool call and return its interruptions."""
+        nested_run_result = consume_agent_tool_run_result(
+            tool_run.tool_call,
+            scope_id=self.tool_state_scope_id,
+        )
+        return nested_run_result, self._get_nested_tool_interruptions(nested_run_result)
+
+    def _resolve_nested_tool_run_result(
+        self,
+        tool_run: ToolRunFunction,
+    ) -> tuple[Any | None, list[ToolApprovalItem]]:
+        """Load nested run state, preserving unresolved interruptions until they are handled."""
+        nested_run_result = peek_agent_tool_run_result(
+            tool_run.tool_call,
+            scope_id=self.tool_state_scope_id,
+        )
+        nested_interruptions = self._get_nested_tool_interruptions(nested_run_result)
+        if nested_run_result is None or not nested_interruptions:
+            nested_run_result, nested_interruptions = self._consume_nested_tool_run_result(tool_run)
+        return nested_run_result, nested_interruptions
+
     def _build_function_tool_results(self) -> list[FunctionToolResult]:
         function_tool_results: list[FunctionToolResult] = []
         for tool_run in self.tool_runs:
             result = self.results_by_tool_run[id(tool_run)]
             if isinstance(result, FunctionToolResult):
-                nested_run_result = consume_agent_tool_run_result(
-                    tool_run.tool_call,
-                    scope_id=self.tool_state_scope_id,
+                nested_run_result, nested_interruptions = self._consume_nested_tool_run_result(
+                    tool_run
                 )
                 if nested_run_result:
                     result.agent_run_result = nested_run_result
-                    nested_interruptions_from_result: list[ToolApprovalItem] = (
-                        nested_run_result.interruptions
-                        if hasattr(nested_run_result, "interruptions")
-                        else []
-                    )
-                    if nested_interruptions_from_result:
-                        result.interruptions = nested_interruptions_from_result
+                    if nested_interruptions:
+                        result.interruptions = nested_interruptions
 
                 function_tool_results.append(result)
                 continue
 
-            nested_run_result = peek_agent_tool_run_result(
-                tool_run.tool_call,
-                scope_id=self.tool_state_scope_id,
-            )
-            nested_interruptions: list[ToolApprovalItem] = []
-            if nested_run_result:
-                nested_interruptions = (
-                    nested_run_result.interruptions
-                    if hasattr(nested_run_result, "interruptions")
-                    else []
-                )
-            if nested_run_result and not nested_interruptions:
-                nested_run_result = consume_agent_tool_run_result(
-                    tool_run.tool_call,
-                    scope_id=self.tool_state_scope_id,
-                )
-            elif nested_run_result is None:
-                nested_run_result = consume_agent_tool_run_result(
-                    tool_run.tool_call,
-                    scope_id=self.tool_state_scope_id,
-                )
-                if nested_run_result:
-                    nested_interruptions = (
-                        nested_run_result.interruptions
-                        if hasattr(nested_run_result, "interruptions")
-                        else []
-                    )
+            nested_run_result, nested_interruptions = self._resolve_nested_tool_run_result(tool_run)
 
             run_item: RunItem | None
             if not nested_interruptions:
