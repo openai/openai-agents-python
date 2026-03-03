@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -717,3 +718,80 @@ async def test_agents_as_tools_orchestrator_runs_multiple_translations() -> None
     assert spanish_model.last_turn_args["input"] == [{"content": "Hi", "role": "user"}]
     assert french_model.last_turn_args["input"] == [{"content": "Hi", "role": "user"}]
     assert len(result.raw_responses) == 3
+
+
+@pytest.mark.asyncio
+async def test_agents_as_tools_subagent_cancellation_preserves_parent_final_output() -> None:
+    """A cancelled nested subagent should not drop sibling outputs from the parent turn."""
+
+    async def _cancel_tool() -> str:
+        raise asyncio.CancelledError("tool-cancelled")
+
+    success_model = FakeModel()
+    success_model.set_next_output([get_text_message("Status: ok")])
+    success_agent = Agent(name="status", model=success_model)
+
+    observability_model = FakeModel()
+    observability_model.set_next_output(
+        [get_function_tool_call("cancel_tool", "{}", call_id="inner_cancel")]
+    )
+    observability_agent = Agent(
+        name="observability",
+        model=observability_model,
+        tools=[function_tool(_cancel_tool, name_override="cancel_tool")],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    orchestrator_model = FakeModel()
+    orchestrator_model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "status_agent",
+                    json.dumps({"input": "Hi"}),
+                    call_id="outer_status",
+                ),
+                get_function_tool_call(
+                    "observability_agent",
+                    json.dumps({"input": "Hi"}),
+                    call_id="outer_observability",
+                ),
+            ],
+            [get_text_message("Summary complete")],
+        ]
+    )
+
+    orchestrator = Agent(
+        name="orchestrator",
+        model=orchestrator_model,
+        tools=[
+            success_agent.as_tool("status_agent", "Status"),
+            observability_agent.as_tool("observability_agent", "Observability"),
+        ],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    result = await Runner.run(orchestrator, "Hi")
+
+    assert result.final_output == "Summary complete"
+    assert len(result.raw_responses) == 2
+    assert success_model.last_turn_args["input"] == [{"content": "Hi", "role": "user"}]
+    assert observability_model.first_turn_args is not None
+    assert observability_model.first_turn_args["input"] == [{"content": "Hi", "role": "user"}]
+
+    second_turn_input = cast(list[dict[str, Any]], orchestrator_model.last_turn_args["input"])
+    tool_outputs = [
+        item for item in second_turn_input if item.get("type") == "function_call_output"
+    ]
+    assert len(tool_outputs) == 2
+    assert tool_outputs[0] == {
+        "call_id": "outer_status",
+        "output": "Status: ok",
+        "type": "function_call_output",
+    }
+    assert tool_outputs[1]["call_id"] == "outer_observability"
+    assert tool_outputs[1]["type"] == "function_call_output"
+    assert tool_outputs[1]["output"].startswith(
+        "An error occurred while running the tool. Please try again. Error:"
+    )
+    assert "cancel" in tool_outputs[1]["output"].lower()
