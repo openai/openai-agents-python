@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 from dataclasses import dataclass
 from typing import Any, Callable, cast
@@ -474,6 +475,57 @@ async def test_multiple_tool_calls_still_raise_non_cancellation_base_exceptions(
 
     with pytest.raises(ToolAborted):
         await get_execute_result(agent, response)
+
+
+@pytest.mark.asyncio
+async def test_multiple_tool_calls_drain_completed_failures_before_raising():
+    loop = asyncio.get_running_loop()
+    original_handler = loop.get_exception_handler()
+    unhandled_contexts: list[dict[str, Any]] = []
+
+    def _exception_handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        unhandled_contexts.append(context)
+
+    async def _error_tool_1() -> str:
+        raise ValueError("boom-1")
+
+    async def _error_tool_2() -> str:
+        raise RuntimeError("boom-2")
+
+    tool_1 = function_tool(
+        _error_tool_1,
+        name_override="error_tool_1",
+        failure_error_function=None,
+    )
+    tool_2 = function_tool(
+        _error_tool_2,
+        name_override="error_tool_2",
+        failure_error_function=None,
+    )
+
+    agent = Agent(name="test", tools=[tool_1, tool_2])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("error_tool_1", "{}", call_id="1"),
+            get_function_tool_call("error_tool_2", "{}", call_id="2"),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    loop.set_exception_handler(_exception_handler)
+    try:
+        with pytest.raises(UserError, match="Error running tool"):
+            await get_execute_result(agent, response)
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(original_handler)
+
+    assert not any(
+        context.get("message") == "Task exception was never retrieved"
+        for context in unhandled_contexts
+    )
 
 
 @pytest.mark.asyncio

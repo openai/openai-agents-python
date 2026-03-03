@@ -999,16 +999,20 @@ async def execute_function_tool_calls(
                 pending_tasks,
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            failure: BaseException | None = None
             for task in done_tasks:
                 tool_run = task_to_tool_run[task]
                 try:
                     results_by_tool_run[id(tool_run)] = task.result()
-                except BaseException:
-                    for pending_task in pending_tasks:
-                        pending_task.cancel()
-                    if pending_tasks:
-                        await asyncio.gather(*pending_tasks, return_exceptions=True)
-                    raise
+                except BaseException as exc:
+                    if failure is None:
+                        failure = exc
+            if failure is not None:
+                for pending_task in pending_tasks:
+                    pending_task.cancel()
+                if pending_tasks:
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
+                raise failure
     except BaseException:
         for pending_task in pending_tasks:
             pending_task.cancel()
