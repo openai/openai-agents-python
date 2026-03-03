@@ -22,6 +22,10 @@ mypy:
 .PHONY: tests
 tests: tests-parallel tests-serial
 
+.PHONY: tests-asyncio-stability
+tests-asyncio-stability:
+	bash .github/scripts/run-asyncio-teardown-stability.sh
+
 .PHONY: tests-parallel
 tests-parallel:
 	uv run pytest -n auto --dist loadfile -m "not serial"
