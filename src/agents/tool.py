@@ -1042,6 +1042,70 @@ def _extract_tool_argument_json_error(error: Exception) -> json.JSONDecodeError 
     return _extract_json_decode_error(error)
 
 
+def _build_handled_function_tool_error_handler(
+    *,
+    span_message: str,
+    log_label: str,
+    span_message_for_json_decode_error: str | None = None,
+    include_input_json_in_logs: bool = True,
+    include_tool_name_in_log_messages: bool = True,
+) -> Callable[[FunctionTool, Exception, str], None]:
+    """Create a consistent handled-error reporter for wrapped FunctionTools."""
+
+    def _on_handled_error(function_tool: FunctionTool, error: Exception, input_json: str) -> None:
+        json_decode_error = _extract_tool_argument_json_error(error)
+        if json_decode_error is not None and span_message_for_json_decode_error is not None:
+            resolved_span_message = span_message_for_json_decode_error
+            span_error_detail = str(json_decode_error)
+        else:
+            resolved_span_message = span_message
+            span_error_detail = str(error)
+
+        _error_tracing.attach_error_to_current_span(
+            SpanError(
+                message=resolved_span_message,
+                data={
+                    "tool_name": function_tool.name,
+                    "error": span_error_detail,
+                },
+            )
+        )
+
+        log_prefix = (
+            f"{log_label} {function_tool.name}" if include_tool_name_in_log_messages else log_label
+        )
+        if _debug.DONT_LOG_TOOL_DATA:
+            logger.debug(f"{log_prefix} failed")
+            return
+
+        if include_input_json_in_logs:
+            logger.error(f"{log_prefix} failed: {input_json} {error}", exc_info=error)
+        else:
+            logger.error(f"{log_prefix} failed: {error}", exc_info=error)
+
+    return _on_handled_error
+
+
+def _parse_function_tool_json_input(*, tool_name: str, input_json: str) -> dict[str, Any]:
+    """Decode raw tool arguments with consistent diagnostics."""
+    try:
+        return json.loads(input_json) if input_json else {}
+    except Exception as exc:
+        if _debug.DONT_LOG_TOOL_DATA:
+            logger.debug(f"Invalid JSON input for tool {tool_name}")
+        else:
+            logger.debug(f"Invalid JSON input for tool {tool_name}: {input_json}")
+        raise ModelBehaviorError(f"Invalid JSON input for tool {tool_name}: {input_json}") from exc
+
+
+def _log_function_tool_invocation(*, tool_name: str, input_json: str) -> None:
+    """Log the start of a tool invocation with the current redaction policy."""
+    if _debug.DONT_LOG_TOOL_DATA:
+        logger.debug(f"Invoking tool {tool_name}")
+    else:
+        logger.debug(f"Invoking tool {tool_name} with input {input_json}")
+
+
 def default_tool_error_function(ctx: RunContextWrapper[Any], error: Exception) -> str:
     """The default tool error function, which just returns a generic error message."""
     json_decode_error = _extract_tool_argument_json_error(error)
@@ -1291,19 +1355,8 @@ def function_tool(
 
         async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
             tool_name = ctx.tool_name
-            try:
-                json_data: dict[str, Any] = json.loads(input) if input else {}
-            except Exception as e:
-                if _debug.DONT_LOG_TOOL_DATA:
-                    logger.debug(f"Invalid JSON input for tool {tool_name}")
-                else:
-                    logger.debug(f"Invalid JSON input for tool {tool_name}: {input}")
-                raise ModelBehaviorError(f"Invalid JSON input for tool {tool_name}: {input}") from e
-
-            if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"Invoking tool {tool_name}")
-            else:
-                logger.debug(f"Invoking tool {tool_name} with input {input}")
+            json_data = _parse_function_tool_json_input(tool_name=tool_name, input_json=input)
+            _log_function_tool_invocation(tool_name=tool_name, input_json=input)
 
             try:
                 parsed = (
@@ -1337,38 +1390,16 @@ def function_tool(
 
             return result
 
-        def _on_handled_error(function_tool: FunctionTool, error: Exception, input: str) -> None:
-            json_decode_error = _extract_tool_argument_json_error(error)
-            if json_decode_error is not None:
-                span_error_message = "Error running tool"
-                span_error_detail = str(json_decode_error)
-            else:
-                span_error_message = "Error running tool (non-fatal)"
-                span_error_detail = str(error)
-
-            _error_tracing.attach_error_to_current_span(
-                SpanError(
-                    message=span_error_message,
-                    data={
-                        "tool_name": function_tool.name,
-                        "error": span_error_detail,
-                    },
-                )
-            )
-            if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"Tool {function_tool.name} failed")
-            else:
-                logger.error(
-                    f"Tool {function_tool.name} failed: {input} {error}",
-                    exc_info=error,
-                )
-
         function_tool = _build_wrapped_function_tool(
             name=schema.name,
             description=schema.description or "",
             params_json_schema=schema.params_json_schema,
             invoke_tool_impl=_on_invoke_tool_impl,
-            on_handled_error=_on_handled_error,
+            on_handled_error=_build_handled_function_tool_error_handler(
+                span_message="Error running tool (non-fatal)",
+                span_message_for_json_decode_error="Error running tool",
+                log_label="Tool",
+            ),
             failure_error_function=failure_error_function,
             strict_json_schema=strict_mode,
             is_enabled=is_enabled,

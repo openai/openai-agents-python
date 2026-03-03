@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
-import json
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, cast
@@ -12,7 +11,6 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from typing_extensions import NotRequired, TypeAlias, TypedDict
 
-from . import _debug
 from .agent_output import AgentOutputSchemaBase
 from .agent_tool_input import (
     AgentAsToolInput,
@@ -47,13 +45,14 @@ from .tool import (
     FunctionToolResult,
     Tool,
     ToolErrorFunction,
+    _build_handled_function_tool_error_handler,
     _build_wrapped_function_tool,
-    _extract_tool_argument_json_error,
+    _log_function_tool_invocation,
+    _parse_function_tool_json_input,
     default_tool_error_function,
 )
 from .tool_context import ToolContext
-from .tracing import SpanError
-from .util import _error_tracing, _transforms
+from .util import _transforms
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
@@ -564,21 +563,11 @@ class Agent(AgentBase, Generic[TContext]):
             tool_name = (
                 context.tool_name if isinstance(context, ToolContext) else tool_name_resolved
             )
-            try:
-                json_data = json.loads(input_json) if input_json else {}
-            except Exception as exc:
-                if _debug.DONT_LOG_TOOL_DATA:
-                    logger.debug(f"Invalid JSON input for tool {tool_name}")
-                else:
-                    logger.debug(f"Invalid JSON input for tool {tool_name}: {input_json}")
-                raise ModelBehaviorError(
-                    f"Invalid JSON input for tool {tool_name}: {input_json}"
-                ) from exc
-
-            if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"Invoking tool {tool_name}")
-            else:
-                logger.debug(f"Invoking tool {tool_name} with input {input_json}")
+            json_data = _parse_function_tool_json_input(
+                tool_name=tool_name,
+                input_json=input_json,
+            )
+            _log_function_tool_invocation(tool_name=tool_name, input_json=input_json)
 
             try:
                 parsed_params = params_adapter.validate_python(json_data)
@@ -806,40 +795,16 @@ class Agent(AgentBase, Generic[TContext]):
 
             return run_result.final_output
 
-        def _on_handled_tool_error(
-            function_tool: FunctionTool, exc: Exception, input_json: str
-        ) -> None:
-            json_decode_error = _extract_tool_argument_json_error(exc)
-            if json_decode_error is not None:
-                span_error_message = "Error running tool"
-                span_error_detail = str(json_decode_error)
-            else:
-                span_error_message = "Error running tool (non-fatal)"
-                span_error_detail = str(exc)
-
-            _error_tracing.attach_error_to_current_span(
-                SpanError(
-                    message=span_error_message,
-                    data={
-                        "tool_name": function_tool.name,
-                        "error": span_error_detail,
-                    },
-                )
-            )
-            if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"Tool {function_tool.name} failed")
-            else:
-                logger.error(
-                    f"Tool {function_tool.name} failed: {input_json} {exc}",
-                    exc_info=exc,
-                )
-
         run_agent_tool = _build_wrapped_function_tool(
             name=tool_name_resolved,
             description=tool_description_resolved,
             params_json_schema=params_schema,
             invoke_tool_impl=_run_agent_impl,
-            on_handled_error=_on_handled_tool_error,
+            on_handled_error=_build_handled_function_tool_error_handler(
+                span_message="Error running tool (non-fatal)",
+                span_message_for_json_decode_error="Error running tool",
+                log_label="Tool",
+            ),
             failure_error_function=failure_error_function,
             strict_json_schema=True,
             is_enabled=is_enabled,

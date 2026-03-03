@@ -23,13 +23,13 @@ from agents.strict_schema import ensure_strict_json_schema
 from agents.tool import (
     FunctionTool,
     ToolErrorFunction,
+    _build_handled_function_tool_error_handler,
     _build_wrapped_function_tool,
     default_tool_error_function,
 )
 from agents.tool_context import ToolContext
 from agents.tracing import SpanError, custom_span
 from agents.usage import Usage as AgentsUsage
-from agents.util import _error_tracing
 from agents.util._types import MaybeAwaitable
 
 from .codex import Codex
@@ -408,24 +408,17 @@ def codex_tool(
             )
             raise
 
-    def _on_handled_error(function_tool: FunctionTool, exc: Exception, _input_json: str) -> None:
-        _error_tracing.attach_error_to_current_span(
-            SpanError(
-                message="Error running Codex tool (non-fatal)",
-                data={"tool_name": function_tool.name, "error": str(exc)},
-            )
-        )
-        if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug("Codex tool failed")
-        else:
-            logger.error("Codex tool failed: %s", exc, exc_info=exc)
-
     function_tool = _build_wrapped_function_tool(
         name=name,
         description=description,
         params_json_schema=params_schema,
         invoke_tool_impl=_on_invoke_tool,
-        on_handled_error=_on_handled_error,
+        on_handled_error=_build_handled_function_tool_error_handler(
+            span_message="Error running Codex tool (non-fatal)",
+            log_label="Codex tool",
+            include_input_json_in_logs=False,
+            include_tool_name_in_log_messages=False,
+        ),
         failure_error_function=resolved_options.failure_error_function,
         strict_json_schema=True,
         is_enabled=resolved_options.is_enabled,

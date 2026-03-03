@@ -22,11 +22,11 @@ from ..tool import (
     ToolErrorFunction,
     ToolOutputImageDict,
     ToolOutputTextDict,
+    _build_handled_function_tool_error_handler,
     _build_wrapped_function_tool,
     default_tool_error_function,
 )
-from ..tracing import FunctionSpanData, SpanError, get_current_span, mcp_tools_span
-from ..util import _error_tracing
+from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
 from ..util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
@@ -261,30 +261,6 @@ class MCPUtil:
             except Exception as e:
                 logger.info(f"Error converting MCP schema to strict mode: {e}")
 
-        # Wrap the invoke function with error handling, similar to regular function tools.
-        # This ensures that MCP tool errors (like timeouts) are handled gracefully instead
-        # of halting the entire agent flow.
-        def on_handled_error(
-            function_tool: FunctionTool, error: Exception, input_json: str
-        ) -> None:
-            _error_tracing.attach_error_to_current_span(
-                SpanError(
-                    message="Error running tool (non-fatal)",
-                    data={
-                        "tool_name": function_tool.name,
-                        "error": str(error),
-                    },
-                )
-            )
-
-            if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"MCP tool {function_tool.name} failed")
-            else:
-                logger.error(
-                    f"MCP tool {function_tool.name} failed: {input_json} {error}",
-                    exc_info=error,
-                )
-
         needs_approval: (
             bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
         ) = server._get_needs_approval_for_tool(tool, agent)
@@ -294,7 +270,10 @@ class MCPUtil:
             description=tool.description or "",
             params_json_schema=schema,
             invoke_tool_impl=invoke_func_impl,
-            on_handled_error=on_handled_error,
+            on_handled_error=_build_handled_function_tool_error_handler(
+                span_message="Error running tool (non-fatal)",
+                log_label="MCP tool",
+            ),
             failure_error_function=effective_failure_error_function,
             strict_json_schema=is_strict,
             needs_approval=needs_approval,
