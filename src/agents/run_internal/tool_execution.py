@@ -973,10 +973,31 @@ async def execute_function_tool_calls(
         function_tool = tool_run.function_tool
         tasks.append(run_single_tool(function_tool, tool_run.tool_call))
 
-    results = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
     function_tool_results = []
     for tool_run, result in zip(tool_runs, results):
+        if isinstance(result, BaseException):
+            error_output = (
+                f"Tool execution failed: {type(result).__name__}: {result}"
+                if str(result)
+                else f"Tool execution failed: {type(result).__name__}"
+            )
+            function_tool_results.append(
+                FunctionToolResult(
+                    tool=tool_run.function_tool,
+                    output=error_output,
+                    run_item=ToolCallOutputItem(
+                        output=error_output,
+                        raw_item=ItemHelpers.tool_call_output_item(
+                            tool_run.tool_call,
+                            error_output,
+                        ),
+                        agent=agent,
+                    ),
+                )
+            )
+            continue
         if isinstance(result, FunctionToolResult):
             nested_run_result = consume_agent_tool_run_result(
                 tool_run.tool_call,

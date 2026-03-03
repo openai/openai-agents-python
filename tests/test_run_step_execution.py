@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any, Callable, cast
@@ -367,6 +368,43 @@ async def test_multiple_tool_calls_with_tool_context():
     assert_item_is_function_tool_call_output(items[3], "456-2")
 
     assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_multiple_tool_calls_preserve_successful_outputs_when_sibling_cancelled():
+    async def _ok_tool() -> str:
+        return "ok"
+
+    async def _cancel_tool() -> str:
+        raise asyncio.CancelledError()
+
+    ok_tool = function_tool(_ok_tool, name_override="ok_tool", failure_error_function=None)
+    cancel_tool = function_tool(
+        _cancel_tool,
+        name_override="cancel_tool",
+        failure_error_function=None,
+    )
+
+    agent = Agent(name="test", tools=[ok_tool, cancel_tool])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("ok_tool", "{}", call_id="1"),
+            get_function_tool_call("cancel_tool", "{}", call_id="2"),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    result = await get_execute_result(agent, response)
+
+    assert len(result.generated_items) == 4
+    assert isinstance(result.next_step, NextStepRunAgain)
+    assert_item_is_function_tool_call(result.generated_items[0], "ok_tool", "{}")
+    assert_item_is_function_tool_call(result.generated_items[1], "cancel_tool", "{}")
+    assert_item_is_function_tool_call_output(result.generated_items[2], "ok")
+    cancelled_output = cast(dict[str, Any], result.generated_items[3].raw_item)["output"]
+    assert cancelled_output.startswith("Tool execution failed:")
+    assert "CancelledError" in cancelled_output
 
 
 @pytest.mark.asyncio
