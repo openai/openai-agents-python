@@ -1,4 +1,4 @@
-# SQLAlchemy Sessions
+# SQLAlchemy sessions
 
 `SQLAlchemySession` uses SQLAlchemy to provide a production-ready session implementation, allowing you to use any database supported by SQLAlchemy (PostgreSQL, MySQL, SQLite, etc.) for session storage.
 
@@ -70,7 +70,7 @@ if __name__ == "__main__":
 ```
 
 
-## API Reference
+## API reference
 
 - [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - Main class
 - [`Session`][agents.memory.session.Session] - Base session protocol

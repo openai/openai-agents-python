@@ -53,9 +53,8 @@ plugins:
           nav:
             - Intro: index.md
             - Quickstart: quickstart.md
-            - config.md
+            - Configuration: config.md
             - Documentation:
-                - multi_agent.md
                 - agents.md
                 - Models:
                     - models/index.md
@@ -64,6 +63,7 @@ plugins:
                 - guardrails.md
                 - running_agents.md
                 - streaming.md
+                - multi_agent.md
                 - handoffs.md
                 - results.md
                 - human_in_the_loop.md
@@ -174,7 +174,6 @@ plugins:
             - クイックスタート: quickstart.md
             - config.md
             - ドキュメント:
-                - multi_agent.md
                 - agents.md
                 - モデル:
                     - models/index.md
@@ -183,6 +182,7 @@ plugins:
                 - guardrails.md
                 - running_agents.md
                 - streaming.md
+                - multi_agent.md
                 - handoffs.md
                 - results.md
                 - human_in_the_loop.md
@@ -214,7 +214,6 @@ plugins:
             - 빠른 시작: quickstart.md
             - config.md
             - 문서:
-                - multi_agent.md
                 - agents.md
                 - 모델:
                     - models/index.md
@@ -223,6 +222,7 @@ plugins:
                 - guardrails.md
                 - running_agents.md
                 - streaming.md
+                - multi_agent.md
                 - handoffs.md
                 - results.md
                 - human_in_the_loop.md
@@ -254,7 +254,6 @@ plugins:
             - 快速开始: quickstart.md
             - config.md
             - 文档:
-                - multi_agent.md
                 - agents.md
                 - 模型:
                     - models/index.md
@@ -263,6 +262,7 @@ plugins:
                 - guardrails.md
                 - running_agents.md
                 - streaming.md
+                - multi_agent.md
                 - handoffs.md
                 - results.md
                 - human_in_the_loop.md

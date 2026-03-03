@@ -619,7 +619,7 @@ The community has developed additional session implementations:
 
 If you've built a session implementation, please feel free to submit a documentation PR to add it here!
 
-## API Reference
+## API reference
 
 For detailed API documentation, see:
 

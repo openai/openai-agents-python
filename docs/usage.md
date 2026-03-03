@@ -85,7 +85,7 @@ class MyHooks(RunHooks):
         print(f"{agent.name} → {u.requests} requests, {u.total_tokens} total tokens")
 ```
 
-## API Reference
+## API reference
 
 For detailed API documentation, see:
 

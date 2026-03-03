@@ -11,7 +11,7 @@ Realtime agents allow for conversational flows, processing audio and text inputs
 
 ## Architecture
 
-### Core Components
+### Core components
 
 The realtime system consists of several key components:
 
@@ -64,9 +64,9 @@ Additional configuration options you can set on `RealtimeRunner(config=...)` inc
 
 See [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] and [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings] for the complete typed configuration.
 
-## Tools and Functions
+## Tools and functions
 
-### Adding Tools
+### Adding tools
 
 Just like regular agents, realtime agents support function tools that execute during conversations:
 
@@ -94,7 +94,7 @@ agent = RealtimeAgent(
 
 ## Handoffs
 
-### Creating Handoffs
+### Creating handoffs
 
 Handoffs allow transferring conversations between specialized agents.
 

@@ -58,5 +58,20 @@ export OPENAI_API_KEY=sk-...
 ## Start here
 
 -   Build your first text-based agent with the [Quickstart](quickstart.md).
--   Build a low-latency voice agent with the [Realtime agents quickstart](realtime/quickstart.md).
--   If you want a speech-to-text / agent / text-to-speech pipeline instead, see the [Voice pipeline quickstart](voice/quickstart.md).
+-   Then decide how you want to carry state across turns in [Running agents](running_agents.md#choose-a-memory-strategy).
+-   If you are deciding between handoffs and manager-style orchestration, read [Agent orchestration](multi_agent.md).
+
+## Choose your path
+
+Use this table when you know the job you want to do, but not which page explains it.
+
+| Goal | Start here |
+| --- | --- |
+| Build the first text agent and see one complete run | [Quickstart](quickstart.md) |
+| Add function tools, hosted tools, or agents as tools | [Tools](tools.md) |
+| Decide between handoffs and manager-style orchestration | [Agent orchestration](multi_agent.md) |
+| Keep memory across turns | [Running agents](running_agents.md#choose-a-memory-strategy) and [Sessions](sessions/index.md) |
+| Use OpenAI models, websocket transport, or non-OpenAI providers | [Models](models/index.md) |
+| Review outputs, run items, interruptions, and resume state | [Results](results.md) |
+| Build a low-latency voice agent | [Realtime agents quickstart](realtime/quickstart.md) |
+| Build a speech-to-text / agent / text-to-speech pipeline | [Voice pipeline quickstart](voice/quickstart.md) |

@@ -18,6 +18,7 @@ Most applications only need a few result properties or helpers:
 | `new_items` | Rich run items with agent, tool, and handoff metadata for logs, UIs, or audits. |
 | `last_agent` | The agent that should usually handle the next turn. |
 | `last_response_id` | Continuation with `previous_response_id` on the next OpenAI Responses turn. |
+| `agent_tool_invocation` | Metadata about the outer tool call when this result came from `Agent.as_tool()`. |
 | `interruptions` | Pending tool approvals you must resolve before resuming. |
 | `to_state()` | A serializable snapshot for pause/resume or durable job workflows. |
 
@@ -62,6 +63,16 @@ The [`new_items`][agents.result.RunResultBase.new_items] property contains the n
 ## Run state
 
 Call [`result.to_state()`][agents.result.RunResult.to_state] when you need a serializable snapshot of the run. This is the bridge between a finished or paused run and a later resume, especially for approval flows or durable worker systems.
+
+## Agent-as-tool metadata
+
+When a result comes from a nested [`Agent.as_tool()`][agents.agent.Agent.as_tool] run, [`agent_tool_invocation`][agents.result.RunResultBase.agent_tool_invocation] exposes immutable metadata about the outer tool call:
+
+-   `tool_name`
+-   `tool_call_id`
+-   `tool_arguments`
+
+For ordinary top-level runs, `agent_tool_invocation` is `None`.
 
 ## Other information
 
@@ -110,4 +121,5 @@ approval workflows, see the [human-in-the-loop guide](human_in_the_loop.md).
 
 - [`final_output_as(...)`][agents.result.RunResultBase.final_output_as] casts final output to a specific type (optionally with runtime type checking).
 - [`last_response_id`][agents.result.RunResultBase.last_response_id] returns the latest model response ID. Pass this back as `previous_response_id` when you want to continue an OpenAI Responses API chain on the next turn.
+- [`agent_tool_invocation`][agents.result.RunResultBase.agent_tool_invocation] returns metadata about the outer tool call when the result comes from `Agent.as_tool()`.
 - [`release_agents(...)`][agents.result.RunResultBase.release_agents] drops strong references to agents when you want to reduce memory pressure after inspecting results.

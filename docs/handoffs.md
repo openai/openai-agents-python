@@ -12,7 +12,7 @@ If you pass plain `Agent` instances, their [`handoff_description`][agents.agent.
 
 You can create a handoff using the [`handoff()`][agents.handoffs.handoff] function provided by the Agents SDK. This function allows you to specify the agent to hand off to, along with optional overrides and input filters.
 
-### Basic Usage
+### Basic usage
 
 Here's how you can create a simple handoff:
 

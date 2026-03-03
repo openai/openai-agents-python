@@ -300,7 +300,7 @@ agent = Agent(
 )
 ```
 
-## Tool Use Behavior
+## Tool use behavior
 
 The `tool_use_behavior` parameter in the `Agent` configuration controls how tool outputs are handled:
 

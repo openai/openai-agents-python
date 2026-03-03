@@ -4,11 +4,11 @@ search:
 ---
 # 会话
 
-Agents SDK 提供内置的会话内存，可在多次智能体运行间自动维护对话历史，无需在轮次之间手动处理 `.to_input_list()`。
+Agents SDK 提供了内置会话内存，可在多次智能体运行之间自动维护对话历史，无需在轮次之间手动处理 `.to_input_list()`。
 
-会话会为特定会话存储对话历史，让智能体无需显式手动管理内存即可保持上下文。这对构建聊天应用或多轮对话尤其有用，因为你希望智能体记住先前交互。
+会话会为特定会话存储对话历史，使智能体无需显式手动管理内存即可保持上下文。这对于构建聊天应用或多轮对话尤其有用，因为你希望智能体记住之前的交互。
 
-当你希望 SDK 为你管理客户端内存时，请使用会话。如果你已经在使用 OpenAI 通过 `conversation_id` 或 `previous_response_id` 管理的服务端状态，通常不需要再为同一对话使用会话。
+当你希望 SDK 为你管理客户端内存时，请使用会话。如果你已经在使用 OpenAI 通过 `conversation_id` 或 `previous_response_id` 管理的服务端状态，通常不需要再为同一对话额外使用会话。
 
 ## 快速开始
 
@@ -51,7 +51,7 @@ print(result.final_output)  # "Approximately 39 million"
 
 ## 使用同一会话恢复中断运行
 
-如果某次运行因审批而暂停，请使用同一个会话实例（或另一个指向同一底层存储的会话实例）进行恢复，以便恢复后的轮次延续同一份已存储的对话历史。
+如果某次运行因审批而暂停，请使用同一个会话实例（或另一个指向同一底层存储的会话实例）进行恢复，以便恢复后的轮次继续使用同一份已存储的对话历史。
 
 ```python
 result = await Runner.run(agent, "Delete temporary files that are no longer needed.", session=session)
@@ -63,27 +63,27 @@ if result.interruptions:
     result = await Runner.run(agent, state, session=session)
 ```
 
-## 核心会话行为
+## 会话核心行为
 
 启用会话内存后：
 
-1. **每次运行前**: 运行器会自动检索该会话的对话历史，并将其预置到输入项前。
-2. **每次运行后**: 运行期间生成的所有新项（用户输入、助手回复、工具调用等）都会自动存储到会话中。
-3. **上下文保持**: 使用同一会话的每次后续运行都会包含完整对话历史，从而让智能体保持上下文。
+1. **每次运行前**：运行器会自动获取该会话的对话历史，并将其前置到输入项之前。
+2. **每次运行后**：运行期间生成的所有新项（用户输入、助手回复、工具调用等）都会自动存入会话。
+3. **上下文保留**：后续每次使用同一会话的运行都会包含完整对话历史，从而使智能体能够保持上下文。
 
-这消除了在运行之间手动调用 `.to_input_list()` 并管理对话状态的需要。
+这消除了手动调用 `.to_input_list()` 并在运行间管理对话状态的需要。
 
-## 控制历史记录与新输入的合并方式
+## 控制历史与新输入的合并方式
 
-当你传入会话时，运行器通常按以下方式准备模型输入：
+当你传入会话时，运行器通常会按以下方式准备模型输入：
 
-1. 会话历史（从 `session.get_items(...)` 检索）
-2. 当前轮次新输入
+1. 会话历史（从 `session.get_items(...)` 获取）
+2. 新一轮输入
 
-可使用 [`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_callback] 在调用模型前自定义该合并步骤。该回调接收两个列表：
+使用 [`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_callback] 可在调用模型前自定义该合并步骤。回调会接收两个列表：
 
--   `history`: 检索到的会话历史（已标准化为输入项格式）
--   `new_input`: 当前轮次的新输入项
+-   `history`：获取到的会话历史（已规范化为输入项格式）
+-   `new_input`：当前轮次的新输入项
 
 返回应发送给模型的最终输入项列表。
 
@@ -107,16 +107,16 @@ result = await Runner.run(
 )
 ```
 
-当你需要自定义裁剪、重排或选择性纳入历史，而不改变会话存储项方式时，可使用此功能。
+当你需要自定义裁剪、重排或选择性包含历史，同时不改变会话存储项方式时，可使用此方法。
 
-## 限制检索历史记录
+## 限制检索历史
 
-使用 [`SessionSettings`][agents.memory.SessionSettings] 控制每次运行前获取多少历史记录。
+使用 [`SessionSettings`][agents.memory.SessionSettings] 控制每次运行前拉取多少历史。
 
--   `SessionSettings(limit=None)`（默认）：检索所有可用会话项
--   `SessionSettings(limit=N)`：仅检索最近 `N` 个项
+-   `SessionSettings(limit=None)`（默认）：检索会话中所有可用项
+-   `SessionSettings(limit=N)`：仅检索最近的 `N` 项
 
-你可以通过 [`RunConfig.session_settings`][agents.run.RunConfig.session_settings] 按次运行应用：
+你可以通过 [`RunConfig.session_settings`][agents.run.RunConfig.session_settings] 在每次运行中应用：
 
 ```python
 from agents import Agent, RunConfig, Runner, SessionSettings, SQLiteSession
@@ -132,13 +132,13 @@ result = await Runner.run(
 )
 ```
 
-如果你的会话实现暴露了默认会话设置，`RunConfig.session_settings` 会覆盖该次运行中所有非 `None` 的值。这对于长对话很有用，可在不改变会话默认行为的情况下限制检索大小。
+如果你的会话实现暴露了默认会话设置，`RunConfig.session_settings` 会覆盖该次运行中所有非 `None` 的值。这对于长对话非常有用，你可以在不改变会话默认行为的情况下限制检索规模。
 
 ## 内存操作
 
 ### 基本操作
 
-会话支持多种用于管理对话历史的操作：
+会话支持若干用于管理对话历史的操作：
 
 ```python
 from agents import SQLiteSession
@@ -165,7 +165,7 @@ await session.clear_session()
 
 ### 使用 pop_item 进行修正
 
-当你想撤销或修改对话中的最后一项时，`pop_item` 方法特别有用：
+当你想撤销或修改对话中的最后一项时，`pop_item` 方法尤其有用：
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -196,24 +196,24 @@ print(f"Agent: {result.final_output}")
 
 ## 内置会话实现
 
-SDK 为不同用例提供了多种会话实现：
+SDK 针对不同用例提供了多种会话实现：
 
 ### 选择内置会话实现
 
-在阅读下方详细示例前，可先用此表选择起点。
+在阅读下方详细示例前，请先用此表选择一个起点。
 
 | 会话类型 | 最适用场景 | 说明 |
 | --- | --- | --- |
-| `SQLiteSession` | 本地开发与简单应用 | 内置、轻量、支持文件或内存存储 |
-| `AsyncSQLiteSession` | 搭配 `aiosqlite` 的异步 SQLite | 扩展后端，支持异步驱动 |
+| `SQLiteSession` | 本地开发和简单应用 | 内置、轻量，支持文件存储或内存存储 |
+| `AsyncSQLiteSession` | 使用 `aiosqlite` 的异步 SQLite | 扩展后端，支持异步驱动 |
 | `RedisSession` | 跨 worker/服务的共享内存 | 适合低延迟分布式部署 |
 | `SQLAlchemySession` | 使用现有数据库的生产应用 | 适用于 SQLAlchemy 支持的数据库 |
-| `OpenAIConversationsSession` | OpenAI 中的服务端托管存储 | 基于 OpenAI Conversations API 的历史记录 |
-| `OpenAIResponsesCompactionSession` | 需要自动压缩的长对话 | 对另一会话后端的封装 |
-| `AdvancedSQLiteSession` | SQLite + 分支/分析 | 功能更重；见专门页面 |
-| `EncryptedSession` | 在另一会话之上提供加密 + TTL | 封装器；先选择底层后端 |
+| `OpenAIConversationsSession` | OpenAI 中的服务端托管存储 | 基于 OpenAI Conversations API 的历史存储 |
+| `OpenAIResponsesCompactionSession` | 带自动压缩的长对话 | 对其他会话后端的封装器 |
+| `AdvancedSQLiteSession` | SQLite + 分支/分析能力 | 功能更重；见专门页面 |
+| `EncryptedSession` | 在其他会话之上提供加密 + TTL | 封装器；先选择底层后端 |
 
-部分实现有包含更多细节的专门页面；其链接已在各小节内给出。
+部分实现有包含更多细节的专门页面；在各自小节中已内联链接。
 
 ### OpenAI Conversations API 会话
 
@@ -253,7 +253,7 @@ print(result.final_output)  # "California"
 
 ### OpenAI Responses 压缩会话
 
-使用 `OpenAIResponsesCompactionSession` 通过 Responses API（`responses.compact`）压缩已存储的对话历史。它封装一个底层会话，并可基于 `should_trigger_compaction` 在每轮后自动压缩。不要将其包裹在 `OpenAIConversationsSession` 外层；这两种功能以不同方式管理历史记录。
+使用 `OpenAIResponsesCompactionSession` 通过 Responses API（`responses.compact`）压缩已存储的对话历史。它会封装一个底层会话，并可基于 `should_trigger_compaction` 在每轮后自动压缩。不要用它封装 `OpenAIConversationsSession`；这两种特性以不同方式管理历史。
 
 #### 典型用法（自动压缩）
 
@@ -272,15 +272,15 @@ result = await Runner.run(agent, "Hello", session=session)
 print(result.final_output)
 ```
 
-默认情况下，一旦达到候选阈值，就会在每轮后执行压缩。
+默认情况下，一旦达到候选阈值，每轮后都会执行压缩。
 
-`compaction_mode="previous_response_id"` 在你已使用 Responses API 的响应 ID 串联轮次时效果最佳。`compaction_mode="input"` 则改为基于当前会话项重建压缩请求；当响应链不可用或你希望会话内容成为事实来源时，这很有用。默认值 `"auto"` 会选择当前可用的最安全选项。
+当你已经使用 Responses API 的响应 ID 串联轮次时，`compaction_mode="previous_response_id"` 效果最佳。`compaction_mode="input"` 会改为基于当前会话项重建压缩请求，这在响应链不可用或你希望以会话内容为准时很有用。默认的 `"auto"` 会选择可用且最安全的方式。
 
 #### 自动压缩可能阻塞流式传输
 
-压缩会清空并重写会话历史，因此 SDK 会等待压缩完成后才将运行视为完成。在流式模式下，如果压缩较重，这意味着 `run.stream_events()` 可能在最后一个输出 token 后仍保持打开数秒。
+压缩会清空并重写会话历史，因此 SDK 会等待压缩完成后才认为该次运行结束。在流式模式下，这意味着若压缩较重，`run.stream_events()` 在最后一个输出 token 后可能还会保持开启几秒。
 
-如果你希望低延迟流式传输或更快轮转，禁用自动压缩，并在轮次之间（或空闲时）自行调用 `run_compaction()`。你可以根据自己的标准决定何时强制压缩。
+如果你希望低延迟流式传输或更快轮次切换，请禁用自动压缩，并在轮次之间（或空闲时）自行调用 `run_compaction()`。你可以根据自己的标准决定何时强制压缩。
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -303,7 +303,7 @@ await session.run_compaction({"force": True})
 
 ### SQLite 会话
 
-默认的轻量级 SQLite 会话实现：
+默认的轻量会话实现，基于 SQLite：
 
 ```python
 from agents import SQLiteSession
@@ -324,7 +324,7 @@ result = await Runner.run(
 
 ### 异步 SQLite 会话
 
-当你希望使用由 `aiosqlite` 支持持久化的 SQLite 时，使用 `AsyncSQLiteSession`。
+当你希望使用由 `aiosqlite` 支撑的 SQLite 持久化时，请使用 `AsyncSQLiteSession`。
 
 ```bash
 pip install aiosqlite
@@ -341,7 +341,7 @@ result = await Runner.run(agent, "Hello", session=session)
 
 ### Redis 会话
 
-使用 `RedisSession` 在多个 worker 或服务间共享会话内存。
+使用 `RedisSession` 在多个 worker 或服务之间共享会话内存。
 
 ```bash
 pip install openai-agents[redis]
@@ -361,7 +361,7 @@ result = await Runner.run(agent, "Hello", session=session)
 
 ### SQLAlchemy 会话
 
-使用任意 SQLAlchemy 支持数据库的生产级会话：
+基于任意 SQLAlchemy 支持数据库的生产级会话：
 
 ```python
 from agents.extensions.memory import SQLAlchemySession
@@ -379,13 +379,13 @@ engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/db")
 session = SQLAlchemySession("user_123", engine=engine, create_tables=True)
 ```
 
-详细文档见 [SQLAlchemy 会话](sqlalchemy_session.md)。
+详见 [SQLAlchemy 会话](sqlalchemy_session.md) 文档。
 
 
 
 ### 高级 SQLite 会话
 
-具备对话分支、用量分析和结构化查询能力的增强型 SQLite 会话：
+增强型 SQLite 会话，支持对话分支、使用分析和结构化查询：
 
 ```python
 from agents.extensions.memory import AdvancedSQLiteSession
@@ -405,11 +405,11 @@ await session.store_run_usage(result)  # Track token usage
 await session.create_branch_from_turn(2)  # Branch from turn 2
 ```
 
-详细文档见 [高级 SQLite 会话](advanced_sqlite_session.md)。
+详见 [高级 SQLite 会话](advanced_sqlite_session.md) 文档。
 
 ### 加密会话
 
-适用于任意会话实现的透明加密封装：
+适用于任意会话实现的透明加密封装器：
 
 ```python
 from agents.extensions.memory import EncryptedSession, SQLAlchemySession
@@ -432,17 +432,17 @@ session = EncryptedSession(
 result = await Runner.run(agent, "Hello", session=session)
 ```
 
-详细文档见 [加密会话](encrypted_session.md)。
+详见 [加密会话](encrypted_session.md) 文档。
 
 ### 其他会话类型
 
-还有更多内置选项。请参阅 `examples/memory/` 和 `extensions/memory/` 下的源代码。
+还有一些内置选项。请参阅 `examples/memory/` 和 `extensions/memory/` 下的源码。
 
 ## 运行模式
 
 ### 会话 ID 命名
 
-使用有意义的会话 ID 以便组织对话：
+使用有意义的会话 ID，帮助你组织对话：
 
 -   基于用户：`"user_12345"`
 -   基于线程：`"thread_abc123"`
@@ -450,15 +450,15 @@ result = await Runner.run(agent, "Hello", session=session)
 
 ### 内存持久化
 
--   对临时对话使用内存 SQLite（`SQLiteSession("session_id")`）
--   对持久对话使用文件 SQLite（`SQLiteSession("session_id", "path/to/db.sqlite")`）
+-   对于临时对话，使用内存型 SQLite（`SQLiteSession("session_id")`）
+-   对于持久对话，使用文件型 SQLite（`SQLiteSession("session_id", "path/to/db.sqlite")`）
 -   当你需要基于 `aiosqlite` 的实现时，使用异步 SQLite（`AsyncSQLiteSession("session_id", db_path="...")`）
--   对共享、低延迟会话内存使用 Redis 支持的会话（`RedisSession.from_url("session_id", url="redis://...")`）
--   对使用 SQLAlchemy 支持的现有数据库的生产系统，使用 SQLAlchemy 驱动的会话（`SQLAlchemySession("session_id", engine=engine, create_tables=True)`）
--   对支持 30+ 数据库后端且内置遥测、追踪和数据隔离的生产云原生部署，使用 Dapr 状态存储会话（`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`）
--   当你希望将历史记录存储在 OpenAI Conversations API 中时，使用 OpenAI 托管存储（`OpenAIConversationsSession()`）
--   使用加密会话（`EncryptedSession(session_id, underlying_session, encryption_key)`）为任意会话添加透明加密和基于 TTL 的过期
--   可考虑为其他生产系统（例如 Django）实现自定义会话后端，以支持更高级用例
+-   对于共享、低延迟的会话内存，使用 Redis 后端会话（`RedisSession.from_url("session_id", url="redis://...")`）
+-   对于使用 SQLAlchemy 支持的现有数据库的生产系统，使用 SQLAlchemy 驱动的会话（`SQLAlchemySession("session_id", engine=engine, create_tables=True)`）
+-   对于云原生生产部署（支持 30+ 数据库后端，并内置遥测、追踪和数据隔离），使用 Dapr 状态存储会话（`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`）
+-   当你希望将历史存储在 OpenAI Conversations API 中时，使用 OpenAI 托管存储（`OpenAIConversationsSession()`）
+-   若要为任意会话增加透明加密和基于 TTL 的过期机制，使用加密会话（`EncryptedSession(session_id, underlying_session, encryption_key)`）
+-   对于更高级用例，可考虑为其他生产系统（例如 Django）实现自定义会话后端
 
 ### 多会话
 
@@ -506,7 +506,7 @@ result2 = await Runner.run(
 
 ## 完整示例
 
-以下是一个展示会话内存实际效果的完整示例：
+下面是一个展示会话内存实际效果的完整示例：
 
 ```python
 import asyncio
@@ -570,7 +570,7 @@ if __name__ == "__main__":
 
 ## 自定义会话实现
 
-你可以通过创建遵循 [`Session`][agents.memory.session.Session] 协议的类来实现你自己的会话内存：
+你可以通过创建符合 [`Session`][agents.memory.session.Session] 协议的类，实现自己的会话内存：
 
 ```python
 from agents.memory.session import SessionABC
@@ -617,7 +617,7 @@ result = await Runner.run(
 
 社区已开发了额外的会话实现：
 
-| Package | 描述 |
+| Package | Description |
 |---------|-------------|
 | [openai-django-sessions](https://pypi.org/project/openai-django-sessions/) | 基于 Django ORM 的会话，适用于任何 Django 支持的数据库（PostgreSQL、MySQL、SQLite 等） |
 
@@ -625,15 +625,15 @@ result = await Runner.run(
 
 ## API 参考
 
-详细 API 文档见：
+详细 API 文档请参阅：
 
 -   [`Session`][agents.memory.session.Session] - 协议接口
 -   [`OpenAIConversationsSession`][agents.memory.OpenAIConversationsSession] - OpenAI Conversations API 实现
--   [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession] - Responses API 压缩封装
+-   [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession] - Responses API 压缩封装器
 -   [`SQLiteSession`][agents.memory.sqlite_session.SQLiteSession] - 基础 SQLite 实现
 -   [`AsyncSQLiteSession`][agents.extensions.memory.async_sqlite_session.AsyncSQLiteSession] - 基于 `aiosqlite` 的异步 SQLite 实现
--   [`RedisSession`][agents.extensions.memory.redis_session.RedisSession] - Redis 支持的会话实现
+-   [`RedisSession`][agents.extensions.memory.redis_session.RedisSession] - Redis 后端会话实现
 -   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy 驱动实现
 -   [`DaprSession`][agents.extensions.memory.dapr_session.DaprSession] - Dapr 状态存储实现
--   [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - 带分支与分析能力的增强型 SQLite
--   [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - 适用于任意会话的加密封装
+-   [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - 带分支与分析能力的增强 SQLite
+-   [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - 适用于任意会话的加密封装器

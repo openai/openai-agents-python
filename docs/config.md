@@ -1,4 +1,4 @@
-# Configuring the SDK
+# Configuration
 
 This page covers SDK-wide defaults that you usually set once during application startup, such as the default OpenAI key or client, the default OpenAI API shape, tracing export defaults, and logging behavior.
 

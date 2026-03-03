@@ -6,7 +6,7 @@ search:
 
 ## 프로젝트 및 가상 환경 생성
 
-이 작업은 한 번만 수행하면 됩니다
+이 작업은 한 번만 하면 됩니다
 
 ```bash
 mkdir my_project
@@ -30,7 +30,7 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 ### OpenAI API 키 설정
 
-아직 없다면 OpenAI API 키를 생성하기 위해 [다음 안내](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)를 따르세요
+아직 키가 없다면 [이 지침](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)을 따라 OpenAI API 키를 생성하세요
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -51,7 +51,7 @@ agent = Agent(
 
 ## 첫 에이전트 실행
 
-에이전트를 실행하고 [`RunResult`][agents.result.RunResult]를 받으려면 [`Runner`][agents.run.Runner]를 사용하세요
+[`Runner`][agents.run.Runner]를 사용해 에이전트를 실행하고 [`RunResult`][agents.result.RunResult]를 반환받으세요
 
 ```python
 import asyncio
@@ -70,7 +70,17 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-두 번째 턴에서는 `result.to_input_list()`를 `Runner.run(...)`에 다시 전달하거나, [세션](sessions/index.md)을 연결하거나, `conversation_id` / `previous_response_id`로 OpenAI 서버 관리 상태를 재사용할 수 있습니다. [에이전트 실행](running_agents.md) 가이드에서 이러한 접근 방식을 비교합니다.
+두 번째 턴에서는 `result.to_input_list()`를 `Runner.run(...)`에 다시 전달하거나, [session](sessions/index.md)을 연결하거나, `conversation_id` / `previous_response_id`로 OpenAI 서버 관리 상태를 재사용할 수 있습니다. [에이전트 실행](running_agents.md) 가이드에서 이러한 접근 방식을 비교합니다
+
+이 경험칙을 사용하세요:
+
+| 원한다면... | 시작 방법... |
+| --- | --- |
+| 완전한 수동 제어와 provider-agnostic 기록 | `result.to_input_list()` |
+| SDK가 기록을 대신 불러오고 저장하기를 원함 | [`session=...`](sessions/index.md) |
+| OpenAI 관리 서버 측 이어서 실행 | `previous_response_id` 또는 `conversation_id` |
+
+트레이드오프와 정확한 동작은 [에이전트 실행](running_agents.md#choose-a-memory-strategy)을 참고하세요
 
 ## 에이전트에 도구 제공
 
@@ -108,7 +118,14 @@ if __name__ == "__main__":
 
 ## 에이전트 몇 개 더 추가
 
-추가 에이전트도 동일한 방식으로 정의할 수 있습니다. `handoff_description`은 라우팅 에이전트에 언제 위임해야 하는지에 대한 추가 컨텍스트를 제공합니다
+멀티 에이전트 패턴을 선택하기 전에, 최종 답변을 누가 담당할지 결정하세요:
+
+-   **핸드오프**: 해당 턴의 그 부분에서는 전문 에이전트가 대화를 이어받습니다
+-   **Agents as tools**: 오케스트레이터가 제어를 유지하고 전문 에이전트를 도구로 호출합니다
+
+이 빠른 시작은 가장 짧은 첫 예제이므로 **핸드오프**를 계속 사용합니다. 매니저 스타일 패턴은 [에이전트 오케스트레이션](multi_agent.md) 및 [도구: Agents as tools](tools.md#agents-as-tools)을 참고하세요
+
+추가 에이전트도 같은 방식으로 정의할 수 있습니다. `handoff_description`은 라우팅 에이전트에 언제 위임할지에 대한 추가 컨텍스트를 제공합니다
 
 ```python
 from agents import Agent
@@ -128,7 +145,7 @@ math_tutor_agent = Agent(
 
 ## 핸드오프 정의
 
-에이전트에서 작업 해결 중 선택할 수 있는 발신 핸드오프 옵션 목록을 정의할 수 있습니다
+에이전트에서 작업 해결 중 선택할 수 있는 외부 핸드오프 옵션 목록을 정의할 수 있습니다
 
 ```python
 triage_agent = Agent(
@@ -140,7 +157,7 @@ triage_agent = Agent(
 
 ## 에이전트 오케스트레이션 실행
 
-러너는 개별 에이전트 실행, 모든 핸드오프, 그리고 모든 도구 호출 처리를 담당합니다
+러너는 개별 에이전트 실행, 핸드오프, 도구 호출을 모두 처리합니다
 
 ```python
 import asyncio
@@ -162,7 +179,7 @@ if __name__ == "__main__":
 
 ## 참고 코드 예제
 
-리포지토리에는 동일한 핵심 패턴에 대한 전체 스크립트가 포함되어 있습니다
+리포지토리에는 동일한 핵심 패턴에 대한 전체 스크립트가 포함되어 있습니다:
 
 -   첫 실행용 [`examples/basic/hello_world.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/hello_world.py)
 -   함수 도구용 [`examples/basic/tools.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/tools.py)
@@ -170,12 +187,12 @@ if __name__ == "__main__":
 
 ## 트레이스 확인
 
-에이전트 실행 중 어떤 일이 일어났는지 검토하려면 [OpenAI Dashboard의 Trace viewer](https://platform.openai.com/traces)로 이동해 에이전트 실행의 트레이스를 확인하세요.
+에이전트 실행 중 무엇이 발생했는지 검토하려면 [OpenAI Dashboard의 Trace viewer](https://platform.openai.com/traces)로 이동해 에이전트 실행의 트레이스를 확인하세요
 
 ## 다음 단계
 
-더 복잡한 에이전트 흐름을 구축하는 방법을 알아보세요
+더 복잡한 에이전트 흐름을 구축하는 방법을 알아보세요:
 
 -   [Agents](agents.md) 구성 방법 알아보기
--   [에이전트 실행](running_agents.md) 및 [세션](sessions/index.md) 알아보기
+-   [에이전트 실행](running_agents.md) 및 [sessions](sessions/index.md) 알아보기
 -   [도구](tools.md), [가드레일](guardrails.md), [모델](models/index.md) 알아보기

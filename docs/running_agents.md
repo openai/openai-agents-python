@@ -263,7 +263,7 @@ async def main():
         # California
 ```
 
-#### Automatic conversation management with Sessions
+#### Automatic conversation management with sessions
 
 For a simpler approach, you can use [Sessions](sessions/index.md) to automatically handle conversation history without manually calling `.to_input_list()`:
 
