@@ -114,27 +114,44 @@ if _enable_litellm_patch.lower() in ("1", "true"):
     _patch_litellm_serializer_warnings()
 
 
-def add_cache_control_to_last_message(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Add cache_control to the last message in the conversation (mutates in place)."""
-    if not messages:
-        return messages
+def _add_cache_control_to_content(msg: dict[str, Any]) -> None:
+    """Add cache_control to a message's content (mutates in place).
 
-    last_msg = messages[-1]
-    content = last_msg.get("content")
-
-    # Handle string content.
+    Handles both string and list content without changing the content format.
+    For string content, converts to list format with cache_control.
+    For list content, adds cache_control to the last text block.
+    """
+    content = msg.get("content")
     if isinstance(content, str):
-        last_msg["content"] = [
+        msg["content"] = [
             {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
         ]
-    # Handle list content.
     elif isinstance(content, list):
-        # Add cache_control to the last text block.
         for j in range(len(content) - 1, -1, -1):
             if isinstance(content[j], dict) and content[j].get("type") == "text":
                 content[j]["cache_control"] = {"type": "ephemeral"}
                 break
 
+
+def normalize_message_content_to_list(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize all string content to list format for consistent caching (mutates in place).
+
+    This ensures the Anthropic API receives the same token sequence regardless of whether
+    messages come from in-memory (possibly mutated) or from database (original string format).
+    Messages with None content (e.g., assistant tool_call messages) are left unchanged.
+    """
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, str):
+            msg["content"] = [{"type": "text", "text": content}]
+    return messages
+
+
+def add_cache_control_to_last_message(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add cache_control to the last message in the conversation (mutates in place)."""
+    if not messages:
+        return messages
+    _add_cache_control_to_content(messages[-1])
     return messages
 
 
@@ -143,32 +160,25 @@ def add_cache_control_to_last_user_message(messages: list[dict[str, Any]]) -> li
     if not messages:
         return messages
 
-    # Find the last user message.
-    last_user_idx = -1
     for i in range(len(messages) - 1, -1, -1):
         if isinstance(messages[i], dict) and messages[i].get("role") == "user":
-            last_user_idx = i
+            _add_cache_control_to_content(messages[i])
             break
 
-    if last_user_idx == -1:
-        return messages
+    return messages
 
-    user_msg = messages[last_user_idx]
-    content = user_msg.get("content")
 
-    # Handle string content.
-    if isinstance(content, str):
-        user_msg["content"] = [
-            {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
-        ]
-    # Handle list content.
-    elif isinstance(content, list):
-        # Add cache_control to the last text block.
-        for j in range(len(content) - 1, -1, -1):
-            if isinstance(content[j], dict) and content[j].get("type") == "text":
-                content[j]["cache_control"] = {"type": "ephemeral"}
-                break
+def add_cache_control_to_system_message(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add cache_control to the system message (mutates in place).
 
+    The system prompt is typically the most stable part of the input, making it
+    an ideal cache anchor point. This creates a separate cache breakpoint that
+    survives even when messages change between turns.
+    """
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "system":
+            _add_cache_control_to_content(msg)
+            break
     return messages
 
 
@@ -691,10 +701,20 @@ class LitellmModel(Model):
             # Apply Anthropic-specific message transformations.
             final_messages = cast(list[dict[str, Any]], converted_messages)
 
-            # Apply cache control to last message and last user message if enabled.
+            # Apply cache control with up to 4 strategic breakpoints.
+            # Anthropic cache hierarchy: tools -> system -> messages
+            # Breakpoints: (1) system prompt, (2) last user msg, (3) last msg overall
             if self.enable_cache_control:
-                final_messages = add_cache_control_to_last_message(final_messages)
-                final_messages = add_cache_control_to_last_user_message(final_messages)
+                # Normalize all string content to list format for consistent caching.
+                # This prevents cache misses caused by format differences between
+                # in-memory messages (mutated to list) and DB-loaded messages (string).
+                normalize_message_content_to_list(final_messages)
+                # Breakpoint 1: System prompt (most stable, rarely changes)
+                add_cache_control_to_system_message(final_messages)
+                # Breakpoint 2: Last user message (conversation history anchor)
+                add_cache_control_to_last_user_message(final_messages)
+                # Breakpoint 3: Last message overall (incremental turn cache)
+                add_cache_control_to_last_message(final_messages)
 
             # Append mock tool use message if deferred tools are enabled.
             if mock_tool_use_msg:
