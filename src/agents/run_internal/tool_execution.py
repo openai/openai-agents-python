@@ -977,6 +977,8 @@ async def execute_function_tool_calls(
 
     function_tool_results = []
     for tool_run, result in zip(tool_runs, results):
+        if isinstance(result, Exception):
+            raise result
         if isinstance(result, BaseException):
             error_output = (
                 f"Tool execution failed: {type(result).__name__}: {result}"

@@ -32,6 +32,7 @@ from agents import (
     ToolInputGuardrail,
     TResponseInputItem,
     Usage,
+    UserError,
 )
 from agents.run_internal import run_loop
 from agents.run_internal.run_loop import (
@@ -405,6 +406,35 @@ async def test_multiple_tool_calls_preserve_successful_outputs_when_sibling_canc
     cancelled_output = cast(dict[str, Any], result.generated_items[3].raw_item)["output"]
     assert cancelled_output.startswith("Tool execution failed:")
     assert "CancelledError" in cancelled_output
+
+
+@pytest.mark.asyncio
+async def test_multiple_tool_calls_still_raise_normal_exceptions():
+    async def _ok_tool() -> str:
+        return "ok"
+
+    async def _error_tool() -> str:
+        raise ValueError("boom")
+
+    ok_tool = function_tool(_ok_tool, name_override="ok_tool", failure_error_function=None)
+    error_tool = function_tool(
+        _error_tool,
+        name_override="error_tool",
+        failure_error_function=None,
+    )
+
+    agent = Agent(name="test", tools=[ok_tool, error_tool])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("ok_tool", "{}", call_id="1"),
+            get_function_tool_call("error_tool", "{}", call_id="2"),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with pytest.raises(UserError, match="Error running tool error_tool: boom"):
+        await get_execute_result(agent, response)
 
 
 @pytest.mark.asyncio
