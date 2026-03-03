@@ -204,6 +204,7 @@ Use this table to pick a starting point before reading the detailed examples bel
 | `AsyncSQLiteSession` | Async SQLite with `aiosqlite` | Extension backend with async driver support |
 | `RedisSession` | Shared memory across workers/services | Good for low-latency distributed deployments |
 | `SQLAlchemySession` | Production apps with existing databases | Works with SQLAlchemy-supported databases |
+| `DaprSession` | Cloud-native deployments with Dapr sidecars | Supports multiple state stores plus TTL and consistency controls |
 | `OpenAIConversationsSession` | Server-managed storage in OpenAI | OpenAI Conversations API-backed history |
 | `OpenAIResponsesCompactionSession` | Long conversations with automatic compaction | Wrapper around another session backend |
 | `AdvancedSQLiteSession` | SQLite plus branching/analytics | Heavier feature set; see dedicated page |
@@ -377,6 +378,36 @@ session = SQLAlchemySession("user_123", engine=engine, create_tables=True)
 
 See [SQLAlchemy Sessions](sqlalchemy_session.md) for detailed documentation.
 
+### Dapr sessions
+
+Use `DaprSession` when you already run Dapr sidecars or want session storage that can move across different state-store backends without changing your agent code.
+
+```bash
+pip install openai-agents[dapr]
+```
+
+```python
+from agents import Agent, Runner
+from agents.extensions.memory import DaprSession
+
+agent = Agent(name="Assistant")
+
+async with DaprSession.from_address(
+    "user_123",
+    state_store_name="statestore",
+    dapr_address="localhost:50001",
+) as session:
+    result = await Runner.run(agent, "Hello", session=session)
+    print(result.final_output)
+```
+
+Notes:
+
+-   `from_address(...)` creates and owns the Dapr client for you. If your app already manages one, construct `DaprSession(...)` directly with `dapr_client=...`.
+-   Pass `ttl=...` to let the backing state store expire old session data automatically when the store supports TTL.
+-   Pass `consistency=DAPR_CONSISTENCY_STRONG` when you need stronger read-after-write guarantees.
+-   The Dapr Python SDK also checks the HTTP sidecar endpoint. In local development, start Dapr with `--dapr-http-port 3500` as well as the gRPC port used in `dapr_address`.
+-   See [`examples/memory/dapr_session_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/dapr_session_example.py) for a full setup walkthrough, including local components and troubleshooting.
 
 
 ### Advanced SQLite sessions

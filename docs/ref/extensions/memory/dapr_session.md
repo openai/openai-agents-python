@@ -1,2 +1,3 @@
-# ::: agents.extensions.memory.dapr_session.DaprSession
+# `DaprSession`
 
+::: agents.extensions.memory.dapr_session.DaprSession

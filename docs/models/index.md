@@ -204,6 +204,36 @@ english_agent = Agent(
 )
 ```
 
+#### Common advanced `ModelSettings` options
+
+When you are using the OpenAI Responses API, several request fields already have direct `ModelSettings` fields, so you do not need `extra_args` for them.
+
+| Field | Use it for |
+| --- | --- |
+| `parallel_tool_calls` | Allow or forbid multiple tool calls in the same turn. |
+| `truncation` | Set `"auto"` to let the Responses API drop the oldest conversation items instead of failing when context would overflow. |
+| `prompt_cache_retention` | Keep cached prompt prefixes around longer, for example with `"24h"`. |
+| `response_include` | Request richer response payloads such as `web_search_call.action.sources`, `file_search_call.results`, or `reasoning.encrypted_content`. |
+| `top_logprobs` | Request top-token logprobs for output text. The SDK also adds `message.output_text.logprobs` automatically. |
+
+```python
+from agents import Agent, ModelSettings
+
+research_agent = Agent(
+    name="Research agent",
+    model="gpt-5.2",
+    model_settings=ModelSettings(
+        parallel_tool_calls=False,
+        truncation="auto",
+        prompt_cache_retention="24h",
+        response_include=["web_search_call.action.sources"],
+        top_logprobs=5,
+    ),
+)
+```
+
+Use `extra_args` when you need provider-specific or newer request fields that the SDK does not expose directly at the top level yet.
+
 Also, when you use OpenAI's Responses API, [there are a few other optional parameters](https://platform.openai.com/docs/api-reference/responses/create) (e.g., `user`, `service_tier`, and so on). If they are not available at the top level, you can use `extra_args` to pass them as well.
 
 ```python

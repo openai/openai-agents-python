@@ -124,6 +124,7 @@ plugins:
                     - ref/models/multi_provider.md
                     - ref/mcp/server.md
                     - ref/mcp/util.md
+                    - ref/mcp/manager.md
                 - Tracing:
                     - ref/tracing/index.md
                     - ref/tracing/create.md
@@ -166,6 +167,15 @@ plugins:
                     - ref/extensions/memory/dapr_session.md
                     - ref/extensions/memory/encrypt_session.md
                     - ref/extensions/memory/advanced_sqlite_session.md
+                    - Experimental Codex:
+                        - ref/extensions/experimental/codex/codex_tool.md
+                        - ref/extensions/experimental/codex/codex.md
+                        - ref/extensions/experimental/codex/codex_options.md
+                        - ref/extensions/experimental/codex/thread.md
+                        - ref/extensions/experimental/codex/thread_options.md
+                        - ref/extensions/experimental/codex/turn_options.md
+                        - ref/extensions/experimental/codex/events.md
+                        - ref/extensions/experimental/codex/items.md
         - locale: ja
           name: 日本語
           build: true
