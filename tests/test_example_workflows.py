@@ -795,3 +795,184 @@ async def test_agents_as_tools_subagent_cancellation_preserves_parent_final_outp
         "An error occurred while running the tool. Please try again. Error:"
     )
     assert "cancel" in tool_outputs[1]["output"].lower()
+
+
+@pytest.mark.asyncio
+async def test_agents_as_tools_streaming_subagent_cancellation_preserves_parent_output() -> None:
+    """A streaming nested subagent should retain sibling outputs after cancellation."""
+
+    async def _ok_tool() -> str:
+        return "Investigation: ok"
+
+    async def _cancel_tool() -> str:
+        raise asyncio.CancelledError("tool-cancelled")
+
+    received_events: list[AgentToolStreamEvent] = []
+
+    async def on_stream(event: AgentToolStreamEvent) -> None:
+        received_events.append(event)
+
+    status_model = FakeModel()
+    status_model.set_next_output([get_text_message("Status: ok")])
+    status_agent = Agent(name="status", model=status_model)
+
+    observability_model = FakeModel()
+    observability_model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call("ok_tool", "{}", call_id="inner_ok"),
+                get_function_tool_call("cancel_tool", "{}", call_id="inner_cancel"),
+            ],
+            [get_text_message("Nested summary")],
+        ]
+    )
+    observability_agent = Agent(
+        name="observability",
+        model=observability_model,
+        tools=[
+            function_tool(_ok_tool, name_override="ok_tool"),
+            function_tool(_cancel_tool, name_override="cancel_tool"),
+        ],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    orchestrator_model = FakeModel()
+    orchestrator_model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "status_agent",
+                    json.dumps({"input": "Hi"}),
+                    call_id="outer_status",
+                ),
+                get_function_tool_call(
+                    "observability_agent",
+                    json.dumps({"input": "Hi"}),
+                    call_id="outer_observability",
+                ),
+            ],
+            [get_text_message("Summary complete")],
+        ]
+    )
+
+    orchestrator = Agent(
+        name="orchestrator",
+        model=orchestrator_model,
+        tools=[
+            status_agent.as_tool("status_agent", "Status"),
+            observability_agent.as_tool(
+                "observability_agent",
+                "Observability",
+                on_stream=on_stream,
+            ),
+        ],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    result = await Runner.run(orchestrator, "Hi")
+
+    assert result.final_output == "Summary complete"
+    assert len(result.raw_responses) == 2
+    assert received_events, "on_stream should confirm the nested streaming path ran"
+    assert status_model.last_turn_args["input"] == [{"content": "Hi", "role": "user"}]
+    assert observability_model.last_turn_args is not None
+
+    nested_second_turn_input = cast(
+        list[dict[str, Any]],
+        observability_model.last_turn_args["input"],
+    )
+    nested_tool_outputs = [
+        item for item in nested_second_turn_input if item.get("type") == "function_call_output"
+    ]
+    assert nested_tool_outputs == [
+        {
+            "call_id": "inner_ok",
+            "output": "Investigation: ok",
+            "type": "function_call_output",
+        },
+        {
+            "call_id": "inner_cancel",
+            "output": (
+                "An error occurred while running the tool. Please try again. Error: tool-cancelled"
+            ),
+            "type": "function_call_output",
+        },
+    ]
+
+    outer_second_turn_input = cast(
+        list[dict[str, Any]],
+        orchestrator_model.last_turn_args["input"],
+    )
+    outer_tool_outputs = [
+        item for item in outer_second_turn_input if item.get("type") == "function_call_output"
+    ]
+    assert outer_tool_outputs == [
+        {
+            "call_id": "outer_status",
+            "output": "Status: ok",
+            "type": "function_call_output",
+        },
+        {
+            "call_id": "outer_observability",
+            "output": "Nested summary",
+            "type": "function_call_output",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agents_as_tools_failure_error_function_none_reraises_cancelled_error() -> None:
+    """Explicit None should preserve cancellation semantics for nested agent tools."""
+
+    async def _cancel_tool() -> str:
+        raise asyncio.CancelledError("tool-cancelled")
+
+    status_model = FakeModel()
+    status_model.set_next_output([get_text_message("Status: ok")])
+    status_agent = Agent(name="status", model=status_model)
+
+    observability_model = FakeModel()
+    observability_model.set_next_output(
+        [get_function_tool_call("cancel_tool", "{}", call_id="inner_cancel")]
+    )
+    observability_agent = Agent(
+        name="observability",
+        model=observability_model,
+        tools=[
+            function_tool(_cancel_tool, name_override="cancel_tool", failure_error_function=None)
+        ],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    orchestrator_model = FakeModel()
+    orchestrator_model.set_next_output(
+        [
+            get_function_tool_call(
+                "status_agent",
+                json.dumps({"input": "Hi"}),
+                call_id="outer_status",
+            ),
+            get_function_tool_call(
+                "observability_agent",
+                json.dumps({"input": "Hi"}),
+                call_id="outer_observability",
+            ),
+        ]
+    )
+
+    orchestrator = Agent(
+        name="orchestrator",
+        model=orchestrator_model,
+        tools=[
+            status_agent.as_tool("status_agent", "Status"),
+            observability_agent.as_tool(
+                "observability_agent",
+                "Observability",
+                failure_error_function=None,
+            ),
+        ],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await Runner.run(orchestrator, "Hi")

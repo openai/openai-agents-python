@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -140,6 +141,7 @@ _FunctionToolSettlementWaiter = Callable[
     [set[asyncio.Task[Any]], asyncio.AbstractEventLoop, float],
     Awaitable[bool],
 ]
+_FunctionToolBackgroundExceptionMessage = Callable[[BaseException], str | None]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -151,32 +153,47 @@ class _FunctionToolFailure:
     source: _FunctionToolFailureSource = "direct"
 
 
-def _consume_background_task_result(task: asyncio.Task[Any]) -> None:
-    """Report late cleanup failures from cancelled sibling tasks."""
-    if task.cancelled():
-        return
+@dataclasses.dataclass
+class _FunctionToolTaskState:
+    """Mutable execution state tracked for each function-tool task in a batch."""
 
-    exc = task.exception()
-    if exc is None or isinstance(exc, asyncio.CancelledError):
-        return
-
-    message = (
-        "Background function tool task raised during cancellation cleanup after failure "
-        "propagation."
-        if isinstance(exc, Exception)
-        else "Background function tool task raised a fatal exception."
-    )
-    task.get_loop().call_exception_handler(
-        {
-            "message": message,
-            "exception": exc,
-            "task": task,
-        }
-    )
+    tool_run: ToolRunFunction
+    order: int
+    invoke_task: asyncio.Task[Any] | None = None
+    in_post_invoke_phase: bool = False
 
 
-def _consume_background_post_invoke_task_result(task: asyncio.Task[Any]) -> None:
-    """Report late post-invoke failures that finish after the main error was raised."""
+def _background_cleanup_task_exception_message(exc: BaseException) -> str | None:
+    """Return the loop-level message for late sibling-cleanup failures."""
+    if isinstance(exc, asyncio.CancelledError):
+        return None
+    if isinstance(exc, Exception):
+        return (
+            "Background function tool task raised during cancellation cleanup after failure "
+            "propagation."
+        )
+    return "Background function tool task raised a fatal exception."
+
+
+def _background_post_invoke_task_exception_message(exc: BaseException) -> str | None:
+    """Return the loop-level message for late post-invoke failures."""
+    del exc
+    return "Background function tool post-invoke task raised after failure propagation."
+
+
+def _parent_cancelled_task_exception_message(exc: BaseException) -> str | None:
+    """Return the loop-level message for detached tasks after parent cancellation."""
+    if isinstance(exc, Exception):
+        return None
+    return "Background function tool task raised a fatal exception."
+
+
+def _consume_function_tool_task_result(
+    task: asyncio.Task[Any],
+    *,
+    message_for_exception: _FunctionToolBackgroundExceptionMessage,
+) -> None:
+    """Report background task failures according to the provided reporting policy."""
     if task.cancelled():
         return
 
@@ -184,29 +201,13 @@ def _consume_background_post_invoke_task_result(task: asyncio.Task[Any]) -> None
     if exc is None:
         return
 
-    task.get_loop().call_exception_handler(
-        {
-            "message": (
-                "Background function tool post-invoke task raised after failure propagation."
-            ),
-            "exception": exc,
-            "task": task,
-        }
-    )
-
-
-def _consume_parent_cancelled_task_result(task: asyncio.Task[Any]) -> None:
-    """Consume task results once parent cancellation has already won."""
-    if task.cancelled():
-        return
-
-    exc = task.exception()
-    if exc is None or isinstance(exc, Exception):
+    message = message_for_exception(exc)
+    if message is None:
         return
 
     task.get_loop().call_exception_handler(
         {
-            "message": "Background function tool task raised a fatal exception.",
+            "message": message,
             "exception": exc,
             "task": task,
         }
@@ -268,40 +269,36 @@ def _cancel_function_tool_tasks(tasks: set[asyncio.Task[Any]]) -> None:
         task.cancel()
 
 
-def _attach_background_task_result_callbacks(tasks: set[asyncio.Task[Any]]) -> None:
-    """Report late sibling-cleanup failures after failure propagation."""
+def _attach_function_tool_task_result_callbacks(
+    tasks: set[asyncio.Task[Any]],
+    *,
+    message_for_exception: _FunctionToolBackgroundExceptionMessage,
+) -> None:
+    """Attach a shared loop-level reporter to a set of background function-tool tasks."""
+    callback = functools.partial(
+        _consume_function_tool_task_result,
+        message_for_exception=message_for_exception,
+    )
     for task in tasks:
-        task.add_done_callback(_consume_background_task_result)
-
-
-def _attach_parent_cancelled_task_result_callbacks(tasks: set[asyncio.Task[Any]]) -> None:
-    """Consume detached task results after parent cancellation without surfacing tool errors."""
-    for task in tasks:
-        task.add_done_callback(_consume_parent_cancelled_task_result)
-
-
-def _attach_background_post_invoke_task_result_callbacks(tasks: set[asyncio.Task[Any]]) -> None:
-    """Report post-invoke failures that complete after the parent already raised."""
-    for task in tasks:
-        task.add_done_callback(_consume_background_post_invoke_task_result)
+        task.add_done_callback(callback)
 
 
 def _record_completed_function_tool_tasks(
     *,
     completed_tasks: Sequence[asyncio.Task[Any]],
-    task_to_tool_run: dict[asyncio.Task[Any], ToolRunFunction],
-    task_to_order: dict[asyncio.Task[Any], int],
+    task_states: Mapping[asyncio.Task[Any], _FunctionToolTaskState],
     results_by_tool_run: dict[int, Any],
     failure_sources_by_task: Mapping[asyncio.Task[Any], _FunctionToolFailureSource] | None = None,
     ignore_cancelled_tasks: set[asyncio.Task[Any]] | None = None,
 ) -> _FunctionToolFailure | None:
     """Store finished task results and return the preferred failure, if any."""
     failure: _FunctionToolFailure | None = None
-    ordered_done_tasks = sorted(completed_tasks, key=lambda task: task_to_order[task])
+    ordered_done_tasks = sorted(completed_tasks, key=lambda task: task_states[task].order)
     ignored_tasks = ignore_cancelled_tasks or set()
     failure_sources = failure_sources_by_task or {}
     for task in ordered_done_tasks:
-        tool_run = task_to_tool_run[task]
+        task_state = task_states[task]
+        tool_run = task_state.tool_run
         try:
             results_by_tool_run[id(tool_run)] = task.result()
         except BaseException as exc:
@@ -311,7 +308,7 @@ def _record_completed_function_tool_tasks(
                 failure,
                 _FunctionToolFailure(
                     error=exc,
-                    order=task_to_order[task],
+                    order=task_state.order,
                     source=failure_sources.get(task, "direct"),
                 ),
             )
@@ -321,8 +318,7 @@ def _record_completed_function_tool_tasks(
 def _collect_settled_function_tool_tasks(
     *,
     remaining_tasks: set[asyncio.Task[Any]],
-    task_to_tool_run: dict[asyncio.Task[Any], ToolRunFunction],
-    task_to_order: dict[asyncio.Task[Any], int],
+    task_states: Mapping[asyncio.Task[Any], _FunctionToolTaskState],
     results_by_tool_run: dict[int, Any],
     failure_sources_by_task: Mapping[asyncio.Task[Any], _FunctionToolFailureSource] | None = None,
     ignore_cancelled_tasks: set[asyncio.Task[Any]] | None = None,
@@ -334,8 +330,7 @@ def _collect_settled_function_tool_tasks(
 
     new_failure = _record_completed_function_tool_tasks(
         completed_tasks=list(settled_tasks),
-        task_to_tool_run=task_to_tool_run,
-        task_to_order=task_to_order,
+        task_states=task_states,
         results_by_tool_run=results_by_tool_run,
         failure_sources_by_task=failure_sources_by_task,
         ignore_cancelled_tasks=ignore_cancelled_tasks,
@@ -348,9 +343,14 @@ async def _wait_for_cancelled_function_tool_task_progress(
     loop: asyncio.AbstractEventLoop,
     remaining_time: float,
     *,
-    task_to_invoke_task: Mapping[asyncio.Task[Any], asyncio.Task[Any]],
+    task_states: Mapping[asyncio.Task[Any], _FunctionToolTaskState],
 ) -> bool:
     """Wait until a cancelled sibling can make another self-driven step."""
+    task_to_invoke_task = {
+        tracked_task: task_state.invoke_task
+        for tracked_task, task_state in task_states.items()
+        if task_state.invoke_task is not None
+    }
     progress_deadlines = {
         task: get_function_tool_task_progress_deadline(
             task=task,
@@ -396,8 +396,7 @@ async def _wait_for_function_tool_task_completion(
 async def _settle_pending_function_tool_tasks(
     *,
     pending_tasks: set[asyncio.Task[Any]],
-    task_to_tool_run: dict[asyncio.Task[Any], ToolRunFunction],
-    task_to_order: dict[asyncio.Task[Any], int],
+    task_states: Mapping[asyncio.Task[Any], _FunctionToolTaskState],
     results_by_tool_run: dict[int, Any],
     timeout_seconds: float,
     wait_for_pending_tasks: _FunctionToolSettlementWaiter,
@@ -416,8 +415,7 @@ async def _settle_pending_function_tool_tasks(
     while remaining_tasks:
         new_failure, remaining_tasks = _collect_settled_function_tool_tasks(
             remaining_tasks=remaining_tasks,
-            task_to_tool_run=task_to_tool_run,
-            task_to_order=task_to_order,
+            task_states=task_states,
             results_by_tool_run=results_by_tool_run,
             failure_sources_by_task=failure_sources_by_task,
             ignore_cancelled_tasks=ignore_cancelled_tasks,
@@ -436,8 +434,7 @@ async def _settle_pending_function_tool_tasks(
 
     new_failure, remaining_tasks = _collect_settled_function_tool_tasks(
         remaining_tasks=remaining_tasks,
-        task_to_tool_run=task_to_tool_run,
-        task_to_order=task_to_order,
+        task_states=task_states,
         results_by_tool_run=results_by_tool_run,
         failure_sources_by_task=failure_sources_by_task,
         ignore_cancelled_tasks=ignore_cancelled_tasks,
@@ -449,9 +446,7 @@ async def _settle_pending_function_tool_tasks(
 async def _drain_cancelled_function_tool_tasks(
     *,
     pending_tasks: set[asyncio.Task[Any]],
-    task_to_tool_run: dict[asyncio.Task[Any], ToolRunFunction],
-    task_to_order: dict[asyncio.Task[Any], int],
-    task_to_invoke_task: Mapping[asyncio.Task[Any], asyncio.Task[Any]],
+    task_states: Mapping[asyncio.Task[Any], _FunctionToolTaskState],
     results_by_tool_run: dict[int, Any],
     failure_sources_by_task: Mapping[asyncio.Task[Any], _FunctionToolFailureSource] | None = None,
     ignore_cancelled_tasks: set[asyncio.Task[Any]] | None = None,
@@ -459,8 +454,7 @@ async def _drain_cancelled_function_tool_tasks(
     """Drain cancelled siblings while they can continue making self-driven progress."""
     return await _settle_pending_function_tool_tasks(
         pending_tasks=pending_tasks,
-        task_to_tool_run=task_to_tool_run,
-        task_to_order=task_to_order,
+        task_states=task_states,
         results_by_tool_run=results_by_tool_run,
         timeout_seconds=_FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS,
         wait_for_pending_tasks=lambda remaining, loop, remaining_time: (
@@ -468,7 +462,7 @@ async def _drain_cancelled_function_tool_tasks(
                 remaining,
                 loop,
                 remaining_time,
-                task_to_invoke_task=task_to_invoke_task,
+                task_states=task_states,
             )
         ),
         failure_sources_by_task=failure_sources_by_task,
@@ -479,8 +473,7 @@ async def _drain_cancelled_function_tool_tasks(
 async def _wait_pending_function_tool_tasks_for_timeout(
     *,
     pending_tasks: set[asyncio.Task[Any]],
-    task_to_tool_run: dict[asyncio.Task[Any], ToolRunFunction],
-    task_to_order: dict[asyncio.Task[Any], int],
+    task_states: Mapping[asyncio.Task[Any], _FunctionToolTaskState],
     results_by_tool_run: dict[int, Any],
     failure_sources_by_task: Mapping[asyncio.Task[Any], _FunctionToolFailureSource] | None = None,
     timeout_seconds: float,
@@ -488,8 +481,7 @@ async def _wait_pending_function_tool_tasks_for_timeout(
     """Wait briefly for post-invoke siblings so in-flight failures can still surface."""
     return await _settle_pending_function_tool_tasks(
         pending_tasks=pending_tasks,
-        task_to_tool_run=task_to_tool_run,
-        task_to_order=task_to_order,
+        task_states=task_states,
         results_by_tool_run=results_by_tool_run,
         timeout_seconds=timeout_seconds,
         wait_for_pending_tasks=_wait_for_function_tool_task_completion,
@@ -1221,11 +1213,8 @@ class _FunctionToolBatchExecutor:
         self.tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
         self.tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
         self.tool_state_scope_id = get_agent_tool_state_scope(context_wrapper)
-        self.task_in_post_invoke_phase: dict[asyncio.Task[Any], bool] = {}
-        self.task_to_invoke_task: dict[asyncio.Task[Any], asyncio.Task[Any]] = {}
+        self.task_states: dict[asyncio.Task[Any], _FunctionToolTaskState] = {}
         self.teardown_cancelled_tasks: set[asyncio.Task[Any]] = set()
-        self.task_to_tool_run: dict[asyncio.Task[Any], ToolRunFunction] = {}
-        self.task_to_order: dict[asyncio.Task[Any], int] = {}
         self.results_by_tool_run: dict[int, Any] = {}
         self.pending_tasks: set[asyncio.Task[Any]] = set()
         self.propagating_failure: BaseException | None = None
@@ -1256,8 +1245,7 @@ class _FunctionToolBatchExecutor:
         task = asyncio.create_task(
             self._run_single_tool(tool_run.function_tool, tool_run.tool_call)
         )
-        self.task_to_tool_run[task] = tool_run
-        self.task_to_order[task] = order
+        self.task_states[task] = _FunctionToolTaskState(tool_run=tool_run, order=order)
         self.pending_tasks.add(task)
 
     async def _drain_pending_tasks(self) -> None:
@@ -1268,8 +1256,7 @@ class _FunctionToolBatchExecutor:
             )
             failure = _record_completed_function_tool_tasks(
                 completed_tasks=list(done_tasks),
-                task_to_tool_run=self.task_to_tool_run,
-                task_to_order=self.task_to_order,
+                task_states=self.task_states,
                 results_by_tool_run=self.results_by_tool_run,
             )
             if failure is not None:
@@ -1290,8 +1277,14 @@ class _FunctionToolBatchExecutor:
             post_invoke_tasks
         )
 
-        _attach_background_task_result_callbacks(remaining_cancelled_tasks)
-        _attach_background_post_invoke_task_result_callbacks(remaining_post_invoke_tasks)
+        _attach_function_tool_task_result_callbacks(
+            remaining_cancelled_tasks,
+            message_for_exception=_background_cleanup_task_exception_message,
+        )
+        _attach_function_tool_task_result_callbacks(
+            remaining_post_invoke_tasks,
+            message_for_exception=_background_post_invoke_task_exception_message,
+        )
 
         merged_failure = _merge_late_function_tool_failure(failure, late_failure)
         merged_failure = _merge_late_function_tool_failure(merged_failure, post_invoke_failure)
@@ -1302,9 +1295,7 @@ class _FunctionToolBatchExecutor:
 
     def _partition_pending_tasks(self) -> tuple[set[asyncio.Task[Any]], set[asyncio.Task[Any]]]:
         cancellable_tasks = {
-            task
-            for task in self.pending_tasks
-            if not self.task_in_post_invoke_phase.get(task, False)
+            task for task in self.pending_tasks if not self.task_states[task].in_post_invoke_phase
         }
         return cancellable_tasks, self.pending_tasks - cancellable_tasks
 
@@ -1317,9 +1308,7 @@ class _FunctionToolBatchExecutor:
         }
         return await _drain_cancelled_function_tool_tasks(
             pending_tasks=tasks,
-            task_to_tool_run=self.task_to_tool_run,
-            task_to_order=self.task_to_order,
-            task_to_invoke_task=self.task_to_invoke_task,
+            task_states=self.task_states,
             results_by_tool_run=self.results_by_tool_run,
             failure_sources_by_task=late_failure_sources,
             ignore_cancelled_tasks=tasks,
@@ -1334,8 +1323,7 @@ class _FunctionToolBatchExecutor:
         }
         return await _wait_pending_function_tool_tasks_for_timeout(
             pending_tasks=tasks,
-            task_to_tool_run=self.task_to_tool_run,
-            task_to_order=self.task_to_order,
+            task_states=self.task_states,
             results_by_tool_run=self.results_by_tool_run,
             failure_sources_by_task=post_invoke_failure_sources,
             timeout_seconds=_FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS,
@@ -1344,7 +1332,10 @@ class _FunctionToolBatchExecutor:
     def _cancel_pending_tasks_for_parent_cancellation(self) -> None:
         self.teardown_cancelled_tasks.update(self.pending_tasks)
         _cancel_function_tool_tasks(self.pending_tasks)
-        _attach_parent_cancelled_task_result_callbacks(self.pending_tasks)
+        _attach_function_tool_task_result_callbacks(
+            self.pending_tasks,
+            message_for_exception=_parent_cancelled_task_exception_message,
+        )
 
     async def _run_single_tool(
         self,
@@ -1353,7 +1344,7 @@ class _FunctionToolBatchExecutor:
     ) -> Any:
         current_task = asyncio.current_task()
         if current_task is not None:
-            self.task_in_post_invoke_phase[current_task] = False
+            self.task_states[current_task].in_post_invoke_phase = False
 
         with function_span(func_tool.name) as span_fn:
             tool_context = ToolContext.from_agent_context(
@@ -1495,7 +1486,7 @@ class _FunctionToolBatchExecutor:
             )
         )
         if current_task is not None:
-            self.task_to_invoke_task[current_task] = invoke_task
+            self.task_states[current_task].invoke_task = invoke_task
         return await self._await_invoke_task(current_task=current_task, invoke_task=invoke_task)
 
     async def _invoke_tool_and_run_post_invoke(
@@ -1534,7 +1525,7 @@ class _FunctionToolBatchExecutor:
             real_result = result
 
         if current_task is not None:
-            self.task_in_post_invoke_phase[current_task] = True
+            self.task_states[current_task].in_post_invoke_phase = True
 
         final_result = await _execute_tool_output_guardrails(
             func_tool=func_tool,
@@ -1583,7 +1574,12 @@ class _FunctionToolBatchExecutor:
                     ):
                         raise invoke_failure from cancel_exc
             else:
-                invoke_task.add_done_callback(_consume_parent_cancelled_task_result)
+                invoke_task.add_done_callback(
+                    functools.partial(
+                        _consume_function_tool_task_result,
+                        message_for_exception=_parent_cancelled_task_exception_message,
+                    )
+                )
             raise
 
     def _get_nested_tool_interruptions(
