@@ -847,16 +847,6 @@ async def execute_function_tool_calls(
     tool_state_scope_id = get_agent_tool_state_scope(context_wrapper)
 
     async def run_single_tool(func_tool: FunctionTool, tool_call: ResponseFunctionToolCall) -> Any:
-        def _task_is_being_cancelled(task: asyncio.Task[Any] | None) -> bool:
-            if task is None:
-                return False
-
-            cancelling = getattr(task, "cancelling", None)
-            if callable(cancelling):
-                return bool(cancelling())
-
-            return bool(getattr(task, "_must_cancel", False))
-
         with function_span(func_tool.name) as span_fn:
             tool_context = ToolContext.from_agent_context(
                 context_wrapper,
@@ -940,15 +930,19 @@ async def execute_function_tool_calls(
                             else _coro.noop_coroutine()
                         ),
                     )
-                    try:
-                        real_result = await invoke_function_tool(
+                    invoke_task = asyncio.create_task(
+                        invoke_function_tool(
                             function_tool=func_tool,
                             context=tool_context,
                             arguments=tool_call.arguments,
                         )
+                    )
+                    try:
+                        real_result = await asyncio.shield(invoke_task)
                     except asyncio.CancelledError as e:
-                        current_task = asyncio.current_task()
-                        if _task_is_being_cancelled(current_task):
+                        if not invoke_task.done():
+                            invoke_task.cancel()
+                            await asyncio.gather(invoke_task, return_exceptions=True)
                             raise
 
                         _error_tracing.attach_error_to_current_span(
