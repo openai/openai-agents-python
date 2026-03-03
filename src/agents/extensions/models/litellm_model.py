@@ -550,6 +550,20 @@ class LitellmModel(Model):
 
         converted_tools = _to_dump_compatible(converted_tools)
 
+        # Sort tools by name for deterministic ordering.
+        # Anthropic cache hierarchy: tools -> system -> messages.
+        # Any change in the tools array (including order) invalidates the
+        # system and messages cache.  Sorting ensures stable tool ordering
+        # regardless of how tools are registered or initialized.
+        if self._is_anthropic_model() and converted_tools:
+            converted_tools.sort(
+                key=lambda t: (
+                    t.get("function", {}).get("name", "")
+                    if "function" in t
+                    else t.get("name", "")
+                )
+            )
+
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
