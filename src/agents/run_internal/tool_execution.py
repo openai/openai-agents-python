@@ -953,6 +953,39 @@ async def execute_function_tool_calls(
                         ),
                     )
                 result = final_result
+            except asyncio.CancelledError as e:
+                if task := asyncio.current_task():
+                    if task.cancelling():
+                        raise
+
+                _error_tracing.attach_error_to_current_span(
+                    SpanError(
+                        message="Tool execution cancelled",
+                        data={"tool_name": func_tool.name, "error": str(e)},
+                    )
+                )
+                error_output = (
+                    f"Tool execution failed: {type(e).__name__}: {e}"
+                    if str(e)
+                    else f"Tool execution failed: {type(e).__name__}"
+                )
+                final_result = await _execute_tool_output_guardrails(
+                    func_tool=func_tool,
+                    tool_context=tool_context,
+                    agent=agent,
+                    real_result=error_output,
+                    tool_output_guardrail_results=tool_output_guardrail_results,
+                )
+
+                await asyncio.gather(
+                    hooks.on_tool_end(tool_context, agent, func_tool, final_result),
+                    (
+                        agent_hooks.on_tool_end(tool_context, agent, func_tool, final_result)
+                        if agent_hooks
+                        else _coro.noop_coroutine()
+                    ),
+                )
+                result = final_result
             except Exception as e:
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
@@ -967,10 +1000,6 @@ async def execute_function_tool_calls(
             if config.trace_include_sensitive_data:
                 span_fn.span_data.output = result
         return result
-
-    @dataclasses.dataclass
-    class _CancelledToolResult:
-        exc: asyncio.CancelledError
 
     task_to_tool_run: dict[asyncio.Task[Any], ToolRunFunction] = {}
     for tool_run in tool_runs:
@@ -990,8 +1019,6 @@ async def execute_function_tool_calls(
                 tool_run = task_to_tool_run[task]
                 try:
                     results_by_tool_run[id(tool_run)] = task.result()
-                except asyncio.CancelledError as exc:
-                    results_by_tool_run[id(tool_run)] = _CancelledToolResult(exc)
                 except Exception:
                     for pending_task in pending_tasks:
                         pending_task.cancel()
@@ -1014,27 +1041,6 @@ async def execute_function_tool_calls(
     function_tool_results = []
     for tool_run in tool_runs:
         result = results_by_tool_run[id(tool_run)]
-        if isinstance(result, _CancelledToolResult):
-            error_output = (
-                f"Tool execution failed: {type(result.exc).__name__}: {result.exc}"
-                if str(result.exc)
-                else f"Tool execution failed: {type(result.exc).__name__}"
-            )
-            function_tool_results.append(
-                FunctionToolResult(
-                    tool=tool_run.function_tool,
-                    output=error_output,
-                    run_item=ToolCallOutputItem(
-                        output=error_output,
-                        raw_item=ItemHelpers.tool_call_output_item(
-                            tool_run.tool_call,
-                            error_output,
-                        ),
-                        agent=agent,
-                    ),
-                )
-            )
-            continue
         if isinstance(result, FunctionToolResult):
             nested_run_result = consume_agent_tool_run_result(
                 tool_run.tool_call,

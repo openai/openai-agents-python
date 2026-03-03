@@ -517,6 +517,7 @@ async def test_multiple_tool_calls_cancel_pending_tasks_when_parent_cancelled():
             else:
                 tool_2_started.set()
             await asyncio.Future()
+            return "unreachable"
         except asyncio.CancelledError:
             cancelled_tools.append(name)
             raise
