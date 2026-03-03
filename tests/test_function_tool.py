@@ -1,5 +1,7 @@
 import asyncio
 import contextlib
+import copy
+import dataclasses
 import json
 import time
 from typing import Any, Callable, cast
@@ -451,6 +453,30 @@ async def test_async_failure_error_function_is_awaited() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failure_error_function_normalizes_cancelled_error_to_exception() -> None:
+    seen_error: Exception | None = None
+
+    def failure_handler(_ctx: RunContextWrapper[Any], error: Exception) -> str:
+        nonlocal seen_error
+        assert isinstance(error, Exception)
+        assert not isinstance(error, asyncio.CancelledError)
+        seen_error = error
+        return f"handled:{error}"
+
+    tool = function_tool(lambda: "ok", failure_error_function=failure_handler)
+
+    result = await tool_module.maybe_invoke_function_tool_failure_error_function(
+        function_tool=tool,
+        context=RunContextWrapper(None),
+        error=asyncio.CancelledError(),
+    )
+
+    assert result == "handled:Tool execution cancelled."
+    assert seen_error is not None
+    assert str(seen_error) == "Tool execution cancelled."
+
+
+@pytest.mark.asyncio
 async def test_default_failure_error_function_is_resolved_at_invoke_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -467,6 +493,148 @@ async def test_default_failure_error_function_is_resolved_at_invoke_time(
     ctx = ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments='{"a": 7}')
     result = await tool.on_invoke_tool(ctx, '{"a": 7}')
     assert result == "patched:boom:7"
+
+
+@pytest.mark.asyncio
+async def test_manual_function_tool_uses_default_failure_error_function() -> None:
+    async def on_invoke_tool(_ctx: ToolContext[Any], _args: str) -> str:
+        raise asyncio.CancelledError("manual-tool-cancelled")
+
+    manual_tool = FunctionTool(
+        name="manual_cancel_tool",
+        description="manual cancel",
+        params_json_schema={},
+        on_invoke_tool=on_invoke_tool,
+    )
+
+    result = await tool_module.maybe_invoke_function_tool_failure_error_function(
+        function_tool=manual_tool,
+        context=RunContextWrapper(None),
+        error=asyncio.CancelledError("manual-tool-cancelled"),
+    )
+
+    expected = (
+        "An error occurred while running the tool. Please try again. Error: manual-tool-cancelled"
+    )
+    assert result == expected
+    assert (
+        tool_module.resolve_function_tool_failure_error_function(manual_tool)
+        is default_tool_error_function
+    )
+
+
+@pytest.mark.asyncio
+async def test_failure_error_function_survives_dataclasses_replace() -> None:
+    def failure_handler(_ctx: RunContextWrapper[Any], error: Exception) -> str:
+        return f"handled:{error}"
+
+    tool = function_tool(lambda: "ok", failure_error_function=failure_handler)
+    copied_tool = dataclasses.replace(tool, name="copied_tool")
+
+    result = await tool_module.maybe_invoke_function_tool_failure_error_function(
+        function_tool=copied_tool,
+        context=RunContextWrapper(None),
+        error=asyncio.CancelledError(),
+    )
+
+    assert result == "handled:Tool execution cancelled."
+    assert tool_module.resolve_function_tool_failure_error_function(copied_tool) is failure_handler
+
+
+@pytest.mark.asyncio
+async def test_replaced_function_tool_normal_failure_uses_replaced_policy() -> None:
+    def boom() -> None:
+        raise RuntimeError("kapow")
+
+    replaced_tool = dataclasses.replace(
+        function_tool(boom),
+        name="replaced_tool",
+        _failure_error_function=None,
+        _use_default_failure_error_function=False,
+    )
+
+    with pytest.raises(RuntimeError, match="kapow"):
+        await replaced_tool.on_invoke_tool(
+            ToolContext(None, tool_name=replaced_tool.name, tool_call_id="1", tool_arguments=""),
+            "",
+        )
+
+
+@pytest.mark.asyncio
+async def test_shallow_copied_function_tool_normal_failure_uses_copied_policy() -> None:
+    def boom() -> None:
+        raise RuntimeError("kapow")
+
+    original_tool = function_tool(boom)
+    custom_state = {"cache": ["alpha"]}
+    cast(Any, original_tool).custom_state = custom_state
+
+    copied_tool = copy.copy(original_tool)
+    copied_tool.name = "copied_tool"
+    copied_tool._failure_error_function = None
+    copied_tool._use_default_failure_error_function = False
+
+    with pytest.raises(RuntimeError, match="kapow"):
+        await copied_tool.on_invoke_tool(
+            ToolContext(None, tool_name=copied_tool.name, tool_call_id="1", tool_arguments=""),
+            "",
+        )
+
+    assert cast(Any, copied_tool).custom_state is custom_state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("copy_style", ["replace", "shallow_copy"])
+async def test_copied_function_tool_invalid_input_uses_current_name(copy_style: str) -> None:
+    def echo(value: str) -> str:
+        return value
+
+    original_tool = function_tool(
+        echo,
+        name_override="original_tool",
+        failure_error_function=None,
+    )
+    if copy_style == "replace":
+        copied_tool = dataclasses.replace(original_tool, name="copied_tool")
+    else:
+        copied_tool = copy.copy(original_tool)
+        copied_tool.name = "copied_tool"
+
+    with pytest.raises(ModelBehaviorError, match="Invalid JSON input for tool copied_tool"):
+        await copied_tool.on_invoke_tool(
+            ToolContext(
+                None,
+                tool_name=copied_tool.name,
+                tool_call_id="1",
+                tool_arguments="{}",
+            ),
+            "{}",
+        )
+
+
+@pytest.mark.asyncio
+async def test_default_failure_error_function_survives_deepcopy() -> None:
+    def boom() -> None:
+        raise RuntimeError("kapow")
+
+    tool = function_tool(boom)
+    copied_tool = copy.deepcopy(tool)
+
+    result = await tool_module.maybe_invoke_function_tool_failure_error_function(
+        function_tool=copied_tool,
+        context=RunContextWrapper(None),
+        error=asyncio.CancelledError(),
+    )
+
+    expected = (
+        "An error occurred while running the tool. Please try again. "
+        "Error: Tool execution cancelled."
+    )
+    assert result == expected
+    assert (
+        tool_module.resolve_function_tool_failure_error_function(copied_tool)
+        is default_tool_error_function
+    )
 
 
 def test_function_tool_accepts_guardrail_arguments():

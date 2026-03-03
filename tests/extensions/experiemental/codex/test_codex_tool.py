@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import importlib
 import inspect
 import json
@@ -8,6 +10,7 @@ from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel, ConfigDict
 
 from agents import Agent, function_tool
@@ -21,9 +24,14 @@ from agents.extensions.experimental.codex import (
     codex_tool,
 )
 from agents.extensions.experimental.codex.codex_tool import CodexToolInputItem
+from agents.lifecycle import RunHooks
+from agents.run_config import RunConfig
 from agents.run_context import RunContextWrapper
+from agents.run_internal.run_steps import ToolRunFunction
+from agents.run_internal.tool_execution import execute_function_tool_calls
 from agents.tool_context import ToolContext
 from agents.tracing import function_span, trace
+from tests.test_responses import get_function_tool_call
 from tests.testing_processor import SPAN_PROCESSOR_TESTING
 
 codex_tool_module = importlib.import_module("agents.extensions.experimental.codex.codex_tool")
@@ -51,6 +59,13 @@ class FakeThread:
 
         async def event_stream() -> Any:
             for event in self._state.events:
+                if event.get("type") == "raise_cancelled":
+                    raise asyncio.CancelledError(event.get("message", "codex-cancelled"))
+                if event.get("type") == "wait_for_cancel":
+                    started_event = cast(asyncio.Event | None, event.get("started_event"))
+                    if started_event is not None:
+                        started_event.set()
+                    await asyncio.Future()
                 yield event
 
         return SimpleNamespace(events=event_stream())
@@ -798,6 +813,148 @@ async def test_codex_tool_persists_thread_id_for_raised_turn_failure() -> None:
     with pytest.raises(UserError, match="Codex turn failed: boom"):
         await tool.on_invoke_tool(context, input_json)
 
+    assert run_context["codex_agent_thread_id"] == "thread-next"
+    assert state.start_calls == 1
+    assert state.resume_calls == 1
+    assert state.last_resumed_thread_id == "thread-next"
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_persists_thread_id_for_cancelled_turn() -> None:
+    state = CodexMockState()
+    state.thread_id = None
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-next"},
+        {"type": "raise_cancelled", "message": "codex-cancelled"},
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            use_run_context_thread_id=True,
+            run_context_thread_id_key="codex_agent_thread_id",
+        )
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "Continue thread", "path": ""}]}'
+    run_context: dict[str, str] = {}
+    context = ToolContext(
+        context=run_context,
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    with pytest.raises(asyncio.CancelledError, match="codex-cancelled"):
+        await tool.on_invoke_tool(context, input_json)
+
+    assert run_context["codex_agent_thread_id"] == "thread-next"
+
+    state.events = [
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    result = await tool.on_invoke_tool(context, input_json)
+
+    assert isinstance(result, CodexToolResult)
+    assert result.thread_id == "thread-next"
+    assert run_context["codex_agent_thread_id"] == "thread-next"
+    assert state.start_calls == 1
+    assert state.resume_calls == 1
+    assert state.last_resumed_thread_id == "thread-next"
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_persists_thread_id_for_handled_parallel_cancellation() -> None:
+    state = CodexMockState()
+    state.thread_id = None
+    codex_thread_started = asyncio.Event()
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-next"},
+        {"type": "wait_for_cancel", "started_event": codex_thread_started},
+    ]
+
+    codex_function_tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            use_run_context_thread_id=True,
+            run_context_thread_id_key="codex_agent_thread_id",
+        )
+    )
+
+    async def _error_tool() -> str:
+        await codex_thread_started.wait()
+        raise ValueError("boom")
+
+    error_tool = function_tool(
+        _error_tool,
+        name_override="error_tool",
+        failure_error_function=None,
+    )
+    agent = Agent(name="test", tools=[codex_function_tool, error_tool])
+    run_context: dict[str, str] = {}
+    context_wrapper = RunContextWrapper(run_context)
+    input_json = '{"inputs": [{"type": "text", "text": "Continue thread", "path": ""}]}'
+    tool_runs = [
+        ToolRunFunction(
+            tool_call=cast(
+                ResponseFunctionToolCall,
+                get_function_tool_call(codex_function_tool.name, input_json, call_id="1"),
+            ),
+            function_tool=codex_function_tool,
+        ),
+        ToolRunFunction(
+            tool_call=cast(
+                ResponseFunctionToolCall,
+                get_function_tool_call("error_tool", "{}", call_id="2"),
+            ),
+            function_tool=error_tool,
+        ),
+    ]
+
+    with pytest.raises(UserError, match="Error running tool error_tool: boom"):
+        await execute_function_tool_calls(
+            agent=agent,
+            tool_runs=tool_runs,
+            hooks=RunHooks(),
+            context_wrapper=context_wrapper,
+            config=RunConfig(),
+        )
+
+    assert run_context["codex_agent_thread_id"] == "thread-next"
+    assert state.start_calls == 1
+    assert state.resume_calls == 0
+
+    state.thread_id = "thread-next"
+    state.events = [
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    result = await codex_function_tool.on_invoke_tool(
+        ToolContext(
+            context=run_context,
+            tool_name=codex_function_tool.name,
+            tool_call_id="call-2",
+            tool_arguments=input_json,
+        ),
+        input_json,
+    )
+
+    assert isinstance(result, CodexToolResult)
+    assert result.thread_id == "thread-next"
     assert run_context["codex_agent_thread_id"] == "thread-next"
     assert state.start_calls == 1
     assert state.resume_calls == 1
@@ -1602,6 +1759,39 @@ async def test_codex_tool_on_invoke_tool_raises_without_failure_handler() -> Non
 
     with pytest.raises(ModelBehaviorError):
         await tool.on_invoke_tool(context, input_json)
+
+
+@pytest.mark.asyncio
+async def test_replaced_codex_tool_normal_failure_uses_replaced_policy() -> None:
+    tool = dataclasses.replace(
+        codex_tool(CodexToolOptions()),
+        _failure_error_function=None,
+        _use_default_failure_error_function=False,
+    )
+    input_json = "{bad"
+    context = ToolContext(
+        context=None,
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    with pytest.raises(ModelBehaviorError):
+        await tool.on_invoke_tool(context, input_json)
+
+
+@pytest.mark.asyncio
+async def test_replaced_codex_tool_preserves_codex_collision_markers() -> None:
+    agent = Agent(
+        name="test",
+        tools=[
+            dataclasses.replace(codex_tool(CodexToolOptions()), name="shared_codex_tool"),
+            dataclasses.replace(codex_tool(CodexToolOptions()), name="shared_codex_tool"),
+        ],
+    )
+
+    with pytest.raises(UserError, match="Duplicate Codex tool names found: shared_codex_tool"):
+        await agent.get_all_tools(RunContextWrapper(None))
 
 
 @pytest.mark.asyncio

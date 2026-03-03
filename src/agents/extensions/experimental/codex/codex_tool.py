@@ -20,7 +20,13 @@ from agents.logger import logger
 from agents.models import _openai_shared
 from agents.run_context import RunContextWrapper
 from agents.strict_schema import ensure_strict_json_schema
-from agents.tool import FunctionTool, ToolErrorFunction, default_tool_error_function
+from agents.tool import (
+    FunctionTool,
+    ToolErrorFunction,
+    default_tool_error_function,
+    set_function_tool_failure_error_function,
+    with_function_tool_failure_error_handler,
+)
 from agents.tool_context import ToolContext
 from agents.tracing import SpanError, custom_span
 from agents.usage import Usage as AgentsUsage
@@ -379,7 +385,7 @@ def codex_tool(
                     resolved_options.span_data_max_chars,
                     resolved_thread_id_holder=resolved_thread_id_holder,
                 )
-            except Exception:
+            except BaseException:
                 resolved_thread_id = resolved_thread_id_holder["thread_id"]
                 raise
 
@@ -394,40 +400,40 @@ def codex_tool(
                 )
 
             return CodexToolResult(thread_id=resolved_thread_id, response=response, usage=usage)
-        except Exception as exc:  # noqa: BLE001
+        except BaseException:
             _try_store_thread_id_in_run_context_after_error(
                 ctx=ctx,
                 key=resolved_run_context_thread_id_key,
                 thread_id=resolved_thread_id,
                 enabled=resolved_options.use_run_context_thread_id,
             )
+            raise
 
-            if resolved_options.failure_error_function is None:
-                raise
-
-            result = resolved_options.failure_error_function(ctx, exc)
-            if inspect.isawaitable(result):
-                result = await result
-
-            _error_tracing.attach_error_to_current_span(
-                SpanError(
-                    message="Error running Codex tool (non-fatal)",
-                    data={"tool_name": name, "error": str(exc)},
-                )
+    def _on_handled_error(function_tool: FunctionTool, exc: Exception, _input_json: str) -> None:
+        _error_tracing.attach_error_to_current_span(
+            SpanError(
+                message="Error running Codex tool (non-fatal)",
+                data={"tool_name": function_tool.name, "error": str(exc)},
             )
-            if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug("Codex tool failed")
-            else:
-                logger.error("Codex tool failed: %s", exc, exc_info=exc)
-            return result
+        )
+        if _debug.DONT_LOG_TOOL_DATA:
+            logger.debug("Codex tool failed")
+        else:
+            logger.error("Codex tool failed: %s", exc, exc_info=exc)
 
-    function_tool = FunctionTool(
-        name=name,
-        description=description,
-        params_json_schema=params_schema,
-        on_invoke_tool=_on_invoke_tool,
-        strict_json_schema=True,
-        is_enabled=resolved_options.is_enabled,
+    function_tool = set_function_tool_failure_error_function(
+        FunctionTool(
+            name=name,
+            description=description,
+            params_json_schema=params_schema,
+            on_invoke_tool=with_function_tool_failure_error_handler(
+                _on_invoke_tool,
+                _on_handled_error,
+            ),
+            strict_json_schema=True,
+            is_enabled=resolved_options.is_enabled,
+        ),
+        resolved_options.failure_error_function,
     )
     # Internal marker used for codex-tool specific runtime validation.
     function_tool._is_codex_tool = True

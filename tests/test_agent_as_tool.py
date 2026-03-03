@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from typing import Any, cast
 
@@ -15,6 +16,7 @@ from agents import (
     AgentToolStreamEvent,
     FunctionTool,
     MessageOutputItem,
+    ModelBehaviorError,
     RunConfig,
     RunContextWrapper,
     RunHooks,
@@ -32,6 +34,7 @@ from agents.agent_tool_state import (
     record_agent_tool_run_result,
     set_agent_tool_state_scope,
 )
+from agents.run_state import _build_agent_map
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
 from agents.tool_context import ToolContext
 from tests.utils.hitl import make_function_tool_call
@@ -1880,3 +1883,94 @@ async def test_agent_as_tool_failure_error_function_custom_handler(
 
     result = await tool.on_invoke_tool(tool_context, '{"input": "hello"}')
     assert result == "handled:ValueError:test failure"
+
+
+@pytest.mark.asyncio
+async def test_replaced_agent_as_tool_normal_failure_uses_replaced_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="failing_agent")
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        assert starting_agent is agent
+        assert input == "hello"
+        raise RuntimeError("test failure")
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    tool = dataclasses.replace(
+        agent.as_tool(
+            tool_name="failing_agent_tool",
+            tool_description="Agent tool that raises",
+            is_enabled=True,
+        ),
+        _failure_error_function=None,
+        _use_default_failure_error_function=False,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name=tool.name,
+        tool_call_id="call_1",
+        tool_arguments='{"input": "hello"}',
+    )
+
+    with pytest.raises(RuntimeError, match="test failure"):
+        await tool.on_invoke_tool(tool_context, '{"input": "hello"}')
+
+
+@pytest.mark.asyncio
+async def test_replaced_agent_as_tool_invalid_input_uses_replaced_name() -> None:
+    nested_agent = Agent(name="nested_agent")
+    replaced_tool = dataclasses.replace(
+        nested_agent.as_tool(
+            tool_name="nested_agent_tool",
+            tool_description="Nested agent tool",
+            is_enabled=True,
+            failure_error_function=None,
+        ),
+        name="replaced_nested_agent_tool",
+    )
+
+    with pytest.raises(
+        ModelBehaviorError,
+        match="Invalid JSON input for tool replaced_nested_agent_tool",
+    ):
+        await replaced_tool.on_invoke_tool(
+            ToolContext(
+                context=None,
+                tool_name=replaced_tool.name,
+                tool_call_id="call_1",
+                tool_arguments="{}",
+            ),
+            "{}",
+        )
+
+
+def test_replaced_agent_as_tool_preserves_agent_markers_for_build_agent_map() -> None:
+    nested_agent = Agent(name="nested_agent")
+    replaced_tool = dataclasses.replace(
+        nested_agent.as_tool(
+            tool_name="nested_agent_tool",
+            tool_description="Nested agent tool",
+            is_enabled=True,
+        ),
+        name="replaced_nested_agent_tool",
+    )
+    parent_agent = Agent(name="parent_agent", tools=[replaced_tool])
+
+    agent_map = _build_agent_map(parent_agent)
+
+    assert agent_map["nested_agent"] is nested_agent

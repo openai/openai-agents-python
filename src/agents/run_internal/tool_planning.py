@@ -527,6 +527,15 @@ async def _execute_tool_plan(
     list[RunItem],
 ]:
     """Execute tool runs captured in a ToolExecutionPlan."""
+    isolate_function_tool_failures = len(plan.function_runs) > 1 or (
+        parallel
+        and (
+            bool(plan.computer_actions)
+            or bool(plan.shell_calls)
+            or bool(plan.apply_patch_calls)
+            or bool(plan.local_shell_calls)
+        )
+    )
     if parallel:
         (
             (function_results, tool_input_guardrail_results, tool_output_guardrail_results),
@@ -541,6 +550,7 @@ async def _execute_tool_plan(
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=run_config,
+                isolate_parallel_failures=isolate_function_tool_failures,
             ),
             execute_computer_actions(
                 agent=agent,
@@ -582,6 +592,7 @@ async def _execute_tool_plan(
             hooks=hooks,
             context_wrapper=context_wrapper,
             config=run_config,
+            isolate_parallel_failures=isolate_function_tool_failures,
         )
         computer_results = await execute_computer_actions(
             agent=agent,

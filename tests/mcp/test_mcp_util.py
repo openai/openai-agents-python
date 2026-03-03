@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import logging
 from typing import Any
@@ -438,6 +439,38 @@ async def test_mcp_tool_failure_error_function_server_none_raises():
 
     with pytest.raises(AgentsException):
         await function_tool.on_invoke_tool(tool_context, "{}")
+
+
+@pytest.mark.asyncio
+async def test_replaced_mcp_tool_normal_failure_uses_replaced_policy():
+    server = CrashingFakeMCPServer()
+    server.add_tool("crashing_tool", {})
+
+    agent = Agent(
+        name="test-agent",
+        mcp_servers=[server],
+        mcp_config={"failure_error_function": default_tool_error_function},
+    )
+    run_context = RunContextWrapper(context=None)
+    function_tools = await agent.get_mcp_tools(run_context)
+    original_tool = next(tool for tool in function_tools if tool.name == "crashing_tool")
+    assert isinstance(original_tool, FunctionTool)
+
+    replaced_tool = dataclasses.replace(
+        original_tool,
+        _failure_error_function=None,
+        _use_default_failure_error_function=False,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name=replaced_tool.name,
+        tool_call_id="test_call_custom_4",
+        tool_arguments="{}",
+    )
+
+    with pytest.raises(AgentsException):
+        await replaced_tool.on_invoke_tool(tool_context, "{}")
 
 
 @pytest.mark.asyncio
