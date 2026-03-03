@@ -22,9 +22,8 @@ from ..tool import (
     ToolErrorFunction,
     ToolOutputImageDict,
     ToolOutputTextDict,
+    _build_wrapped_function_tool,
     default_tool_error_function,
-    set_function_tool_failure_error_function,
-    with_function_tool_failure_error_handler,
 )
 from ..tracing import FunctionSpanData, SpanError, get_current_span, mcp_tools_span
 from ..util import _error_tracing
@@ -290,19 +289,15 @@ class MCPUtil:
             bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
         ) = server._get_needs_approval_for_tool(tool, agent)
 
-        function_tool = set_function_tool_failure_error_function(
-            FunctionTool(
-                name=tool.name,
-                description=tool.description or "",
-                params_json_schema=schema,
-                on_invoke_tool=with_function_tool_failure_error_handler(
-                    invoke_func_impl,
-                    on_handled_error,
-                ),
-                strict_json_schema=is_strict,
-                needs_approval=needs_approval,
-            ),
-            effective_failure_error_function,
+        function_tool = _build_wrapped_function_tool(
+            name=tool.name,
+            description=tool.description or "",
+            params_json_schema=schema,
+            invoke_tool_impl=invoke_func_impl,
+            on_handled_error=on_handled_error,
+            failure_error_function=effective_failure_error_function,
+            strict_json_schema=is_strict,
+            needs_approval=needs_approval,
         )
         return function_tool
 

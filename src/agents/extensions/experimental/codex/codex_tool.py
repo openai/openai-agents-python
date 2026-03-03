@@ -23,9 +23,8 @@ from agents.strict_schema import ensure_strict_json_schema
 from agents.tool import (
     FunctionTool,
     ToolErrorFunction,
+    _build_wrapped_function_tool,
     default_tool_error_function,
-    set_function_tool_failure_error_function,
-    with_function_tool_failure_error_handler,
 )
 from agents.tool_context import ToolContext
 from agents.tracing import SpanError, custom_span
@@ -421,19 +420,15 @@ def codex_tool(
         else:
             logger.error("Codex tool failed: %s", exc, exc_info=exc)
 
-    function_tool = set_function_tool_failure_error_function(
-        FunctionTool(
-            name=name,
-            description=description,
-            params_json_schema=params_schema,
-            on_invoke_tool=with_function_tool_failure_error_handler(
-                _on_invoke_tool,
-                _on_handled_error,
-            ),
-            strict_json_schema=True,
-            is_enabled=resolved_options.is_enabled,
-        ),
-        resolved_options.failure_error_function,
+    function_tool = _build_wrapped_function_tool(
+        name=name,
+        description=description,
+        params_json_schema=params_schema,
+        invoke_tool_impl=_on_invoke_tool,
+        on_handled_error=_on_handled_error,
+        failure_error_function=resolved_options.failure_error_function,
+        strict_json_schema=True,
+        is_enabled=resolved_options.is_enabled,
     )
     # Internal marker used for codex-tool specific runtime validation.
     function_tool._is_codex_tool = True

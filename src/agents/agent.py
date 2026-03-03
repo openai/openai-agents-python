@@ -47,10 +47,9 @@ from .tool import (
     FunctionToolResult,
     Tool,
     ToolErrorFunction,
+    _build_wrapped_function_tool,
     _extract_tool_argument_json_error,
     default_tool_error_function,
-    set_function_tool_failure_error_function,
-    with_function_tool_failure_error_handler,
 )
 from .tool_context import ToolContext
 from .tracing import SpanError
@@ -835,20 +834,16 @@ class Agent(AgentBase, Generic[TContext]):
                     exc_info=exc,
                 )
 
-        run_agent_tool = set_function_tool_failure_error_function(
-            FunctionTool(
-                name=tool_name_resolved,
-                description=tool_description_resolved,
-                params_json_schema=params_schema,
-                on_invoke_tool=with_function_tool_failure_error_handler(
-                    _run_agent_impl,
-                    _on_handled_tool_error,
-                ),
-                strict_json_schema=True,
-                is_enabled=is_enabled,
-                needs_approval=needs_approval,
-            ),
-            failure_error_function,
+        run_agent_tool = _build_wrapped_function_tool(
+            name=tool_name_resolved,
+            description=tool_description_resolved,
+            params_json_schema=params_schema,
+            invoke_tool_impl=_run_agent_impl,
+            on_handled_error=_on_handled_tool_error,
+            failure_error_function=failure_error_function,
+            strict_json_schema=True,
+            is_enabled=is_enabled,
+            needs_approval=needs_approval,
         )
         run_agent_tool._is_agent_tool = True
         run_agent_tool._agent_instance = self

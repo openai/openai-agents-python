@@ -375,6 +375,53 @@ def with_function_tool_failure_error_handler(
     return _FailureHandlingFunctionToolInvoker(invoke_tool_impl, on_handled_error)
 
 
+def _build_wrapped_function_tool(
+    *,
+    name: str,
+    description: str,
+    params_json_schema: dict[str, Any],
+    invoke_tool_impl: Callable[[ToolContext[Any], str], Awaitable[Any]],
+    on_handled_error: Callable[[FunctionTool, Exception, str], None],
+    failure_error_function: ToolErrorFunction | None | object = _UNSET_FAILURE_ERROR_FUNCTION,
+    strict_json_schema: bool = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
+    tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
+    needs_approval: (
+        bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
+    ) = False,
+    timeout_seconds: float | None = None,
+    timeout_behavior: ToolTimeoutBehavior = "error_as_result",
+    timeout_error_function: ToolErrorFunction | None = None,
+    sync_invoker: bool = False,
+) -> FunctionTool:
+    """Create a FunctionTool with copied-tool-aware failure handling bound in one place."""
+    on_invoke_tool = with_function_tool_failure_error_handler(
+        invoke_tool_impl,
+        on_handled_error,
+    )
+    if sync_invoker:
+        setattr(on_invoke_tool, _SYNC_FUNCTION_TOOL_MARKER, True)
+
+    return set_function_tool_failure_error_function(
+        FunctionTool(
+            name=name,
+            description=description,
+            params_json_schema=params_json_schema,
+            on_invoke_tool=on_invoke_tool,
+            strict_json_schema=strict_json_schema,
+            is_enabled=is_enabled,
+            tool_input_guardrails=tool_input_guardrails,
+            tool_output_guardrails=tool_output_guardrails,
+            needs_approval=needs_approval,
+            timeout_seconds=timeout_seconds,
+            timeout_behavior=timeout_behavior,
+            timeout_error_function=timeout_error_function,
+        ),
+        failure_error_function,
+    )
+
+
 @dataclass
 class FileSearchTool:
     """A hosted tool that lets the LLM search through a vector store. Currently only supported with
@@ -1316,30 +1363,22 @@ def function_tool(
                     exc_info=error,
                 )
 
-        on_invoke_tool = with_function_tool_failure_error_handler(
-            _on_invoke_tool_impl,
-            _on_handled_error,
-        )
-
-        if is_sync_function_tool:
-            setattr(on_invoke_tool, _SYNC_FUNCTION_TOOL_MARKER, True)
-
-        function_tool = set_function_tool_failure_error_function(
-            FunctionTool(
-                name=schema.name,
-                description=schema.description or "",
-                params_json_schema=schema.params_json_schema,
-                on_invoke_tool=on_invoke_tool,
-                strict_json_schema=strict_mode,
-                is_enabled=is_enabled,
-                needs_approval=needs_approval,
-                tool_input_guardrails=tool_input_guardrails,
-                tool_output_guardrails=tool_output_guardrails,
-                timeout_seconds=timeout,
-                timeout_behavior=timeout_behavior,
-                timeout_error_function=timeout_error_function,
-            ),
-            failure_error_function,
+        function_tool = _build_wrapped_function_tool(
+            name=schema.name,
+            description=schema.description or "",
+            params_json_schema=schema.params_json_schema,
+            invoke_tool_impl=_on_invoke_tool_impl,
+            on_handled_error=_on_handled_error,
+            failure_error_function=failure_error_function,
+            strict_json_schema=strict_mode,
+            is_enabled=is_enabled,
+            needs_approval=needs_approval,
+            tool_input_guardrails=tool_input_guardrails,
+            tool_output_guardrails=tool_output_guardrails,
+            timeout_seconds=timeout,
+            timeout_behavior=timeout_behavior,
+            timeout_error_function=timeout_error_function,
+            sync_invoker=is_sync_function_tool,
         )
         return function_tool
 

@@ -70,6 +70,7 @@ from ..tool_guardrails import (
 from ..tracing import Span, SpanError, function_span, get_current_trace
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
+from ._asyncio_progress import get_function_tool_task_progress_deadline
 from .approvals import append_approval_error_output
 from .items import (
     REJECTION_MESSAGE,
@@ -208,6 +209,15 @@ def _consume_parent_cancelled_task_result(task: asyncio.Task[Any]) -> None:
     )
 
 
+def _get_function_tool_failure_priority(error: BaseException) -> int:
+    """Return the precedence used to arbitrate concurrent function-tool failures."""
+    if isinstance(error, asyncio.CancelledError):
+        return 0
+    if isinstance(error, Exception):
+        return 1
+    return 2
+
+
 def _select_function_tool_failure(
     current_failure: _FunctionToolFailure | None,
     new_failure: _FunctionToolFailure | None,
@@ -218,15 +228,8 @@ def _select_function_tool_failure(
     if new_failure is None:
         return current_failure
 
-    def _failure_priority(error: BaseException) -> int:
-        if isinstance(error, asyncio.CancelledError):
-            return 0
-        if isinstance(error, Exception):
-            return 1
-        return 2
-
-    current_priority = _failure_priority(current_failure.error)
-    new_priority = _failure_priority(new_failure.error)
+    current_priority = _get_function_tool_failure_priority(current_failure.error)
+    new_priority = _get_function_tool_failure_priority(new_failure.error)
     if new_priority > current_priority:
         return new_failure
     if new_priority == current_priority and new_failure.order < current_failure.order:
@@ -244,15 +247,8 @@ def _merge_late_function_tool_failure(
     if late_failure is None:
         return current_failure
 
-    def _failure_priority(error: BaseException) -> int:
-        if isinstance(error, asyncio.CancelledError):
-            return 0
-        if isinstance(error, Exception):
-            return 1
-        return 2
-
-    current_priority = _failure_priority(current_failure.error)
-    late_priority = _failure_priority(late_failure.error)
+    current_priority = _get_function_tool_failure_priority(current_failure.error)
+    late_priority = _get_function_tool_failure_priority(late_failure.error)
     if late_priority > current_priority:
         return late_failure
     if late_priority < current_priority:
@@ -318,95 +314,6 @@ def _record_completed_function_tool_tasks(
     return failure
 
 
-def _get_scheduled_future_deadline(
-    loop: asyncio.AbstractEventLoop,
-    future: asyncio.Future[Any],
-) -> float | None:
-    """Return the next loop deadline for a timer-backed future, if any."""
-    scheduled_handles = getattr(loop, "_scheduled", None)
-    if not scheduled_handles:
-        return None
-
-    for handle in scheduled_handles:
-        if handle.cancelled():
-            continue
-        callback = getattr(handle, "_callback", None)
-        args = getattr(handle, "_args", ())
-        if getattr(callback, "__name__", None) == "_set_result_unless_cancelled" and args:
-            if args[0] is future:
-                return float(handle.when())
-    return None
-
-
-def _iter_future_child_tasks(future: asyncio.Future[Any]) -> tuple[asyncio.Task[Any], ...]:
-    """Best-effort extraction of nested tasks that drive this future forward."""
-    children = tuple(
-        child for child in getattr(future, "_children", ()) if isinstance(child, asyncio.Task)
-    )
-    if children:
-        return children
-
-    callbacks = getattr(future, "_callbacks", None) or ()
-    discovered: list[asyncio.Task[Any]] = []
-    for callback_entry in callbacks:
-        callback = callback_entry[0] if isinstance(callback_entry, tuple) else callback_entry
-        for cell in getattr(callback, "__closure__", ()) or ():
-            if isinstance(cell.cell_contents, asyncio.Task):
-                discovered.append(cell.cell_contents)
-    return tuple(discovered)
-
-
-def _get_self_progress_deadline_for_future(
-    future: asyncio.Future[Any],
-    *,
-    loop: asyncio.AbstractEventLoop,
-    seen: set[int],
-) -> float | None:
-    """Return when a future can make progress without outside input, if determinable."""
-    future_id = id(future)
-    if future_id in seen:
-        return None
-    seen.add(future_id)
-
-    if future.done():
-        return loop.time()
-
-    if isinstance(future, asyncio.Task):
-        waiter = getattr(future, "_fut_waiter", None)
-        if waiter is None:
-            return loop.time()
-        return _get_self_progress_deadline_for_future(waiter, loop=loop, seen=seen)
-
-    child_tasks = _iter_future_child_tasks(future)
-    if child_tasks:
-        pending_child_tasks = [child for child in child_tasks if not child.done()]
-        if not pending_child_tasks:
-            return loop.time()
-        child_deadlines = [
-            _get_self_progress_deadline_for_future(child, loop=loop, seen=seen)
-            for child in pending_child_tasks
-        ]
-        ready_deadlines = [deadline for deadline in child_deadlines if deadline is not None]
-        return min(ready_deadlines) if ready_deadlines else None
-
-    return _get_scheduled_future_deadline(loop, future)
-
-
-def _get_function_tool_task_progress_deadline(
-    *,
-    task: asyncio.Task[Any],
-    task_to_invoke_task: Mapping[asyncio.Task[Any], asyncio.Task[Any]],
-    loop: asyncio.AbstractEventLoop,
-) -> float | None:
-    """Return the next self-driven progress deadline for a cancelled function-tool task."""
-    task_waiter = getattr(task, "_fut_waiter", None)
-    if task_waiter is not None and task_waiter.done():
-        return loop.time()
-    tracked_task = task_to_invoke_task.get(task)
-    target_task = tracked_task if tracked_task is not None and not tracked_task.done() else task
-    return _get_self_progress_deadline_for_future(target_task, loop=loop, seen=set())
-
-
 async def _drain_cancelled_function_tool_tasks(
     *,
     pending_tasks: set[asyncio.Task[Any]],
@@ -447,7 +354,7 @@ async def _drain_cancelled_function_tool_tasks(
             break
 
         progress_deadlines = {
-            task: _get_function_tool_task_progress_deadline(
+            task: get_function_tool_task_progress_deadline(
                 task=task,
                 task_to_invoke_task=task_to_invoke_task,
                 loop=loop,
@@ -1235,202 +1142,192 @@ def should_keep_hosted_mcp_item(
     )
 
 
-async def execute_function_tool_calls(
-    *,
-    agent: Agent[Any],
-    tool_runs: list[ToolRunFunction],
-    hooks: RunHooks[Any],
-    context_wrapper: RunContextWrapper[Any],
-    config: RunConfig,
-    isolate_parallel_failures: bool | None = None,
-) -> tuple[
-    list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
-]:
-    """Execute function tool calls with approvals, guardrails, and hooks."""
-    tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
-    tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
-    tool_state_scope_id = get_agent_tool_state_scope(context_wrapper)
-    task_in_post_invoke_phase: dict[asyncio.Task[Any], bool] = {}
-    task_to_invoke_task: dict[asyncio.Task[Any], asyncio.Task[Any]] = {}
-    teardown_cancelled_tasks: set[asyncio.Task[Any]] = set()
-    if isolate_parallel_failures is None:
-        isolate_parallel_failures = len(tool_runs) > 1
+class _FunctionToolBatchExecutor:
+    """Own the mutable state needed to execute and arbitrate a function-tool batch."""
 
-    async def run_single_tool(
+    def __init__(
+        self,
+        *,
+        agent: Agent[Any],
+        tool_runs: list[ToolRunFunction],
+        hooks: RunHooks[Any],
+        context_wrapper: RunContextWrapper[Any],
+        config: RunConfig,
+        isolate_parallel_failures: bool | None,
+    ) -> None:
+        self.agent = agent
+        self.tool_runs = tool_runs
+        self.hooks = hooks
+        self.context_wrapper = context_wrapper
+        self.config = config
+        self.isolate_parallel_failures = (
+            len(tool_runs) > 1 if isolate_parallel_failures is None else isolate_parallel_failures
+        )
+        self.tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
+        self.tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
+        self.tool_state_scope_id = get_agent_tool_state_scope(context_wrapper)
+        self.task_in_post_invoke_phase: dict[asyncio.Task[Any], bool] = {}
+        self.task_to_invoke_task: dict[asyncio.Task[Any], asyncio.Task[Any]] = {}
+        self.teardown_cancelled_tasks: set[asyncio.Task[Any]] = set()
+        self.task_to_tool_run: dict[asyncio.Task[Any], ToolRunFunction] = {}
+        self.task_to_order: dict[asyncio.Task[Any], int] = {}
+        self.results_by_tool_run: dict[int, Any] = {}
+        self.pending_tasks: set[asyncio.Task[Any]] = set()
+        self.propagating_failure: BaseException | None = None
+
+    async def execute(
+        self,
+    ) -> tuple[
+        list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
+    ]:
+        for order, tool_run in enumerate(self.tool_runs):
+            self._create_tool_task(tool_run, order)
+
+        try:
+            await self._drain_pending_tasks()
+        except asyncio.CancelledError as exc:
+            if self.propagating_failure is exc:
+                raise
+            self._cancel_pending_tasks_for_parent_cancellation()
+            raise
+
+        return (
+            self._build_function_tool_results(),
+            self.tool_input_guardrail_results,
+            self.tool_output_guardrail_results,
+        )
+
+    def _create_tool_task(self, tool_run: ToolRunFunction, order: int) -> None:
+        task = asyncio.create_task(
+            self._run_single_tool(tool_run.function_tool, tool_run.tool_call)
+        )
+        self.task_to_tool_run[task] = tool_run
+        self.task_to_order[task] = order
+        self.pending_tasks.add(task)
+
+    async def _drain_pending_tasks(self) -> None:
+        while self.pending_tasks:
+            done_tasks, self.pending_tasks = await asyncio.wait(
+                self.pending_tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            failure = _record_completed_function_tool_tasks(
+                completed_tasks=list(done_tasks),
+                task_to_tool_run=self.task_to_tool_run,
+                task_to_order=self.task_to_order,
+                results_by_tool_run=self.results_by_tool_run,
+            )
+            if failure is not None:
+                await self._raise_failure_after_draining_siblings(failure)
+
+    async def _raise_failure_after_draining_siblings(
+        self,
+        failure: _FunctionToolFailure,
+    ) -> None:
+        cancellable_tasks, post_invoke_tasks = self._partition_pending_tasks()
+        self.teardown_cancelled_tasks.update(cancellable_tasks)
+        _cancel_function_tool_tasks(cancellable_tasks)
+
+        late_failure, remaining_cancelled_tasks = await self._drain_cancelled_tasks(
+            cancellable_tasks
+        )
+        post_invoke_failure, remaining_post_invoke_tasks = await self._wait_post_invoke_tasks(
+            post_invoke_tasks
+        )
+
+        _attach_background_task_result_callbacks(remaining_cancelled_tasks)
+        _attach_background_post_invoke_task_result_callbacks(remaining_post_invoke_tasks)
+
+        merged_failure = _merge_late_function_tool_failure(failure, late_failure)
+        merged_failure = _merge_late_function_tool_failure(merged_failure, post_invoke_failure)
+        assert merged_failure is not None
+        self.pending_tasks = set()
+        self.propagating_failure = merged_failure.error
+        raise merged_failure.error
+
+    def _partition_pending_tasks(self) -> tuple[set[asyncio.Task[Any]], set[asyncio.Task[Any]]]:
+        cancellable_tasks = {
+            task
+            for task in self.pending_tasks
+            if not self.task_in_post_invoke_phase.get(task, False)
+        }
+        return cancellable_tasks, self.pending_tasks - cancellable_tasks
+
+    async def _drain_cancelled_tasks(
+        self,
+        tasks: set[asyncio.Task[Any]],
+    ) -> tuple[_FunctionToolFailure | None, set[asyncio.Task[Any]]]:
+        late_failure_sources: dict[asyncio.Task[Any], _FunctionToolFailureSource] = {
+            task: "cancelled_teardown" for task in tasks
+        }
+        return await _drain_cancelled_function_tool_tasks(
+            pending_tasks=tasks,
+            task_to_tool_run=self.task_to_tool_run,
+            task_to_order=self.task_to_order,
+            task_to_invoke_task=self.task_to_invoke_task,
+            results_by_tool_run=self.results_by_tool_run,
+            failure_sources_by_task=late_failure_sources,
+            ignore_cancelled_tasks=tasks,
+        )
+
+    async def _wait_post_invoke_tasks(
+        self,
+        tasks: set[asyncio.Task[Any]],
+    ) -> tuple[_FunctionToolFailure | None, set[asyncio.Task[Any]]]:
+        post_invoke_failure_sources: dict[asyncio.Task[Any], _FunctionToolFailureSource] = {
+            task: "post_invoke" for task in tasks
+        }
+        return await _wait_pending_function_tool_tasks_for_timeout(
+            pending_tasks=tasks,
+            task_to_tool_run=self.task_to_tool_run,
+            task_to_order=self.task_to_order,
+            results_by_tool_run=self.results_by_tool_run,
+            failure_sources_by_task=post_invoke_failure_sources,
+            timeout_seconds=_FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS,
+        )
+
+    def _cancel_pending_tasks_for_parent_cancellation(self) -> None:
+        self.teardown_cancelled_tasks.update(self.pending_tasks)
+        _cancel_function_tool_tasks(self.pending_tasks)
+        _attach_parent_cancelled_task_result_callbacks(self.pending_tasks)
+
+    async def _run_single_tool(
+        self,
         func_tool: FunctionTool,
         tool_call: ResponseFunctionToolCall,
     ) -> Any:
         current_task = asyncio.current_task()
         if current_task is not None:
-            task_in_post_invoke_phase[current_task] = False
+            self.task_in_post_invoke_phase[current_task] = False
+
         with function_span(func_tool.name) as span_fn:
             tool_context = ToolContext.from_agent_context(
-                context_wrapper,
+                self.context_wrapper,
                 tool_call.call_id,
                 tool_call=tool_call,
-                agent=agent,
-                run_config=config,
+                agent=self.agent,
+                run_config=self.config,
             )
-            agent_hooks = agent.hooks
-            if config.trace_include_sensitive_data:
+            agent_hooks = self.agent.hooks
+            if self.config.trace_include_sensitive_data:
                 span_fn.span_data.input = tool_call.arguments
+
             try:
-                needs_approval_result = await function_needs_approval(
-                    func_tool,
-                    context_wrapper,
-                    tool_call,
-                )
-
-                if needs_approval_result:
-                    approval_status = context_wrapper.get_approval_status(
-                        func_tool.name,
-                        tool_call.call_id,
-                    )
-
-                    if approval_status is None:
-                        approval_item = ToolApprovalItem(
-                            agent=agent, raw_item=tool_call, tool_name=func_tool.name
-                        )
-                        return FunctionToolResult(
-                            tool=func_tool, output=None, run_item=approval_item
-                        )
-
-                    if approval_status is False:
-                        rejection_message = await resolve_approval_rejection_message(
-                            context_wrapper=context_wrapper,
-                            run_config=config,
-                            tool_type="function",
-                            tool_name=func_tool.name,
-                            call_id=tool_call.call_id,
-                        )
-                        span_fn.set_error(
-                            SpanError(
-                                message=rejection_message,
-                                data={
-                                    "tool_name": func_tool.name,
-                                    "error": (
-                                        f"Tool execution for {tool_call.call_id} "
-                                        "was manually rejected by user."
-                                    ),
-                                },
-                            )
-                        )
-                        result = rejection_message
-                        span_fn.span_data.output = result
-                        return FunctionToolResult(
-                            tool=func_tool,
-                            output=result,
-                            run_item=function_rejection_item(
-                                agent,
-                                tool_call,
-                                rejection_message=rejection_message,
-                                scope_id=tool_state_scope_id,
-                            ),
-                        )
-
-                rejected_message = await _execute_tool_input_guardrails(
+                approval_result = await self._maybe_execute_tool_approval(
                     func_tool=func_tool,
-                    tool_context=tool_context,
-                    agent=agent,
-                    tool_input_guardrail_results=tool_input_guardrail_results,
+                    tool_call=tool_call,
+                    span_fn=span_fn,
                 )
-
-                if rejected_message is not None:
-                    final_result = rejected_message
+                if approval_result is not None:
+                    result = approval_result
                 else:
-                    await asyncio.gather(
-                        hooks.on_tool_start(tool_context, agent, func_tool),
-                        (
-                            agent_hooks.on_tool_start(tool_context, agent, func_tool)
-                            if agent_hooks
-                            else _coro.noop_coroutine()
-                        ),
+                    result = await self._execute_single_tool_body(
+                        current_task=current_task,
+                        func_tool=func_tool,
+                        tool_call=tool_call,
+                        tool_context=tool_context,
+                        agent_hooks=agent_hooks,
                     )
-
-                    async def _invoke_tool_and_run_post_invoke() -> Any:
-                        try:
-                            real_result = await invoke_function_tool(
-                                function_tool=func_tool,
-                                context=tool_context,
-                                arguments=tool_call.arguments,
-                            )
-                        except asyncio.CancelledError as e:
-                            if (
-                                not isolate_parallel_failures
-                                or current_task in teardown_cancelled_tasks
-                            ):
-                                raise
-
-                            result = await maybe_invoke_function_tool_failure_error_function(
-                                function_tool=func_tool,
-                                context=tool_context,
-                                error=e,
-                            )
-                            if result is None:
-                                raise
-
-                            _error_tracing.attach_error_to_current_span(
-                                SpanError(
-                                    message="Tool execution cancelled",
-                                    data={"tool_name": func_tool.name, "error": str(e)},
-                                )
-                            )
-                            real_result = result
-
-                        if current_task is not None:
-                            task_in_post_invoke_phase[current_task] = True
-
-                        final_result = await _execute_tool_output_guardrails(
-                            func_tool=func_tool,
-                            tool_context=tool_context,
-                            agent=agent,
-                            real_result=real_result,
-                            tool_output_guardrail_results=tool_output_guardrail_results,
-                        )
-
-                        await asyncio.gather(
-                            hooks.on_tool_end(tool_context, agent, func_tool, final_result),
-                            (
-                                agent_hooks.on_tool_end(
-                                    tool_context, agent, func_tool, final_result
-                                )
-                                if agent_hooks
-                                else _coro.noop_coroutine()
-                            ),
-                        )
-                        return final_result
-
-                    invoke_task = asyncio.create_task(_invoke_tool_and_run_post_invoke())
-                    if current_task is not None:
-                        task_to_invoke_task[current_task] = invoke_task
-                    try:
-                        final_result = await asyncio.shield(invoke_task)
-                    except asyncio.CancelledError as cancel_exc:
-                        sibling_failure_cancelled = (
-                            current_task is not None and current_task in teardown_cancelled_tasks
-                        )
-                        if not invoke_task.done():
-                            invoke_task.cancel()
-                        if sibling_failure_cancelled:
-                            invoke_results = await asyncio.gather(
-                                invoke_task, return_exceptions=True
-                            )
-                            invoke_failure = invoke_results[0] if invoke_results else None
-                            if isinstance(invoke_failure, BaseException) and not isinstance(
-                                invoke_failure, asyncio.CancelledError
-                            ):
-                                raise invoke_failure from cancel_exc
-                        elif invoke_task.done():
-                            if not invoke_task.cancelled():
-                                invoke_failure = invoke_task.exception()
-                                if isinstance(invoke_failure, BaseException) and not isinstance(
-                                    invoke_failure, Exception
-                                ):
-                                    raise invoke_failure from cancel_exc
-                        else:
-                            invoke_task.add_done_callback(_consume_parent_cancelled_task_result)
-                        raise
-                result = final_result
             except Exception as e:
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
@@ -1442,108 +1339,223 @@ async def execute_function_tool_calls(
                     raise e
                 raise UserError(f"Error running tool {func_tool.name}: {e}") from e
 
-            if config.trace_include_sensitive_data:
+            if self.config.trace_include_sensitive_data:
                 span_fn.span_data.output = result
-        return result
+            return result
 
-    task_to_tool_run: dict[asyncio.Task[Any], ToolRunFunction] = {}
-    task_to_order: dict[asyncio.Task[Any], int] = {}
-    for order, tool_run in enumerate(tool_runs):
-        function_tool = tool_run.function_tool
-        task = asyncio.create_task(run_single_tool(function_tool, tool_run.tool_call))
-        task_to_tool_run[task] = tool_run
-        task_to_order[task] = order
+    async def _maybe_execute_tool_approval(
+        self,
+        *,
+        func_tool: FunctionTool,
+        tool_call: ResponseFunctionToolCall,
+        span_fn: Span[Any],
+    ) -> Any | None:
+        needs_approval_result = await function_needs_approval(
+            func_tool,
+            self.context_wrapper,
+            tool_call,
+        )
+        if not needs_approval_result:
+            return None
 
-    results_by_tool_run: dict[int, Any] = {}
-    pending_tasks = set(task_to_tool_run)
-    propagating_failure: BaseException | None = None
-    try:
-        while pending_tasks:
-            done_tasks, pending_tasks = await asyncio.wait(
-                pending_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
+        approval_status = self.context_wrapper.get_approval_status(
+            func_tool.name,
+            tool_call.call_id,
+        )
+        if approval_status is None:
+            approval_item = ToolApprovalItem(
+                agent=self.agent,
+                raw_item=tool_call,
+                tool_name=func_tool.name,
             )
-            failure = _record_completed_function_tool_tasks(
-                completed_tasks=list(done_tasks),
-                task_to_tool_run=task_to_tool_run,
-                task_to_order=task_to_order,
-                results_by_tool_run=results_by_tool_run,
+            return FunctionToolResult(tool=func_tool, output=None, run_item=approval_item)
+
+        if approval_status is not False:
+            return None
+
+        rejection_message = await resolve_approval_rejection_message(
+            context_wrapper=self.context_wrapper,
+            run_config=self.config,
+            tool_type="function",
+            tool_name=func_tool.name,
+            call_id=tool_call.call_id,
+        )
+        span_fn.set_error(
+            SpanError(
+                message=rejection_message,
+                data={
+                    "tool_name": func_tool.name,
+                    "error": (
+                        f"Tool execution for {tool_call.call_id} was manually rejected by user."
+                    ),
+                },
             )
-            if failure is not None:
-                cancellable_tasks = {
-                    task for task in pending_tasks if not task_in_post_invoke_phase.get(task, False)
-                }
-                post_invoke_tasks = pending_tasks - cancellable_tasks
-                teardown_cancelled_tasks.update(cancellable_tasks)
-                _cancel_function_tool_tasks(cancellable_tasks)
-                late_failure_sources: dict[asyncio.Task[Any], _FunctionToolFailureSource] = {
-                    task: "cancelled_teardown" for task in cancellable_tasks
-                }
-                (
-                    late_failure,
-                    remaining_cancelled_tasks,
-                ) = await _drain_cancelled_function_tool_tasks(
-                    pending_tasks=cancellable_tasks,
-                    task_to_tool_run=task_to_tool_run,
-                    task_to_order=task_to_order,
-                    task_to_invoke_task=task_to_invoke_task,
-                    results_by_tool_run=results_by_tool_run,
-                    failure_sources_by_task=late_failure_sources,
-                    ignore_cancelled_tasks=cancellable_tasks,
+        )
+        span_fn.span_data.output = rejection_message
+        return FunctionToolResult(
+            tool=func_tool,
+            output=rejection_message,
+            run_item=function_rejection_item(
+                self.agent,
+                tool_call,
+                rejection_message=rejection_message,
+                scope_id=self.tool_state_scope_id,
+            ),
+        )
+
+    async def _execute_single_tool_body(
+        self,
+        *,
+        current_task: asyncio.Task[Any] | None,
+        func_tool: FunctionTool,
+        tool_call: ResponseFunctionToolCall,
+        tool_context: ToolContext[Any],
+        agent_hooks: Any,
+    ) -> Any:
+        rejected_message = await _execute_tool_input_guardrails(
+            func_tool=func_tool,
+            tool_context=tool_context,
+            agent=self.agent,
+            tool_input_guardrail_results=self.tool_input_guardrail_results,
+        )
+        if rejected_message is not None:
+            return rejected_message
+
+        await asyncio.gather(
+            self.hooks.on_tool_start(tool_context, self.agent, func_tool),
+            (
+                agent_hooks.on_tool_start(tool_context, self.agent, func_tool)
+                if agent_hooks
+                else _coro.noop_coroutine()
+            ),
+        )
+
+        invoke_task = asyncio.create_task(
+            self._invoke_tool_and_run_post_invoke(
+                current_task=current_task,
+                func_tool=func_tool,
+                tool_call=tool_call,
+                tool_context=tool_context,
+                agent_hooks=agent_hooks,
+            )
+        )
+        if current_task is not None:
+            self.task_to_invoke_task[current_task] = invoke_task
+        return await self._await_invoke_task(current_task=current_task, invoke_task=invoke_task)
+
+    async def _invoke_tool_and_run_post_invoke(
+        self,
+        *,
+        current_task: asyncio.Task[Any] | None,
+        func_tool: FunctionTool,
+        tool_call: ResponseFunctionToolCall,
+        tool_context: ToolContext[Any],
+        agent_hooks: Any,
+    ) -> Any:
+        try:
+            real_result = await invoke_function_tool(
+                function_tool=func_tool,
+                context=tool_context,
+                arguments=tool_call.arguments,
+            )
+        except asyncio.CancelledError as e:
+            if not self.isolate_parallel_failures or current_task in self.teardown_cancelled_tasks:
+                raise
+
+            result = await maybe_invoke_function_tool_failure_error_function(
+                function_tool=func_tool,
+                context=tool_context,
+                error=e,
+            )
+            if result is None:
+                raise
+
+            _error_tracing.attach_error_to_current_span(
+                SpanError(
+                    message="Tool execution cancelled",
+                    data={"tool_name": func_tool.name, "error": str(e)},
                 )
-                post_invoke_failure_sources: dict[asyncio.Task[Any], _FunctionToolFailureSource] = {
-                    task: "post_invoke" for task in post_invoke_tasks
-                }
-                (
-                    post_invoke_failure,
-                    remaining_post_invoke_tasks,
-                ) = await _wait_pending_function_tool_tasks_for_timeout(
-                    pending_tasks=post_invoke_tasks,
-                    task_to_tool_run=task_to_tool_run,
-                    task_to_order=task_to_order,
-                    results_by_tool_run=results_by_tool_run,
-                    failure_sources_by_task=post_invoke_failure_sources,
-                    timeout_seconds=_FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS,
-                )
-                _attach_background_task_result_callbacks(remaining_cancelled_tasks)
-                _attach_background_post_invoke_task_result_callbacks(remaining_post_invoke_tasks)
-                failure = _merge_late_function_tool_failure(failure, late_failure)
-                failure = _merge_late_function_tool_failure(failure, post_invoke_failure)
-                pending_tasks = set()
-                assert failure is not None
-                propagating_failure = failure.error
-                raise failure.error
-    except asyncio.CancelledError as exc:
-        if propagating_failure is exc:
+            )
+            real_result = result
+
+        if current_task is not None:
+            self.task_in_post_invoke_phase[current_task] = True
+
+        final_result = await _execute_tool_output_guardrails(
+            func_tool=func_tool,
+            tool_context=tool_context,
+            agent=self.agent,
+            real_result=real_result,
+            tool_output_guardrail_results=self.tool_output_guardrail_results,
+        )
+
+        await asyncio.gather(
+            self.hooks.on_tool_end(tool_context, self.agent, func_tool, final_result),
+            (
+                agent_hooks.on_tool_end(tool_context, self.agent, func_tool, final_result)
+                if agent_hooks
+                else _coro.noop_coroutine()
+            ),
+        )
+        return final_result
+
+    async def _await_invoke_task(
+        self,
+        *,
+        current_task: asyncio.Task[Any] | None,
+        invoke_task: asyncio.Task[Any],
+    ) -> Any:
+        try:
+            return await asyncio.shield(invoke_task)
+        except asyncio.CancelledError as cancel_exc:
+            sibling_failure_cancelled = (
+                current_task is not None and current_task in self.teardown_cancelled_tasks
+            )
+            if not invoke_task.done():
+                invoke_task.cancel()
+            if sibling_failure_cancelled:
+                invoke_results = await asyncio.gather(invoke_task, return_exceptions=True)
+                invoke_failure = invoke_results[0] if invoke_results else None
+                if isinstance(invoke_failure, BaseException) and not isinstance(
+                    invoke_failure, asyncio.CancelledError
+                ):
+                    raise invoke_failure from cancel_exc
+            elif invoke_task.done():
+                if not invoke_task.cancelled():
+                    invoke_failure = invoke_task.exception()
+                    if isinstance(invoke_failure, BaseException) and not isinstance(
+                        invoke_failure, Exception
+                    ):
+                        raise invoke_failure from cancel_exc
+            else:
+                invoke_task.add_done_callback(_consume_parent_cancelled_task_result)
             raise
-        teardown_cancelled_tasks.update(pending_tasks)
-        _cancel_function_tool_tasks(pending_tasks)
-        _attach_parent_cancelled_task_result_callbacks(pending_tasks)
-        raise
 
-    function_tool_results = []
-    for tool_run in tool_runs:
-        result = results_by_tool_run[id(tool_run)]
-        if isinstance(result, FunctionToolResult):
-            nested_run_result = consume_agent_tool_run_result(
-                tool_run.tool_call,
-                scope_id=tool_state_scope_id,
-            )
-            if nested_run_result:
-                result.agent_run_result = nested_run_result
-                nested_interruptions_from_result: list[ToolApprovalItem] = (
-                    nested_run_result.interruptions
-                    if hasattr(nested_run_result, "interruptions")
-                    else []
+    def _build_function_tool_results(self) -> list[FunctionToolResult]:
+        function_tool_results: list[FunctionToolResult] = []
+        for tool_run in self.tool_runs:
+            result = self.results_by_tool_run[id(tool_run)]
+            if isinstance(result, FunctionToolResult):
+                nested_run_result = consume_agent_tool_run_result(
+                    tool_run.tool_call,
+                    scope_id=self.tool_state_scope_id,
                 )
-                if nested_interruptions_from_result:
-                    result.interruptions = nested_interruptions_from_result
+                if nested_run_result:
+                    result.agent_run_result = nested_run_result
+                    nested_interruptions_from_result: list[ToolApprovalItem] = (
+                        nested_run_result.interruptions
+                        if hasattr(nested_run_result, "interruptions")
+                        else []
+                    )
+                    if nested_interruptions_from_result:
+                        result.interruptions = nested_interruptions_from_result
 
-            function_tool_results.append(result)
-        else:
+                function_tool_results.append(result)
+                continue
+
             nested_run_result = peek_agent_tool_run_result(
                 tool_run.tool_call,
-                scope_id=tool_state_scope_id,
+                scope_id=self.tool_state_scope_id,
             )
             nested_interruptions: list[ToolApprovalItem] = []
             if nested_run_result:
@@ -1555,12 +1567,12 @@ async def execute_function_tool_calls(
             if nested_run_result and not nested_interruptions:
                 nested_run_result = consume_agent_tool_run_result(
                     tool_run.tool_call,
-                    scope_id=tool_state_scope_id,
+                    scope_id=self.tool_state_scope_id,
                 )
             elif nested_run_result is None:
                 nested_run_result = consume_agent_tool_run_result(
                     tool_run.tool_call,
-                    scope_id=tool_state_scope_id,
+                    scope_id=self.tool_state_scope_id,
                 )
                 if nested_run_result:
                     nested_interruptions = (
@@ -1569,12 +1581,12 @@ async def execute_function_tool_calls(
                         else []
                     )
 
-            run_item: RunItem | None = None
+            run_item: RunItem | None
             if not nested_interruptions:
                 run_item = ToolCallOutputItem(
                     output=result,
                     raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
-                    agent=agent,
+                    agent=self.agent,
                 )
             else:
                 # Skip tool output until nested interruptions are resolved.
@@ -1590,7 +1602,29 @@ async def execute_function_tool_calls(
                 )
             )
 
-    return function_tool_results, tool_input_guardrail_results, tool_output_guardrail_results
+        return function_tool_results
+
+
+async def execute_function_tool_calls(
+    *,
+    agent: Agent[Any],
+    tool_runs: list[ToolRunFunction],
+    hooks: RunHooks[Any],
+    context_wrapper: RunContextWrapper[Any],
+    config: RunConfig,
+    isolate_parallel_failures: bool | None = None,
+) -> tuple[
+    list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
+]:
+    """Execute function tool calls with approvals, guardrails, and hooks."""
+    return await _FunctionToolBatchExecutor(
+        agent=agent,
+        tool_runs=tool_runs,
+        hooks=hooks,
+        context_wrapper=context_wrapper,
+        config=config,
+        isolate_parallel_failures=isolate_parallel_failures,
+    ).execute()
 
 
 async def execute_local_shell_calls(
