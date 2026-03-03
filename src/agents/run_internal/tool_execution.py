@@ -930,11 +930,28 @@ async def execute_function_tool_calls(
                             else _coro.noop_coroutine()
                         ),
                     )
-                    real_result = await invoke_function_tool(
-                        function_tool=func_tool,
-                        context=tool_context,
-                        arguments=tool_call.arguments,
-                    )
+                    try:
+                        real_result = await invoke_function_tool(
+                            function_tool=func_tool,
+                            context=tool_context,
+                            arguments=tool_call.arguments,
+                        )
+                    except asyncio.CancelledError as e:
+                        current_task = asyncio.current_task()
+                        if current_task is not None and current_task.cancelling():
+                            raise
+
+                        _error_tracing.attach_error_to_current_span(
+                            SpanError(
+                                message="Tool execution cancelled",
+                                data={"tool_name": func_tool.name, "error": str(e)},
+                            )
+                        )
+                        real_result = (
+                            f"Tool execution failed: {type(e).__name__}: {e}"
+                            if str(e)
+                            else f"Tool execution failed: {type(e).__name__}"
+                        )
 
                     final_result = await _execute_tool_output_guardrails(
                         func_tool=func_tool,
@@ -952,39 +969,6 @@ async def execute_function_tool_calls(
                             else _coro.noop_coroutine()
                         ),
                     )
-                result = final_result
-            except asyncio.CancelledError as e:
-                if task := asyncio.current_task():
-                    if task.cancelling():
-                        raise
-
-                _error_tracing.attach_error_to_current_span(
-                    SpanError(
-                        message="Tool execution cancelled",
-                        data={"tool_name": func_tool.name, "error": str(e)},
-                    )
-                )
-                error_output = (
-                    f"Tool execution failed: {type(e).__name__}: {e}"
-                    if str(e)
-                    else f"Tool execution failed: {type(e).__name__}"
-                )
-                final_result = await _execute_tool_output_guardrails(
-                    func_tool=func_tool,
-                    tool_context=tool_context,
-                    agent=agent,
-                    real_result=error_output,
-                    tool_output_guardrail_results=tool_output_guardrail_results,
-                )
-
-                await asyncio.gather(
-                    hooks.on_tool_end(tool_context, agent, func_tool, final_result),
-                    (
-                        agent_hooks.on_tool_end(tool_context, agent, func_tool, final_result)
-                        if agent_hooks
-                        else _coro.noop_coroutine()
-                    ),
-                )
                 result = final_result
             except Exception as e:
                 _error_tracing.attach_error_to_current_span(
@@ -1019,12 +1003,6 @@ async def execute_function_tool_calls(
                 tool_run = task_to_tool_run[task]
                 try:
                     results_by_tool_run[id(tool_run)] = task.result()
-                except Exception:
-                    for pending_task in pending_tasks:
-                        pending_task.cancel()
-                    if pending_tasks:
-                        await asyncio.gather(*pending_tasks, return_exceptions=True)
-                    raise
                 except BaseException:
                     for pending_task in pending_tasks:
                         pending_task.cancel()
