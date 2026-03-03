@@ -968,18 +968,42 @@ async def execute_function_tool_calls(
                 span_fn.span_data.output = result
         return result
 
-    tasks = []
+    task_to_tool_run: dict[asyncio.Task[Any], ToolRunFunction] = {}
     for tool_run in tool_runs:
         function_tool = tool_run.function_tool
-        tasks.append(run_single_tool(function_tool, tool_run.tool_call))
+        task = asyncio.create_task(run_single_tool(function_tool, tool_run.tool_call))
+        task_to_tool_run[task] = tool_run
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    results_by_tool_run: dict[int, Any] = {}
+    pending_tasks = set(task_to_tool_run)
+    while pending_tasks:
+        done_tasks, pending_tasks = await asyncio.wait(
+            pending_tasks,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in done_tasks:
+            tool_run = task_to_tool_run[task]
+            try:
+                results_by_tool_run[id(tool_run)] = task.result()
+            except asyncio.CancelledError as exc:
+                results_by_tool_run[id(tool_run)] = exc
+            except Exception:
+                for pending_task in pending_tasks:
+                    pending_task.cancel()
+                if pending_tasks:
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
+                raise
+            except BaseException:
+                for pending_task in pending_tasks:
+                    pending_task.cancel()
+                if pending_tasks:
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
+                raise
 
     function_tool_results = []
-    for tool_run, result in zip(tool_runs, results):
-        if isinstance(result, Exception):
-            raise result
-        if isinstance(result, BaseException):
+    for tool_run in tool_runs:
+        result = results_by_tool_run[id(tool_run)]
+        if isinstance(result, asyncio.CancelledError):
             error_output = (
                 f"Tool execution failed: {type(result).__name__}: {result}"
                 if str(result)
@@ -1000,6 +1024,8 @@ async def execute_function_tool_calls(
                 )
             )
             continue
+        if isinstance(result, BaseException):
+            raise result
         if isinstance(result, FunctionToolResult):
             nested_run_result = consume_agent_tool_run_result(
                 tool_run.tool_call,

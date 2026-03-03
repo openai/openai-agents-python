@@ -410,23 +410,30 @@ async def test_multiple_tool_calls_preserve_successful_outputs_when_sibling_canc
 
 @pytest.mark.asyncio
 async def test_multiple_tool_calls_still_raise_normal_exceptions():
-    async def _ok_tool() -> str:
-        return "ok"
+    never_finishes = asyncio.Event()
+
+    async def _hanging_tool() -> str:
+        await never_finishes.wait()
+        return "never"
 
     async def _error_tool() -> str:
         raise ValueError("boom")
 
-    ok_tool = function_tool(_ok_tool, name_override="ok_tool", failure_error_function=None)
+    hanging_tool = function_tool(
+        _hanging_tool,
+        name_override="hanging_tool",
+        failure_error_function=None,
+    )
     error_tool = function_tool(
         _error_tool,
         name_override="error_tool",
         failure_error_function=None,
     )
 
-    agent = Agent(name="test", tools=[ok_tool, error_tool])
+    agent = Agent(name="test", tools=[hanging_tool, error_tool])
     response = ModelResponse(
         output=[
-            get_function_tool_call("ok_tool", "{}", call_id="1"),
+            get_function_tool_call("hanging_tool", "{}", call_id="1"),
             get_function_tool_call("error_tool", "{}", call_id="2"),
         ],
         usage=Usage(),
@@ -434,6 +441,38 @@ async def test_multiple_tool_calls_still_raise_normal_exceptions():
     )
 
     with pytest.raises(UserError, match="Error running tool error_tool: boom"):
+        await asyncio.wait_for(get_execute_result(agent, response), timeout=0.2)
+
+
+@pytest.mark.asyncio
+async def test_multiple_tool_calls_still_raise_non_cancellation_base_exceptions():
+    class ToolAborted(BaseException):
+        pass
+
+    async def _ok_tool() -> str:
+        return "ok"
+
+    async def _aborting_tool() -> str:
+        raise ToolAborted()
+
+    ok_tool = function_tool(_ok_tool, name_override="ok_tool", failure_error_function=None)
+    aborting_tool = function_tool(
+        _aborting_tool,
+        name_override="aborting_tool",
+        failure_error_function=None,
+    )
+
+    agent = Agent(name="test", tools=[ok_tool, aborting_tool])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("ok_tool", "{}", call_id="1"),
+            get_function_tool_call("aborting_tool", "{}", call_id="2"),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with pytest.raises(ToolAborted):
         await get_execute_result(agent, response)
 
 
