@@ -956,9 +956,7 @@ async def execute_function_tool_calls(
                             )
                             return _ToolCancelledResult(error_output)
 
-                    invoke_task = asyncio.create_task(
-                        _invoke_tool()
-                    )
+                    invoke_task = asyncio.create_task(_invoke_tool())
                     try:
                         real_result = await asyncio.shield(invoke_task)
                     except asyncio.CancelledError:
