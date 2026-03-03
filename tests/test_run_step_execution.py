@@ -607,6 +607,34 @@ async def test_multiple_tool_calls_cancel_pending_tasks_when_parent_cancelled():
 
 
 @pytest.mark.asyncio
+async def test_parent_cancellation_wins_when_shield_raises_after_tool_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def _ok_tool() -> str:
+        return "ok"
+
+    tool = function_tool(_ok_tool, name_override="ok_tool", failure_error_function=None)
+    agent = Agent(name="test", tools=[tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("ok_tool", "{}", call_id="1")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    original_shield = asyncio.shield
+
+    async def _shield_then_cancel(task: asyncio.Task[Any]) -> Any:
+        result = await original_shield(task)
+        raise asyncio.CancelledError()
+        return result
+
+    monkeypatch.setattr(asyncio, "shield", _shield_then_cancel)
+
+    with pytest.raises(asyncio.CancelledError):
+        await get_execute_result(agent, response)
+
+
+@pytest.mark.asyncio
 async def test_function_tool_context_includes_run_config() -> None:
     async def _tool_with_run_config(context: ToolContext[str]) -> str:
         assert context.run_config is not None
