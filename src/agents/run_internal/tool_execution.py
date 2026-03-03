@@ -847,10 +847,6 @@ async def execute_function_tool_calls(
     tool_state_scope_id = get_agent_tool_state_scope(context_wrapper)
 
     async def run_single_tool(func_tool: FunctionTool, tool_call: ResponseFunctionToolCall) -> Any:
-        @dataclasses.dataclass
-        class _ToolCancelledResult:
-            error_output: str
-
         with function_span(func_tool.name) as span_fn:
             tool_context = ToolContext.from_agent_context(
                 context_wrapper,
@@ -934,38 +930,20 @@ async def execute_function_tool_calls(
                             else _coro.noop_coroutine()
                         ),
                     )
-
-                    async def _invoke_tool() -> Any:
-                        try:
-                            return await invoke_function_tool(
-                                function_tool=func_tool,
-                                context=tool_context,
-                                arguments=tool_call.arguments,
-                            )
-                        except asyncio.CancelledError as e:
-                            _error_tracing.attach_error_to_current_span(
-                                SpanError(
-                                    message="Tool execution cancelled",
-                                    data={"tool_name": func_tool.name, "error": str(e)},
-                                )
-                            )
-                            error_output = (
-                                f"Tool execution failed: {type(e).__name__}: {e}"
-                                if str(e)
-                                else f"Tool execution failed: {type(e).__name__}"
-                            )
-                            return _ToolCancelledResult(error_output)
-
-                    invoke_task = asyncio.create_task(_invoke_tool())
+                    invoke_task = asyncio.create_task(
+                        invoke_function_tool(
+                            function_tool=func_tool,
+                            context=tool_context,
+                            arguments=tool_call.arguments,
+                        )
+                    )
                     try:
                         real_result = await asyncio.shield(invoke_task)
                     except asyncio.CancelledError:
-                        invoke_task.cancel()
+                        if not invoke_task.done():
+                            invoke_task.cancel()
                         await asyncio.gather(invoke_task, return_exceptions=True)
                         raise
-
-                    if isinstance(real_result, _ToolCancelledResult):
-                        real_result = real_result.error_output
 
                     final_result = await _execute_tool_output_guardrails(
                         func_tool=func_tool,

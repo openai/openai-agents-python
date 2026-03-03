@@ -373,7 +373,7 @@ async def test_multiple_tool_calls_with_tool_context():
 
 
 @pytest.mark.asyncio
-async def test_multiple_tool_calls_preserve_successful_outputs_when_sibling_cancelled():
+async def test_multiple_tool_calls_re_raise_tool_cancelled_error():
     async def _ok_tool() -> str:
         return "ok"
 
@@ -397,16 +397,8 @@ async def test_multiple_tool_calls_preserve_successful_outputs_when_sibling_canc
         response_id=None,
     )
 
-    result = await get_execute_result(agent, response)
-
-    assert len(result.generated_items) == 4
-    assert isinstance(result.next_step, NextStepRunAgain)
-    assert_item_is_function_tool_call(result.generated_items[0], "ok_tool", "{}")
-    assert_item_is_function_tool_call(result.generated_items[1], "cancel_tool", "{}")
-    assert_item_is_function_tool_call_output(result.generated_items[2], "ok")
-    cancelled_output = cast(dict[str, Any], result.generated_items[3].raw_item)["output"]
-    assert cancelled_output.startswith("Tool execution failed:")
-    assert "CancelledError" in cancelled_output
+    with pytest.raises(asyncio.CancelledError):
+        await get_execute_result(agent, response)
 
 
 @pytest.mark.asyncio
