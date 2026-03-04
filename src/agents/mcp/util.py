@@ -367,17 +367,16 @@ class MCPUtil:
         except Exception as e:
             if _McpError is not None and isinstance(e, _McpError):
                 # An MCP-level error (e.g. upstream HTTP 4xx/5xx, tool not found, etc.)
-                # is not a programming error – return it as a structured error result so
-                # the model can decide how to handle it instead of crashing the whole run.
+                # is not a programming error – re-raise so the FunctionTool failure
+                # pipeline (failure_error_function) can handle it.  The default handler
+                # will surface the message as a structured error result; callers who set
+                # failure_error_function=None will have the error raised as documented.
                 error_text = e.error.message if hasattr(e, "error") and e.error else str(e)
                 logger.warning(
                     f"MCP tool {tool.name} on server '{server.name}' returned an error: "
                     f"{error_text}"
                 )
-                return ToolOutputTextDict(
-                    type="text",
-                    text=f"Error: {error_text}",
-                )
+                raise
 
             logger.error(f"Error invoking MCP tool {tool.name} on server '{server.name}': {e}")
             raise AgentsException(
