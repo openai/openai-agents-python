@@ -108,6 +108,38 @@ result = await Runner.run(
 
 If you need prefix-based model routing (for example mixing `openai/...` and `litellm/...` model names in one run), use [`MultiProvider`][agents.MultiProvider] and set `openai_use_responses_websocket=True` there instead.
 
+`MultiProvider` keeps two historical defaults:
+
+-   `openai/...` is treated as an alias for the OpenAI provider, so `openai/gpt-4.1` is routed as model `gpt-4.1`.
+-   Unknown prefixes raise `UserError` instead of being passed through.
+
+When you point the OpenAI provider at an OpenAI-compatible endpoint that expects literal namespaced model IDs, opt into the pass-through behavior explicitly:
+
+```python
+from agents import Agent, MultiProvider, RunConfig, Runner
+
+provider = MultiProvider(
+    openai_base_url="https://openrouter.ai/api/v1",
+    openai_api_key="...",
+    openai_prefix_mode="model_id",
+    unknown_prefix_mode="model_id",
+)
+
+agent = Agent(
+    name="Assistant",
+    instructions="Be concise.",
+    model="openai/gpt-4.1",
+)
+
+result = await Runner.run(
+    agent,
+    "Hello",
+    run_config=RunConfig(model_provider=provider),
+)
+```
+
+Use `openai_prefix_mode="model_id"` when a backend expects the literal `openai/...` string. Use `unknown_prefix_mode="model_id"` when the backend expects other namespaced model IDs such as `openrouter/openai/gpt-4o`. The same options are also available on [`responses_websocket_session()`][agents.responses_websocket_session].
+
 If you use a custom OpenAI-compatible endpoint or proxy, websocket transport also requires a compatible websocket `/responses` endpoint. In those setups you may need to set `websocket_base_url` explicitly.
 
 Notes:
