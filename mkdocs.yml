@@ -78,6 +78,7 @@ plugins:
                 - tracing.md
                 - Realtime agents:
                     - realtime/quickstart.md
+                    - realtime/transport.md
                     - realtime/guide.md
                 - Voice agents:
                     - voice/quickstart.md

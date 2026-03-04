@@ -69,10 +69,10 @@ Check out a variety of sample implementations of the SDK in the examples section
 -   **[realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime):**
     Examples showing how to build real-time experiences using the SDK, including:
 
-    -   Web applications
-    -   Command-line interfaces
-    -   Twilio integration
-    -   Twilio SIP integration
+    -   Web application patterns with structured text and image messages
+    -   Command-line audio loops and playback handling
+    -   Twilio Media Streams integration over WebSocket
+    -   Twilio SIP integration using Realtime Calls API attach flows
 
 -   **[reasoning_content](https://github.com/openai/openai-agents-python/tree/main/examples/reasoning_content):**
     Examples demonstrating how to work with reasoning content and structured outputs.

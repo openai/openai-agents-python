@@ -1,157 +1,258 @@
 # Realtime agents guide
 
-This guide provides an in-depth look at building voice-enabled AI agents using the OpenAI Agents SDK's realtime capabilities.
+This guide explains how the OpenAI Agents SDK's realtime layer maps onto the OpenAI Realtime API, and what extra behavior the Python SDK adds on top.
 
 !!! warning "Beta feature"
-Realtime agents are in beta. Expect some breaking changes as we improve the implementation.
+
+    Realtime agents are in beta. Expect some breaking changes as we improve the implementation.
+
+!!! note "Start here"
+
+    If you want the default Python path, read the [quickstart](quickstart.md) first. If you are deciding whether your app should use server-side WebSocket or SIP, read [Realtime transport](transport.md). Browser WebRTC transport is not part of the Python SDK.
 
 ## Overview
 
-Realtime agents allow for conversational flows, processing audio and text inputs in real time and responding with realtime audio. They maintain persistent connections with OpenAI's Realtime API, enabling natural voice conversations with low latency and the ability to handle interruptions gracefully.
+Realtime agents keep a long-lived connection open to the Realtime API so the model can process text and audio incrementally, stream audio output, call tools, and handle interruptions without restarting a fresh request on every turn.
 
-## Architecture
+The main SDK components are:
 
-### Core components
+-   **RealtimeAgent**: Instructions, tools, output guardrails, and handoffs for one realtime specialist
+-   **RealtimeRunner**: Session factory that wires a starting agent to a realtime transport
+-   **RealtimeSession**: A live session that sends input, receives events, tracks history, and executes tools
+-   **RealtimeModel**: The transport abstraction. The default is OpenAI's server-side WebSocket implementation.
 
-The realtime system consists of several key components:
+## Session lifecycle
 
--   **RealtimeAgent**: An agent, configured with instructions, tools and handoffs.
--   **RealtimeRunner**: Manages configuration. You can call `runner.run()` to get a session.
--   **RealtimeSession**: A single interaction session. You typically create one each time a user starts a conversation, and keep it alive until the conversation is done.
--   **RealtimeModel**: The underlying model interface (typically OpenAI's WebSocket implementation)
+A typical realtime session looks like this:
 
-### Session flow
+1. Create one or more `RealtimeAgent`s.
+2. Create a `RealtimeRunner` with the starting agent.
+3. Call `await runner.run()` to get a `RealtimeSession`.
+4. Enter the session with `async with session:` or `await session.enter()`.
+5. Send user input with `send_message()` or `send_audio()`.
+6. Iterate over session events until the conversation ends.
 
-A typical realtime session follows this flow:
+Unlike text-only runs, `runner.run()` does not produce a final result immediately. It returns a live session object that keeps local history, background tool execution, guardrail state, and the active agent configuration in sync with the transport layer.
 
-1. **Create your RealtimeAgent(s)** with instructions, tools and handoffs.
-2. **Set up a RealtimeRunner** with the agent and configuration options
-3. **Start the session** using `await runner.run()` which returns a RealtimeSession.
-4. **Send audio or text messages** to the session using `send_audio()` or `send_message()`
-5. **Listen for events** by iterating over the session - events include audio output, transcripts, tool calls, handoffs, and errors
-6. **Handle interruptions** when users speak over the agent, which automatically stops current audio generation
+By default, `RealtimeRunner` uses `OpenAIRealtimeWebSocketModel`, so the default Python path is a server-side WebSocket connection to the Realtime API. If you pass a different `RealtimeModel`, the same session lifecycle and agent features still apply, while the connection mechanics can change.
 
-The session maintains the conversation history and manages the persistent connection with the realtime model.
+## Agent and session configuration
 
-## Agent configuration
+`RealtimeAgent` is intentionally narrower than the regular `Agent` type:
 
-RealtimeAgent works similarly to the regular Agent class with some key differences. For full API details, see the [`RealtimeAgent`][agents.realtime.agent.RealtimeAgent] API reference.
+-   Model choice is configured at the session level, not per agent.
+-   Structured outputs are not supported.
+-   Voice can be configured, but it cannot change after the session has already produced spoken audio.
+-   Instructions, function tools, handoffs, hooks, and output guardrails all still work.
 
-Key differences from regular agents:
+`RealtimeSessionModelSettings` supports both a newer nested `audio` config and older flat aliases. Prefer the nested shape for new code:
 
--   Model choice is configured at the session level, not the agent level.
--   No structured output support (`outputType` is not supported).
--   Voice can be configured per agent but cannot be changed after the first agent speaks.
--   All other features like tools, handoffs, and instructions work the same way.
+```python
+runner = RealtimeRunner(
+    starting_agent=agent,
+    config={
+        "model_settings": {
+            "model_name": "gpt-realtime",
+            "audio": {
+                "input": {
+                    "format": "pcm16",
+                    "transcription": {"model": "gpt-4o-mini-transcribe"},
+                    "turn_detection": {"type": "semantic_vad", "interrupt_response": True},
+                },
+                "output": {"format": "pcm16", "voice": "ash"},
+            },
+            "tool_choice": "auto",
+        }
+    },
+)
+```
 
-## Session configuration
+Useful session-level settings include:
 
-### Model settings
+-   `audio.input.format`, `audio.output.format`
+-   `audio.input.transcription`
+-   `audio.input.noise_reduction`
+-   `audio.input.turn_detection`
+-   `audio.output.voice`, `audio.output.speed`
+-   `output_modalities`
+-   `tool_choice`
+-   `prompt`
+-   `tracing`
 
-The session configuration allows you to control the underlying realtime model behavior. You can configure the model name (such as `gpt-realtime`), voice selection (alloy, echo, fable, onyx, nova, shimmer), and supported modalities (text and/or audio). Audio formats can be set for both input and output, with PCM16 being the default.
+Useful run-level settings on `RealtimeRunner(config=...)` include:
 
-### Audio configuration
+-   `async_tool_calls`
+-   `output_guardrails`
+-   `guardrails_settings.debounce_text_length`
+-   `tool_error_formatter`
+-   `tracing_disabled`
 
-Audio settings control how the session handles voice input and output. You can configure input audio transcription using models like Whisper, set language preferences, and provide transcription prompts to improve accuracy for domain-specific terms. Turn detection settings control when the agent should start and stop responding, with options for voice activity detection thresholds, silence duration, and padding around detected speech.
+See [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] and [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings] for the full typed surface.
 
-Additional configuration options you can set on `RealtimeRunner(config=...)` include:
+## Inputs and outputs
 
--   `model_settings.output_modalities` to constrain output to text and/or audio.
--   `model_settings.input_audio_noise_reduction` to tune noise reduction for near-field or far-field audio.
--   `guardrails_settings.debounce_text_length` to control how frequently output guardrails run.
--   `async_tool_calls` to run function tools concurrently.
--   `tool_error_formatter` to customize model-visible tool error messages.
+### Text and structured user messages
 
-See [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] and [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings] for the complete typed configuration.
+Use [`session.send_message()`][agents.realtime.session.RealtimeSession.send_message] for plain text or structured realtime messages.
 
-## Tools and functions
+```python
+from agents.realtime import RealtimeUserInputMessage
 
-### Adding tools
+await session.send_message("Summarize what we discussed so far.")
 
-Just like regular agents, realtime agents support function tools that execute during conversations:
+message: RealtimeUserInputMessage = {
+    "type": "message",
+    "role": "user",
+    "content": [
+        {"type": "input_text", "text": "Describe this image."},
+        {"type": "input_image", "image_url": image_data_url, "detail": "high"},
+    ],
+}
+await session.send_message(message)
+```
+
+Structured messages are the main way to include image input in a realtime conversation. The example web demo in [`examples/realtime/app/server.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/app/server.py) forwards `input_image` messages this way.
+
+### Audio input
+
+Use [`session.send_audio()`][agents.realtime.session.RealtimeSession.send_audio] to stream raw audio bytes:
+
+```python
+await session.send_audio(audio_bytes)
+```
+
+If server-side turn detection is disabled, you are responsible for marking turn boundaries. The high-level convenience is:
+
+```python
+await session.send_audio(audio_bytes, commit=True)
+```
+
+If you need lower-level control, you can also send raw client events such as `input_audio_buffer.commit` through the underlying model transport.
+
+### Manual response control
+
+`session.send_message()` sends user input using the high-level path and starts a response for you. Raw audio buffering does **not** automatically do the same in every configuration.
+
+At the Realtime API level, manual turn control means clearing `turn_detection` with a raw `session.update`, then sending `input_audio_buffer.commit` and `response.create` yourself.
+
+If you are managing turns manually, you can send raw client events through the model transport:
+
+```python
+from agents.realtime.model_inputs import RealtimeModelSendRawMessage
+
+await session.model.send_event(
+    RealtimeModelSendRawMessage(
+        message={
+            "type": "response.create",
+        }
+    )
+)
+```
+
+This pattern is useful when:
+
+-   `turn_detection` is disabled and you want to decide when the model should respond
+-   you want to inspect or gate user input before triggering a response
+-   you need a custom prompt for an out-of-band response
+
+The SIP example in [`examples/realtime/twilio_sip/server.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/twilio_sip/server.py) uses a raw `response.create` to force an opening greeting.
+
+## Events, history, and interruptions
+
+`RealtimeSession` emits higher-level SDK events while still forwarding raw model events when you need them.
+
+High-value session events include:
+
+-   `audio`, `audio_end`, `audio_interrupted`
+-   `agent_start`, `agent_end`
+-   `tool_start`, `tool_end`, `tool_approval_required`
+-   `handoff`
+-   `history_added`, `history_updated`
+-   `guardrail_tripped`
+-   `input_audio_timeout_triggered`
+-   `error`
+-   `raw_model_event`
+
+The most useful events for UI state are usually `history_added` and `history_updated`. They expose the session's local history as `RealtimeItem` objects, including user messages, assistant messages, and tool calls.
+
+### Interruptions and playback tracking
+
+When the user interrupts the assistant, the session emits `audio_interrupted` and updates history so the server-side conversation stays aligned with what the user actually heard.
+
+In low-latency local playback, the default playback tracker is often enough. In remote or delayed playback scenarios, especially telephony, use [`RealtimePlaybackTracker`][agents.realtime.model.RealtimePlaybackTracker] so interruption truncation is based on actual playback progress rather than assuming all generated audio has already been heard.
+
+The Twilio example in [`examples/realtime/twilio/twilio_handler.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/twilio/twilio_handler.py) shows this pattern.
+
+## Tools, approvals, handoffs, and guardrails
+
+### Function tools
+
+Realtime agents support function tools during live conversations:
 
 ```python
 from agents import function_tool
 
+
 @function_tool
 def get_weather(city: str) -> str:
     """Get current weather for a city."""
-    # Your weather API logic here
-    return f"The weather in {city} is sunny, 72°F"
+    return f"The weather in {city} is sunny, 72F."
 
-@function_tool
-def book_appointment(date: str, time: str, service: str) -> str:
-    """Book an appointment."""
-    # Your booking logic here
-    return f"Appointment booked for {service} on {date} at {time}"
 
 agent = RealtimeAgent(
     name="Assistant",
-    instructions="You can help with weather and appointments.",
-    tools=[get_weather, book_appointment],
+    instructions="You can answer weather questions.",
+    tools=[get_weather],
 )
 ```
 
-## Handoffs
+### Tool approvals
 
-### Creating handoffs
-
-Handoffs allow transferring conversations between specialized agents.
+Function tools can require human approval before execution. When that happens, the session emits `tool_approval_required` and pauses the tool run until you call `approve_tool_call()` or `reject_tool_call()`.
 
 ```python
-from agents.realtime import realtime_handoff
+async for event in session:
+    if event.type == "tool_approval_required":
+        await session.approve_tool_call(event.call_id)
+```
 
-# Specialized agents
+For a concrete server-side approval loop, see [`examples/realtime/app/server.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/app/server.py). The human-in-the-loop docs also point back to this flow in [Human in the loop](../human_in_the_loop.md).
+
+### Handoffs
+
+Realtime handoffs let one agent transfer the live conversation to another specialist:
+
+```python
+from agents.realtime import RealtimeAgent, realtime_handoff
+
 billing_agent = RealtimeAgent(
     name="Billing Support",
-    instructions="You specialize in billing and payment issues.",
+    instructions="You specialize in billing issues.",
 )
 
-technical_agent = RealtimeAgent(
-    name="Technical Support",
-    instructions="You handle technical troubleshooting.",
-)
-
-# Main agent with handoffs
 main_agent = RealtimeAgent(
     name="Customer Service",
-    instructions="You are the main customer service agent. Hand off to specialists when needed.",
-    handoffs=[
-        realtime_handoff(billing_agent, tool_description="Transfer to billing support"),
-        realtime_handoff(technical_agent, tool_description="Transfer to technical support"),
-    ]
+    instructions="Triage the request and hand off when needed.",
+    handoffs=[realtime_handoff(billing_agent, tool_description="Transfer to billing support")],
 )
 ```
 
-## Runtime behavior and session handling
-
-### Event handling
-
-The session streams events that you can listen to by iterating over the session object. Events include audio output chunks, transcription results, tool execution start and end, agent handoffs, and errors. Key events to handle include:
-
--   **audio**: Raw audio data from the agent's response
--   **audio_end**: Agent finished speaking
--   **audio_interrupted**: User interrupted the agent
--   **tool_start/tool_end**: Tool execution lifecycle
--   **handoff**: Agent handoff occurred
--   **error**: Error occurred during processing
-
-For complete event details, see [`RealtimeSessionEvent`][agents.realtime.events.RealtimeSessionEvent].
+Bare `RealtimeAgent` handoffs are auto-wrapped, and `realtime_handoff(...)` lets you customize names, descriptions, validation, callbacks, and availability. Realtime handoffs do **not** support the regular handoff `input_filter`.
 
 ### Guardrails
 
-Only output guardrails are supported for realtime agents. These guardrails are debounced and run periodically (not on every word) to avoid performance issues during real-time generation. The default debounce length is 100 characters, but this is configurable.
-
-Guardrails can be attached directly to a `RealtimeAgent` or provided via the session's `run_config`. Guardrails from both sources run together.
+Only output guardrails are supported for realtime agents. They run on debounced transcript accumulation rather than on every partial token, and they emit `guardrail_tripped` instead of raising an exception.
 
 ```python
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
+
 
 def sensitive_data_check(context, agent, output):
     return GuardrailFunctionOutput(
         tripwire_triggered="password" in output,
         output_info=None,
     )
+
 
 agent = RealtimeAgent(
     name="Assistant",
@@ -160,70 +261,79 @@ agent = RealtimeAgent(
 )
 ```
 
-When a guardrail is triggered, it generates a `guardrail_tripped` event and can interrupt the agent's current response. The debounce behavior helps balance safety with real-time performance requirements. Unlike text agents, realtime agents do **not** raise an Exception when guardrails are tripped.
+## SIP and telephony
 
-### Audio processing
+The Python SDK includes a first-class SIP attach flow via [`OpenAIRealtimeSIPModel`][agents.realtime.openai_realtime.OpenAIRealtimeSIPModel].
 
-Send audio to the session using [`session.send_audio(audio_bytes)`][agents.realtime.session.RealtimeSession.send_audio] or send text using [`session.send_message()`][agents.realtime.session.RealtimeSession.send_message].
-
-For audio output, listen for `audio` events and play the audio data through your preferred audio library. Make sure to listen for `audio_interrupted` events to stop playback immediately and clear any queued audio when the user interrupts the agent.
-
-## Advanced integrations and low-level access
-
-### SIP integration
-
-You can attach realtime agents to phone calls that arrive via the [Realtime Calls API](https://platform.openai.com/docs/guides/realtime-sip). The SDK provides [`OpenAIRealtimeSIPModel`][agents.realtime.openai_realtime.OpenAIRealtimeSIPModel], which reuses the same agent flow while negotiating media over SIP.
-
-To use it, pass the model instance to the runner and supply the SIP `call_id` when starting the session. The call ID is delivered by the webhook that signals an incoming call.
+Use it when a call arrives through the Realtime Calls API and you want to attach an agent session to the resulting `call_id`:
 
 ```python
-from agents.realtime import RealtimeAgent, RealtimeRunner
+from agents.realtime import RealtimeRunner
 from agents.realtime.openai_realtime import OpenAIRealtimeSIPModel
 
-runner = RealtimeRunner(
-    starting_agent=agent,
-    model=OpenAIRealtimeSIPModel(),
-)
+runner = RealtimeRunner(starting_agent=agent, model=OpenAIRealtimeSIPModel())
 
 async with await runner.run(
     model_config={
         "call_id": call_id_from_webhook,
-        "initial_model_settings": {
-            "turn_detection": {"type": "semantic_vad", "interrupt_response": True},
-        },
-    },
+    }
 ) as session:
     async for event in session:
         ...
 ```
 
-When the caller hangs up, the SIP session ends and the realtime connection closes automatically. For a complete telephony example, see [`examples/realtime/twilio_sip`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/twilio_sip).
+If you need to accept the call first and want the accept payload to match the agent-derived session configuration, use `OpenAIRealtimeSIPModel.build_initial_session_payload(...)`. The complete flow is shown in [`examples/realtime/twilio_sip/server.py`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/twilio_sip/server.py).
 
-### Direct model access
+## Low-level access and custom endpoints
 
-You can access the underlying model to add custom listeners or perform advanced operations:
+You can access the underlying transport object through `session.model`.
+
+Use this when you need:
+
+-   custom listeners via `session.model.add_listener(...)`
+-   raw client events such as `response.create` or `session.update`
+-   custom `url`, `headers`, or `api_key` handling through `model_config`
+-   `call_id` attach to an existing realtime call
+
+`RealtimeModelConfig` supports:
+
+-   `api_key`
+-   `url`
+-   `headers`
+-   `initial_model_settings`
+-   `playback_tracker`
+-   `call_id`
+
+This repository's shipped `call_id` example is SIP. The broader Realtime API also uses `call_id` for some server-side control flows, but those are not packaged as Python examples here.
+
+When connecting to Azure OpenAI, pass a GA Realtime endpoint URL and explicit headers. For example:
 
 ```python
-# Add a custom listener to the model
-session.model.add_listener(my_custom_listener)
+session = await runner.run(
+    model_config={
+        "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
+        "headers": {"api-key": "<your-azure-api-key>"},
+    }
+)
 ```
 
-This gives you direct access to the [`RealtimeModel`][agents.realtime.model.RealtimeModel] interface for advanced use cases where you need lower-level control over the connection.
-
-### Examples and further reading
-
-For complete working examples, check out the [examples/realtime directory](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) which includes demos with and without UI components.
-
-### Azure OpenAI endpoint format
-
-When connecting to Azure OpenAI, use the GA Realtime endpoint format and pass credentials via
-headers in `model_config`:
+For token-based authentication, use a bearer token in `headers`:
 
 ```python
-model_config = {
-    "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
-    "headers": {"api-key": "<your-azure-api-key>"},
-}
+session = await runner.run(
+    model_config={
+        "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
+        "headers": {"authorization": f"Bearer {token}"},
+    }
+)
 ```
 
-For token-based auth, use `{"authorization": f"Bearer {token}"}` in `headers`.
+If you pass `headers`, the SDK does not add `Authorization` automatically. Avoid the legacy beta path (`/openai/realtime?api-version=...`) with realtime agents.
+
+## Further reading
+
+-   [Realtime transport](transport.md)
+-   [Quickstart](quickstart.md)
+-   [OpenAI Realtime conversations](https://developers.openai.com/api/docs/guides/realtime-conversations/)
+-   [OpenAI Realtime server-side controls](https://developers.openai.com/api/docs/guides/realtime-server-controls/)
+-   [`examples/realtime`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime)

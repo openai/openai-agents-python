@@ -73,5 +73,5 @@ Use this table when you know the job you want to do, but not which page explains
 | Keep memory across turns | [Running agents](running_agents.md#choose-a-memory-strategy) and [Sessions](sessions/index.md) |
 | Use OpenAI models, websocket transport, or non-OpenAI providers | [Models](models/index.md) |
 | Review outputs, run items, interruptions, and resume state | [Results](results.md) |
-| Build a low-latency voice agent | [Realtime agents quickstart](realtime/quickstart.md) |
+| Build a low-latency voice agent | [Realtime agents quickstart](realtime/quickstart.md) and [Realtime transport](realtime/transport.md) |
 | Build a speech-to-text / agent / text-to-speech pipeline | [Voice pipeline quickstart](voice/quickstart.md) |
