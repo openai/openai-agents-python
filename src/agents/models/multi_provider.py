@@ -144,12 +144,19 @@ class MultiProvider(ModelProvider):
         Returns:
             A Model.
         """
+        original_model_name = model_name
         prefix, model_name = self._get_prefix_and_model_name(model_name)
 
+        # Route known prefixes to dedicated providers.
         if prefix and self.provider_map and (provider := self.provider_map.get_provider(prefix)):
             return provider.get_model(model_name)
-        else:
+        if prefix in {"openai", "litellm", None}:
             return self._get_fallback_provider(prefix).get_model(model_name)
+
+        # Unknown prefixes are treated as part of the model name for OpenAI-compatible providers.
+        # This supports endpoints like OpenRouter that use namespaced model IDs such as
+        # "openrouter/openai/gpt-4o".
+        return self._get_fallback_provider(None).get_model(original_model_name)
 
     async def aclose(self) -> None:
         """Close cached resources held by child providers."""

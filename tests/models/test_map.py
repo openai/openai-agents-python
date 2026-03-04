@@ -1,3 +1,5 @@
+from typing import Any
+
 from agents import Agent, MultiProvider, OpenAIResponsesModel, OpenAIResponsesWSModel, RunConfig
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.run_internal.run_loop import get_model
@@ -53,3 +55,25 @@ def test_multi_provider_passes_websocket_base_url_to_openai_provider(monkeypatch
 
     MultiProvider(openai_websocket_base_url="wss://proxy.example.test/v1")
     assert captured_kwargs["websocket_base_url"] == "wss://proxy.example.test/v1"
+
+
+def test_unknown_prefix_model_name_keeps_prefix_for_openai_fallback(monkeypatch):
+    captured_model: dict[str, Any] = {}
+    captured_result: dict[str, Any] = {}
+
+    class FakeOpenAIProvider:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_model(self, model_name):
+            captured_model["value"] = model_name
+            fake_model = object()
+            captured_result["value"] = fake_model
+            return fake_model
+
+    monkeypatch.setattr("agents.models.multi_provider.OpenAIProvider", FakeOpenAIProvider)
+
+    provider = MultiProvider()
+    result = provider.get_model("openrouter/openai/gpt-4o")
+    assert result is captured_result["value"]
+    assert captured_model["value"] == "openrouter/openai/gpt-4o"
