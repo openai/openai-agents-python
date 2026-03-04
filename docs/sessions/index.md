@@ -4,7 +4,7 @@ The Agents SDK provides built-in session memory to automatically maintain conver
 
 Sessions stores conversation history for a specific session, allowing agents to maintain context without requiring explicit manual memory management. This is particularly useful for building chat applications or multi-turn conversations where you want the agent to remember previous interactions.
 
-Use sessions when you want the SDK to manage client-side memory for you. If you are already using OpenAI server-managed state with `conversation_id` or `previous_response_id`, you usually do not also need a session for the same conversation.
+Use sessions when you want the SDK to manage client-side memory for you. Sessions cannot be combined with `conversation_id`, `previous_response_id`, or `auto_previous_response_id` in the same run. If you want OpenAI server-managed continuation instead, choose one of those mechanisms rather than layering a session on top.
 
 ## Quick start
 
@@ -83,6 +83,8 @@ Use [`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_call
 
 Return the final list of input items that should be sent to the model.
 
+The callback receives copies of both lists, so you can safely mutate them. The returned list controls the model input for that turn, but the SDK still persists only items that belong to the new turn. Reordering or filtering old history therefore does not cause old session items to be saved again as fresh input.
+
 ```python
 from agents import Agent, RunConfig, Runner, SQLiteSession
 
@@ -103,7 +105,7 @@ result = await Runner.run(
 )
 ```
 
-Use this when you need custom pruning, reordering, or selective inclusion of history without changing how the session stores items.
+Use this when you need custom pruning, reordering, or selective inclusion of history without changing how the session stores items. If you need a later final pass immediately before the model call, use [`call_model_input_filter`][agents.run.RunConfig.call_model_input_filter] from the [running agents guide](../running_agents.md).
 
 ## Limiting retrieved history
 

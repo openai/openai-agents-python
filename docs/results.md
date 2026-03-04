@@ -1,102 +1,87 @@
 # Results
 
-When you call the `Runner.run` methods, you either get a:
+When you call the `Runner.run` methods, you receive one of two result types:
 
--   [`RunResult`][agents.result.RunResult] if you call `run` or `run_sync`
--   [`RunResultStreaming`][agents.result.RunResultStreaming] if you call `run_streamed`
+-   [`RunResult`][agents.result.RunResult] from `Runner.run(...)` or `Runner.run_sync(...)`
+-   [`RunResultStreaming`][agents.result.RunResultStreaming] from `Runner.run_streamed(...)`
 
-Both of these inherit from [`RunResultBase`][agents.result.RunResultBase], which is where most useful information is present.
+Both inherit from [`RunResultBase`][agents.result.RunResultBase], which exposes the shared result surfaces such as `final_output`, `new_items`, `last_agent`, `raw_responses`, and `to_state()`.
 
-## Which result property should I use?
+`RunResultStreaming` adds streaming-specific controls such as [`stream_events()`][agents.result.RunResultStreaming.stream_events], [`current_agent`][agents.result.RunResultStreaming.current_agent], [`is_complete`][agents.result.RunResultStreaming.is_complete], and [`cancel(...)`][agents.result.RunResultStreaming.cancel].
+
+## Choose the right result surface
 
 Most applications only need a few result properties or helpers:
 
-| Property or helper | Use it when you need... |
+| If you need... | Use |
 | --- | --- |
-| `final_output` | The final answer to show the user. |
-| `to_input_list()` | A full next-turn input list when you are manually carrying conversation history yourself. |
-| `new_items` | Rich run items with agent, tool, and handoff metadata for logs, UIs, or audits. |
-| `last_agent` | The agent that should usually handle the next turn. |
-| `last_response_id` | Continuation with `previous_response_id` on the next OpenAI Responses turn. |
-| `agent_tool_invocation` | Metadata about the outer tool call when this result came from `Agent.as_tool()`. |
-| `interruptions` | Pending tool approvals you must resolve before resuming. |
-| `to_state()` | A serializable snapshot for pause/resume or durable job workflows. |
+| The final answer to show the user | `final_output` |
+| A replay-ready next-turn input list with the full local transcript | `to_input_list()` |
+| Rich run items with agent, tool, handoff, and approval metadata | `new_items` |
+| The agent that should usually handle the next user turn | `last_agent` |
+| OpenAI Responses API chaining with `previous_response_id` | `last_response_id` |
+| Pending approvals and a resumable snapshot | `interruptions` and `to_state()` |
+| Metadata about the current nested `Agent.as_tool()` invocation | `agent_tool_invocation` |
+| Raw model calls or guardrail diagnostics | `raw_responses` and the guardrail result arrays |
 
 ## Final output
 
 The [`final_output`][agents.result.RunResultBase.final_output] property contains the final output of the last agent that ran. This is either:
 
--   a `str`, if the last agent didn't have an `output_type` defined
--   an object of type `last_agent.output_type`, if the agent had an output type defined.
+-   a `str`, if the last agent did not have an `output_type` defined
+-   an object of type `last_agent.output_type`, if the last agent had an output type defined
+-   `None`, if the run stopped before a final output was produced, for example because it paused on an approval interruption
 
 !!! note
 
-    `final_output` is of type `Any`. We can't statically type this, because of handoffs. If handoffs occur, that means any Agent might be the last agent, so we don't statically know the set of possible output types.
+    `final_output` is typed as `Any`. Handoffs can change which agent finishes the run, so the SDK cannot statically know the full set of possible output types.
 
-## Inputs for the next turn
+In streaming mode, `final_output` stays `None` until the stream has finished processing. See [Streaming](streaming.md) for the event-by-event flow.
 
-You can use [`result.to_input_list()`][agents.result.RunResultBase.to_input_list] to turn the result into an input list that concatenates the original input you provided, to the items generated during the agent run. This makes it convenient to take the outputs of one agent run and pass them into another run, or to run it in a loop and append new user inputs each time.
+## Input, next-turn history, and new items
+
+These surfaces answer different questions:
+
+| Property or helper | What it contains | Best for |
+| --- | --- | --- |
+| [`input`][agents.result.RunResultBase.input] | The base input for this run segment. If a handoff input filter rewrote the history, this reflects the filtered input the run continued with. | Auditing what this run actually used as input |
+| [`to_input_list()`][agents.result.RunResultBase.to_input_list] | A replay-ready next-turn input list built from `input` plus the converted `new_items` from this run. | Manual chat loops and client-managed conversation state |
+| [`new_items`][agents.result.RunResultBase.new_items] | Rich [`RunItem`][agents.items.RunItem] wrappers with agent, tool, handoff, and approval metadata. | Logs, UIs, audits, and debugging |
+| [`raw_responses`][agents.result.RunResultBase.raw_responses] | Raw [`ModelResponse`][agents.items.ModelResponse] objects from each model call in the run. | Provider-level diagnostics or raw response inspection |
 
 In practice:
 
--   Use `result.to_input_list()` when your application manually carries the entire conversation transcript.
+-   Use `to_input_list()` when your application manually carries the entire conversation transcript.
 -   Use [`session=...`](sessions/index.md) when you want the SDK to load and save history for you.
--   If you are using OpenAI server-managed state with `conversation_id` or `previous_response_id`, usually pass only the new user input and reuse the stored ID instead of resending `result.to_input_list()`.
+-   If you are using OpenAI server-managed state with `conversation_id` or `previous_response_id`, usually pass only the new user input and reuse the stored ID instead of resending `to_input_list()`.
 
-## Last agent
+Unlike the JavaScript SDK, Python does not expose a separate `output` property for the model-shaped delta only. Use `new_items` when you need SDK metadata, or inspect `raw_responses` when you need the raw model payloads.
 
-The [`last_agent`][agents.result.RunResultBase.last_agent] property contains the last agent that ran. Depending on your application, this is often useful for the next time the user inputs something. For example, if you have a frontline triage agent that hands off to a language-specific agent, you can store the last agent, and re-use it the next time the user messages the agent.
+### New items
 
-In streaming mode, [`RunResultStreaming.current_agent`][agents.result.RunResultStreaming.current_agent] updates as the run progresses, so you can observe handoffs as they happen.
+[`new_items`][agents.result.RunResultBase.new_items] gives you the richest view of what happened during the run. Common item types are:
 
-## New items
+-   [`MessageOutputItem`][agents.items.MessageOutputItem] for assistant messages
+-   [`ReasoningItem`][agents.items.ReasoningItem] for reasoning items
+-   [`ToolCallItem`][agents.items.ToolCallItem] and [`ToolCallOutputItem`][agents.items.ToolCallOutputItem] for tool calls and their results
+-   [`ToolApprovalItem`][agents.items.ToolApprovalItem] for tool calls that paused for approval
+-   [`HandoffCallItem`][agents.items.HandoffCallItem] and [`HandoffOutputItem`][agents.items.HandoffOutputItem] for handoff requests and completed transfers
 
-The [`new_items`][agents.result.RunResultBase.new_items] property contains the new items generated during the run. The items are [`RunItem`][agents.items.RunItem]s. A run item wraps the raw item generated by the LLM.
+Choose `new_items` over `to_input_list()` whenever you need agent associations, tool outputs, handoff boundaries, or approval boundaries.
 
--   [`MessageOutputItem`][agents.items.MessageOutputItem] indicates a message from the LLM. The raw item is the message generated.
--   [`HandoffCallItem`][agents.items.HandoffCallItem] indicates that the LLM called the handoff tool. The raw item is the tool call item from the LLM.
--   [`HandoffOutputItem`][agents.items.HandoffOutputItem] indicates that a handoff occurred. The raw item is the tool response to the handoff tool call. You can also access the source/target agents from the item.
--   [`ToolCallItem`][agents.items.ToolCallItem] indicates that the LLM invoked a tool.
--   [`ToolCallOutputItem`][agents.items.ToolCallOutputItem] indicates that a tool was called. The raw item is the tool response. You can also access the tool output from the item.
--   [`ReasoningItem`][agents.items.ReasoningItem] indicates a reasoning item from the LLM. The raw item is the reasoning generated.
+## Continue or resume the conversation
 
-## Run state
+### Next-turn agent
 
-Call [`result.to_state()`][agents.result.RunResult.to_state] when you need a serializable snapshot of the run. This is the bridge between a finished or paused run and a later resume, especially for approval flows or durable worker systems.
+[`last_agent`][agents.result.RunResultBase.last_agent] contains the last agent that ran. This is often the best agent to reuse for the next user turn after handoffs.
 
-## Agent-as-tool metadata
+In streaming mode, [`RunResultStreaming.current_agent`][agents.result.RunResultStreaming.current_agent] updates as the run progresses, so you can observe handoffs before the stream finishes.
 
-When a result comes from a nested [`Agent.as_tool()`][agents.agent.Agent.as_tool] run, [`agent_tool_invocation`][agents.result.RunResultBase.agent_tool_invocation] exposes immutable metadata about the outer tool call:
+### Interruptions and run state
 
--   `tool_name`
--   `tool_call_id`
--   `tool_arguments`
+If a tool needs approval, pending approvals are exposed in [`RunResult.interruptions`][agents.result.RunResult.interruptions] or [`RunResultStreaming.interruptions`][agents.result.RunResultStreaming.interruptions]. This can include approvals raised by direct tools, by tools reached after a handoff, or by nested [`Agent.as_tool()`][agents.agent.Agent.as_tool] runs.
 
-For ordinary top-level runs, `agent_tool_invocation` is `None`.
-
-## Other information
-
-### Guardrail results
-
-The [`input_guardrail_results`][agents.result.RunResultBase.input_guardrail_results] and [`output_guardrail_results`][agents.result.RunResultBase.output_guardrail_results] properties contain the results of the guardrails, if any. Guardrail results can sometimes contain useful information you want to log or store, so we make these available to you.
-
-Tool guardrail results are available separately as [`tool_input_guardrail_results`][agents.result.RunResultBase.tool_input_guardrail_results] and [`tool_output_guardrail_results`][agents.result.RunResultBase.tool_output_guardrail_results]. These guardrails can be attached to tools, and those tool calls execute the guardrails during the agent workflow.
-
-### Raw responses
-
-The [`raw_responses`][agents.result.RunResultBase.raw_responses] property contains the [`ModelResponse`][agents.items.ModelResponse]s generated by the LLM.
-
-### Original input
-
-The [`input`][agents.result.RunResultBase.input] property contains the original input you provided to the `run` method. In most cases you won't need this, but it's available in case you do.
-
-### Interruptions and resuming runs
-
-If a run pauses for tool approval, pending approvals are exposed in
-[`RunResult.interruptions`][agents.result.RunResult.interruptions] or
-[`RunResultStreaming.interruptions`][agents.result.RunResultStreaming.interruptions]. Convert the
-result into a [`RunState`][agents.run_state.RunState] with `to_state()`, approve or reject the
-interruption(s), and resume with `Runner.run(...)` or `Runner.run_streamed(...)`.
+Call [`to_state()`][agents.result.RunResult.to_state] to capture a resumable [`RunState`][agents.run_state.RunState], approve or reject the pending items, and then resume with `Runner.run(...)` or `Runner.run_streamed(...)`.
 
 ```python
 from agents import Agent, Runner
@@ -111,15 +96,59 @@ if result.interruptions:
     result = await Runner.run(agent, state)
 ```
 
-Both [`RunResult`][agents.result.RunResult] and
-[`RunResultStreaming`][agents.result.RunResultStreaming] support `to_state()`. For durable
-approval workflows, see the [human-in-the-loop guide](human_in_the_loop.md).
+For streaming runs, finish consuming [`stream_events()`][agents.result.RunResultStreaming.stream_events] first, then inspect `result.interruptions` and resume from `result.to_state()`. For the full approval flow, see [Human-in-the-loop](human_in_the_loop.md).
 
-### Convenience helpers
+### Server-managed continuation
 
-`RunResultBase` includes a few helper methods/properties that are useful in production flows:
+[`last_response_id`][agents.result.RunResultBase.last_response_id] is the latest model response ID from the run. Pass it back as `previous_response_id` on the next turn when you want to continue an OpenAI Responses API chain.
 
-- [`final_output_as(...)`][agents.result.RunResultBase.final_output_as] casts final output to a specific type (optionally with runtime type checking).
-- [`last_response_id`][agents.result.RunResultBase.last_response_id] returns the latest model response ID. Pass this back as `previous_response_id` when you want to continue an OpenAI Responses API chain on the next turn.
-- [`agent_tool_invocation`][agents.result.RunResultBase.agent_tool_invocation] returns metadata about the outer tool call when the result comes from `Agent.as_tool()`.
-- [`release_agents(...)`][agents.result.RunResultBase.release_agents] drops strong references to agents when you want to reduce memory pressure after inspecting results.
+If you already continue the conversation with `to_input_list()`, `session`, or `conversation_id`, you usually do not need `last_response_id`. If you need every model response from a multi-step run, inspect `raw_responses` instead.
+
+## Agent-as-tool metadata
+
+When a result comes from a nested [`Agent.as_tool()`][agents.agent.Agent.as_tool] run, [`agent_tool_invocation`][agents.result.RunResultBase.agent_tool_invocation] exposes immutable metadata about the outer tool call:
+
+-   `tool_name`
+-   `tool_call_id`
+-   `tool_arguments`
+
+For ordinary top-level runs, `agent_tool_invocation` is `None`.
+
+This is especially useful inside `custom_output_extractor`, where you may need the outer tool name, call ID, or raw arguments while post-processing the nested result. See [Tools](tools.md) for the surrounding `Agent.as_tool()` patterns.
+
+If you also need the parsed structured input for that nested run, read `context_wrapper.tool_input`. That is the field [`RunState`][agents.run_state.RunState] serializes generically for nested tool input, while `agent_tool_invocation` is the live result accessor for the current nested invocation.
+
+## Streaming lifecycle and diagnostics
+
+[`RunResultStreaming`][agents.result.RunResultStreaming] inherits the same result surfaces above, but adds streaming-specific controls:
+
+-   [`stream_events()`][agents.result.RunResultStreaming.stream_events] to consume semantic stream events
+-   [`current_agent`][agents.result.RunResultStreaming.current_agent] to track the active agent mid-run
+-   [`is_complete`][agents.result.RunResultStreaming.is_complete] to see whether the streamed run has fully finished
+-   [`cancel(...)`][agents.result.RunResultStreaming.cancel] to stop the run immediately or after the current turn
+
+Keep consuming `stream_events()` until the async iterator finishes. A streaming run is not complete until that iterator ends, and summary properties such as `final_output`, `interruptions`, `raw_responses`, and session-persistence side effects may still be settling after the last visible token arrives.
+
+If you call `cancel()`, continue consuming `stream_events()` so cancellation and cleanup can finish correctly.
+
+Python does not expose a separate streamed `completed` promise or `error` property. Terminal streaming failures are surfaced by raising from `stream_events()`, and `is_complete` reflects whether the run has reached its terminal state.
+
+### Raw responses
+
+[`raw_responses`][agents.result.RunResultBase.raw_responses] contains the raw model responses collected during the run. Multi-step runs can produce more than one response, for example across handoffs or repeated model/tool/model cycles.
+
+[`last_response_id`][agents.result.RunResultBase.last_response_id] is just the ID from the last entry in `raw_responses`.
+
+### Guardrail results
+
+Agent-level guardrails are exposed as [`input_guardrail_results`][agents.result.RunResultBase.input_guardrail_results] and [`output_guardrail_results`][agents.result.RunResultBase.output_guardrail_results].
+
+Tool guardrails are exposed separately as [`tool_input_guardrail_results`][agents.result.RunResultBase.tool_input_guardrail_results] and [`tool_output_guardrail_results`][agents.result.RunResultBase.tool_output_guardrail_results].
+
+These arrays accumulate across the run, so they are useful for logging decisions, storing extra guardrail metadata, or debugging why a run was blocked.
+
+### Context and usage
+
+[`context_wrapper`][agents.result.RunResultBase.context_wrapper] exposes your app context together with SDK-managed runtime metadata such as approvals, usage, and nested `tool_input`.
+
+Usage is tracked on `context_wrapper.usage`. For streamed runs, the usage totals can lag until the stream's final chunks have been processed. See [Context management](context.md) for the full wrapper shape and persistence caveats.

@@ -106,7 +106,12 @@ class Handoff(Generic[TContext, TAgent]):
     """The description of the tool that represents the handoff."""
 
     input_json_schema: dict[str, Any]
-    """The JSON schema for the handoff input. Can be empty if the handoff does not take an input."""
+    """The JSON schema for the handoff tool-call arguments.
+
+    This schema is exposed to the model as the handoff tool's ``parameters``. It only describes the
+    structured payload passed to ``on_invoke_handoff`` and does not replace the next agent's main
+    input.
+    """
 
     on_invoke_handoff: Callable[[RunContextWrapper[Any], str], Awaitable[TAgent]]
     """The function that invokes the handoff.
@@ -226,9 +231,13 @@ def handoff(
         tool_name_override: Optional override for the name of the tool that represents the handoff.
         tool_description_override: Optional override for the description of the tool that
             represents the handoff.
-        on_handoff: A function that runs when the handoff is invoked.
-        input_type: The type of the input to the handoff. If provided, the input will be validated
-            against this type. Only relevant if you pass a function that takes an input.
+        on_handoff: A function that runs when the handoff is invoked. The ``handoff()`` helper
+            always returns the specific ``agent`` captured here, so use ``on_handoff`` for side
+            effects or bookkeeping rather than dynamic destination selection.
+        input_type: The type of the handoff tool-call arguments. If provided, the model-generated
+            JSON arguments are validated against this type and the parsed value is passed to
+            ``on_handoff``. This only affects the handoff tool payload, not the next agent's main
+            input.
         input_filter: A function that filters the inputs that are passed to the next agent.
         nest_handoff_history: Optional override for the RunConfig-level ``nest_handoff_history``
             flag. If ``None`` we fall back to the run's configuration.

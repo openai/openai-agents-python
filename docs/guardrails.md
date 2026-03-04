@@ -7,6 +7,16 @@ There are two kinds of guardrails:
 1. Input guardrails run on the initial user input
 2. Output guardrails run on the final agent output
 
+## Workflow boundaries
+
+Guardrails are attached to agents and tools, but they do not all run at the same points in a workflow:
+
+-   **Input guardrails** run only for the first agent in the chain.
+-   **Output guardrails** run only for the agent that produces the final output.
+-   **Tool guardrails** run on every custom function-tool invocation, with input guardrails before execution and output guardrails after execution.
+
+If you need checks around each custom function-tool call in a workflow that includes managers, handoffs, or delegated specialists, use tool guardrails instead of relying only on agent-level input/output guardrails.
+
 ## Input guardrails
 
 Input guardrails run in 3 steps:
@@ -47,7 +57,7 @@ Tool guardrails wrap **function tools** and let you validate or block tool calls
 
 - Input tool guardrails run before the tool executes and can skip the call, replace the output with a message, or raise a tripwire.
 - Output tool guardrails run after the tool executes and can replace the output or raise a tripwire.
-- Tool guardrails apply only to function tools created with [`function_tool`][agents.function_tool]; hosted tools (`WebSearchTool`, `FileSearchTool`, `HostedMCPTool`, `CodeInterpreterTool`, `ImageGenerationTool`) and built-in execution tools (`ComputerTool`, `ShellTool`, `ApplyPatchTool`, `LocalShellTool`) do not use this guardrail pipeline.
+- Tool guardrails apply only to function tools created with [`function_tool`][agents.tool.function_tool]. Handoffs run through the SDK's handoff pipeline rather than the normal function-tool pipeline, so tool guardrails do not apply to the handoff call itself. Hosted tools (`WebSearchTool`, `FileSearchTool`, `HostedMCPTool`, `CodeInterpreterTool`, `ImageGenerationTool`) and built-in execution tools (`ComputerTool`, `ShellTool`, `ApplyPatchTool`, `LocalShellTool`) also do not use this guardrail pipeline, and [`Agent.as_tool()`][agents.agent.Agent.as_tool] does not currently expose tool-guardrail options directly.
 
 See the code snippet below for details.
 

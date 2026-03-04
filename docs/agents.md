@@ -1,18 +1,43 @@
 # Agents
 
-Agents are the core building block in your apps. An agent is a large language model (LLM), configured with instructions and tools.
+Agents are the core building block in your apps. An agent is a large language model (LLM) configured with instructions, tools, and optional runtime behavior such as handoffs, guardrails, and structured outputs.
+
+Use this page when you want to define or customize a single agent. If you are deciding how multiple agents should collaborate, read [Agent orchestration](multi_agent.md).
+
+## Choose the next guide
+
+Use this page as the hub for agent definition. Jump to the adjacent guide that matches the next decision you need to make.
+
+| If you want to... | Read next |
+| --- | --- |
+| Choose a model or provider setup | [Models](models/index.md) |
+| Add capabilities to the agent | [Tools](tools.md) |
+| Decide between manager-style orchestration and handoffs | [Agent orchestration](multi_agent.md) |
+| Configure handoff behavior | [Handoffs](handoffs.md) |
+| Run turns, stream events, or manage conversation state | [Running agents](running_agents.md) |
+| Inspect final output, run items, or resumable state | [Results](results.md) |
+| Share local dependencies and runtime state | [Context management](context.md) |
 
 ## Basic configuration
 
-The most common properties of an agent you'll configure are:
+The most common properties of an agent are:
 
--   `name`: A required string that identifies your agent.
--   `instructions`: also known as a developer message or system prompt.
--   `model`: which LLM to use, and optional `model_settings` to configure model tuning parameters like temperature, top_p, etc.
--   `prompt`: Reference a prompt template by id (and variables) when using OpenAI's Responses API.
--   `tools`: Tools that the agent can use to achieve its tasks.
--   `mcp_servers`: MCP servers that provide tools to the agent. See the [MCP guide](mcp.md).
--   `reset_tool_choice`: Whether to reset `tool_choice` after a tool call (default: `True`) to avoid tool-use loops. See [Forcing tool use](#forcing-tool-use).
+| Property | Required | Description |
+| --- | --- | --- |
+| `name` | yes | Human-readable agent name. |
+| `instructions` | yes | System prompt or dynamic instructions callback. See [Dynamic instructions](#dynamic-instructions). |
+| `prompt` | no | OpenAI Responses API prompt configuration. Accepts a static prompt object or a function. See [Prompt templates](#prompt-templates). |
+| `handoff_description` | no | Short description exposed when this agent is offered as a handoff target. |
+| `handoffs` | no | Delegate the conversation to specialist agents. See [handoffs](handoffs.md). |
+| `model` | no | Which LLM to use. See [Models](models/index.md). |
+| `model_settings` | no | Model tuning parameters such as `temperature`, `top_p`, and `tool_choice`. |
+| `tools` | no | Tools the agent can call. See [Tools](tools.md). |
+| `mcp_servers` | no | MCP-backed tools for the agent. See the [MCP guide](mcp.md). |
+| `input_guardrails` | no | Guardrails that run on the first user input for this agent chain. See [Guardrails](guardrails.md). |
+| `output_guardrails` | no | Guardrails that run on the final output for this agent. See [Guardrails](guardrails.md). |
+| `output_type` | no | Structured output type instead of plain text. See [Output types](#output-types). |
+| `tool_use_behavior` | no | Control whether tool results loop back to the model or end the run. See [Tool use behavior](#tool-use-behavior). |
+| `reset_tool_choice` | no | Reset `tool_choice` after a tool call (default: `True`) to avoid tool-use loops. See [Forcing tool use](#forcing-tool-use). |
 
 ```python
 from agents import Agent, ModelSettings, function_tool
@@ -92,6 +117,8 @@ result = await Runner.run(
 ## Context
 
 Agents are generic on their `context` type. Context is a dependency-injection tool: it's an object you create and pass to `Runner.run()`, that is passed to every agent, tool, handoff etc, and it serves as a grab bag of dependencies and state for the agent run. You can provide any Python object as the context.
+
+Read the [context guide](context.md) for the full `RunContextWrapper` surface, shared usage tracking, nested `tool_input`, and serialization caveats.
 
 ```python
 @dataclass

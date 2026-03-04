@@ -376,6 +376,8 @@ settings so the resumed turn continues in the same server-managed conversation.
 
 Use `call_model_input_filter` to edit the model input right before the model call. The hook receives the current agent, context, and the combined input items (including session history when present) and returns a new `ModelInputData`.
 
+The return value must be a [`ModelInputData`][agents.run.ModelInputData] object. Its `input` field is required and must be a list of input items. Returning any other shape raises a `UserError`.
+
 ```python
 from agents import Agent, Runner, RunConfig
 from agents.run import CallModelData, ModelInputData
@@ -392,6 +394,12 @@ result = Runner.run_sync(
     run_config=RunConfig(call_model_input_filter=drop_old_messages),
 )
 ```
+
+The runner passes a copy of the prepared input list to the hook, so you can trim, replace, or reorder it without mutating the caller's original list in place.
+
+If you are using a session, `call_model_input_filter` runs after session history has already been loaded and merged with the current turn. Use [`session_input_callback`][agents.run.RunConfig.session_input_callback] when you want to customize that earlier merge step itself.
+
+If you are using OpenAI server-managed conversation state with `conversation_id`, `previous_response_id`, or `auto_previous_response_id`, the hook runs on the prepared payload for the next Responses API call. That payload may already represent only the new-turn delta rather than a full replay of earlier history. Only the items you return are marked as sent for that server-managed continuation.
 
 Set the hook per run via `run_config` to redact sensitive data, trim long histories, or inject additional system guidance.
 
