@@ -4,44 +4,52 @@ search:
 ---
 # クイックスタート
 
-Realtime エージェントを使うと、OpenAI の Realtime API を使用して AI エージェントと音声会話できます。このガイドでは、最初の realtime 音声エージェントを作成する手順を説明します。
+Python SDK の Realtime エージェントは、 WebSocket トランスポート上の OpenAI Realtime API を基盤とした、サーバー側の低レイテンシ エージェントです。
 
 !!! warning "ベータ機能"
-Realtime エージェントはベータ版です。実装の改善に伴い、破壊的変更が入る可能性があります。
+
+    Realtime エージェントはベータ版です。実装の改善に伴い、互換性のない変更が発生する可能性があります。
+
+!!! note "Python SDK の境界"
+
+    Python SDK はブラウザー向けの WebRTC トランスポートを **提供しません** 。このページでは、サーバー側 WebSocket を介した Python 管理の realtime セッションのみを扱います。サーバー側のオーケストレーション、ツール、承認、テレフォニー統合にはこの SDK を使用してください。あわせて [Realtime transport](transport.md) も参照してください。
 
 ## 前提条件
 
 -   Python 3.10 以上
 -   OpenAI API キー
--   OpenAI Agents SDK の基本的な理解
+-   OpenAI Agents SDK の基本的な知識
 
 ## インストール
 
-まだの場合は、OpenAI Agents SDK をインストールしてください。
+まだの場合は、 OpenAI Agents SDK をインストールします。
 
 ```bash
 pip install openai-agents
 ```
 
-## 最初の realtime エージェントの作成
+## サーバー側 realtime セッションの作成
 
-### 1. 必要なコンポーネントのインポート
+### 1. realtime コンポーネントのインポート
 
 ```python
 import asyncio
+
 from agents.realtime import RealtimeAgent, RealtimeRunner
 ```
 
-### 2. realtime エージェントの作成
+### 2. 開始エージェントの定義
 
 ```python
 agent = RealtimeAgent(
     name="Assistant",
-    instructions="You are a helpful voice assistant. Keep your responses conversational and friendly.",
+    instructions="You are a helpful voice assistant. Keep responses short and conversational.",
 )
 ```
 
-### 3. ランナーのセットアップ
+### 3. ランナーの設定
+
+新しいコードでは、ネストされた `audio.input` / `audio.output` のセッション設定形式を推奨します。
 
 ```python
 runner = RealtimeRunner(
@@ -49,222 +57,106 @@ runner = RealtimeRunner(
     config={
         "model_settings": {
             "model_name": "gpt-realtime",
-            "voice": "ash",
-            "modalities": ["audio"],
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "input_audio_transcription": {"model": "gpt-4o-mini-transcribe"},
-            "turn_detection": {"type": "semantic_vad", "interrupt_response": True},
+            "audio": {
+                "input": {
+                    "format": "pcm16",
+                    "transcription": {"model": "gpt-4o-mini-transcribe"},
+                    "turn_detection": {
+                        "type": "semantic_vad",
+                        "interrupt_response": True,
+                    },
+                },
+                "output": {
+                    "format": "pcm16",
+                    "voice": "ash",
+                },
+            },
         }
-    }
+    },
 )
 ```
 
-### 4. セッションの開始
+### 4. セッション開始と入力送信
+
+`runner.run()` は `RealtimeSession` を返します。セッションコンテキストに入ると接続が開かれます。
 
 ```python
-# Start the session
-session = await runner.run()
-
-async with session:
-    print("Session started! The agent will stream audio responses in real-time.")
-    # Process events
-    async for event in session:
-        try:
-            if event.type == "agent_start":
-                print(f"Agent started: {event.agent.name}")
-            elif event.type == "agent_end":
-                print(f"Agent ended: {event.agent.name}")
-            elif event.type == "handoff":
-                print(f"Handoff from {event.from_agent.name} to {event.to_agent.name}")
-            elif event.type == "tool_start":
-                print(f"Tool started: {event.tool.name}")
-            elif event.type == "tool_end":
-                print(f"Tool ended: {event.tool.name}; output: {event.output}")
-            elif event.type == "audio_end":
-                print("Audio ended")
-            elif event.type == "audio":
-                # Enqueue audio for callback-based playback with metadata
-                # Non-blocking put; queue is unbounded, so drops won’t occur.
-                pass
-            elif event.type == "audio_interrupted":
-                print("Audio interrupted")
-                # Begin graceful fade + flush in the audio callback and rebuild jitter buffer.
-            elif event.type == "error":
-                print(f"Error: {event.error}")
-            elif event.type == "history_updated":
-                pass  # Skip these frequent events
-            elif event.type == "history_added":
-                pass  # Skip these frequent events
-            elif event.type == "raw_model_event":
-                print(f"Raw model event: {_truncate_str(str(event.data), 200)}")
-            else:
-                print(f"Unknown event type: {event.type}")
-        except Exception as e:
-            print(f"Error processing event: {_truncate_str(str(e), 200)}")
-
-def _truncate_str(s: str, max_length: int) -> str:
-    if len(s) > max_length:
-        return s[:max_length] + "..."
-    return s
-```
-
-## 完全な例（同じフローを 1 ファイルにまとめたもの）
-
-これは、同じクイックスタートのフローを 1 つのスクリプトとして書き直したものです。
-
-```python
-import asyncio
-from agents.realtime import RealtimeAgent, RealtimeRunner
-
-async def main():
-    # Create the agent
-    agent = RealtimeAgent(
-        name="Assistant",
-        instructions="You are a helpful voice assistant. Keep responses brief and conversational.",
-    )
-    # Set up the runner with configuration
-    runner = RealtimeRunner(
-        starting_agent=agent,
-        config={
-            "model_settings": {
-                "model_name": "gpt-realtime",
-                "voice": "ash",
-                "modalities": ["audio"],
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "input_audio_transcription": {"model": "gpt-4o-mini-transcribe"},
-                "turn_detection": {"type": "semantic_vad", "interrupt_response": True},
-            }
-        },
-    )
-    # Start the session
+async def main() -> None:
     session = await runner.run()
 
     async with session:
-        print("Session started! The agent will stream audio responses in real-time.")
-        # Process events
-        async for event in session:
-            try:
-                if event.type == "agent_start":
-                    print(f"Agent started: {event.agent.name}")
-                elif event.type == "agent_end":
-                    print(f"Agent ended: {event.agent.name}")
-                elif event.type == "handoff":
-                    print(f"Handoff from {event.from_agent.name} to {event.to_agent.name}")
-                elif event.type == "tool_start":
-                    print(f"Tool started: {event.tool.name}")
-                elif event.type == "tool_end":
-                    print(f"Tool ended: {event.tool.name}; output: {event.output}")
-                elif event.type == "audio_end":
-                    print("Audio ended")
-                elif event.type == "audio":
-                    # Enqueue audio for callback-based playback with metadata
-                    # Non-blocking put; queue is unbounded, so drops won’t occur.
-                    pass
-                elif event.type == "audio_interrupted":
-                    print("Audio interrupted")
-                    # Begin graceful fade + flush in the audio callback and rebuild jitter buffer.
-                elif event.type == "error":
-                    print(f"Error: {event.error}")
-                elif event.type == "history_updated":
-                    pass  # Skip these frequent events
-                elif event.type == "history_added":
-                    pass  # Skip these frequent events
-                elif event.type == "raw_model_event":
-                    print(f"Raw model event: {_truncate_str(str(event.data), 200)}")
-                else:
-                    print(f"Unknown event type: {event.type}")
-            except Exception as e:
-                print(f"Error processing event: {_truncate_str(str(e), 200)}")
+        await session.send_message("Say hello in one short sentence.")
 
-def _truncate_str(s: str, max_length: int) -> str:
-    if len(s) > max_length:
-        return s[:max_length] + "..."
-    return s
+        async for event in session:
+            if event.type == "audio":
+                # Forward or play event.audio.data.
+                pass
+            elif event.type == "history_added":
+                print(event.item)
+            elif event.type == "agent_end":
+                # One assistant turn finished.
+                break
+            elif event.type == "error":
+                print(f"Error: {event.error}")
+
 
 if __name__ == "__main__":
-    # Run the session
     asyncio.run(main())
 ```
 
-## 設定とデプロイの注意事項
+`session.send_message()` は、プレーンな文字列または構造化された realtime メッセージのいずれかを受け付けます。raw 音声チャンクには [`session.send_audio()`][agents.realtime.session.RealtimeSession.send_audio] を使用してください。
 
-基本的なセッションが動作した後に、これらのオプションを使用してください。
+## このクイックスタートに含まれないもの
 
-### モデル設定
+-   マイク入力取得およびスピーカー再生コード。[`examples/realtime`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) の realtime コード例を参照してください。
+-   SIP / テレフォニー接続フロー。[Realtime transport](transport.md) と [SIP section](guide.md#sip-and-telephony) を参照してください。
 
--   `model_name`: 利用可能な realtime モデルから選択します（例: `gpt-realtime`）
--   `voice`: 音声を選択します（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
--   `modalities`: テキストまたは音声を有効化します（`["text"]` または `["audio"]`）
--   `output_modalities`: 出力をテキストおよび/または音声に任意で制約します（`["text"]`、`["audio"]`、または両方）
+## 主要設定
 
-### 音声設定
+基本セッションが動作したら、次によく使われる設定は以下です。
 
--   `input_audio_format`: 入力音声の形式（`pcm16`、`g711_ulaw`、`g711_alaw`）
--   `output_audio_format`: 出力音声の形式
--   `input_audio_transcription`: 文字起こしの設定
--   `input_audio_noise_reduction`: 入力のノイズ低減設定（`near_field` または `far_field`）
+-   `model_name`
+-   `audio.input.format`, `audio.output.format`
+-   `audio.input.transcription`
+-   `audio.input.noise_reduction`
+-   自動ターン検出のための `audio.input.turn_detection`
+-   `audio.output.voice`
+-   `tool_choice`, `prompt`, `tracing`
+-   `async_tool_calls`, `guardrails_settings.debounce_text_length`, `tool_error_formatter`
 
-### ターン検出
+`input_audio_format`、`output_audio_format`、`input_audio_transcription`、`turn_detection` などの古いフラットなエイリアスも引き続き動作しますが、新しいコードではネストされた `audio` 設定を推奨します。
 
--   `type`: 検出方法（`server_vad`、`semantic_vad`）
--   `threshold`: 音声アクティビティのしきい値（0.0-1.0）
--   `silence_duration_ms`: ターン終了を検出する無音時間
--   `prefix_padding_ms`: 発話前の音声パディング
+手動でターン制御を行う場合は、[Realtime agents guide](guide.md#manual-response-control) に記載の raw `session.update` / `input_audio_buffer.commit` / `response.create` フローを使用してください。
 
-### 実行設定
+完全なスキーマは [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] と [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings] を参照してください。
 
--   `async_tool_calls`: 関数ツールを非同期で実行するかどうか（デフォルトは `True`）
--   `guardrails_settings.debounce_text_length`: 出力ガードレールを実行する前に必要な累積文字起こしサイズの最小値（デフォルトは `100`）
--   `tool_error_formatter`: モデルに見えるツールのエラーメッセージをカスタマイズするためのコールバック
+## 接続オプション
 
-完全なスキーマについては、[`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] と [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings] の API リファレンスを参照してください。
-
-### 認証
-
-環境に OpenAI API キーが設定されていることを確認してください。
+環境変数に API キーを設定します。
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-または、セッション作成時に直接渡します。
+または、セッション開始時に直接渡します。
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})
 ```
 
-### Azure OpenAI エンドポイント形式
+`model_config` は以下もサポートします。
 
-OpenAI のデフォルト エンドポイントではなく Azure OpenAI に接続する場合は、`model_config["url"]` に GA Realtime URL を渡し、認証ヘッダーを明示的に設定してください。
+-   `url`: カスタム WebSocket エンドポイント
+-   `headers`: カスタムリクエストヘッダー
+-   `call_id`: 既存の realtime 通話に接続します。このリポジトリで文書化されている接続フローは SIP です。
+-   `playback_tracker`: ユーザーが実際に聞いた音声量を報告します
 
-```python
-session = await runner.run(
-    model_config={
-        "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
-        "headers": {"api-key": "<your-azure-api-key>"},
-    }
-)
-```
+`headers` を明示的に渡した場合、 SDK は `Authorization` ヘッダーを **自動挿入しません** 。
 
-ベアラートークンも使用できます。
-
-```python
-session = await runner.run(
-    model_config={
-        "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
-        "headers": {"authorization": f"Bearer {token}"},
-    }
-)
-```
-
-realtime エージェントでは、レガシーのベータ パス（`/openai/realtime?api-version=...`）の使用は避けてください。SDK は GA Realtime インターフェースを想定しています。
+Azure OpenAI に接続する場合は、`model_config["url"]` に GA Realtime エンドポイント URL と明示的なヘッダーを渡してください。realtime エージェントではレガシー beta パス（`/openai/realtime?api-version=...`）は避けてください。詳細は [Realtime agents guide](guide.md#low-level-access-and-custom-endpoints) を参照してください。
 
 ## 次のステップ
 
--   [realtime エージェントの詳細](guide.md)
--   [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) フォルダの動作する例を確認する
--   エージェントにツールを追加する
--   エージェント間のハンドオフを実装する
--   安全性のためのガードレールを設定する
+-   サーバー側 WebSocket と SIP のどちらを使うか選ぶために [Realtime transport](transport.md) を読んでください。
+-   ライフサイクル、構造化入力、承認、ハンドオフ、ガードレール、低レベル制御について [Realtime agents guide](guide.md) を読んでください。
+-   [`examples/realtime`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) のコード例を確認してください。
