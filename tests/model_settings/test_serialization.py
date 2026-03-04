@@ -65,6 +65,7 @@ def test_all_fields_serialization() -> None:
         extra_body={"foo": "bar"},
         extra_headers={"foo": "bar"},
         extra_args={"custom_param": "value", "another_param": 42},
+        max_parallel_tool_calls=4,
     )
 
     # Verify that every single field is set to a non-None value
