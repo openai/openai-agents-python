@@ -4,30 +4,47 @@ search:
 ---
 # 컨텍스트 관리
 
-컨텍스트는 의미가 중첩된 용어입니다. 관심을 가질 수 있는 컨텍스트는 크게 두 가지 범주가 있습니다:
+컨텍스트는 여러 의미로 사용되는 용어입니다. 주로 신경 써야 할 컨텍스트는 두 가지 범주가 있습니다
 
-1. 코드에서 로컬로 사용할 수 있는 컨텍스트: 도구 함수 실행 시, `on_handoff` 같은 콜백 중, 라이프사이클 훅 등에서 필요할 수 있는 데이터와 의존성입니다
-2. LLM에서 사용할 수 있는 컨텍스트: 응답을 생성할 때 LLM이 보게 되는 데이터입니다
+1. 코드에서 로컬로 사용할 수 있는 컨텍스트: 도구 함수 실행 시, `on_handoff` 같은 콜백 중, 라이프사이클 훅 등에서 필요할 수 있는 데이터와 의존성
+2. LLM에서 사용할 수 있는 컨텍스트: LLM이 응답을 생성할 때 보는 데이터
 
 ## 로컬 컨텍스트
 
-이는 [`RunContextWrapper`][agents.run_context.RunContextWrapper] 클래스와 그 안의 [`context`][agents.run_context.RunContextWrapper.context] 프로퍼티로 표현됩니다. 동작 방식은 다음과 같습니다:
+이는 [`RunContextWrapper`][agents.run_context.RunContextWrapper] 클래스와 그 안의 [`context`][agents.run_context.RunContextWrapper.context] 속성으로 표현됩니다. 동작 방식은 다음과 같습니다
 
-1. 원하는 어떤 파이썬 객체든 생성합니다. 흔한 패턴은 dataclass 또는 Pydantic 객체를 사용하는 것입니다
-2. 해당 객체를 다양한 run 메서드(예: `Runner.run(..., context=whatever)`)에 전달합니다
-3. 모든 도구 호출, 라이프사이클 훅 등에는 래퍼 객체 `RunContextWrapper[T]`가 전달되며, 여기서 `T`는 `wrapper.context`로 접근할 수 있는 컨텍스트 객체의 타입을 나타냅니다
+1. 원하는 Python 객체를 만듭니다. 일반적인 패턴은 dataclass나 Pydantic 객체를 사용하는 것입니다
+2. 해당 객체를 다양한 run 메서드에 전달합니다(예: `Runner.run(..., context=whatever)`)
+3. 모든 도구 호출, 라이프사이클 훅 등은 `RunContextWrapper[T]` 래퍼 객체를 전달받으며, 여기서 `T`는 `wrapper.context`를 통해 접근할 수 있는 컨텍스트 객체 타입을 나타냅니다
 
-가장 **중요한** 점: 특정 에이전트 run에 대해, 해당 run에서 사용되는 모든 에이전트, 도구 함수, 라이프사이클 등은 동일한 컨텍스트 _타입_을 사용해야 합니다
+**가장 중요**하게 알아둘 점: 특정 에이전트 실행에 대해, 모든 에이전트, 도구 함수, 라이프사이클 등은 동일한 _타입_ 의 컨텍스트를 사용해야 합니다
 
-컨텍스트는 다음과 같은 용도로 사용할 수 있습니다:
+컨텍스트는 다음과 같은 용도로 사용할 수 있습니다
 
-- 실행에 대한 컨텍스트 데이터(예: 사용자 이름/uid 또는 사용자에 대한 기타 정보)
-- 의존성(예: 로거 객체, 데이터 페처 등)
-- 헬퍼 함수
+-   실행에 대한 문맥 데이터(예: 사용자 이름/uid 또는 사용자에 관한 기타 정보)
+-   의존성(예: logger 객체, 데이터 가져오기 객체 등)
+-   헬퍼 함수
 
-!!! danger "Note"
+!!! danger "참고"
 
-    컨텍스트 객체는 **LLM에 전송되지 않습니다**. 이는 순수하게 로컬 객체로, 읽고/쓰고/메서드를 호출할 수 있습니다
+    컨텍스트 객체는 LLM으로 **전송되지 않습니다**. 이는 순수하게 로컬 객체이며, 여기서 값을 읽고, 쓰고, 메서드를 호출할 수 있습니다
+
+단일 실행 내에서 파생된 래퍼들은 동일한 기본 앱 컨텍스트, 승인 상태, 사용량 추적을 공유합니다. 중첩된 [`Agent.as_tool()`][agents.agent.Agent.as_tool] 실행은 다른 `tool_input`을 연결할 수 있지만, 기본적으로 앱 상태의 분리된 복사본을 받지는 않습니다.
+
+### `RunContextWrapper` 노출 항목
+
+[`RunContextWrapper`][agents.run_context.RunContextWrapper]는 앱에서 정의한 컨텍스트 객체를 감싸는 래퍼입니다. 실제로는 보통 다음을 가장 많이 사용합니다
+
+-   앱의 변경 가능한 상태와 의존성을 위한 [`wrapper.context`][agents.run_context.RunContextWrapper.context]
+-   현재 실행 전반의 집계된 요청 및 토큰 사용량을 위한 [`wrapper.usage`][agents.run_context.RunContextWrapper.usage]
+-   현재 실행이 [`Agent.as_tool()`][agents.agent.Agent.as_tool] 내부에서 수행될 때 구조화된 입력을 위한 [`wrapper.tool_input`][agents.run_context.RunContextWrapper.tool_input]
+-   승인 상태를 프로그래밍 방식으로 업데이트해야 할 때 [`wrapper.approve_tool(...)`][agents.run_context.RunContextWrapper.approve_tool] / [`wrapper.reject_tool(...)`][agents.run_context.RunContextWrapper.reject_tool]
+
+`wrapper.context`만이 앱에서 정의한 객체입니다. 나머지 필드는 SDK가 관리하는 런타임 메타데이터입니다.
+
+나중에 휴먼인더루프 (HITL) 또는 내구성 있는 작업 워크플로를 위해 [`RunState`][agents.run_state.RunState]를 직렬화하면, 해당 런타임 메타데이터도 상태와 함께 저장됩니다. 직렬화된 상태를 유지하거나 전송할 계획이라면 [`RunContextWrapper.context`][agents.run_context.RunContextWrapper.context]에 비밀 정보를 넣지 마세요.
+
+대화 상태는 별개의 관심사입니다. 턴을 이어가는 방식에 따라 `result.to_input_list()`, `session`, `conversation_id`, `previous_response_id`를 사용하세요. 이 결정에 대해서는 [results](results.md), [running agents](running_agents.md), [sessions](sessions/index.md)를 참고하세요.
 
 ```python
 import asyncio
@@ -66,9 +83,9 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-1. 이것이 컨텍스트 객체입니다. 여기서는 dataclass를 사용했지만 어떤 타입이든 사용할 수 있습니다
+1. 이것이 컨텍스트 객체입니다. 여기서는 dataclass를 사용했지만, 어떤 타입이든 사용할 수 있습니다
 2. 이것은 도구입니다. `RunContextWrapper[UserInfo]`를 받는 것을 볼 수 있습니다. 도구 구현은 컨텍스트에서 값을 읽습니다
-3. 타입체커가 오류를 잡을 수 있도록(예: 다른 컨텍스트 타입을 받는 도구를 전달하려고 할 때) 에이전트에 제네릭 `UserInfo`를 표시합니다
+3. 타입 체커가 오류를 잡을 수 있도록(예: 다른 컨텍스트 타입을 받는 도구를 전달하려는 경우) 에이전트를 제네릭 `UserInfo`로 지정합니다
 4. 컨텍스트는 `run` 함수에 전달됩니다
 5. 에이전트는 도구를 올바르게 호출하고 나이를 얻습니다
 
@@ -76,8 +93,8 @@ if __name__ == "__main__":
 
 ### 고급: `ToolContext`
 
-일부 경우에는 실행 중인 도구에 대한 추가 메타데이터(예: 이름, 호출 ID, 원문 인자 문자열)에 접근하고 싶을 수 있습니다.  
-이를 위해 `RunContextWrapper`를 확장한 [`ToolContext`][agents.tool_context.ToolContext] 클래스를 사용할 수 있습니다.
+경우에 따라 실행 중인 도구에 대한 추가 메타데이터(예: 이름, 호출 ID, 원문 인자 문자열)에 접근하고 싶을 수 있습니다  
+이를 위해 `RunContextWrapper`를 확장한 [`ToolContext`][agents.tool_context.ToolContext] 클래스를 사용할 수 있습니다
 
 ```python
 from typing import Annotated
@@ -105,23 +122,23 @@ agent = Agent(
 )
 ```
 
-`ToolContext`는 `RunContextWrapper`와 동일한 `.context` 프로퍼티를 제공하며,  
-여기에 더해 현재 도구 호출에 특화된 추가 필드를 제공합니다:
+`ToolContext`는 `RunContextWrapper`와 동일한 `.context` 속성을 제공하며,  
+여기에 현재 도구 호출에 특화된 추가 필드가 있습니다
 
 - `tool_name` – 호출되는 도구의 이름  
-- `tool_call_id` – 이 도구 호출을 위한 고유 식별자  
+- `tool_call_id` – 이 도구 호출의 고유 식별자  
 - `tool_arguments` – 도구에 전달된 원문 인자 문자열  
 
-실행 중 도구 수준의 메타데이터가 필요할 때 `ToolContext`를 사용하세요.  
-에이전트와 도구 간 일반적인 컨텍스트 공유에는 `RunContextWrapper`만으로도 충분합니다.
+실행 중 도구 수준 메타데이터가 필요할 때 `ToolContext`를 사용하세요  
+에이전트와 도구 간 일반적인 컨텍스트 공유에는 `RunContextWrapper`만으로도 충분합니다. `ToolContext`는 `RunContextWrapper`를 확장하므로, 중첩된 `Agent.as_tool()` 실행이 구조화된 입력을 제공한 경우 `.tool_input`도 노출할 수 있습니다.
 
 ---
 
 ## 에이전트/LLM 컨텍스트
 
-LLM이 호출될 때, LLM이 볼 수 있는 데이터는 대화 히스토리에서 온 것 **뿐**입니다. 즉, 새로운 데이터를 LLM에서 사용할 수 있게 만들고 싶다면, 해당 데이터가 그 히스토리에 포함되도록 하는 방식으로 해야 합니다. 이를 위한 몇 가지 방법이 있습니다:
+LLM이 호출될 때 볼 수 있는 데이터는 대화 기록의 내용이 **전부**입니다. 즉, 어떤 새 데이터를 LLM에서 사용할 수 있게 하려면, 그 데이터가 대화 기록에서 접근 가능하도록 만들어야 합니다. 이를 위한 방법은 몇 가지가 있습니다
 
-1. Agent `instructions`에 추가할 수 있습니다. 이는 "system prompt" 또는 "developer message"라고도 합니다. 시스템 프롬프트는 정적인 문자열일 수도 있고, 컨텍스트를 받아 문자열을 출력하는 동적 함수일 수도 있습니다. 이는 항상 유용한 정보(예: 사용자 이름 또는 현재 날짜)에 대한 일반적인 전술입니다
-2. `Runner.run` 함수를 호출할 때 `input`에 추가합니다. 이는 `instructions` 전술과 유사하지만, [chain of command](https://cdn.openai.com/spec/model-spec-2024-05-08.html#follow-the-chain-of-command)에서 더 낮은 수준의 메시지를 둘 수 있습니다
-3. 함수 도구를 통해 노출합니다. 이는 _온디맨드_ 컨텍스트에 유용합니다. LLM이 언제 어떤 데이터가 필요한지 결정하고, 해당 데이터를 가져오기 위해 도구를 호출할 수 있습니다
-4. retrieval 또는 웹 검색을 사용합니다. 이는 파일이나 데이터베이스에서 관련 데이터를 가져오거나(retrieval), 웹에서 가져올 수 있는(웹 검색) 특수 도구입니다. 이는 응답을 관련 컨텍스트 데이터에 "그라운딩"하는 데 유용합니다
+1. 에이전트 `instructions`에 추가할 수 있습니다. 이는 "시스템 프롬프트" 또는 "개발자 메시지"라고도 합니다. 시스템 프롬프트는 정적 문자열일 수도 있고, 컨텍스트를 받아 문자열을 출력하는 동적 함수일 수도 있습니다. 이는 항상 유용한 정보(예: 사용자 이름 또는 현재 날짜)에 대한 일반적인 방법입니다
+2. `Runner.run` 함수를 호출할 때 `input`에 추가합니다. 이는 `instructions` 방식과 유사하지만, [chain of command](https://cdn.openai.com/spec/model-spec-2024-05-08.html#follow-the-chain-of-command)에서 더 낮은 우선순위의 메시지를 둘 수 있게 해줍니다
+3. 함수 도구를 통해 노출합니다. 이는 _온디맨드_ 컨텍스트에 유용합니다. LLM이 데이터가 필요한 시점을 결정하고, 해당 데이터를 가져오기 위해 도구를 호출할 수 있습니다
+4. retrieval 또는 웹 검색을 사용합니다. 이들은 파일 또는 데이터베이스(retrieval), 혹은 웹(웹 검색)에서 관련 데이터를 가져올 수 있는 특수 도구입니다. 이는 관련 컨텍스트 데이터에 응답을 "근거화(grounding)"하는 데 유용합니다
