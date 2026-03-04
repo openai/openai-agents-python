@@ -90,6 +90,34 @@ class ModelSettings:
     model to at most one tool call per turn.
     """
 
+    max_parallel_tool_calls: int | None = None
+    """Maximum number of tool calls to execute concurrently in a single turn.
+
+    When the model returns multiple tool calls at once this setting caps how
+    many of them the SDK runs at the same time.  The remaining calls are
+    queued and started as running ones finish, so all tool calls are still
+    executed – just not all at the same time.
+
+    ``None`` (the default) means no limit: all tool calls in the turn are
+    launched concurrently, which is the historical behaviour.
+
+    Example – allow at most 4 tool calls to run in parallel::
+
+        agent = Agent(
+            name="Assistant",
+            tools=[...],
+            model_settings=ModelSettings(max_parallel_tool_calls=4),
+        )
+
+    Setting ``max_parallel_tool_calls=1`` is equivalent to serial execution
+    and can be useful to avoid rate-limiting on downstream services.
+
+    .. note::
+        This is an SDK-side concurrency limit, not a model API parameter.
+        It does not affect how many tool calls the model *requests*; it only
+        controls how many the SDK executes concurrently.
+    """
+
     truncation: Literal["auto", "disabled"] | None = None
     """The truncation strategy to use when calling the model.
     See [Responses API documentation](https://platform.openai.com/docs/api-reference/responses/create#responses_create-truncation)
