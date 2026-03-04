@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Literal, TypeVar
+from typing import Any, Callable, Literal, TypeVar, cast
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -9,30 +9,36 @@ from openai.types.responses import (
 )
 
 from agents import Agent
+from agents._tool_identity import FunctionToolLookupKey, get_function_tool_lookup_key
 from agents.items import ToolApprovalItem
 from agents.run_context import RunContextWrapper
 from agents.run_state import RunState
 
 TContext = TypeVar("TContext")
+_AUTO_LOOKUP_KEY = object()
 
 
 def make_tool_call(
     call_id: str = "call_1",
     *,
     name: str = "test_tool",
+    namespace: str | None = None,
     status: Literal["in_progress", "completed", "incomplete"] | None = "completed",
     arguments: str = "{}",
     call_type: Literal["function_call"] = "function_call",
 ) -> ResponseFunctionToolCall:
     """Build a ResponseFunctionToolCall with common defaults."""
 
-    return ResponseFunctionToolCall(
-        type=call_type,
-        name=name,
-        call_id=call_id,
-        status=status,
-        arguments=arguments,
-    )
+    kwargs: dict[str, Any] = {
+        "type": call_type,
+        "name": name,
+        "call_id": call_id,
+        "status": status,
+        "arguments": arguments,
+    }
+    if namespace is not None:
+        kwargs["namespace"] = namespace
+    return ResponseFunctionToolCall(**kwargs)
 
 
 def make_tool_approval_item(
@@ -40,19 +46,32 @@ def make_tool_approval_item(
     *,
     call_id: str = "call_1",
     name: str = "test_tool",
+    namespace: str | None = None,
+    allow_bare_name_alias: bool = False,
     status: Literal["in_progress", "completed", "incomplete"] | None = "completed",
     arguments: str = "{}",
+    tool_lookup_key: FunctionToolLookupKey | None | object = _AUTO_LOOKUP_KEY,
 ) -> ToolApprovalItem:
     """Create a ToolApprovalItem backed by a function call."""
+
+    resolved_tool_lookup_key: FunctionToolLookupKey | None
+    if tool_lookup_key is _AUTO_LOOKUP_KEY:
+        resolved_tool_lookup_key = get_function_tool_lookup_key(name, namespace)
+    else:
+        resolved_tool_lookup_key = cast(FunctionToolLookupKey | None, tool_lookup_key)
 
     return ToolApprovalItem(
         agent=agent,
         raw_item=make_tool_call(
             call_id=call_id,
             name=name,
+            namespace=namespace,
             status=status,
             arguments=arguments,
         ),
+        tool_namespace=namespace,
+        tool_lookup_key=resolved_tool_lookup_key,
+        _allow_bare_name_alias=allow_bare_name_alias,
     )
 
 

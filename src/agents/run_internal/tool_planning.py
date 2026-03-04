@@ -10,6 +10,7 @@ from typing import Any, TypeVar, cast
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_input_param import McpApprovalResponse
 
+from .._tool_identity import get_function_tool_lookup_key_for_call, get_tool_call_namespace
 from ..agent import Agent
 from ..exceptions import UserError
 from ..items import (
@@ -413,6 +414,10 @@ async def _collect_runs_by_approval(
                 agent=agent,
                 raw_item=get_mapping_or_attr(run, "tool_call"),
                 tool_name=tool_name,
+                tool_namespace=get_tool_call_namespace(get_mapping_or_attr(run, "tool_call")),
+                tool_lookup_key=get_function_tool_lookup_key_for_call(
+                    get_mapping_or_attr(run, "tool_call")
+                ),
             )
             pending_interruption_adder(pending_item)
 
@@ -482,6 +487,7 @@ async def _select_function_tool_runs_for_resume(
         approval_status = context_wrapper.get_approval_status(
             run.function_tool.name,
             call_id,
+            tool_namespace=get_tool_call_namespace(run.tool_call),
             existing_pending=approval_items_by_call_id.get(call_id),
         )
 

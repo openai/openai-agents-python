@@ -50,15 +50,22 @@ def get_function_tool(
 
 
 def get_function_tool_call(
-    name: str, arguments: str | None = None, call_id: str | None = None
+    name: str,
+    arguments: str | None = None,
+    call_id: str | None = None,
+    *,
+    namespace: str | None = None,
 ) -> ResponseOutputItem:
-    return ResponseFunctionToolCall(
-        id="1",
-        call_id=call_id or "2",
-        type="function_call",
-        name=name,
-        arguments=arguments or "",
-    )
+    kwargs: dict[str, Any] = {
+        "id": "1",
+        "call_id": call_id or "2",
+        "type": "function_call",
+        "name": name,
+        "arguments": arguments or "",
+    }
+    if namespace is not None:
+        kwargs["namespace"] = namespace
+    return ResponseFunctionToolCall(**kwargs)
 
 
 def get_handoff_tool_call(

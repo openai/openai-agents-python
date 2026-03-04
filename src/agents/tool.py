@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import inspect
 import json
@@ -34,6 +35,12 @@ from pydantic import BaseModel, TypeAdapter, ValidationError, model_validator
 from typing_extensions import Concatenate, NotRequired, ParamSpec, TypedDict
 
 from . import _debug
+from ._tool_identity import (
+    get_explicit_function_tool_namespace,
+    tool_qualified_name,
+    validate_function_tool_lookup_configuration,
+    validate_function_tool_namespace_shape,
+)
 from .computer import AsyncComputer, Computer
 from .editor import ApplyPatchEditor, ApplyPatchOperation
 from .exceptions import ModelBehaviorError, ToolTimeoutError, UserError
@@ -278,6 +285,9 @@ class FunctionTool:
     timeout_error_function: ToolErrorFunction | None = None
     """Optional formatter for timeout errors when timeout_behavior is "error_as_result"."""
 
+    defer_loading: bool = False
+    """Whether the Responses API should hide this tool definition until tool search loads it."""
+
     _failure_error_function: ToolErrorFunction | None = field(
         default=None,
         kw_only=True,
@@ -300,6 +310,19 @@ class FunctionTool:
 
     _agent_instance: Any = field(default=None, kw_only=True, repr=False)
     """Internal reference to the agent instance if this is an agent-as-tool."""
+
+    _tool_namespace: str | None = field(default=None, kw_only=True, repr=False)
+    """Internal namespace metadata used to group function tools for the Responses API."""
+
+    _tool_namespace_description: str | None = field(default=None, kw_only=True, repr=False)
+    """Internal namespace description used when serializing grouped function tools."""
+
+    @property
+    def qualified_name(self) -> str:
+        """Return the public qualified name used to identify this function tool."""
+        return (
+            tool_qualified_name(self.name, get_explicit_function_tool_namespace(self)) or self.name
+        )
 
     def __post_init__(self):
         bind_to_function_tool = getattr(self.on_invoke_tool, "__agents_bind_function_tool__", None)
@@ -393,6 +416,7 @@ def _build_wrapped_function_tool(
     timeout_seconds: float | None = None,
     timeout_behavior: ToolTimeoutBehavior = "error_as_result",
     timeout_error_function: ToolErrorFunction | None = None,
+    defer_loading: bool = False,
     sync_invoker: bool = False,
 ) -> FunctionTool:
     """Create a FunctionTool with copied-tool-aware failure handling bound in one place."""
@@ -417,6 +441,7 @@ def _build_wrapped_function_tool(
             timeout_seconds=timeout_seconds,
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
+            defer_loading=defer_loading,
         ),
         failure_error_function,
     )
@@ -1010,6 +1035,23 @@ class ApplyPatchTool:
         return "apply_patch"
 
 
+@dataclass
+class ToolSearchTool:
+    """A hosted Responses API tool that lets the model search deferred tools by namespace.
+
+    `execution="client"` is supported for manual Responses orchestration, but the standard
+    OpenAI Agents runner does not auto-execute client tool search calls.
+    """
+
+    description: str | None = None
+    execution: Literal["server", "client"] | None = None
+    parameters: object | None = None
+
+    @property
+    def name(self) -> str:
+        return "tool_search"
+
+
 Tool = Union[
     FunctionTool,
     FileSearchTool,
@@ -1021,8 +1063,139 @@ Tool = Union[
     LocalShellTool,
     ImageGenerationTool,
     CodeInterpreterTool,
+    ToolSearchTool,
 ]
 """A tool that can be used in an agent."""
+
+
+def tool_namespace(
+    *,
+    name: str,
+    description: str | None,
+    tools: list[FunctionTool],
+) -> list[FunctionTool]:
+    """Attach namespace metadata to function tools for OpenAI Responses tool search."""
+    if not isinstance(name, str) or not name.strip():
+        raise UserError("tool_namespace() requires a non-empty namespace name.")
+    if not isinstance(description, str) or not description.strip():
+        raise UserError("tool_namespace() requires a non-empty description.")
+    if any(not isinstance(tool, FunctionTool) for tool in tools):
+        raise UserError("tool_namespace() only supports FunctionTool instances.")
+
+    namespace_name = name.strip()
+    normalized_description = description.strip()
+    namespaced_tools: list[FunctionTool] = []
+    for tool in tools:
+        validate_function_tool_namespace_shape(tool.name, namespace_name)
+        namespaced_tool = copy.copy(tool)
+        namespaced_tool._tool_namespace = namespace_name
+        namespaced_tool._tool_namespace_description = normalized_description
+        namespaced_tools.append(namespaced_tool)
+    return namespaced_tools
+
+
+def get_function_tool_responses_only_features(tool: FunctionTool) -> tuple[str, ...]:
+    """Return Responses-only features used by a function tool."""
+    features: list[str] = []
+    if get_explicit_function_tool_namespace(tool) is not None:
+        features.append("tool_namespace()")
+    if tool.defer_loading:
+        features.append("defer_loading=True")
+    return tuple(features)
+
+
+def ensure_function_tool_supports_responses_only_features(
+    tool: FunctionTool,
+    *,
+    backend_name: str,
+) -> None:
+    """Reject Responses-only function-tool features on unsupported backends."""
+    unsupported_features = get_function_tool_responses_only_features(tool)
+    if not unsupported_features:
+        return
+
+    tool_name = tool.qualified_name
+    raise UserError(
+        "The following function-tool features are only supported with OpenAI Responses "
+        f"models: {', '.join(unsupported_features)}. "
+        f"Tool `{tool_name}` cannot be used with {backend_name}."
+    )
+
+
+def ensure_tool_choice_supports_backend(
+    tool_choice: Literal["auto", "required", "none"] | str | Any | None,
+    *,
+    backend_name: str,
+) -> None:
+    """Backend-specific converters should validate reserved tool choices."""
+    return None
+
+
+def is_responses_tool_search_surface(tool: Tool) -> bool:
+    """Return True when a tool can be exposed through hosted Responses tool search."""
+    if isinstance(tool, FunctionTool):
+        return tool.defer_loading or get_explicit_function_tool_namespace(tool) is not None
+    if isinstance(tool, HostedMCPTool):
+        return bool(tool.tool_config.get("defer_loading"))
+    return False
+
+
+def has_responses_tool_search_surface(tools: list[Tool]) -> bool:
+    """Return True when tool search has at least one eligible searchable surface."""
+    return any(is_responses_tool_search_surface(tool) for tool in tools)
+
+
+def is_required_tool_search_surface(tool: Tool) -> bool:
+    """Return True when a tool requires ToolSearchTool() to stay reachable."""
+    if isinstance(tool, FunctionTool):
+        return tool.defer_loading
+    if isinstance(tool, HostedMCPTool):
+        return bool(tool.tool_config.get("defer_loading"))
+    return False
+
+
+def has_required_tool_search_surface(tools: list[Tool]) -> bool:
+    """Return True when any enabled surface requires ToolSearchTool()."""
+    return any(is_required_tool_search_surface(tool) for tool in tools)
+
+
+def validate_responses_tool_search_configuration(
+    tools: list[Tool],
+    *,
+    allow_opaque_search_surface: bool = False,
+) -> None:
+    """Validate the Responses-only tool_search and defer-loading contract."""
+    tool_search_tools = [tool for tool in tools if isinstance(tool, ToolSearchTool)]
+    tool_search_count = len(tool_search_tools)
+    has_tool_search = tool_search_count > 0
+    has_tool_search_surface = has_responses_tool_search_surface(tools)
+    has_required_tool_search = has_required_tool_search_surface(tools)
+
+    if tool_search_count > 1:
+        raise UserError("Only one ToolSearchTool() is allowed when using OpenAI Responses models.")
+    validate_function_tool_lookup_configuration(tools)
+    if has_required_tool_search and not has_tool_search:
+        raise UserError(
+            "Deferred-loading Responses tools require ToolSearchTool() when using OpenAI "
+            "Responses models."
+        )
+    if has_tool_search and not has_tool_search_surface and not allow_opaque_search_surface:
+        raise UserError(
+            "ToolSearchTool() requires at least one searchable Responses surface: a "
+            "tool_namespace(...) function tool, a deferred-loading function tool "
+            "(`function_tool(..., defer_loading=True)`), or a deferred-loading hosted MCP "
+            "server (`HostedMCPTool(tool_config={..., 'defer_loading': True})`)."
+        )
+
+
+def prune_orphaned_tool_search_tools(tools: list[Tool]) -> list[Tool]:
+    """Preserve explicit ToolSearchTool entries until request conversion validates them.
+
+    Whether a tool_search definition is valid can depend on prompt-managed surfaces that are
+    only known during request conversion, so pruning here hides misconfiguration instead of
+    surfacing a clear error.
+    """
+    return tools
 
 
 def _extract_json_decode_error(error: BaseException) -> json.JSONDecodeError | None:
@@ -1253,6 +1426,7 @@ def function_tool(
     timeout: float | None = None,
     timeout_behavior: ToolTimeoutBehavior = "error_as_result",
     timeout_error_function: ToolErrorFunction | None = None,
+    defer_loading: bool = False,
 ) -> FunctionTool:
     """Overload for usage as @function_tool (no parentheses)."""
     ...
@@ -1275,6 +1449,7 @@ def function_tool(
     timeout: float | None = None,
     timeout_behavior: ToolTimeoutBehavior = "error_as_result",
     timeout_error_function: ToolErrorFunction | None = None,
+    defer_loading: bool = False,
 ) -> Callable[[ToolFunction[...]], FunctionTool]:
     """Overload for usage as @function_tool(...)."""
     ...
@@ -1297,6 +1472,7 @@ def function_tool(
     timeout: float | None = None,
     timeout_behavior: ToolTimeoutBehavior = "error_as_result",
     timeout_error_function: ToolErrorFunction | None = None,
+    defer_loading: bool = False,
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
     """
     Decorator to create a FunctionTool from a function. By default, we will:
@@ -1340,6 +1516,8 @@ def function_tool(
             while "raise_exception" raises ToolTimeoutError and fails the run.
         timeout_error_function: Optional formatter used for timeout messages when
             timeout_behavior="error_as_result".
+        defer_loading: Whether to hide this tool definition until Responses API tool search
+            explicitly loads it.
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
@@ -1409,6 +1587,7 @@ def function_tool(
             timeout_seconds=timeout,
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
+            defer_loading=defer_loading,
             sync_invoker=is_sync_function_tool,
         )
         return function_tool

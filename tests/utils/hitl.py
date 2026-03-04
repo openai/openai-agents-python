@@ -311,13 +311,22 @@ def make_function_tool_call(
     *,
     call_id: str = "call-1",
     arguments: str = "{}",
+    namespace: str | None = None,
 ) -> ResponseFunctionToolCall:
     """Create a ResponseFunctionToolCall for HITL scenarios."""
+    if namespace is None:
+        return ResponseFunctionToolCall(
+            type="function_call",
+            name=name,
+            call_id=call_id,
+            arguments=arguments,
+        )
     return ResponseFunctionToolCall(
         type="function_call",
         name=name,
         call_id=call_id,
         arguments=arguments,
+        namespace=namespace,
     )
 
 

@@ -67,3 +67,23 @@ def test_run_context_unknown_tool_name_fallback() -> None:
     approval = ToolApprovalItem(agent=agent, raw_item=raw, tool_name=None)
 
     assert RunContextWrapper._resolve_tool_name(approval) == "unknown_tool"
+
+
+def test_tool_approval_item_preserves_positional_type_argument() -> None:
+    raw: dict[str, Any] = {
+        "type": "function_call",
+        "name": "lookup_account",
+        "call_id": "call-1",
+        "namespace": "billing",
+    }
+
+    approval = ToolApprovalItem(
+        make_agent(),
+        raw,
+        "lookup_account",
+        "tool_approval_item",
+    )
+
+    assert approval.type == "tool_approval_item"
+    assert approval.tool_name == "lookup_account"
+    assert approval.tool_namespace == "billing"

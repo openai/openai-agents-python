@@ -7,10 +7,18 @@ from __future__ import annotations
 
 from typing import Any, get_args, get_origin
 
+from .._tool_identity import get_function_tool_trace_name
 from ..agent import Agent
-from ..items import ToolCallItemTypes
+from ..items import (
+    HandoffCallItem,
+    ToolCallItem,
+    ToolCallItemTypes,
+    ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
+)
 from ..run_state import _build_agent_map
-from .run_steps import ToolRunFunction
+from .run_steps import ProcessedResponse, ToolRunFunction
 
 __all__ = [
     "AgentToolUseTracker",
@@ -19,6 +27,20 @@ __all__ = [
     "get_tool_call_types",
     "TOOL_CALL_TYPES",
 ]
+
+_TOOL_USE_RESET_TRACKING_ITEM_TYPES = (
+    HandoffCallItem,
+    ToolCallItem,
+    ToolCallOutputItem,
+)
+
+_PROCESSED_RESPONSE_TOOL_ITEM_TYPES = (
+    HandoffCallItem,
+    ToolCallItem,
+    ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
+)
 
 
 class AgentToolUseTracker:
@@ -31,11 +53,34 @@ class AgentToolUseTracker:
         self.agent_to_tools: list[tuple[Agent[Any], list[str]]] = []
 
     def record_used_tools(self, agent: Agent[Any], tools: list[ToolRunFunction]) -> None:
-        tool_names = [tool.function_tool.name for tool in tools]
+        tool_names = [
+            get_function_tool_trace_name(tool.function_tool) or tool.function_tool.name
+            for tool in tools
+        ]
+        self.add_tool_use(agent, tool_names)
+
+    def record_processed_response(
+        self, agent: Agent[Any], processed_response: ProcessedResponse
+    ) -> None:
+        """Track resettable tool usage from a processed model response."""
+        tool_name_iter = iter(processed_response.tools_used)
+        tool_names: list[str] = []
+        for item in processed_response.new_items:
+            if not isinstance(item, _PROCESSED_RESPONSE_TOOL_ITEM_TYPES):
+                continue
+            tool_name = next(tool_name_iter, None)
+            if tool_name is None:
+                break
+            if isinstance(item, _TOOL_USE_RESET_TRACKING_ITEM_TYPES):
+                tool_names.append(tool_name)
+
         self.add_tool_use(agent, tool_names)
 
     def add_tool_use(self, agent: Agent[Any], tool_names: list[str]) -> None:
         """Maintain compatibility for callers that append tool usage directly."""
+        if not tool_names:
+            return
+
         agent_name = getattr(agent, "name", agent.__class__.__name__)
         names_set = self.agent_map.setdefault(agent_name, set())
         names_set.update(tool_names)

@@ -8,7 +8,7 @@ from openai.types.realtime.realtime_tracing_config import (
     TracingConfiguration,
 )
 
-from agents import Agent
+from agents import Agent, function_tool, tool_namespace
 from agents.exceptions import UserError
 from agents.handoffs import handoff
 from agents.realtime.config import RealtimeModelTracingConfig
@@ -101,3 +101,27 @@ def test_tools_to_session_tools_includes_handoffs():
     m = OpenAIRealtimeWebSocketModel()
     out = m._tools_to_session_tools([], [h])
     assert out[0].name is not None and out[0].name.startswith("transfer_to_")
+
+
+def test_tools_to_session_tools_rejects_namespaced_function_tools():
+    tool = tool_namespace(
+        name="crm",
+        description="CRM tools",
+        tools=[function_tool(lambda customer_id: customer_id, name_override="lookup_account")],
+    )[0]
+    m = OpenAIRealtimeWebSocketModel()
+
+    with pytest.raises(UserError, match="tool_namespace\\(\\)"):
+        m._tools_to_session_tools([tool], [])
+
+
+def test_tools_to_session_tools_rejects_deferred_function_tools():
+    tool = function_tool(
+        lambda customer_id: customer_id,
+        name_override="lookup_account",
+        defer_loading=True,
+    )
+    m = OpenAIRealtimeWebSocketModel()
+
+    with pytest.raises(UserError, match="defer_loading=True"):
+        m._tools_to_session_tools([tool], [])

@@ -1,7 +1,9 @@
 import asyncio
 import time
+from typing import cast
 
 import pytest
+from openai._models import construct_type
 from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseContentPartAddedEvent,
@@ -10,6 +12,7 @@ from openai.types.responses import (
     ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseInProgressEvent,
+    ResponseOutputItem,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponseReasoningSummaryPartAddedEvent,
@@ -24,7 +27,14 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from agents import Agent, HandoffCallItem, Runner, function_tool
 from agents.extensions.handoff_filters import remove_all_tools
 from agents.handoffs import handoff
-from agents.items import MessageOutputItem, ReasoningItem, ToolCallItem, ToolCallOutputItem
+from agents.items import (
+    MessageOutputItem,
+    ReasoningItem,
+    ToolCallItem,
+    ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
+)
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
@@ -280,3 +290,71 @@ async def test_complete_streaming_events():
     assert events[26].type == "run_item_stream_event"
     assert events[26].name == "message_output_created"
     assert isinstance(events[26].item, MessageOutputItem)
+
+
+@pytest.mark.asyncio
+async def test_stream_events_emit_tool_search_items() -> None:
+    model = FakeModel()
+    agent = Agent(name="ToolSearchAgent", model=model)
+    tool_search_call = cast(
+        ResponseOutputItem,
+        construct_type(
+            type_=ResponseOutputItem,
+            value={
+                "id": "tsc_stream",
+                "type": "tool_search_call",
+                "arguments": {"paths": ["crm"], "query": "orders"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+    )
+    tool_search_output = cast(
+        ResponseOutputItem,
+        construct_type(
+            type_=ResponseOutputItem,
+            value={
+                "id": "tso_stream",
+                "type": "tool_search_output",
+                "execution": "server",
+                "status": "completed",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "list_open_orders",
+                        "description": "List open orders for a customer.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "customer_id": {
+                                    "type": "string",
+                                }
+                            },
+                            "required": ["customer_id"],
+                        },
+                        "defer_loading": True,
+                    }
+                ],
+            },
+        ),
+    )
+    model.add_multiple_turn_outputs(
+        [[tool_search_call, tool_search_output, get_text_message("Done")]]
+    )
+
+    result = Runner.run_streamed(agent, input="Search for CRM order tools")
+
+    seen_events: list[tuple[str, object]] = []
+    async for event in result.stream_events():
+        if event.type != "run_item_stream_event":
+            continue
+        seen_events.append((event.name, event.item))
+
+    assert any(
+        name == "tool_search_called" and isinstance(item, ToolSearchCallItem)
+        for name, item in seen_events
+    )
+    assert any(
+        name == "tool_search_output_created" and isinstance(item, ToolSearchOutputItem)
+        for name, item in seen_events
+    )

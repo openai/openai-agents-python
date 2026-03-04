@@ -154,11 +154,13 @@ from .tool import (
     ToolOutputImageDict,
     ToolOutputText,
     ToolOutputTextDict,
+    ToolSearchTool,
     WebSearchTool,
     default_tool_error_function,
     dispose_resolved_computers,
     function_tool,
     resolve_computer,
+    tool_namespace,
 )
 from .tool_guardrails import (
     ToolGuardrailFunctionOutput,
@@ -420,7 +422,9 @@ __all__ = [
     "ToolOutputImageDict",
     "ToolOutputFileContent",
     "ToolOutputFileContentDict",
+    "ToolSearchTool",
     "function_tool",
+    "tool_namespace",
     "resolve_computer",
     "dispose_resolved_computers",
     "Usage",

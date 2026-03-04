@@ -74,6 +74,48 @@ def test_tool_context_constructor_accepts_agent_keyword() -> None:
     assert tool_ctx.agent is agent
 
 
+def test_tool_context_constructor_infers_namespace_from_tool_call() -> None:
+    tool_call = ResponseFunctionToolCall(
+        type="function_call",
+        name="lookup_account",
+        call_id="call-2",
+        arguments="{}",
+        namespace="billing",
+    )
+
+    tool_ctx: ToolContext[dict[str, object]] = ToolContext(
+        context={},
+        tool_name="lookup_account",
+        tool_call_id="call-2",
+        tool_arguments="{}",
+        tool_call=tool_call,
+    )
+
+    assert tool_ctx.tool_namespace == "billing"
+    assert tool_ctx.qualified_tool_name == "billing.lookup_account"
+
+
+def test_tool_context_qualified_tool_name_collapses_synthetic_namespace() -> None:
+    tool_call = ResponseFunctionToolCall(
+        type="function_call",
+        name="get_weather",
+        call_id="call-weather",
+        arguments="{}",
+        namespace="get_weather",
+    )
+
+    tool_ctx: ToolContext[dict[str, object]] = ToolContext(
+        context={},
+        tool_name="get_weather",
+        tool_call_id="call-weather",
+        tool_arguments="{}",
+        tool_call=tool_call,
+    )
+
+    assert tool_ctx.tool_namespace == "get_weather"
+    assert tool_ctx.qualified_tool_name == "get_weather"
+
+
 def test_tool_context_from_tool_context_inherits_agent() -> None:
     original_call = ResponseFunctionToolCall(
         type="function_call",

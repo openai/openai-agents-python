@@ -1,19 +1,41 @@
 from typing import Any, cast
 
 import pytest
+from openai._models import construct_type
 from openai.types.responses import (
     ResponseApplyPatchToolCall,
     ResponseCompactionItem,
     ResponseFunctionShellToolCall,
     ResponseFunctionShellToolCallOutput,
+    ResponseOutputItem,
+    ResponseToolSearchCall,
+    ResponseToolSearchOutputItem,
 )
 
-from agents import Agent, ApplyPatchTool, CompactionItem, ShellTool
-from agents.exceptions import ModelBehaviorError
-from agents.items import ModelResponse, ToolCallItem, ToolCallOutputItem
+from agents import (
+    Agent,
+    ApplyPatchTool,
+    CompactionItem,
+    Handoff,
+    ShellTool,
+    Tool,
+    function_tool,
+    handoff,
+    tool_namespace,
+)
+from agents.exceptions import ModelBehaviorError, UserError
+from agents.items import (
+    HandoffCallItem,
+    ModelResponse,
+    ToolCallItem,
+    ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
+)
 from agents.run_internal import run_loop
 from agents.usage import Usage
 from tests.fake_model import FakeModel
+from tests.test_responses import get_function_tool_call
 from tests.utils.hitl import (
     RecordingEditor,
     make_apply_patch_call,
@@ -255,6 +277,36 @@ def test_process_model_response_converts_custom_apply_patch_call() -> None:
     assert converted_call.get("type") == "apply_patch_call"
 
 
+def test_process_model_response_prefers_namespaced_function_over_apply_patch_fallback() -> None:
+    namespaced_tool = tool_namespace(
+        name="billing",
+        description="Billing tools",
+        tools=[function_tool(lambda payload: payload, name_override="apply_patch_lookup")],
+    )[0]
+    all_tools: list[Tool] = [namespaced_tool]
+    agent = Agent(name="billing-agent", model=FakeModel(), tools=all_tools)
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=all_tools,
+        response=_response(
+            [
+                get_function_tool_call(
+                    "apply_patch_lookup",
+                    '{"payload":"value"}',
+                    namespace="billing",
+                )
+            ]
+        ),
+        output_schema=None,
+        handoffs=[],
+    )
+
+    assert len(processed.functions) == 1
+    assert processed.functions[0].function_tool is namespaced_tool
+    assert processed.apply_patch_calls == []
+
+
 def test_process_model_response_handles_compaction_item() -> None:
     agent = Agent(name="compaction-agent", model=FakeModel())
     compaction_item = ResponseCompactionItem(
@@ -279,3 +331,377 @@ def test_process_model_response_handles_compaction_item() -> None:
     assert item.raw_item["type"] == "compaction"
     assert item.raw_item["encrypted_content"] == "enc"
     assert "created_by" not in item.raw_item
+
+
+def test_process_model_response_classifies_tool_search_items() -> None:
+    agent = Agent(name="tool-search-agent", model=FakeModel())
+    tool_search_call = construct_type(
+        type_=ResponseOutputItem,
+        value={
+            "id": "tsc_123",
+            "type": "tool_search_call",
+            "arguments": {"paths": ["crm"], "query": "profile"},
+            "execution": "server",
+            "status": "completed",
+        },
+    )
+    tool_search_output = construct_type(
+        type_=ResponseOutputItem,
+        value={
+            "id": "tso_123",
+            "type": "tool_search_output",
+            "execution": "server",
+            "status": "completed",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "get_customer_profile",
+                    "description": "Fetch a CRM customer profile.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "customer_id": {
+                                "type": "string",
+                            }
+                        },
+                        "required": ["customer_id"],
+                    },
+                    "defer_loading": True,
+                }
+            ],
+        },
+    )
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=[],
+        response=_response([tool_search_call, tool_search_output]),
+        output_schema=None,
+        handoffs=[],
+    )
+
+    assert isinstance(processed.new_items[0], ToolSearchCallItem)
+    assert isinstance(processed.new_items[0].raw_item, ResponseToolSearchCall)
+    assert isinstance(processed.new_items[1], ToolSearchOutputItem)
+    assert isinstance(processed.new_items[1].raw_item, ResponseToolSearchOutputItem)
+    assert processed.tools_used == ["tool_search", "tool_search"]
+
+
+def test_process_model_response_uses_namespace_for_duplicate_function_names() -> None:
+    crm_tool = function_tool(lambda customer_id: customer_id, name_override="lookup_account")
+    billing_tool = function_tool(lambda customer_id: customer_id, name_override="lookup_account")
+    crm_namespace = tool_namespace(
+        name="crm",
+        description="CRM tools",
+        tools=[crm_tool],
+    )
+    billing_namespace = tool_namespace(
+        name="billing",
+        description="Billing tools",
+        tools=[billing_tool],
+    )
+    all_tools: list[Tool] = [*crm_namespace, *billing_namespace]
+    agent = Agent(name="billing-agent", model=FakeModel(), tools=all_tools)
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=all_tools,
+        response=_response(
+            [
+                get_function_tool_call(
+                    "lookup_account",
+                    '{"customer_id":"customer_42"}',
+                    namespace="billing",
+                )
+            ]
+        ),
+        output_schema=None,
+        handoffs=[],
+    )
+
+    assert len(processed.functions) == 1
+    assert processed.functions[0].function_tool is billing_namespace[0]
+    assert processed.tools_used == ["billing.lookup_account"]
+
+
+def test_process_model_response_collapses_synthetic_deferred_namespace_in_tools_used() -> None:
+    deferred_tool = function_tool(
+        lambda city: city,
+        name_override="get_weather",
+        defer_loading=True,
+    )
+    agent = Agent(name="weather-agent", model=FakeModel(), tools=[deferred_tool])
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=[deferred_tool],
+        response=_response(
+            [
+                get_function_tool_call(
+                    "get_weather",
+                    '{"city":"Tokyo"}',
+                    namespace="get_weather",
+                )
+            ]
+        ),
+        output_schema=None,
+        handoffs=[],
+    )
+
+    assert len(processed.functions) == 1
+    assert processed.functions[0].function_tool is deferred_tool
+    assert processed.tools_used == ["get_weather"]
+
+
+def test_process_model_response_rejects_bare_name_for_duplicate_namespaced_functions() -> None:
+    crm_tool = function_tool(lambda customer_id: customer_id, name_override="lookup_account")
+    billing_tool = function_tool(lambda customer_id: customer_id, name_override="lookup_account")
+    crm_namespace = tool_namespace(
+        name="crm",
+        description="CRM tools",
+        tools=[crm_tool],
+    )
+    billing_namespace = tool_namespace(
+        name="billing",
+        description="Billing tools",
+        tools=[billing_tool],
+    )
+    all_tools: list[Tool] = [*crm_namespace, *billing_namespace]
+    agent = Agent(name="billing-agent", model=FakeModel(), tools=all_tools)
+
+    with pytest.raises(ModelBehaviorError, match="Tool lookup_account not found"):
+        run_loop.process_model_response(
+            agent=agent,
+            all_tools=all_tools,
+            response=_response(
+                [get_function_tool_call("lookup_account", '{"customer_id":"customer_42"}')]
+            ),
+            output_schema=None,
+            handoffs=[],
+        )
+
+
+def test_process_model_response_uses_last_duplicate_top_level_function() -> None:
+    first_tool = function_tool(lambda customer_id: f"first:{customer_id}", name_override="lookup")
+    second_tool = function_tool(lambda customer_id: f"second:{customer_id}", name_override="lookup")
+    all_tools: list[Tool] = [first_tool, second_tool]
+    agent = Agent(name="lookup-agent", model=FakeModel(), tools=all_tools)
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=all_tools,
+        response=_response([get_function_tool_call("lookup", '{"customer_id":"customer_42"}')]),
+        output_schema=None,
+        handoffs=[],
+    )
+
+    assert len(processed.functions) == 1
+    assert processed.functions[0].function_tool is second_tool
+
+
+def test_process_model_response_rejects_reserved_same_name_namespace_shape() -> None:
+    invalid_tool = function_tool(lambda customer_id: customer_id, name_override="lookup_account")
+    invalid_tool._tool_namespace = "lookup_account"
+    invalid_tool._tool_namespace_description = "Same-name namespace"
+    all_tools: list[Tool] = [invalid_tool]
+    agent = Agent(name="lookup-agent", model=FakeModel(), tools=all_tools)
+
+    with pytest.raises(UserError, match="synthetic namespace `lookup_account.lookup_account`"):
+        run_loop.process_model_response(
+            agent=agent,
+            all_tools=all_tools,
+            response=_response(
+                [
+                    get_function_tool_call(
+                        "lookup_account",
+                        '{"customer_id":"customer_42"}',
+                        namespace="lookup_account",
+                    )
+                ]
+            ),
+            output_schema=None,
+            handoffs=[],
+        )
+
+
+def test_process_model_response_rejects_qualified_name_collision_with_dotted_top_level_tool() -> (
+    None
+):
+    dotted_top_level_tool = function_tool(
+        lambda customer_id: customer_id,
+        name_override="crm.lookup_account",
+    )
+    namespaced_tool = tool_namespace(
+        name="crm",
+        description="CRM tools",
+        tools=[function_tool(lambda customer_id: customer_id, name_override="lookup_account")],
+    )[0]
+    all_tools: list[Tool] = [dotted_top_level_tool, namespaced_tool]
+    agent = Agent(name="lookup-agent", model=FakeModel(), tools=all_tools)
+
+    with pytest.raises(UserError, match="qualified name `crm.lookup_account`"):
+        run_loop.process_model_response(
+            agent=agent,
+            all_tools=all_tools,
+            response=_response(
+                [
+                    get_function_tool_call(
+                        "lookup_account",
+                        '{"customer_id":"customer_42"}',
+                        namespace="crm",
+                    )
+                ]
+            ),
+            output_schema=None,
+            handoffs=[],
+        )
+
+
+def test_process_model_response_prefers_visible_top_level_function_over_deferred_same_name_tool():
+    visible_tool = function_tool(
+        lambda customer_id: f"visible:{customer_id}",
+        name_override="lookup_account",
+    )
+    deferred_tool = function_tool(
+        lambda customer_id: f"deferred:{customer_id}",
+        name_override="lookup_account",
+        defer_loading=True,
+    )
+    all_tools: list[Tool] = [visible_tool, deferred_tool]
+    agent = Agent(name="lookup-agent", model=FakeModel(), tools=all_tools)
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=all_tools,
+        response=_response(
+            [get_function_tool_call("lookup_account", '{"customer_id":"customer_42"}')]
+        ),
+        output_schema=None,
+        handoffs=[],
+    )
+
+    assert len(processed.functions) == 1
+    assert processed.functions[0].function_tool is visible_tool
+    assert getattr(processed.functions[0].tool_call, "namespace", None) is None
+    assert isinstance(processed.new_items[0], ToolCallItem)
+    assert getattr(processed.new_items[0].raw_item, "namespace", None) is None
+
+
+def test_process_model_response_uses_internal_lookup_key_for_deferred_top_level_calls() -> None:
+    visible_tool = function_tool(
+        lambda customer_id: f"visible:{customer_id}",
+        name_override="lookup_account.lookup_account",
+    )
+    deferred_tool = function_tool(
+        lambda customer_id: f"deferred:{customer_id}",
+        name_override="lookup_account",
+        defer_loading=True,
+    )
+    all_tools: list[Tool] = [visible_tool, deferred_tool]
+    agent = Agent(name="lookup-agent", model=FakeModel(), tools=all_tools)
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=all_tools,
+        response=_response(
+            [
+                get_function_tool_call(
+                    "lookup_account",
+                    '{"customer_id":"customer_42"}',
+                    namespace="lookup_account",
+                )
+            ]
+        ),
+        output_schema=None,
+        handoffs=[],
+    )
+
+    assert len(processed.functions) == 1
+    assert processed.functions[0].function_tool is deferred_tool
+
+
+def test_process_model_response_preserves_synthetic_namespace_for_deferred_top_level_tools() -> (
+    None
+):
+    deferred_tool = function_tool(
+        lambda city: city,
+        name_override="get_weather",
+        defer_loading=True,
+    )
+    all_tools: list[Tool] = [deferred_tool]
+    agent = Agent(name="weather-agent", model=FakeModel(), tools=all_tools)
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=all_tools,
+        response=_response(
+            [get_function_tool_call("get_weather", '{"city":"Tokyo"}', namespace="get_weather")]
+        ),
+        output_schema=None,
+        handoffs=[],
+    )
+
+    assert len(processed.functions) == 1
+    assert processed.functions[0].function_tool is deferred_tool
+    assert getattr(processed.functions[0].tool_call, "namespace", None) == "get_weather"
+    assert isinstance(processed.new_items[0], ToolCallItem)
+    assert getattr(processed.new_items[0].raw_item, "namespace", None) == "get_weather"
+
+
+def test_process_model_response_prefers_namespaced_function_over_handoff_name_collision() -> None:
+    billing_tool = function_tool(lambda customer_id: customer_id, name_override="lookup_account")
+    billing_namespace = tool_namespace(
+        name="billing",
+        description="Billing tools",
+        tools=[billing_tool],
+    )
+    handoff_target = Agent(name="lookup-agent", model=FakeModel())
+    lookup_handoff: Handoff = handoff(handoff_target, tool_name_override="lookup_account")
+    all_tools: list[Tool] = [*billing_namespace]
+    agent = Agent(name="billing-agent", model=FakeModel(), tools=all_tools)
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=all_tools,
+        response=_response(
+            [
+                get_function_tool_call(
+                    "lookup_account",
+                    '{"customer_id":"customer_42"}',
+                    namespace="billing",
+                )
+            ]
+        ),
+        output_schema=None,
+        handoffs=[lookup_handoff],
+    )
+
+    assert len(processed.functions) == 1
+    assert processed.functions[0].function_tool is billing_namespace[0]
+    assert processed.handoffs == []
+    assert len(processed.new_items) == 1
+    assert isinstance(processed.new_items[0], ToolCallItem)
+    assert not isinstance(processed.new_items[0], HandoffCallItem)
+
+
+def test_process_model_response_rejects_mismatched_function_namespace() -> None:
+    bare_tool = function_tool(lambda customer_id: customer_id, name_override="lookup_account")
+    all_tools: list[Tool] = [bare_tool]
+    agent = Agent(name="bare-agent", model=FakeModel(), tools=all_tools)
+
+    with pytest.raises(ModelBehaviorError, match="crm.lookup_account"):
+        run_loop.process_model_response(
+            agent=agent,
+            all_tools=all_tools,
+            response=_response(
+                [
+                    get_function_tool_call(
+                        "lookup_account",
+                        '{"customer_id":"customer_42"}',
+                        namespace="crm",
+                    )
+                ]
+            ),
+            output_schema=None,
+            handoffs=[],
+        )

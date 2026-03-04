@@ -11,6 +11,7 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from typing_extensions import NotRequired, TypeAlias, TypedDict
 
+from ._tool_identity import get_function_tool_approval_keys
 from .agent_output import AgentOutputSchemaBase
 from .agent_tool_input import (
     AgentAsToolInput,
@@ -50,6 +51,7 @@ from .tool import (
     _log_function_tool_invocation,
     _parse_function_tool_json_input,
     default_tool_error_function,
+    prune_orphaned_tool_search_tools,
 )
 from .tool_context import ToolContext
 from .util import _transforms
@@ -210,7 +212,7 @@ class AgentBase(Generic[TContext]):
 
         results = await asyncio.gather(*(_check_tool_enabled(t) for t in self.tools))
         enabled: list[Tool] = [t for t, ok in zip(self.tools, results) if ok]
-        all_tools: list[Tool] = [*mcp_tools, *enabled]
+        all_tools: list[Tool] = prune_orphaned_tool_search_tools([*mcp_tools, *enabled])
         _validate_codex_tool_name_collisions(all_tools)
         return all_tools
 
@@ -597,6 +599,7 @@ class Agent(AgentBase, Generic[TContext]):
                     tool_call_id=context.tool_call_id,
                     tool_arguments=context.tool_arguments,
                     tool_call=context.tool_call,
+                    tool_namespace=context.tool_namespace,
                     agent=context.agent,
                     run_config=resolved_run_config,
                 )
@@ -631,8 +634,12 @@ class Agent(AgentBase, Generic[TContext]):
                     if not call_id:
                         has_pending = True
                         continue
+                    tool_namespace = RunContextWrapper._resolve_tool_namespace(interruption)
                     status = context.get_approval_status(
-                        interruption.tool_name or "", call_id, existing_pending=interruption
+                        interruption.tool_name or "",
+                        call_id,
+                        tool_namespace=tool_namespace,
+                        existing_pending=interruption,
                     )
                     if status is False:
                         return "rejected"
@@ -651,17 +658,54 @@ class Agent(AgentBase, Generic[TContext]):
                 parent_context: RunContextWrapper[Any],
                 interruptions: list[ToolApprovalItem],
             ) -> None:
+                def _find_mirrored_approval_record(
+                    interruption: ToolApprovalItem,
+                    *,
+                    approved: bool,
+                ) -> Any | None:
+                    candidate_keys = list(RunContextWrapper._resolve_approval_keys(interruption))
+                    for candidate_key in get_function_tool_approval_keys(
+                        tool_name=RunContextWrapper._resolve_tool_name(interruption),
+                        tool_namespace=RunContextWrapper._resolve_tool_namespace(interruption),
+                        tool_lookup_key=RunContextWrapper._resolve_tool_lookup_key(interruption),
+                        include_legacy_deferred_key=True,
+                    ):
+                        if candidate_key not in candidate_keys:
+                            candidate_keys.append(candidate_key)
+                    fallback: Any | None = None
+                    for candidate_key in candidate_keys:
+                        candidate = parent_context._approvals.get(candidate_key)
+                        if candidate is None:
+                            continue
+                        if approved and candidate.approved is True:
+                            return candidate
+                        if not approved and candidate.rejected is True:
+                            return candidate
+                        if fallback is None:
+                            fallback = candidate
+                    return fallback
+
                 for interruption in interruptions:
                     call_id = interruption.call_id
                     if not call_id:
                         continue
                     tool_name = RunContextWrapper._resolve_tool_name(interruption)
+                    tool_namespace = RunContextWrapper._resolve_tool_namespace(interruption)
+                    approval_key = RunContextWrapper._resolve_approval_key(interruption)
                     status = parent_context.get_approval_status(
-                        tool_name, call_id, existing_pending=interruption
+                        tool_name,
+                        call_id,
+                        tool_namespace=tool_namespace,
+                        existing_pending=interruption,
                     )
                     if status is None:
                         continue
-                    approval_record = parent_context._approvals.get(tool_name)
+                    approval_record = parent_context._approvals.get(approval_key)
+                    if approval_record is None:
+                        approval_record = _find_mirrored_approval_record(
+                            interruption,
+                            approved=status,
+                        )
                     if status is True:
                         always_approve = bool(approval_record and approval_record.approved is True)
                         nested_context.approve_tool(

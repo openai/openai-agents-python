@@ -31,6 +31,17 @@ from openai.types.responses.response_output_item import (
 from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeVar
 
+from ._tool_identity import (
+    FunctionToolLookupKey,
+    NamedToolLookupKey,
+    build_function_tool_lookup_map,
+    deserialize_function_tool_lookup_key,
+    get_function_tool_lookup_key,
+    get_function_tool_lookup_key_for_tool,
+    get_function_tool_namespace,
+    get_function_tool_qualified_name,
+    serialize_function_tool_lookup_key,
+)
 from .exceptions import UserError
 from .guardrail import (
     GuardrailFunctionOutput,
@@ -54,7 +65,11 @@ from .items import (
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
     TResponseInputItem,
+    coerce_tool_search_call_raw_item,
+    coerce_tool_search_output_raw_item,
 )
 from .logger import logger
 from .run_context import RunContextWrapper
@@ -95,13 +110,16 @@ ContextOverride = Union[Mapping[str, Any], RunContextWrapper[Any]]
 ContextSerializer = Callable[[Any], Mapping[str, Any]]
 ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 
+
 # RunState schema policy.
 # 1. Bump CURRENT_SCHEMA_VERSION when serialized shape/semantics change.
 # 2. Keep older readable versions in SUPPORTED_SCHEMA_VERSIONS for backward reads.
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer versions).
-CURRENT_SCHEMA_VERSION = "1.4"
-SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2", "1.3", CURRENT_SCHEMA_VERSION})
+CURRENT_SCHEMA_VERSION = "1.6"
+SUPPORTED_SCHEMA_VERSIONS = frozenset(
+    {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", CURRENT_SCHEMA_VERSION}
+)
 
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
 _COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(ComputerCallOutput)
@@ -185,6 +203,9 @@ class RunState(Generic[TContext, TAgent]):
     _last_processed_response: ProcessedResponse | None = None
     """The last processed model response. This is needed for resuming from interruptions."""
 
+    _generated_items_last_processed_marker: str | None = field(default=None, repr=False)
+    """Tracks whether _generated_items already include the current last_processed_response."""
+
     _current_turn_persisted_item_count: int = 0
     """Tracks how many items from this turn were already written to the session."""
 
@@ -227,6 +248,7 @@ class RunState(Generic[TContext, TAgent]):
         self._current_step = None
         self._current_turn = 0
         self._last_processed_response = None
+        self._generated_items_last_processed_marker = None
         self._current_turn_persisted_item_count = 0
         self._tool_use_tracker_snapshot = {}
         self._trace_state = None
@@ -445,10 +467,46 @@ class RunState(Generic[TContext, TAgent]):
 
         return _to_dump_compatible(tool_input)
 
+    def _current_generated_items_merge_marker(self) -> str | None:
+        """Return a marker for the processed response already reflected in _generated_items."""
+        if not (self._last_processed_response and self._last_processed_response.new_items):
+            return None
+
+        latest_response_id = (
+            self._model_responses[-1].response_id if self._model_responses else None
+        )
+        serialized_items = [
+            self._serialize_item(item) for item in self._last_processed_response.new_items
+        ]
+        return json.dumps(
+            {
+                "current_turn": self._current_turn,
+                "last_response_id": latest_response_id,
+                "new_items": serialized_items,
+            },
+            sort_keys=True,
+            default=str,
+        )
+
+    def _mark_generated_items_merged_with_last_processed(self) -> None:
+        """Remember that _generated_items already include the current processed response."""
+        self._generated_items_last_processed_marker = self._current_generated_items_merge_marker()
+
+    def _clear_generated_items_last_processed_marker(self) -> None:
+        """Forget any prior merge marker after _generated_items is replaced."""
+        self._generated_items_last_processed_marker = None
+
     def _merge_generated_items_with_processed(self) -> list[RunItem]:
         """Merge persisted and newly processed items without duplication."""
         generated_items = list(self._generated_items)
         if not (self._last_processed_response and self._last_processed_response.new_items):
+            return generated_items
+
+        current_merge_marker = self._current_generated_items_merge_marker()
+        if (
+            current_merge_marker is not None
+            and self._generated_items_last_processed_marker == current_merge_marker
+        ):
             return generated_items
 
         seen_id_types: set[tuple[str, str]] = set()
@@ -500,6 +558,9 @@ class RunState(Generic[TContext, TAgent]):
             elif call_id:
                 seen_call_ids.add(call_id)
             generated_items.append(new_item)
+
+        if current_merge_marker is not None:
+            self._generated_items_last_processed_marker = current_merge_marker
         return generated_items
 
     def to_json(
@@ -689,6 +750,13 @@ class RunState(Generic[TContext, TAgent]):
             result["target_agent"] = {"name": item.target_agent.name}
         if hasattr(item, "tool_name") and item.tool_name is not None:
             result["tool_name"] = item.tool_name
+        if hasattr(item, "tool_namespace") and item.tool_namespace is not None:
+            result["tool_namespace"] = item.tool_namespace
+        tool_lookup_key = serialize_function_tool_lookup_key(getattr(item, "tool_lookup_key", None))
+        if tool_lookup_key is not None:
+            result["tool_lookup_key"] = tool_lookup_key
+        if getattr(item, "_allow_bare_name_alias", False):
+            result["allow_bare_name_alias"] = True
         if hasattr(item, "description") and item.description is not None:
             result["description"] = item.description
 
@@ -1017,6 +1085,15 @@ def _serialize_tool_metadata(
 ) -> dict[str, Any]:
     """Build a dictionary of tool metadata for serialization."""
     metadata: dict[str, Any] = {"name": tool.name if hasattr(tool, "name") else None}
+    namespace = get_function_tool_namespace(tool)
+    if namespace is not None:
+        metadata["namespace"] = namespace
+    qualified_name = get_function_tool_qualified_name(tool)
+    if qualified_name is not None and qualified_name != metadata["name"]:
+        metadata["qualifiedName"] = qualified_name
+    lookup_key = serialize_function_tool_lookup_key(get_function_tool_lookup_key_for_tool(tool))
+    if lookup_key is not None:
+        metadata["lookupKey"] = lookup_key
     if include_description and hasattr(tool, "description"):
         metadata["description"] = tool.description
     if include_params_schema and hasattr(tool, "params_json_schema"):
@@ -1122,6 +1199,15 @@ def _serialize_tool_approval_interruption(
     }
     if include_tool_name and interruption.tool_name is not None:
         interruption_dict["tool_name"] = interruption.tool_name
+    if interruption.tool_namespace is not None:
+        interruption_dict["tool_namespace"] = interruption.tool_namespace
+    tool_lookup_key = serialize_function_tool_lookup_key(
+        getattr(interruption, "tool_lookup_key", None)
+    )
+    if tool_lookup_key is not None:
+        interruption_dict["tool_lookup_key"] = tool_lookup_key
+    if interruption._allow_bare_name_alias:
+        interruption_dict["allow_bare_name_alias"] = True
     return interruption_dict
 
 
@@ -1330,11 +1416,27 @@ def _serialize_last_model_response(model_responses: list[dict[str, Any]]) -> Any
     return model_responses[-1]
 
 
-def _build_named_tool_map(tools: Sequence[Any], tool_type: type[Any]) -> dict[str, Any]:
+def _build_named_tool_map(
+    tools: Sequence[Any], tool_type: type[Any]
+) -> dict[NamedToolLookupKey, Any]:
     """Build a name-indexed map for tools of a given type."""
-    return {
-        tool.name: tool for tool in tools if isinstance(tool, tool_type) and hasattr(tool, "name")
-    }
+    if tool_type is FunctionTool:
+        return cast(
+            dict[NamedToolLookupKey, Any],
+            build_function_tool_lookup_map(
+                [tool for tool in tools if isinstance(tool, FunctionTool)]
+            ),
+        )
+
+    tool_map: dict[NamedToolLookupKey, Any] = {}
+    for tool in tools:
+        if not isinstance(tool, tool_type) or not hasattr(tool, "name"):
+            continue
+        tool_name = getattr(tool, "name", None)
+        if not isinstance(tool_name, str) or not tool_name:
+            continue
+        tool_map[tool_name] = tool
+    return tool_map
 
 
 def _build_handoffs_map(current_agent: Agent[Any]) -> dict[str, Handoff[Any, Agent[Any]]]:
@@ -1455,23 +1557,34 @@ async def _deserialize_processed_response(
         entries: list[dict[str, Any]],
         *,
         tool_key: str,
-        tool_map: Mapping[str, Any],
+        tool_map: Mapping[NamedToolLookupKey, Any],
         call_parser: Callable[[dict[str, Any]], Any],
         action_factory: Callable[[Any, Any], Any],
-        name_resolver: Callable[[Mapping[str, Any]], str | None] | None = None,
+        name_resolver: Callable[[Mapping[str, Any]], NamedToolLookupKey | None] | None = None,
     ) -> list[Any]:
         """Deserialize tool actions with shared structure."""
         deserialized: list[Any] = []
         for entry in entries or []:
+            tool_container = entry.get(tool_key, {}) if isinstance(entry, Mapping) else {}
             if name_resolver:
                 tool_name = name_resolver(entry)
             else:
-                tool_container = entry.get(tool_key, {}) if isinstance(entry, Mapping) else {}
                 if isinstance(tool_container, Mapping):
                     tool_name = tool_container.get("name")
                 else:
                     tool_name = None
             tool = tool_map.get(tool_name) if tool_name else None
+            if (
+                tool is None
+                and name_resolver is None
+                and isinstance(tool_container, Mapping)
+                and not isinstance(tool_container.get("namespace"), str)
+            ):
+                bare_name = tool_container.get("name")
+                if isinstance(bare_name, str):
+                    bare_lookup_key = get_function_tool_lookup_key(bare_name)
+                    if bare_lookup_key is not None:
+                        tool = tool_map.get(bare_lookup_key)
             if not tool:
                 continue
 
@@ -1499,14 +1612,46 @@ async def _deserialize_processed_response(
             return data
 
     def _deserialize_action_groups() -> dict[str, list[Any]]:
+        def _resolve_handoff_tool_name(data: Mapping[str, Any]) -> NamedToolLookupKey | None:
+            handoff_data = data.get("handoff", {})
+            if not isinstance(handoff_data, Mapping):
+                return None
+            tool_name = handoff_data.get("tool_name")
+            return cast(
+                NamedToolLookupKey | None, tool_name if isinstance(tool_name, str) else None
+            )
+
+        def _resolve_function_tool_name(data: Mapping[str, Any]) -> FunctionToolLookupKey | None:
+            tool_data = data.get("tool", {})
+            if isinstance(tool_data, Mapping):
+                lookup_key = deserialize_function_tool_lookup_key(tool_data.get("lookupKey"))
+                if lookup_key is not None:
+                    return lookup_key
+
+            tool_call_data = data.get("tool_call", {})
+            if isinstance(tool_call_data, Mapping):
+                lookup_key = get_function_tool_lookup_key(
+                    cast(str | None, tool_call_data.get("name")),
+                    cast(str | None, tool_call_data.get("namespace")),
+                )
+                if lookup_key is not None:
+                    return lookup_key
+
+            if not isinstance(tool_data, Mapping):
+                return None
+            return get_function_tool_lookup_key(
+                cast(str | None, tool_data.get("name")),
+                cast(str | None, tool_data.get("namespace")),
+            )
+
         action_specs: list[
             tuple[
                 str,
                 str,
-                Mapping[str, Any],
+                Mapping[Any, Any],
                 Callable[[dict[str, Any]], Any],
                 Callable[[Any, Any], Any],
-                Callable[[Mapping[str, Any]], str | None] | None,
+                Callable[[Mapping[str, Any]], NamedToolLookupKey | None] | None,
             ]
         ] = [
             (
@@ -1515,7 +1660,7 @@ async def _deserialize_processed_response(
                 handoffs_map,
                 lambda data: ResponseFunctionToolCall(**data),
                 lambda tool_call, handoff: ToolRunHandoff(tool_call=tool_call, handoff=handoff),
-                lambda data: data.get("handoff", {}).get("tool_name"),
+                _resolve_handoff_tool_name,
             ),
             (
                 "functions",
@@ -1525,7 +1670,7 @@ async def _deserialize_processed_response(
                 lambda tool_call, function_tool: ToolRunFunction(
                     tool_call=tool_call, function_tool=function_tool
                 ),
-                None,
+                _resolve_function_tool_name,
             ),
             (
                 "computer_actions",
@@ -1719,8 +1864,18 @@ def _deserialize_tool_approval_item(
             raw_item_data = dict(raw_item_data)
 
     tool_name = item_data.get("tool_name")
+    tool_namespace = item_data.get("tool_namespace")
+    tool_lookup_key = deserialize_function_tool_lookup_key(item_data.get("tool_lookup_key"))
+    allow_bare_name_alias = item_data.get("allow_bare_name_alias") is True
     raw_item = _deserialize_tool_approval_raw_item(raw_item_data)
-    return ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name=tool_name)
+    return ToolApprovalItem(
+        agent=agent,
+        raw_item=raw_item,
+        tool_name=tool_name,
+        tool_namespace=tool_namespace,
+        tool_lookup_key=tool_lookup_key,
+        _allow_bare_name_alias=allow_bare_name_alias,
+    )
 
 
 def _deserialize_tool_call_output_raw_item(
@@ -2059,6 +2214,8 @@ async def _build_run_state_from_json(
     else:
         state._session_items = state._merge_generated_items_with_processed()
 
+    state._mark_generated_items_merged_with_last_processed()
+
     state._input_guardrail_results = _deserialize_input_guardrail_results(
         state_json.get("input_guardrail_results", [])
     )
@@ -2296,6 +2453,18 @@ def _deserialize_items(
             if item_type == "message_output_item":
                 raw_item_msg = ResponseOutputMessage(**normalized_raw_item)
                 result.append(MessageOutputItem(agent=agent, raw_item=raw_item_msg))
+
+            elif item_type == "tool_search_call_item":
+                raw_item_tool_search_call = coerce_tool_search_call_raw_item(normalized_raw_item)
+                result.append(ToolSearchCallItem(agent=agent, raw_item=raw_item_tool_search_call))
+
+            elif item_type == "tool_search_output_item":
+                raw_item_tool_search_output = coerce_tool_search_output_raw_item(
+                    normalized_raw_item
+                )
+                result.append(
+                    ToolSearchOutputItem(agent=agent, raw_item=raw_item_tool_search_output)
+                )
 
             elif item_type == "tool_call_item":
                 # Tool call items can be function calls, shell calls, apply_patch calls,

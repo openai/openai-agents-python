@@ -11,7 +11,7 @@ from openai import NOT_GIVEN, omit
 from openai.types.responses import ResponseCompletedEvent
 from openai.types.shared.reasoning import Reasoning
 
-from agents import ModelSettings, ModelTracing, __version__
+from agents import ModelSettings, ModelTracing, ToolSearchTool, __version__
 from agents.exceptions import UserError
 from agents.models.openai_responses import (
     _HEADERS_OVERRIDE as RESP_HEADERS,
@@ -699,6 +699,27 @@ def test_build_response_create_kwargs_rejects_duplicate_extra_args_keys():
 
 
 @pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_preserves_unknown_response_include_values():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(response_include=["response.future_flag"]),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert kwargs["include"] == ["response.future_flag"]
+
+
+@pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 async def test_prompt_id_omits_model_parameter():
     called_kwargs: dict[str, Any] = {}
@@ -840,6 +861,42 @@ async def test_prompt_id_keeps_literal_tool_choice_without_local_tools(tool_choi
 
     assert called_kwargs["tools"] is omit
     assert called_kwargs["tool_choice"] == tool_choice
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_prompt_id_keeps_explicit_tool_search_without_local_surface() -> None:
+    called_kwargs: dict[str, Any] = {}
+
+    class DummyResponses:
+        async def create(self, **kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return get_response_obj([])
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=DummyResponsesClient(),  # type: ignore[arg-type]
+        model_is_explicit=False,
+    )
+
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[ToolSearchTool()],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        prompt={"id": "pmpt_123"},
+    )
+
+    assert called_kwargs["prompt"] == {"id": "pmpt_123"}
+    assert called_kwargs["tools"] == [{"type": "tool_search"}]
 
 
 @pytest.mark.allow_call_model_methods
