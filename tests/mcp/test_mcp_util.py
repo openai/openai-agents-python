@@ -193,6 +193,45 @@ async def test_mcp_invocation_crash_causes_error(caplog: pytest.LogCaptureFixtur
 
 
 @pytest.mark.asyncio
+async def test_mcp_invocation_mcp_error_returns_error_result(caplog: pytest.LogCaptureFixture):
+    """Test that McpError from server.call_tool is returned as a structured error result.
+
+    When an MCP server raises McpError (e.g. upstream HTTP 4xx/5xx), the tool should
+    return a structured error payload instead of raising AgentsException and crashing the
+    agent run.  This lets the model decide how to recover.
+    """
+    caplog.set_level(logging.DEBUG)
+
+    from mcp.shared.exceptions import McpError
+    from mcp.types import ErrorData
+
+    class McpErrorFakeMCPServer(FakeMCPServer):
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None = None,
+        ):
+            raise McpError(ErrorData(code=-32000, message="upstream 422 Unprocessable Entity"))
+
+    server = McpErrorFakeMCPServer()
+    server.add_tool("search", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="search", inputSchema={})
+
+    # Should NOT raise – McpError is converted to a structured error result
+    result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    assert isinstance(result, dict)
+    assert result["type"] == "text"
+    assert "upstream 422 Unprocessable Entity" in result["text"]
+
+    # Warning (not error) should be logged
+    assert "returned an error" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_mcp_tool_graceful_error_handling(caplog: pytest.LogCaptureFixture):
     """Test that MCP tool errors are handled gracefully when invoked via FunctionTool.
 
