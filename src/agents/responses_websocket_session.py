@@ -7,7 +7,11 @@ from typing import Any
 
 from .agent import Agent
 from .items import TResponseInputItem
-from .models.multi_provider import MultiProvider
+from .models.multi_provider import (
+    MultiProvider,
+    MultiProviderOpenAIPrefixMode,
+    MultiProviderUnknownPrefixMode,
+)
 from .models.openai_provider import OpenAIProvider
 from .result import RunResult, RunResultStreaming
 from .run import Runner
@@ -80,6 +84,8 @@ async def responses_websocket_session(
     websocket_base_url: str | None = None,
     organization: str | None = None,
     project: str | None = None,
+    openai_prefix_mode: MultiProviderOpenAIPrefixMode = "alias",
+    unknown_prefix_mode: MultiProviderUnknownPrefixMode = "error",
 ) -> AsyncIterator[ResponsesWebSocketSession]:
     """Create a shared OpenAI Responses websocket session for multiple Runner calls.
 
@@ -88,6 +94,10 @@ async def responses_websocket_session(
     prefix-based model routing (for example ``openai/gpt-4.1``) while keeping websocket
     connections warm across turns and nested agent-as-tool runs that inherit the same
     ``run_config``.
+
+    Use ``openai_prefix_mode="model_id"`` and/or ``unknown_prefix_mode="model_id"`` when the
+    configured OpenAI-compatible endpoint expects literal namespaced model IDs instead of the SDK's
+    historical routing-prefix behavior.
 
     Drain or close streamed iterators before the context exits. Exiting the context while a
     websocket request is still in flight may force-close the shared connection.
@@ -100,6 +110,8 @@ async def responses_websocket_session(
         openai_project=project,
         openai_use_responses=True,
         openai_use_responses_websocket=True,
+        openai_prefix_mode=openai_prefix_mode,
+        unknown_prefix_mode=unknown_prefix_mode,
     )
     provider = model_provider.openai_provider
     session = ResponsesWebSocketSession(

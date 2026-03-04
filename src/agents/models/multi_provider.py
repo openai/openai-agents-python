@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from typing import Literal, cast
+
 from openai import AsyncOpenAI
 
 from ..exceptions import UserError
 from .interface import Model, ModelProvider
 from .openai_provider import OpenAIProvider
+
+MultiProviderOpenAIPrefixMode = Literal["alias", "model_id"]
+MultiProviderUnknownPrefixMode = Literal["error", "model_id"]
 
 
 class MultiProviderMap:
@@ -57,7 +62,11 @@ class MultiProvider(ModelProvider):
     - "openai/" prefix or no prefix -> OpenAIProvider. e.g. "openai/gpt-4.1", "gpt-4.1"
     - "litellm/" prefix -> LitellmProvider. e.g. "litellm/openai/gpt-4.1"
 
-    You can override or customize this mapping.
+    You can override or customize this mapping. The ``openai`` prefix is ambiguous for some
+    OpenAI-compatible backends because a string like ``openai/gpt-4.1`` could mean either "route
+    to the OpenAI provider and use model ``gpt-4.1``" or "send the literal model ID
+    ``openai/gpt-4.1`` to the configured OpenAI-compatible endpoint." The prefix mode options let
+    callers opt into the second behavior without breaking the historical alias semantics.
     """
 
     def __init__(
@@ -72,6 +81,8 @@ class MultiProvider(ModelProvider):
         openai_use_responses: bool | None = None,
         openai_use_responses_websocket: bool | None = None,
         openai_websocket_base_url: str | None = None,
+        openai_prefix_mode: MultiProviderOpenAIPrefixMode = "alias",
+        unknown_prefix_mode: MultiProviderUnknownPrefixMode = "error",
     ) -> None:
         """Create a new OpenAI provider.
 
@@ -92,6 +103,15 @@ class MultiProvider(ModelProvider):
                 responses API.
             openai_websocket_base_url: The websocket base URL to use for the OpenAI provider.
                 If not provided, the provider will use `OPENAI_WEBSOCKET_BASE_URL` when set.
+            openai_prefix_mode: Controls how ``openai/...`` model strings are interpreted.
+                ``"alias"`` preserves the historical behavior and strips the ``openai/`` prefix
+                before calling the OpenAI provider. ``"model_id"`` keeps the full string and is
+                useful for OpenAI-compatible endpoints that expect literal namespaced model IDs.
+            unknown_prefix_mode: Controls how prefixes outside the explicit provider map and
+                built-in fallbacks are handled. ``"error"`` preserves the historical fail-fast
+                behavior and raises ``UserError``. ``"model_id"`` passes the full string through to
+                the OpenAI provider so OpenAI-compatible endpoints can receive namespaced model IDs
+                such as ``openrouter/openai/gpt-4o``.
         """
         self.provider_map = provider_map
         self.openai_provider = OpenAIProvider(
@@ -104,6 +124,8 @@ class MultiProvider(ModelProvider):
             use_responses=openai_use_responses,
             use_responses_websocket=openai_use_responses_websocket,
         )
+        self._openai_prefix_mode = self._validate_openai_prefix_mode(openai_prefix_mode)
+        self._unknown_prefix_mode = self._validate_unknown_prefix_mode(unknown_prefix_mode)
 
         self._fallback_providers: dict[str, ModelProvider] = {}
 
@@ -124,6 +146,20 @@ class MultiProvider(ModelProvider):
         else:
             raise UserError(f"Unknown prefix: {prefix}")
 
+    @staticmethod
+    def _validate_openai_prefix_mode(mode: str) -> MultiProviderOpenAIPrefixMode:
+        if mode not in {"alias", "model_id"}:
+            raise UserError("MultiProvider openai_prefix_mode must be one of: 'alias', 'model_id'.")
+        return cast(MultiProviderOpenAIPrefixMode, mode)
+
+    @staticmethod
+    def _validate_unknown_prefix_mode(mode: str) -> MultiProviderUnknownPrefixMode:
+        if mode not in {"error", "model_id"}:
+            raise UserError(
+                "MultiProvider unknown_prefix_mode must be one of: 'error', 'model_id'."
+            )
+        return cast(MultiProviderUnknownPrefixMode, mode)
+
     def _get_fallback_provider(self, prefix: str | None) -> ModelProvider:
         if prefix is None or prefix == "openai":
             return self.openai_provider
@@ -132,6 +168,31 @@ class MultiProvider(ModelProvider):
         else:
             self._fallback_providers[prefix] = self._create_fallback_provider(prefix)
             return self._fallback_providers[prefix]
+
+    def _resolve_prefixed_model(
+        self,
+        *,
+        original_model_name: str,
+        prefix: str,
+        stripped_model_name: str | None,
+    ) -> tuple[ModelProvider, str | None]:
+        # Explicit provider_map entries are the least surprising routing mechanism, so they always
+        # win over the built-in OpenAI alias and unknown-prefix fallback behavior.
+        if self.provider_map and (provider := self.provider_map.get_provider(prefix)):
+            return provider, stripped_model_name
+
+        if prefix == "litellm":
+            return self._get_fallback_provider(prefix), stripped_model_name
+
+        if prefix == "openai":
+            if self._openai_prefix_mode == "alias":
+                return self.openai_provider, stripped_model_name
+            return self.openai_provider, original_model_name
+
+        if self._unknown_prefix_mode == "model_id":
+            return self.openai_provider, original_model_name
+
+        raise UserError(f"Unknown prefix: {prefix}")
 
     def get_model(self, model_name: str | None) -> Model:
         """Returns a Model based on the model name. The model name can have a prefix, ending with
@@ -144,12 +205,21 @@ class MultiProvider(ModelProvider):
         Returns:
             A Model.
         """
-        prefix, model_name = self._get_prefix_and_model_name(model_name)
+        # Bare model names are always delegated directly to the OpenAI provider. That provider can
+        # still point at an OpenAI-compatible endpoint via ``base_url``.
+        if model_name is None:
+            return self.openai_provider.get_model(None)
 
-        if prefix and self.provider_map and (provider := self.provider_map.get_provider(prefix)):
-            return provider.get_model(model_name)
-        else:
-            return self._get_fallback_provider(prefix).get_model(model_name)
+        prefix, stripped_model_name = self._get_prefix_and_model_name(model_name)
+        if prefix is None:
+            return self.openai_provider.get_model(stripped_model_name)
+
+        provider, resolved_model_name = self._resolve_prefixed_model(
+            original_model_name=model_name,
+            prefix=prefix,
+            stripped_model_name=stripped_model_name,
+        )
+        return provider.get_model(resolved_model_name)
 
     async def aclose(self) -> None:
         """Close cached resources held by child providers."""
