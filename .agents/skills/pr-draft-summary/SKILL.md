@@ -18,6 +18,7 @@ Produce the PR-ready summary required in this repository after substantive code 
 - Working tree: `git status -sb`.
 - Untracked files: `git ls-files --others --exclude-standard` (use with `git status -sb` to ensure they are surfaced; `--stat` does not include them).
 - Changed files: `git diff --name-only` (unstaged) and `git diff --name-only --cached` (staged); sizes via `git diff --stat` and `git diff --stat --cached`.
+- Latest release tag (prefer remote-aware lookup): `LATEST_RELEASE_TAG=$(.agents/skills/final-release-review/scripts/find_latest_release_tag.sh origin 'v*' 2>/dev/null || git tag -l 'v*' --sort=-v:refname | head -n1)`.
 - Base reference (use the branch's upstream, fallback to `origin/main`):
   - `BASE_REF=$(git rev-parse --abbrev-ref --symbolic-full-name @{upstream} 2>/dev/null || echo origin/main)`.
   - `BASE_COMMIT=$(git merge-base --fork-point "$BASE_REF" HEAD || git merge-base "$BASE_REF" HEAD || echo "$BASE_REF")`.
@@ -27,7 +28,7 @@ Produce the PR-ready summary required in this repository after substantive code 
 ## Workflow
 1) Run the commands above without asking the user; compute `BASE_REF`/`BASE_COMMIT` first so later commands reuse them.
 2) If there are no staged/unstaged/untracked changes and no commits ahead of `${BASE_COMMIT}`, reply briefly that no code changes were detected and skip emitting the PR block.
-3) Infer change type from the touched paths listed under "Category signals"; classify as feature, fix, refactor, or docs-with-impact, and flag backward-compatibility risk when runtime code changed.
+3) Infer change type from the touched paths listed under "Category signals"; classify as feature, fix, refactor, or docs-with-impact, and flag backward-compatibility risk only when the diff changes released public APIs, external config, persisted data, serialized state, or wire protocols. Judge that risk against `LATEST_RELEASE_TAG`, not unreleased branch-only churn.
 4) Summarize changes in 1–3 short sentences using the key paths (top 5) and `git diff --stat` output; explicitly call out untracked files from `git status -sb`/`git ls-files --others --exclude-standard` because `--stat` does not include them. If the working tree is clean but there are commits ahead of `${BASE_COMMIT}`, summarize using those commit messages.
 5) Choose the lead verb for the description: feature → `adds`, bug fix → `fixes`, refactor/perf → `improves` or `updates`, docs-only → `updates`.
 6) Suggest a branch name. If already off main, keep it; otherwise propose `feat/<slug>`, `fix/<slug>`, or `docs/<slug>` based on the primary area (e.g., `docs/pr-draft-summary-guidance`).

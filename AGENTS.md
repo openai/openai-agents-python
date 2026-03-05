@@ -30,11 +30,15 @@ You can skip `$code-change-verification` for docs-only or repo-meta changes (for
 
 When working on OpenAI API or OpenAI platform integrations in this repo (Responses API, tools, streaming, Realtime API, auth, models, rate limits, MCP, Agents SDK or ChatGPT Apps SDK), use `$openai-knowledge` to pull authoritative docs via the OpenAI Developer Docs MCP server (and guide setup if it is not configured).
 
+#### `$implementation-strategy`
+
+Before changing runtime code, exported APIs, external configuration, persisted schemas, wire protocols, or other user-facing behavior, use `$implementation-strategy` to decide the compatibility boundary and implementation shape. Judge breaking changes against the latest release tag, not unreleased branch-local churn. Interfaces introduced or changed after the latest release tag may be rewritten without compatibility shims unless they define durable external state or the user explicitly asks for a migration path.
+
 ### ExecPlans
 
-Call out potential backward compatibility or public API risks early in your plan and confirm the approach before implementing changes that could impact users.
+Call out compatibility risk early in your plan only when the change affects behavior shipped in the latest release tag or durable external state, and confirm the approach before implementing changes that could impact users.
 
-Use an ExecPlan when work is multi-step, spans several files, involves new features or refactors, or is likely to take more than about an hour. Start with the template and rules in `PLANS.md`, keep milestones and living sections (Progress, Surprises & Discoveries, Decision Log, Outcomes & Retrospective) up to date as you execute, and rewrite the plan if scope shifts. If you intentionally skip an ExecPlan for a complex task, note why in your response so reviewers understand the choice.
+Use an ExecPlan when work is multi-step, spans several files, involves new features or refactors, or is likely to take more than about an hour. Start with the template and rules in `PLANS.md`, keep milestones and living sections (Progress, Surprises & Discoveries, Decision Log, Outcomes & Retrospective) up to date as you execute, and rewrite the plan if scope shifts. Call out compatibility risk only when the plan changes behavior shipped in the latest release tag or durable external state. Do not treat branch-local interface churn or unreleased post-tag changes on `main` as breaking by default; prefer direct replacement over compatibility layers in those cases. If you intentionally skip an ExecPlan for a complex task, note why in your response so reviewers understand the choice.
 
 ### Public API Positional Compatibility
 
@@ -98,7 +102,7 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
    ```
 2. If dependencies changed or you are setting up the repo, run `make sync`.
 3. Implement changes and add or update tests alongside code updates.
-4. Highlight backward compatibility or API risks in your plan before implementing breaking or user-facing changes.
+4. Highlight compatibility or API risks in your plan before implementing changes that alter the latest released behavior or durable external state.
 5. Build docs when you touch documentation:
    ```bash
    make build-docs
