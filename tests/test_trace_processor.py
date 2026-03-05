@@ -67,7 +67,9 @@ def test_batch_trace_processor_on_span_end(mocked_exporter):
 
 
 def test_batch_trace_processor_queue_full(mocked_exporter):
-    processor = BatchTraceProcessor(exporter=mocked_exporter, max_queue_size=2, schedule_delay=0.1)
+    processor = BatchTraceProcessor(
+        exporter=mocked_exporter, max_queue_size=2, schedule_delay=0.1
+    )
     # Fill the queue
     processor.on_trace_start(get_trace(processor))
     processor.on_trace_start(get_trace(processor))
@@ -102,7 +104,9 @@ def test_batch_processor_doesnt_enqueue_on_trace_end_or_span_start(mocked_export
 
 
 def test_batch_trace_processor_force_flush(mocked_exporter):
-    processor = BatchTraceProcessor(exporter=mocked_exporter, max_batch_size=2, schedule_delay=5.0)
+    processor = BatchTraceProcessor(
+        exporter=mocked_exporter, max_batch_size=2, schedule_delay=5.0
+    )
 
     processor.on_trace_start(get_trace(processor))
     processor.on_span_end(get_span(processor))
@@ -138,7 +142,9 @@ def test_batch_trace_processor_shutdown_flushes(mocked_exporter):
         batch = call_args[0][0]
         total_exported += len(batch)
 
-    assert total_exported == 2, "All items in the queue should be exported upon shutdown"
+    assert (
+        total_exported == 2
+    ), "All items in the queue should be exported upon shutdown"
 
 
 def test_batch_trace_processor_scheduled_export(mocked_exporter):
@@ -247,7 +253,9 @@ def test_backend_span_exporter_5xx_retry(mock_client, patched_time_sleep):
     # Make post() return 500 every time
     mock_client.return_value.post.return_value = mock_response
 
-    exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=0.1, max_delay=0.2)
+    exporter = BackendSpanExporter(
+        api_key="test_key", max_retries=3, base_delay=0.1, max_delay=0.2
+    )
     exporter.export([get_span(mock_processor())])
 
     # Should retry up to max_retries times
@@ -261,7 +269,9 @@ def test_backend_span_exporter_request_error(mock_client, patched_time_sleep):
     # Make post() raise a RequestError each time
     mock_client.return_value.post.side_effect = httpx.RequestError("Network error")
 
-    exporter = BackendSpanExporter(api_key="test_key", max_retries=2, base_delay=0.1, max_delay=0.2)
+    exporter = BackendSpanExporter(
+        api_key="test_key", max_retries=2, base_delay=0.1, max_delay=0.2
+    )
     exporter.export([get_span(mock_processor())])
 
     # Should retry up to max_retries times
@@ -280,7 +290,9 @@ def test_backend_span_exporter_close(mock_client):
 
 
 @patch("httpx.Client")
-def test_backend_span_exporter_sanitizes_generation_usage_for_openai_tracing(mock_client):
+def test_backend_span_exporter_sanitizes_generation_usage_for_openai_tracing(
+    mock_client,
+):
     """Unsupported usage keys should be stripped before POSTing to OpenAI tracing."""
 
     class DummyItem:
@@ -344,7 +356,8 @@ def test_backend_span_exporter_truncates_large_input_for_openai_tracing(mock_cli
                 "object": "trace.span",
                 "span_data": {
                     "type": "generation",
-                    "input": "x" * (BackendSpanExporter._OPENAI_TRACING_MAX_FIELD_BYTES + 5_000),
+                    "input": "x"
+                    * (BackendSpanExporter._OPENAI_TRACING_MAX_FIELD_BYTES + 5_000),
                 },
             }
 
@@ -363,16 +376,23 @@ def test_backend_span_exporter_truncates_large_input_for_openai_tracing(mock_cli
     sent_input = sent_payload["span_data"]["input"]
     assert isinstance(sent_input, str)
     assert sent_input.endswith(exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX)
-    assert exporter._value_json_size_bytes(sent_input) <= exporter._OPENAI_TRACING_MAX_FIELD_BYTES
+    assert (
+        exporter._value_json_size_bytes(sent_input)
+        <= exporter._OPENAI_TRACING_MAX_FIELD_BYTES
+    )
     assert item.exported_payload["span_data"]["input"] != sent_input
     exporter.close()
 
 
 @patch("httpx.Client")
-def test_backend_span_exporter_truncates_large_structured_input_without_stringifying(mock_client):
+def test_backend_span_exporter_truncates_large_structured_input_without_stringifying(
+    mock_client,
+):
     class NoStringifyDict(dict[str, Any]):
         def __str__(self) -> str:
-            raise AssertionError("__str__ should not be called for oversized non-string previews")
+            raise AssertionError(
+                "__str__ should not be called for oversized non-string previews"
+            )
 
     class DummyItem:
         tracing_api_key = None
@@ -403,8 +423,13 @@ def test_backend_span_exporter_truncates_large_structured_input_without_stringif
     sent_input = sent_payload["span_data"]["input"]
     assert isinstance(sent_input, dict)
     assert isinstance(sent_input["blob"], str)
-    assert sent_input["blob"].endswith(exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX)
-    assert exporter._value_json_size_bytes(sent_input) <= exporter._OPENAI_TRACING_MAX_FIELD_BYTES
+    assert sent_input["blob"].endswith(
+        exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX
+    )
+    assert (
+        exporter._value_json_size_bytes(sent_input)
+        <= exporter._OPENAI_TRACING_MAX_FIELD_BYTES
+    )
     exporter.close()
 
 
@@ -498,7 +523,8 @@ def test_backend_span_exporter_keeps_large_input_for_custom_endpoint(mock_client
                 "object": "trace.span",
                 "span_data": {
                     "type": "generation",
-                    "input": "x" * (BackendSpanExporter._OPENAI_TRACING_MAX_FIELD_BYTES + 5_000),
+                    "input": "x"
+                    * (BackendSpanExporter._OPENAI_TRACING_MAX_FIELD_BYTES + 5_000),
                 },
             }
 
@@ -516,8 +542,13 @@ def test_backend_span_exporter_keeps_large_input_for_custom_endpoint(mock_client
     item = DummyItem()
     exporter.export([cast(Any, item)])
 
-    sent_payload: dict[str, Any] = mock_client.return_value.post.call_args.kwargs["json"]["data"][0]
-    assert sent_payload["span_data"]["input"] == item.exported_payload["span_data"]["input"]
+    sent_payload: dict[str, Any] = mock_client.return_value.post.call_args.kwargs[
+        "json"
+    ]["data"][0]
+    assert (
+        sent_payload["span_data"]["input"]
+        == item.exported_payload["span_data"]["input"]
+    )
     exporter.close()
 
 
@@ -723,7 +754,8 @@ def test_sanitize_for_openai_tracing_api_truncates_oversized_output():
         "object": "trace.span",
         "span_data": {
             "type": "function",
-            "output": "x" * (BackendSpanExporter._OPENAI_TRACING_MAX_FIELD_BYTES + 5_000),
+            "output": "x"
+            * (BackendSpanExporter._OPENAI_TRACING_MAX_FIELD_BYTES + 5_000),
         },
     }
 
@@ -754,7 +786,10 @@ def test_sanitize_for_openai_tracing_api_preserves_generation_input_list_shape()
                             "type": "input_audio",
                             "input_audio": {
                                 "data": "x"
-                                * (BackendSpanExporter._OPENAI_TRACING_MAX_FIELD_BYTES + 5_000),
+                                * (
+                                    BackendSpanExporter._OPENAI_TRACING_MAX_FIELD_BYTES
+                                    + 5_000
+                                ),
                                 "format": "wav",
                             },
                         }
@@ -771,7 +806,8 @@ def test_sanitize_for_openai_tracing_api_preserves_generation_input_list_shape()
     assert isinstance(sanitized_input[0], dict)
     assert sanitized_input[0]["role"] == "user"
     assert (
-        exporter._value_json_size_bytes(sanitized_input) <= exporter._OPENAI_TRACING_MAX_FIELD_BYTES
+        exporter._value_json_size_bytes(sanitized_input)
+        <= exporter._OPENAI_TRACING_MAX_FIELD_BYTES
     )
     exporter.close()
 
@@ -806,7 +842,9 @@ def test_truncate_string_for_json_limit_returns_original_when_within_limit():
 
 def test_truncate_string_for_json_limit_returns_suffix_when_limit_equals_suffix():
     exporter = BackendSpanExporter(api_key="test_key")
-    max_bytes = exporter._value_json_size_bytes(exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX)
+    max_bytes = exporter._value_json_size_bytes(
+        exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX
+    )
 
     assert (
         exporter._truncate_string_for_json_limit("x" * 100, max_bytes)
@@ -818,7 +856,10 @@ def test_truncate_string_for_json_limit_returns_suffix_when_limit_equals_suffix(
 def test_truncate_string_for_json_limit_returns_empty_when_suffix_too_large():
     exporter = BackendSpanExporter(api_key="test_key")
     max_bytes = (
-        exporter._value_json_size_bytes(exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX) - 1
+        exporter._value_json_size_bytes(
+            exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX
+        )
+        - 1
     )
 
     assert exporter._truncate_string_for_json_limit("x" * 100, max_bytes) == ""
@@ -834,4 +875,102 @@ def test_truncate_string_for_json_limit_handles_escape_heavy_input():
 
     assert truncated.endswith(exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX)
     assert exporter._value_json_size_bytes(truncated) <= max_bytes
+    exporter.close()
+
+
+def test_sanitize_json_compatible_value_preserves_bigint_precision():
+    """Test big integers beyond JS MAX_SAFE_INTEGER are serialized as strings.
+
+    JavaScript's Number.MAX_SAFE_INTEGER is 2^53 - 1 = 9007199254740991.
+    Integers larger than this lose precision when serialized as JSON numbers.
+    See: https://github.com/openai/openai-agents-python/issues/2094
+    """
+    exporter = BackendSpanExporter(api_key="test_key")
+
+    # JavaScript's MAX_SAFE_INTEGER
+    MAX_SAFE = 9007199254740991
+
+    # Test values beyond MAX_SAFE_INTEGER that would lose precision in JS
+    big_int_1 = 10000000000000001  # From the issue example
+    big_int_2 = 10000000000000002  # From the issue example
+    big_int_3 = MAX_SAFE + 100
+
+    # Test direct sanitization
+    result_1 = exporter._sanitize_json_compatible_value(big_int_1)
+    result_2 = exporter._sanitize_json_compatible_value(big_int_2)
+    result_3 = exporter._sanitize_json_compatible_value(big_int_3)
+
+    # Big integers should be converted to strings to preserve precision
+    assert isinstance(
+        result_1, str
+    ), f"Big int {big_int_1} should be serialized as string"
+    assert result_1 == str(
+        big_int_1
+    ), f"String value should match original: {result_1} != {big_int_1}"
+
+    assert isinstance(
+        result_2, str
+    ), f"Big int {big_int_2} should be serialized as string"
+    assert result_2 == str(
+        big_int_2
+    ), f"String value should match original: {result_2} != {big_int_2}"
+
+    assert isinstance(
+        result_3, str
+    ), f"Big int {big_int_3} should be serialized as string"
+    assert result_3 == str(
+        big_int_3
+    ), f"String value should match original: {result_3} != {big_int_3}"
+
+    # Test that small integers are still preserved as integers
+    small_int = 42
+    result_small = exporter._sanitize_json_compatible_value(small_int)
+    assert isinstance(result_small, int), "Small integers should remain as integers"
+    assert result_small == small_int
+
+    # Test big integers in nested structures
+    nested_data = {
+        "args": {"a": big_int_1, "b": big_int_2},
+        "result": big_int_3,
+        "normal": 123,
+    }
+    result_nested = exporter._sanitize_json_compatible_value(nested_data)
+
+    assert isinstance(result_nested["args"]["a"], str)
+    assert result_nested["args"]["a"] == str(big_int_1)
+    assert isinstance(result_nested["args"]["b"], str)
+    assert result_nested["args"]["b"] == str(big_int_2)
+    assert isinstance(result_nested["result"], str)
+    assert result_nested["result"] == str(big_int_3)
+    assert isinstance(result_nested["normal"], int)
+    assert result_nested["normal"] == 123
+
+    exporter.close()
+
+
+def test_sanitize_for_openai_tracing_api_preserves_bigint_in_span_data():
+    """Test that big integers in span data are correctly serialized as strings.
+
+    This is the end-to-end test for issue #2094.
+    """
+    exporter = BackendSpanExporter(api_key="test_key")
+
+    big_int = 10000000000000001
+
+    payload = {
+        "object": "trace.span",
+        "span_data": {
+            "type": "function",
+            "name": "add",
+            "input": '{"a": 10000000000000001, "b": 123}',
+            "output": big_int,
+        },
+    }
+
+    sanitized = exporter._sanitize_for_openai_tracing_api(payload)
+
+    # The output should be serialized as a string to preserve precision
+    assert isinstance(sanitized["span_data"]["output"], str)
+    assert sanitized["span_data"]["output"] == str(big_int)
+
     exporter.close()

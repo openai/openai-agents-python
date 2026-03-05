@@ -40,6 +40,9 @@ class BackendSpanExporter(TracingExporter):
         }
     )
     _UNSERIALIZABLE = object()
+    # JavaScript's Number.MAX_SAFE_INTEGER: integers beyond this lose precision in JS
+    _JS_MAX_SAFE_INTEGER = 9007199254740991  # 2^53 - 1
+    _JS_MIN_SAFE_INTEGER = -9007199254740991  # -(2^53 - 1)
 
     def __init__(
         self,
@@ -144,7 +147,9 @@ class BackendSpanExporter(TracingExporter):
             while True:
                 attempt += 1
                 try:
-                    response = self._client.post(url=self.endpoint, headers=headers, json=payload)
+                    response = self._client.post(
+                        url=self.endpoint, headers=headers, json=payload
+                    )
 
                     # If the response is successful, break out of the loop
                     if response.status_code < 300:
@@ -181,9 +186,13 @@ class BackendSpanExporter(TracingExporter):
                 delay = min(delay * 2, self.max_delay)
 
     def _should_sanitize_for_openai_tracing_api(self) -> bool:
-        return self.endpoint.rstrip("/") == self._OPENAI_TRACING_INGEST_ENDPOINT.rstrip("/")
+        return self.endpoint.rstrip("/") == self._OPENAI_TRACING_INGEST_ENDPOINT.rstrip(
+            "/"
+        )
 
-    def _sanitize_for_openai_tracing_api(self, payload_item: dict[str, Any]) -> dict[str, Any]:
+    def _sanitize_for_openai_tracing_api(
+        self, payload_item: dict[str, Any]
+    ) -> dict[str, Any]:
         """Drop or truncate span fields known to be rejected by traces ingest."""
         span_data = payload_item.get("span_data")
         if not isinstance(span_data, dict):
@@ -274,12 +283,15 @@ class BackendSpanExporter(TracingExporter):
 
     def _truncate_span_field_value(self, value: Any) -> Any:
         max_bytes = self._OPENAI_TRACING_MAX_FIELD_BYTES
-        if self._value_json_size_bytes(value) <= max_bytes:
-            return value
 
+        # Always sanitize for JSON compatibility (e.g., convert big ints to strings)
         sanitized_value = self._sanitize_json_compatible_value(value)
         if sanitized_value is self._UNSERIALIZABLE:
             return self._truncated_preview(value)
+
+        # If within size limit, return the sanitized value
+        if self._value_json_size_bytes(sanitized_value) <= max_bytes:
+            return sanitized_value
 
         return self._truncate_json_value_for_limit(sanitized_value, max_bytes)
 
@@ -322,7 +334,9 @@ class BackendSpanExporter(TracingExporter):
 
         return truncated
 
-    def _truncate_list_for_json_limit(self, value: list[Any], max_bytes: int) -> list[Any]:
+    def _truncate_list_for_json_limit(
+        self, value: list[Any], max_bytes: int
+    ) -> list[Any]:
         truncated = list(value)
         current_size = self._value_json_size_bytes(truncated)
 
@@ -366,9 +380,9 @@ class BackendSpanExporter(TracingExporter):
     ) -> dict[str, Any] | None:
         input_tokens = usage.get("input_tokens")
         output_tokens = usage.get("output_tokens")
-        if not self._is_finite_json_number(input_tokens) or not self._is_finite_json_number(
-            output_tokens
-        ):
+        if not self._is_finite_json_number(
+            input_tokens
+        ) or not self._is_finite_json_number(output_tokens):
             return None
 
         details: dict[str, Any] = {}
@@ -383,7 +397,11 @@ class BackendSpanExporter(TracingExporter):
                 details[key] = sanitized_value
 
         for key, value in usage.items():
-            if key in self._OPENAI_TRACING_ALLOWED_USAGE_KEYS or key == "details" or value is None:
+            if (
+                key in self._OPENAI_TRACING_ALLOWED_USAGE_KEYS
+                or key == "details"
+                or value is None
+            ):
                 continue
             sanitized_value = self._sanitize_json_compatible_value(value)
             if sanitized_value is self._UNSERIALIZABLE:
@@ -405,8 +423,16 @@ class BackendSpanExporter(TracingExporter):
             isinstance(value, float) and not math.isfinite(value)
         )
 
-    def _sanitize_json_compatible_value(self, value: Any, seen_ids: set[int] | None = None) -> Any:
-        if value is None or isinstance(value, str | bool | int):
+    def _sanitize_json_compatible_value(
+        self, value: Any, seen_ids: set[int] | None = None
+    ) -> Any:
+        if value is None or isinstance(value, str | bool):
+            return value
+        if isinstance(value, int):
+            # Convert big integers to strings to preserve precision in JavaScript
+            # JS Number.MAX_SAFE_INTEGER is 2^53 - 1 = 9007199254740991
+            if value > self._JS_MAX_SAFE_INTEGER or value < self._JS_MIN_SAFE_INTEGER:
+                return str(value)
             return value
         if isinstance(value, float):
             return value if math.isfinite(value) else self._UNSERIALIZABLE
@@ -422,7 +448,9 @@ class BackendSpanExporter(TracingExporter):
                 for key, nested_value in value.items():
                     if not isinstance(key, str):
                         continue
-                    sanitized_nested = self._sanitize_json_compatible_value(nested_value, seen_ids)
+                    sanitized_nested = self._sanitize_json_compatible_value(
+                        nested_value, seen_ids
+                    )
                     if sanitized_nested is self._UNSERIALIZABLE:
                         continue
                     sanitized_dict[key] = sanitized_nested
@@ -437,7 +465,9 @@ class BackendSpanExporter(TracingExporter):
             sanitized_list: list[Any] = []
             try:
                 for nested_value in value:
-                    sanitized_nested = self._sanitize_json_compatible_value(nested_value, seen_ids)
+                    sanitized_nested = self._sanitize_json_compatible_value(
+                        nested_value, seen_ids
+                    )
                     if sanitized_nested is self._UNSERIALIZABLE:
                         continue
                     sanitized_list.append(sanitized_nested)
@@ -476,7 +506,9 @@ class BatchTraceProcessor(TracingProcessor):
             export_trigger_ratio: The ratio of the queue size at which we will trigger an export.
         """
         self._exporter = exporter
-        self._queue: queue.Queue[Trace | Span[Any]] = queue.Queue(maxsize=max_queue_size)
+        self._queue: queue.Queue[Trace | Span[Any]] = queue.Queue(
+            maxsize=max_queue_size
+        )
         self._max_queue_size = max_queue_size
         self._max_batch_size = max_batch_size
         self._schedule_delay = schedule_delay
@@ -556,7 +588,10 @@ class BatchTraceProcessor(TracingProcessor):
             queue_size = self._queue.qsize()
 
             # If it's time for a scheduled flush or queue is above the trigger threshold
-            if current_time >= self._next_export_time or queue_size >= self._export_trigger_size:
+            if (
+                current_time >= self._next_export_time
+                or queue_size >= self._export_trigger_size
+            ):
                 self._export_batches(force=False)
                 # Reset the next scheduled flush time
                 self._next_export_time = time.time() + self._schedule_delay
