@@ -179,3 +179,29 @@ def test_pydantic_serialization() -> None:
     deserialized = TypeAdapter(ModelSettings).validate_json(json)
 
     assert model_settings == deserialized
+
+
+def test_max_parallel_tool_calls_valid() -> None:
+    """Positive values are accepted."""
+    s = ModelSettings(max_parallel_tool_calls=4)
+    assert s.max_parallel_tool_calls == 4
+
+
+def test_max_parallel_tool_calls_one() -> None:
+    """1 is valid (serial execution)."""
+    s = ModelSettings(max_parallel_tool_calls=1)
+    assert s.max_parallel_tool_calls == 1
+
+
+def test_max_parallel_tool_calls_zero_raises() -> None:
+    """0 is rejected with a clear error."""
+    import pytest
+    with pytest.raises(ValueError, match='max_parallel_tool_calls must be a positive integer'):
+        ModelSettings(max_parallel_tool_calls=0)
+
+
+def test_max_parallel_tool_calls_negative_raises() -> None:
+    """-1 is rejected with a clear error."""
+    import pytest
+    with pytest.raises(ValueError, match='max_parallel_tool_calls must be a positive integer'):
+        ModelSettings(max_parallel_tool_calls=-1)

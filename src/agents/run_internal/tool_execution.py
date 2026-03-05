@@ -1224,7 +1224,7 @@ class _FunctionToolBatchExecutor:
         resolved_settings = agent.model_settings.resolve(config.model_settings)
         max_parallel = resolved_settings.max_parallel_tool_calls
         self._concurrency_semaphore: asyncio.Semaphore | None = (
-            asyncio.Semaphore(max(1, max_parallel)) if max_parallel is not None else None
+            asyncio.Semaphore(max_parallel) if max_parallel is not None else None
         )
 
     async def execute(
