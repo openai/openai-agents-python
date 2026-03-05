@@ -16,7 +16,11 @@ from agents import (
     reset_conversation_history_wrappers,
     set_conversation_history_wrappers,
 )
-from agents.extensions.handoff_filters import nest_handoff_history, remove_all_tools
+from agents.extensions.handoff_filters import (
+    nest_handoff_history,
+    remove_all_reasoning,
+    remove_all_tools,
+)
 from agents.items import (
     HandoffOutputItem,
     MessageOutputItem,
@@ -261,6 +265,132 @@ def test_removes_handoffs_from_history():
     filtered_data = remove_all_tools(handoff_input_data)
     assert len(filtered_data.input_history) == 1
     assert len(filtered_data.pre_handoff_items) == 1
+    assert len(filtered_data.new_items) == 1
+
+
+# --- remove_all_reasoning tests ---
+
+
+def test_remove_reasoning_empty_data():
+    handoff_input_data = handoff_data()
+    filtered_data = remove_all_reasoning(handoff_input_data)
+    assert filtered_data.input_history == ()
+    assert filtered_data.pre_handoff_items == ()
+    assert filtered_data.new_items == ()
+
+
+def test_remove_reasoning_no_reasoning_items():
+    """Non-reasoning items should pass through unchanged."""
+    handoff_input_data = handoff_data(
+        input_history=(
+            _get_message_input_item("Hello"),
+            _get_function_result_input_item("result"),
+        ),
+        pre_handoff_items=(_get_message_output_run_item("pre"),),
+        new_items=(_get_message_output_run_item("new"),),
+    )
+    filtered_data = remove_all_reasoning(handoff_input_data)
+    assert len(filtered_data.input_history) == 2
+    assert len(filtered_data.pre_handoff_items) == 1
+    assert len(filtered_data.new_items) == 1
+
+
+def test_remove_reasoning_from_input_history():
+    """Reasoning items in input_history should be filtered out."""
+    handoff_input_data = handoff_data(
+        input_history=(
+            _get_message_input_item("Hello"),
+            _get_reasoning_input_item(),
+            _get_message_input_item("World"),
+        ),
+    )
+    filtered_data = remove_all_reasoning(handoff_input_data)
+    assert len(filtered_data.input_history) == 2
+
+
+def test_remove_reasoning_from_pre_handoff_items():
+    """Reasoning RunItems in pre_handoff_items should be filtered out."""
+    handoff_input_data = handoff_data(
+        pre_handoff_items=(
+            _get_reasoning_output_run_item(),
+            _get_message_output_run_item("Hello"),
+            _get_reasoning_output_run_item(),
+        ),
+    )
+    filtered_data = remove_all_reasoning(handoff_input_data)
+    assert len(filtered_data.pre_handoff_items) == 1
+
+
+def test_remove_reasoning_from_new_items():
+    """Reasoning RunItems in new_items should be filtered out."""
+    handoff_input_data = handoff_data(
+        new_items=(
+            _get_reasoning_output_run_item(),
+            _get_message_output_run_item("Hello"),
+            _get_tool_output_run_item("World"),
+        ),
+    )
+    filtered_data = remove_all_reasoning(handoff_input_data)
+    assert len(filtered_data.new_items) == 2
+
+
+def test_remove_reasoning_from_all_locations():
+    """Reasoning items should be filtered from all three locations at once."""
+    handoff_input_data = handoff_data(
+        input_history=(
+            _get_message_input_item("Hello"),
+            _get_reasoning_input_item(),
+            _get_function_result_input_item("result"),
+        ),
+        pre_handoff_items=(
+            _get_reasoning_output_run_item(),
+            _get_message_output_run_item("pre"),
+        ),
+        new_items=(
+            _get_reasoning_output_run_item(),
+            _get_message_output_run_item("new"),
+            _get_tool_output_run_item("tool"),
+        ),
+    )
+    filtered_data = remove_all_reasoning(handoff_input_data)
+    assert len(filtered_data.input_history) == 2
+    assert len(filtered_data.pre_handoff_items) == 1
+    assert len(filtered_data.new_items) == 2
+
+
+def test_remove_reasoning_preserves_tools():
+    """Tool items should not be affected by remove_all_reasoning."""
+    handoff_input_data = handoff_data(
+        input_history=(
+            _get_function_result_input_item("result"),
+            _get_reasoning_input_item(),
+        ),
+        pre_handoff_items=(
+            _get_tool_output_run_item("tool"),
+            _get_reasoning_output_run_item(),
+        ),
+        new_items=(
+            _get_handoff_output_run_item("handoff"),
+            _get_reasoning_output_run_item(),
+        ),
+    )
+    filtered_data = remove_all_reasoning(handoff_input_data)
+    assert len(filtered_data.input_history) == 1
+    assert len(filtered_data.pre_handoff_items) == 1
+    assert len(filtered_data.new_items) == 1
+
+
+def test_remove_reasoning_str_history():
+    """String input_history should pass through unchanged."""
+    handoff_input_data = handoff_data(
+        input_history="Hello",
+        new_items=(
+            _get_reasoning_output_run_item(),
+            _get_message_output_run_item("World"),
+        ),
+    )
+    filtered_data = remove_all_reasoning(handoff_input_data)
+    assert filtered_data.input_history == "Hello"
     assert len(filtered_data.new_items) == 1
 
 

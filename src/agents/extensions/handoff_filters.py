@@ -19,6 +19,7 @@ from ..items import (
 
 __all__ = [
     "remove_all_tools",
+    "remove_all_reasoning",
     "nest_handoff_history",
     "default_handoff_history_mapper",
 ]
@@ -35,6 +36,31 @@ def remove_all_tools(handoff_input_data: HandoffInputData) -> HandoffInputData:
     )
     filtered_pre_handoff_items = _remove_tools_from_items(handoff_input_data.pre_handoff_items)
     filtered_new_items = _remove_tools_from_items(new_items)
+
+    return HandoffInputData(
+        input_history=filtered_history,
+        pre_handoff_items=filtered_pre_handoff_items,
+        new_items=filtered_new_items,
+        run_context=handoff_input_data.run_context,
+    )
+
+
+def remove_all_reasoning(handoff_input_data: HandoffInputData) -> HandoffInputData:
+    """Filters out all reasoning items from handoff input.
+
+    Use this filter when handing off from a reasoning model (e.g. o4-mini) to a
+    non-reasoning model (e.g. gpt-4.1) to avoid 400 errors caused by reasoning
+    items being sent to a model that does not support them.
+    """
+
+    history = handoff_input_data.input_history
+    new_items = handoff_input_data.new_items
+
+    filtered_history = (
+        _remove_reasoning_types_from_input(history) if isinstance(history, tuple) else history
+    )
+    filtered_pre_handoff_items = _remove_reasoning_from_items(handoff_input_data.pre_handoff_items)
+    filtered_new_items = _remove_reasoning_from_items(new_items)
 
     return HandoffInputData(
         input_history=filtered_history,
@@ -75,6 +101,27 @@ def _remove_tool_types_from_input(
     for item in items:
         itype = item.get("type")
         if itype in tool_types:
+            continue
+        filtered_items.append(item)
+    return tuple(filtered_items)
+
+
+def _remove_reasoning_from_items(items: tuple[RunItem, ...]) -> tuple[RunItem, ...]:
+    filtered_items = []
+    for item in items:
+        if isinstance(item, ReasoningItem):
+            continue
+        filtered_items.append(item)
+    return tuple(filtered_items)
+
+
+def _remove_reasoning_types_from_input(
+    items: tuple[TResponseInputItem, ...],
+) -> tuple[TResponseInputItem, ...]:
+    filtered_items: list[TResponseInputItem] = []
+    for item in items:
+        itype = item.get("type")
+        if itype == "reasoning":
             continue
         filtered_items.append(item)
     return tuple(filtered_items)
