@@ -759,6 +759,8 @@ class RunState(Generic[TContext, TAgent]):
             result["allow_bare_name_alias"] = True
         if hasattr(item, "description") and item.description is not None:
             result["description"] = item.description
+        if hasattr(item, "title") and item.title is not None:
+            result["title"] = item.title
 
         return result
 
@@ -2470,10 +2472,16 @@ def _deserialize_items(
                 # Tool call items can be function calls, shell calls, apply_patch calls,
                 # MCP calls, etc. Check the type field to determine which type to deserialize as
                 raw_item_tool = _deserialize_tool_call_raw_item(normalized_raw_item)
-                # Preserve description if it was stored with the item
+                # Preserve description and title if they were stored with the item.
                 description = item_data.get("description")
+                title = item_data.get("title")
                 result.append(
-                    ToolCallItem(agent=agent, raw_item=raw_item_tool, description=description)
+                    ToolCallItem(
+                        agent=agent,
+                        raw_item=raw_item_tool,
+                        description=description,
+                        title=title,
+                    )
                 )
 
             elif item_type == "tool_call_output_item":

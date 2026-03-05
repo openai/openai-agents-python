@@ -353,7 +353,10 @@ class ToolCallItem(RunItemBase[Any]):
     type: Literal["tool_call_item"] = "tool_call_item"
 
     description: str | None = None
-    """Optional tool description if known at item creation time."""
+    """Optional tool description, if known at item creation time."""
+
+    title: str | None = None
+    """Short human-readable display label for the tool, if known at item creation time."""
 
 
 ToolCallOutputTypes: TypeAlias = Union[

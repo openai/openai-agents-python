@@ -1079,3 +1079,86 @@ async def test_multiple_content_items_without_structured():
     assert result[0]["text"] == "First"
     assert result[1]["type"] == "text"
     assert result[1]["text"] == "Second"
+
+
+# ---------------------------------------------------------------------------
+# Tests for to_function_tool() _mcp_title resolution
+# ---------------------------------------------------------------------------
+
+
+def test_to_function_tool_sets_mcp_title_from_tool_title():
+    """When tool.title is set, _mcp_title is populated with it."""
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="my_tool",
+        inputSchema={},
+        description="Long-form description.",
+        title="Short Title",
+    )
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+
+    assert function_tool.description == "Long-form description."
+    assert function_tool._mcp_title == "Short Title"
+
+
+def test_to_function_tool_sets_mcp_title_from_annotations_title():
+    """When tool.title is absent but annotations.title is set, _mcp_title uses it."""
+    from mcp.types import ToolAnnotations
+
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="my_tool",
+        inputSchema={},
+        description="Some description",
+        title=None,
+        annotations=ToolAnnotations(title="Annotation Title"),
+    )
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+
+    assert function_tool._mcp_title == "Annotation Title"
+
+
+def test_to_function_tool_title_prefers_tool_title_over_annotations_title():
+    """tool.title takes precedence over annotations.title for _mcp_title."""
+    from mcp.types import ToolAnnotations
+
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="my_tool",
+        inputSchema={},
+        description="desc",
+        title="Top-level Title",
+        annotations=ToolAnnotations(title="Annotation Title"),
+    )
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+
+    assert function_tool._mcp_title == "Top-level Title"
+
+
+def test_to_function_tool_mcp_title_none_when_no_title_metadata():
+    """When neither tool.title nor annotations.title exists, _mcp_title is None."""
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="my_tool",
+        inputSchema={},
+        description=None,
+        title=None,
+        annotations=None,
+    )
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+
+    assert function_tool._mcp_title is None
+
+
+def test_to_function_tool_description_falls_back_to_empty_string():
+    """When tool.description is None, description falls back to empty string."""
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="my_tool",
+        inputSchema={},
+        description=None,
+        title="Short Title",
+    )
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+
+    assert function_tool.description == ""

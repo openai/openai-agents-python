@@ -270,6 +270,13 @@ class MCPUtil:
             bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
         ) = server._get_needs_approval_for_tool(tool, agent)
 
+        # Resolve the MCP title at conversion time so it is available on the
+        # FunctionTool instance without needing reverse-lookups later.
+        _annotations = getattr(tool, "annotations", None)
+        mcp_title: str | None = getattr(tool, "title", None) or (
+            getattr(_annotations, "title", None) if _annotations else None
+        )
+
         function_tool = _build_wrapped_function_tool(
             name=tool.name,
             description=tool.description or "",
@@ -282,6 +289,7 @@ class MCPUtil:
             failure_error_function=effective_failure_error_function,
             strict_json_schema=is_strict,
             needs_approval=needs_approval,
+            mcp_title=mcp_title,
         )
         return function_tool
 

@@ -1100,6 +1100,14 @@ async def run_single_turn_streamed(
             }
         return json.dumps(payload, sort_keys=True, default=str)
 
+    # Precompute (server_label, tool_name) -> cached MCPTool for McpCall items.
+    # McpCall items come directly from the Responses API (not through FunctionTool),
+    # so we need to look up title/description from the server's cached tool metadata.
+    mcp_tool_map: dict[tuple[str, str], Any] = {}
+    for _mcp_server in agent.mcp_servers:
+        for _mcp_tool in _mcp_server.cached_tools or []:
+            mcp_tool_map.setdefault((_mcp_server.name, _mcp_tool.name), _mcp_tool)
+
     try:
         turn_input = ItemHelpers.input_to_new_input_list(streamed_result.input)
     except Exception:
@@ -1314,13 +1322,32 @@ async def run_single_turn_streamed(
                         tool_map.get(tool_lookup_key) if tool_lookup_key is not None else None
                     )
                     tool_description: str | None = None
-                    if matched_tool is not None:
+                    tool_title: str | None = None
+                    tool_server_label = getattr(output_item, "server_label", None)
+                    tool_name = getattr(output_item, "name", None)
+                    if tool_server_label and isinstance(tool_name, str):
+                        # McpCall (native MCP path): look up description and title
+                        # from the server's cached tool metadata.  These items bypass
+                        # FunctionTool entirely, so we never read _mcp_title here.
+                        _cached = mcp_tool_map.get((tool_server_label, tool_name))
+                        if _cached is not None:
+                            tool_description = getattr(_cached, "description", None)
+                            _ann = getattr(_cached, "annotations", None)
+                            tool_title = getattr(_cached, "title", None) or (
+                                getattr(_ann, "title", None) if _ann else None
+                            )
+                    elif matched_tool is not None:
+                        # ResponseFunctionToolCall (including MCP tools converted by
+                        # MCPUtil): read description and _mcp_title from the resolved
+                        # FunctionTool instance.
                         tool_description = getattr(matched_tool, "description", None)
+                        tool_title = getattr(matched_tool, "_mcp_title", None)
 
                     tool_item = ToolCallItem(
                         raw_item=cast(ToolCallItemTypes, output_item),
                         agent=agent,
                         description=tool_description,
+                        title=tool_title,
                     )
                     streamed_result._event_queue.put_nowait(
                         RunItemStreamEvent(item=tool_item, name="tool_called")

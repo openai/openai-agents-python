@@ -1249,6 +1249,76 @@ class TestSerializationRoundTrip:
         assert new_state._generated_items[1].description == "My tool description"
         assert new_state._generated_items[2].description is None
 
+    async def test_tool_call_item_title_round_trip(self):
+        """Test that ToolCallItem.title survives serialize/deserialize."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TitleAgent")
+        state = make_state(agent, context=context, original_input="test", max_turns=5)
+
+        # ToolCallItem with both description and title set.
+        tool_call_both = ResponseFunctionToolCall(
+            type="function_call",
+            name="both_tool",
+            call_id="call_both",
+            status="completed",
+            arguments="{}",
+        )
+        state._generated_items.append(
+            ToolCallItem(
+                agent=agent,
+                raw_item=tool_call_both,
+                description="Long description",
+                title="Short Label",
+            )
+        )
+
+        # ToolCallItem with title set but description None.
+        tool_call_title_only = ResponseFunctionToolCall(
+            type="function_call",
+            name="title_tool",
+            call_id="call_title",
+            status="completed",
+            arguments="{}",
+        )
+        state._generated_items.append(
+            ToolCallItem(
+                agent=agent,
+                raw_item=tool_call_title_only,
+                description=None,
+                title="Title Only",
+            )
+        )
+
+        # ToolCallItem with neither set (regression: both remain None).
+        tool_call_neither = ResponseFunctionToolCall(
+            type="function_call",
+            name="empty_tool",
+            call_id="call_empty",
+            status="completed",
+            arguments="{}",
+        )
+        state._generated_items.append(ToolCallItem(agent=agent, raw_item=tool_call_neither))
+
+        json_data = state.to_json()
+        new_state = await RunState.from_json(agent, json_data)
+
+        assert len(new_state._generated_items) == 3
+
+        item_both = new_state._generated_items[0]
+        assert isinstance(item_both, ToolCallItem)
+        assert item_both.description == "Long description"
+        assert item_both.title == "Short Label"
+
+        item_title_only = new_state._generated_items[1]
+        assert isinstance(item_title_only, ToolCallItem)
+        assert item_title_only.description is None
+        assert item_title_only.title == "Title Only"
+
+        item_neither = new_state._generated_items[2]
+        assert isinstance(item_neither, ToolCallItem)
+        assert item_neither.description is None
+        assert item_neither.title is None
+
     async def test_serializes_original_input_with_function_call_output(self):
         """Test that original_input with function_call_output items is preserved."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})

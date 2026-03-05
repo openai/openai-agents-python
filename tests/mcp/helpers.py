@@ -20,6 +20,102 @@ from agents.mcp.server import _UNSET, _MCPServerWithClientSession, _UnsetType
 from agents.mcp.util import MCPToolMetaResolver, ToolFilter
 from agents.tool import ToolErrorFunction
 
+# ---------------------------------------------------------------------------
+# Shared MCP server stubs for title/description tests
+# ---------------------------------------------------------------------------
+
+
+class CachedToolsMCPServer(MCPServer):
+    """Minimal MCPServer stub that exposes a fixed cached_tools list.
+
+    Used across multiple test modules to verify MCP tool title and description
+    population on ToolCallItem without needing a real MCP connection.
+    """
+
+    def __init__(self, server_name: str, tools: list[MCPTool]) -> None:
+        super().__init__(use_structured_content=False)
+        self._server_name = server_name
+        self._cached_tools = tools
+
+    @property
+    def name(self) -> str:
+        return self._server_name
+
+    @property
+    def cached_tools(self) -> list[MCPTool] | None:
+        return self._cached_tools
+
+    async def connect(self) -> None:
+        pass
+
+    async def cleanup(self) -> None:
+        pass
+
+    async def list_tools(self, run_context=None, agent=None) -> list[MCPTool]:
+        return self._cached_tools
+
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
+        raise NotImplementedError
+
+    async def list_prompts(self) -> ListPromptsResult:
+        return ListPromptsResult(prompts=[])
+
+    async def get_prompt(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> GetPromptResult:
+        raise NotImplementedError
+
+
+class NoCacheMCPServer(MCPServer):
+    """Minimal MCPServer stub whose cached_tools is always None.
+
+    Simulates an MCP server with caching disabled.  Used to verify that
+    title/description remain None when no cached tool metadata is available.
+    """
+
+    def __init__(self, server_name: str = "my_server") -> None:
+        super().__init__(use_structured_content=False)
+        self._server_name = server_name
+
+    @property
+    def name(self) -> str:
+        return self._server_name
+
+    @property
+    def cached_tools(self) -> list[MCPTool] | None:
+        return None
+
+    async def connect(self) -> None:
+        pass
+
+    async def cleanup(self) -> None:
+        pass
+
+    async def list_tools(self, run_context=None, agent=None) -> list[MCPTool]:
+        return []
+
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
+        raise NotImplementedError
+
+    async def list_prompts(self) -> ListPromptsResult:
+        return ListPromptsResult(prompts=[])
+
+    async def get_prompt(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> GetPromptResult:
+        raise NotImplementedError
+
+
 tee = shutil.which("tee") or ""
 assert tee, "tee not found"
 

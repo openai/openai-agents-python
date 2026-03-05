@@ -1506,19 +1506,31 @@ def process_model_response(
         elif isinstance(output, McpListTools):
             items.append(MCPListToolsItem(raw_item=output, agent=agent))
         elif isinstance(output, McpCall):
-            # Look up MCP tool description from the server's cached tools list.
+            # Look up MCP tool description and title from the server's cached tools list.
             # Tool discovery is async I/O, but this function is sync, so this is best-effort and
             # only works if the server has cached tool metadata (e.g., when cache_tools_list is
             # enabled).
             _mcp_description: str | None = None
+            _mcp_title: str | None = None
             for _server in agent.mcp_servers:
                 if _server.name == output.server_label:
                     for _tool in _server.cached_tools or []:
                         if _tool.name == output.name:
                             _mcp_description = _tool.description
+                            _ann = getattr(_tool, "annotations", None)
+                            _mcp_title = getattr(_tool, "title", None) or (
+                                getattr(_ann, "title", None) if _ann else None
+                            )
                             break
                     break
-            items.append(ToolCallItem(raw_item=output, agent=agent, description=_mcp_description))
+            items.append(
+                ToolCallItem(
+                    raw_item=output,
+                    agent=agent,
+                    description=_mcp_description,
+                    title=_mcp_title,
+                )
+            )
             tools_used.append("mcp")
         elif isinstance(output, ImageGenerationCall):
             items.append(ToolCallItem(raw_item=output, agent=agent))
@@ -1652,6 +1664,7 @@ def process_model_response(
                     raw_item=output,
                     agent=agent,
                     description=func_tool.description,
+                    title=func_tool._mcp_title,
                 )
             )
             functions.append(
