@@ -185,7 +185,8 @@ class ModelSettings:
     def __post_init__(self) -> None:
         if self.max_parallel_tool_calls is not None and self.max_parallel_tool_calls < 1:
             raise ValueError(
-                f'max_parallel_tool_calls must be a positive integer, got {self.max_parallel_tool_calls}'
+                "max_parallel_tool_calls must be a positive integer, "
+                f"got {self.max_parallel_tool_calls}"
             )
 
     def resolve(self, override: ModelSettings | None) -> ModelSettings:

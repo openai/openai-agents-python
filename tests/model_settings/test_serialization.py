@@ -196,12 +196,14 @@ def test_max_parallel_tool_calls_one() -> None:
 def test_max_parallel_tool_calls_zero_raises() -> None:
     """0 is rejected with a clear error."""
     import pytest
-    with pytest.raises(ValueError, match='max_parallel_tool_calls must be a positive integer'):
+
+    with pytest.raises(ValueError, match="max_parallel_tool_calls must be a positive integer"):
         ModelSettings(max_parallel_tool_calls=0)
 
 
 def test_max_parallel_tool_calls_negative_raises() -> None:
     """-1 is rejected with a clear error."""
     import pytest
-    with pytest.raises(ValueError, match='max_parallel_tool_calls must be a positive integer'):
+
+    with pytest.raises(ValueError, match="max_parallel_tool_calls must be a positive integer"):
         ModelSettings(max_parallel_tool_calls=-1)

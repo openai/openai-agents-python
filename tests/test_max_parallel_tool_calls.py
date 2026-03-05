@@ -1,10 +1,9 @@
 """Tests for ModelSettings.max_parallel_tool_calls concurrency limiting."""
+
 from __future__ import annotations
 
 import asyncio
 from unittest.mock import MagicMock
-
-import pytest
 
 from agents import Agent, ModelSettings, RunConfig
 from agents.run_internal.tool_execution import _FunctionToolBatchExecutor
