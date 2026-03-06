@@ -7,6 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
+from pydantic import BaseModel
 from typing_extensions import assert_never
 
 from ..agent import Agent
@@ -72,11 +73,14 @@ def _serialize_tool_output(output: Any) -> str:
     """Serialize structured tool outputs to JSON when possible."""
     if isinstance(output, str):
         return output
-    if hasattr(output, "model_dump") and callable(output.model_dump):
+    if isinstance(output, BaseModel):
         try:
             output = output.model_dump(mode="json")
-        except TypeError:
-            output = output.model_dump()
+        except Exception:
+            try:
+                output = output.model_dump()
+            except Exception:
+                return str(output)
     elif dataclasses.is_dataclass(output) and not isinstance(output, type):
         output = dataclasses.asdict(output)
     try:

@@ -4,7 +4,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from agents.exceptions import UserError
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
@@ -57,7 +57,7 @@ from agents.realtime.model_inputs import (
     RealtimeModelSendSessionUpdate,
     RealtimeModelSendUserInput,
 )
-from agents.realtime.session import REJECTION_MESSAGE, RealtimeSession
+from agents.realtime.session import REJECTION_MESSAGE, RealtimeSession, _serialize_tool_output
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
 
@@ -1413,6 +1413,43 @@ class TestToolCallExecution:
 
         _sent_call, sent_output, _ = mock_model.sent_tool_outputs[0]
         assert sent_output == json.dumps({"name": "demo", "score": 7})
+
+    def test_serialize_tool_output_ignores_non_pydantic_model_dump_objects(self) -> None:
+        class FakeModelDump:
+            def model_dump(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                raise AssertionError("non-pydantic objects should not use model_dump")
+
+            def __str__(self) -> str:
+                return "fake-model-dump-object"
+
+        assert _serialize_tool_output(FakeModelDump()) == "fake-model-dump-object"
+
+    def test_serialize_tool_output_falls_back_when_pydantic_json_dump_fails(self) -> None:
+        class FallbackModel(BaseModel):
+            model_config = ConfigDict(arbitrary_types_allowed=True)
+
+            payload: object
+
+            def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                if kwargs.get("mode") == "json":
+                    raise ValueError("json mode failed")
+                return {"payload": "ok"}
+
+        assert _serialize_tool_output(FallbackModel(payload=object())) == json.dumps(
+            {"payload": "ok"}
+        )
+
+    def test_serialize_tool_output_returns_string_when_pydantic_dump_fails(self) -> None:
+        class BrokenModel(BaseModel):
+            value: int
+
+            def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                raise ValueError("dump failed")
+
+            def __str__(self) -> str:
+                return "broken-model"
+
+        assert _serialize_tool_output(BrokenModel(value=1)) == "broken-model"
 
     @pytest.mark.asyncio
     async def test_mixed_tool_types_filtering(self, mock_model, mock_agent):
