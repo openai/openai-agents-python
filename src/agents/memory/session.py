@@ -19,7 +19,11 @@ class Session(Protocol):
     """
 
     session_id: str
-    session_settings: SessionSettings | None = None
+
+    @property
+    def session_settings(self) -> SessionSettings | None:
+        """Optional default settings used by the session implementation."""
+        ...
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
