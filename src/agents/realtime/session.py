@@ -82,7 +82,10 @@ def _serialize_tool_output(output: Any) -> str:
             except Exception:
                 return str(output)
     elif dataclasses.is_dataclass(output) and not isinstance(output, type):
-        output = dataclasses.asdict(output)
+        try:
+            output = dataclasses.asdict(output)
+        except Exception:
+            return str(output)
     try:
         return json.dumps(output, ensure_ascii=False)
     except (TypeError, ValueError):

@@ -1,5 +1,7 @@
 import asyncio
+import dataclasses
 import json
+import threading
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
@@ -1450,6 +1452,16 @@ class TestToolCallExecution:
                 return "broken-model"
 
         assert _serialize_tool_output(BrokenModel(value=1)) == "broken-model"
+
+    def test_serialize_tool_output_returns_string_when_dataclass_asdict_fails(self) -> None:
+        @dataclasses.dataclass
+        class BrokenDataclass:
+            lock: Any
+
+            def __str__(self) -> str:
+                return "broken-dataclass"
+
+        assert _serialize_tool_output(BrokenDataclass(lock=threading.Lock())) == "broken-dataclass"
 
     @pytest.mark.asyncio
     async def test_mixed_tool_types_filtering(self, mock_model, mock_agent):
