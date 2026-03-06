@@ -19,6 +19,8 @@ class SQLiteSession(SessionABC):
     For persistent storage, provide a file path.
     """
 
+    session_settings: SessionSettings | None = None
+
     def __init__(
         self,
         session_id: str,
