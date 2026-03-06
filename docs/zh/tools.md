@@ -4,25 +4,25 @@ search:
 ---
 # 工具
 
-工具让智能体能够执行操作：例如获取数据、运行代码、调用外部 API，甚至使用计算机。SDK 支持五个目录：
+工具让智能体能够执行操作：例如获取数据、运行代码、调用外部 API，甚至使用计算机。SDK 支持五类：
 
 -   由OpenAI托管的工具：与模型一起在 OpenAI 服务上运行。
 -   本地/运行时执行工具：`ComputerTool` 和 `ApplyPatchTool` 始终在你的环境中运行，而 `ShellTool` 可在本地或托管容器中运行。
 -   Function Calling：将任意 Python 函数封装为工具。
--   Agents as tools：将智能体暴露为可调用工具，而不进行完整任务转移。
+-   Agents as tools：将智能体作为可调用工具暴露，而无需完整任务转移。
 -   实验性：Codex 工具：通过工具调用运行工作区范围的 Codex 任务。
 
 ## 工具类型选择
 
-将本页作为目录使用，然后跳转到与你可控制的运行时相匹配的章节。
+将本页作为目录，然后跳转到与你可控运行时相匹配的部分。
 
 | 如果你想要... | 从这里开始 |
 | --- | --- |
-| 使用 OpenAI 管理的工具（网络检索、文件检索、Code Interpreter、托管 MCP、图像生成） | [托管工具](#hosted-tools) |
+| 使用由 OpenAI 管理的工具（网络检索、文件检索、Code Interpreter、托管 MCP、图像生成） | [托管工具](#hosted-tools) |
 | 在你自己的进程或环境中运行工具 | [本地运行时工具](#local-runtime-tools) |
 | 将 Python 函数封装为工具 | [工具调用](#function-tools) |
 | 让一个智能体在不任务转移的情况下调用另一个智能体 | [Agents as tools](#agents-as-tools) |
-| 从智能体运行工作区范围的 Codex 任务 | [实验性：Codex 工具](#experimental-codex-tool) |
+| 让智能体运行工作区范围的 Codex 任务 | [实验性：Codex 工具](#experimental-codex-tool) |
 
 ## 托管工具
 
@@ -34,7 +34,7 @@ search:
 -   [`HostedMCPTool`][agents.tool.HostedMCPTool] 将远程 MCP 服务的工具暴露给模型。
 -   [`ImageGenerationTool`][agents.tool.ImageGenerationTool] 根据提示词生成图像。
 
-高级托管检索选项：
+高级托管搜索选项：
 
 -   `FileSearchTool` 除了 `vector_store_ids` 和 `max_num_results` 外，还支持 `filters`、`ranking_options` 和 `include_search_results`。
 -   `WebSearchTool` 支持 `filters`、`user_location` 和 `search_context_size`。
@@ -58,9 +58,9 @@ async def main():
     print(result.final_output)
 ```
 
-### 托管容器 shell + skills
+### 托管容器 shell 与技能
 
-`ShellTool` 也支持由 OpenAI 托管的容器执行。当你希望模型在受管容器中运行 shell 命令而不是在本地运行时时，请使用此模式。
+`ShellTool` 还支持由 OpenAI 托管的容器执行。当你希望模型在受管容器中运行 shell 命令而不是在本地运行时时，请使用此模式。
 
 ```python
 from agents import Agent, Runner, ShellTool, ShellToolSkillReference
@@ -73,7 +73,7 @@ csv_skill: ShellToolSkillReference = {
 
 agent = Agent(
     name="Container shell agent",
-    model="gpt-5.2",
+    model="gpt-5.4",
     instructions="Use the mounted skill when helpful.",
     tools=[
         ShellTool(
@@ -97,29 +97,29 @@ print(result.final_output)
 
 须知事项：
 
--   托管 shell 可通过 Responses API 的 shell 工具使用。
+-   托管 shell 可通过 Responses API shell 工具使用。
 -   `container_auto` 会为请求配置容器；`container_reference` 会复用现有容器。
--   `container_auto` 也可包含 `file_ids` 和 `memory_limit`。
--   `environment.skills` 接受 skill 引用和内联 skill bundle。
+-   `container_auto` 还可包含 `file_ids` 和 `memory_limit`。
+-   `environment.skills` 接受技能引用和内联技能包。
 -   使用托管环境时，不要在 `ShellTool` 上设置 `executor`、`needs_approval` 或 `on_approval`。
 -   `network_policy` 支持 `disabled` 和 `allowlist` 模式。
--   在 allowlist 模式下，`network_policy.domain_secrets` 可按名称注入域范围密钥。
+-   在 allowlist 模式下，`network_policy.domain_secrets` 可按名称注入域级密钥。
 -   完整示例见 `examples/tools/container_shell_skill_reference.py` 和 `examples/tools/container_shell_inline_skill.py`。
 -   OpenAI 平台指南：[Shell](https://platform.openai.com/docs/guides/tools-shell) 和 [Skills](https://platform.openai.com/docs/guides/tools-skills)。
 
 ## 本地运行时工具
 
-本地运行时工具在模型响应本身之外执行。模型仍会决定何时调用它们，但实际工作由你的应用或已配置的执行环境完成。
+本地运行时工具在模型响应本身之外执行。模型仍会决定何时调用它们，但实际工作由你的应用程序或已配置的执行环境完成。
 
-`ComputerTool` 和 `ApplyPatchTool` 始终需要你提供本地实现。`ShellTool` 同时覆盖两种模式：当你需要受管执行时，使用上面的托管容器配置；当你希望命令在自己的进程中运行时，使用下面的本地运行时配置。
+`ComputerTool` 和 `ApplyPatchTool` 始终需要你提供本地实现。`ShellTool` 同时覆盖两种模式：当你需要受管执行时使用上面的托管容器配置；当你希望命令在自己的进程中运行时，使用下面的本地运行时配置。
 
 本地运行时工具要求你提供实现：
 
--   [`ComputerTool`][agents.tool.ComputerTool]：实现 [`Computer`][agents.computer.Computer] 或 [`AsyncComputer`][agents.computer.AsyncComputer] 接口以启用 GUI/浏览器自动化。
+-   [`ComputerTool`][agents.tool.ComputerTool]：实现 [`Computer`][agents.computer.Computer] 或 [`AsyncComputer`][agents.computer.AsyncComputer] 接口，以启用 GUI/浏览器自动化。
 -   [`ShellTool`][agents.tool.ShellTool]：同时支持本地执行和托管容器执行的最新 shell 工具。
 -   [`LocalShellTool`][agents.tool.LocalShellTool]：旧版本地 shell 集成。
 -   [`ApplyPatchTool`][agents.tool.ApplyPatchTool]：实现 [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor] 以在本地应用差异补丁。
--   可通过 `ShellTool(environment={"type": "local", "skills": [...]})` 使用本地 shell skills。
+-   使用 `ShellTool(environment={"type": "local", "skills": [...]})` 可启用本地 shell 技能。
 
 ```python
 from agents import Agent, ApplyPatchTool, ShellTool
@@ -165,12 +165,12 @@ agent = Agent(
 
 你可以将任何 Python 函数用作工具。Agents SDK 会自动设置该工具：
 
--   工具名称将是 Python 函数名称（也可自行提供名称）
--   工具描述将取自函数 docstring（也可自行提供描述）
+-   工具名称将使用 Python 函数名（你也可以提供名称）
+-   工具描述将取自函数的文档字符串（你也可以提供描述）
 -   函数输入的 schema 会根据函数参数自动创建
--   每个输入的描述会从函数 docstring 中提取，除非禁用
+-   每个输入项的描述将从函数文档字符串中提取，除非禁用
 
-我们使用 Python 的 `inspect` 模块提取函数签名，并结合 [`griffe`](https://mkdocstrings.github.io/griffe/) 解析 docstring，再使用 `pydantic` 创建 schema。
+我们使用 Python 的 `inspect` 模块提取函数签名，并结合 [`griffe`](https://mkdocstrings.github.io/griffe/) 解析文档字符串，使用 `pydantic` 创建 schema。
 
 ```python
 import json
@@ -222,9 +222,9 @@ for tool in agent.tools:
 
 ```
 
-1.  你的函数参数可以使用任何 Python 类型，函数也可以是同步或异步。
-2.  如果存在 docstring，会用于提取描述和参数描述
-3.  函数可选择接收 `context`（必须是第一个参数）。你也可以设置覆盖项，例如工具名称、描述、使用哪种 docstring 风格等。
+1.  你的函数参数可以使用任意 Python 类型，函数也可以是同步或异步。
+2.  如果存在文档字符串，会用来提取描述和参数描述
+3.  函数可选择接收 `context`（必须是第一个参数）。你也可以设置覆盖项，例如工具名称、描述、使用哪种文档字符串风格等。
 4.  你可以将装饰后的函数传入工具列表。
 
 ??? note "展开查看输出"
@@ -299,7 +299,7 @@ for tool in agent.tools:
 
 ### 从工具调用返回图像或文件
 
-除了返回文本输出外，你还可以将一个或多个图像或文件作为工具调用的输出返回。为此，你可以返回以下任意类型：
+除了返回文本输出外，你还可以将一个或多个图像或文件作为工具调用输出返回。为此，你可以返回以下任意类型：
 
 -   图像：[`ToolOutputImage`][agents.tool.ToolOutputImage]（或其 TypedDict 版本 [`ToolOutputImageDict`][agents.tool.ToolOutputImageDict]）
 -   文件：[`ToolOutputFileContent`][agents.tool.ToolOutputFileContent]（或其 TypedDict 版本 [`ToolOutputFileContentDict`][agents.tool.ToolOutputFileContentDict]）
@@ -312,7 +312,7 @@ for tool in agent.tools:
 -   `name`
 -   `description`
 -   `params_json_schema`，即参数的 JSON schema
--   `on_invoke_tool`，即一个异步函数，接收 [`ToolContext`][agents.tool_context.ToolContext] 和 JSON 字符串形式的参数，并返回工具输出（例如文本、结构化工具输出对象或输出列表）。
+-   `on_invoke_tool`，一个异步函数，接收 [`ToolContext`][agents.tool_context.ToolContext] 和 JSON 字符串形式的参数，并返回工具输出（例如文本、结构化工具输出对象或输出列表）。
 
 ```python
 from typing import Any
@@ -345,18 +345,18 @@ tool = FunctionTool(
 )
 ```
 
-### 自动参数与 docstring 解析
+### 自动参数与文档字符串解析
 
-如前所述，我们会自动解析函数签名以提取工具 schema，并解析 docstring 以提取工具和各参数的描述。说明如下：
+如前所述，我们会自动解析函数签名以提取工具 schema，并解析文档字符串以提取工具及各参数的描述。说明如下：
 
-1. 函数签名解析通过 `inspect` 模块完成。我们使用类型注解理解参数类型，并动态构建一个 Pydantic 模型来表示整体 schema。它支持大多数类型，包括 Python 基本类型、Pydantic 模型、TypedDict 等。
-2. 我们使用 `griffe` 解析 docstring。支持的 docstring 格式包括 `google`、`sphinx` 和 `numpy`。我们会尝试自动检测 docstring 格式，但这是尽力而为；你也可以在调用 `function_tool` 时显式设置。你还可以通过将 `use_docstring_info` 设为 `False` 来禁用 docstring 解析。
+1. 函数签名解析通过 `inspect` 模块完成。我们使用类型注解理解参数类型，并动态构建 Pydantic 模型来表示整体 schema。它支持大多数类型，包括 Python 基本类型、Pydantic 模型、TypedDict 等。
+2. 我们使用 `griffe` 解析文档字符串。支持的文档字符串格式包括 `google`、`sphinx` 和 `numpy`。我们会尝试自动检测文档字符串格式，但这属于尽力而为；你也可以在调用 `function_tool` 时显式设置。你还可以通过将 `use_docstring_info` 设为 `False` 来禁用文档字符串解析。
 
 schema 提取代码位于 [`agents.function_schema`][]。
 
 ### 使用 Pydantic Field 约束并描述参数
 
-你可以使用 Pydantic 的 [`Field`](https://docs.pydantic.dev/latest/concepts/fields/) 为工具参数添加约束（例如数字最小/最大值、字符串长度或模式）和描述。与 Pydantic 一样，两种形式都支持：基于默认值（`arg: int = Field(..., ge=1)`）和 `Annotated`（`arg: Annotated[int, Field(..., ge=1)]`）。生成的 JSON schema 与校验将包含这些约束。
+你可以使用 Pydantic 的 [`Field`](https://docs.pydantic.dev/latest/concepts/fields/) 为工具参数添加约束（例如数字最小/最大值、字符串长度或模式）和描述。与 Pydantic 一样，支持两种形式：基于默认值（`arg: int = Field(..., ge=1)`）和 `Annotated`（`arg: Annotated[int, Field(..., ge=1)]`）。生成的 JSON schema 和校验会包含这些约束。
 
 ```python
 from typing import Annotated
@@ -376,7 +376,7 @@ def score_b(score: Annotated[int, Field(..., ge=0, le=100, description="Score fr
 
 ### 工具调用超时
 
-你可以通过 `@function_tool(timeout=...)` 为异步工具调用设置单次调用超时。
+你可以通过 `@function_tool(timeout=...)` 为异步工具调用设置每次调用超时。
 
 ```python
 import asyncio
@@ -396,7 +396,7 @@ agent = Agent(
 )
 ```
 
-达到超时时，默认行为是 `timeout_behavior="error_as_result"`，会向模型发送可见的超时消息（例如 `Tool 'slow_lookup' timed out after 2 seconds.`）。
+当达到超时时间时，默认行为是 `timeout_behavior="error_as_result"`，会向模型发送可见的超时消息（例如 `Tool 'slow_lookup' timed out after 2 seconds.`）。
 
 你可以控制超时处理方式：
 
@@ -427,13 +427,13 @@ except ToolTimeoutError as e:
 
     超时配置仅支持异步 `@function_tool` 处理器。
 
-### 处理工具调用中的错误
+### 处理工具调用错误
 
-当你通过 `@function_tool` 创建工具调用时，可以传入 `failure_error_function`。这是在工具调用崩溃时向 LLM 提供错误响应的函数。
+当你通过 `@function_tool` 创建工具调用时，可以传入 `failure_error_function`。当工具调用崩溃时，该函数会向 LLM 提供错误响应。
 
--   默认情况下（即你不传任何值），会运行 `default_tool_error_function`，告知 LLM 发生了错误。
--   如果你传入自己的错误函数，则会改为运行该函数，并将其响应发送给 LLM。
--   如果你显式传入 `None`，则任何工具调用错误都会被重新抛出，由你处理。这可能是模型生成无效 JSON 导致的 `ModelBehaviorError`，也可能是代码崩溃导致的 `UserError` 等。
+-   默认情况下（即你未传入任何值），会运行 `default_tool_error_function`，告知 LLM 发生了错误。
+-   如果你传入自己的错误函数，则会运行该函数，并将其响应发送给 LLM。
+-   如果你显式传入 `None`，则任何工具调用错误都会重新抛出，由你处理。这可能是模型产出无效 JSON 导致的 `ModelBehaviorError`，也可能是你的代码崩溃导致的 `UserError` 等。
 
 ```python
 from agents import function_tool, RunContextWrapper
@@ -460,7 +460,7 @@ def get_user_profile(user_id: str) -> str:
 
 ## Agents as tools
 
-在某些工作流中，你可能希望由一个中心智能体进行智能体编排一个由专用智能体组成的网络，而不是移交控制权。你可以通过将智能体建模为工具来实现。
+在某些工作流中，你可能希望由一个中心智能体进行智能体编排，协调一组专用智能体，而不是移交控制权。你可以通过将智能体建模为工具来实现。
 
 ```python
 from agents import Agent, Runner
@@ -501,7 +501,7 @@ async def main():
 
 ### 工具智能体自定义
 
-`agent.as_tool` 函数是一个便捷方法，可轻松将智能体转换为工具。它支持常见运行时选项，如 `max_turns`、`run_config`、`hooks`、`previous_response_id`、`conversation_id`、`session` 和 `needs_approval`。它还支持通过 `parameters`、`input_builder` 和 `include_input_schema` 进行结构化输入。对于高级编排（例如条件重试、回退行为或串联多个智能体调用），请在你的工具实现中直接使用 `Runner.run`：
+`agent.as_tool` 函数是一个便捷方法，可轻松将智能体转换为工具。它支持常见运行时选项，例如 `max_turns`、`run_config`、`hooks`、`previous_response_id`、`conversation_id`、`session` 和 `needs_approval`。它还支持通过 `parameters`、`input_builder` 和 `include_input_schema` 进行结构化输入。对于高级编排（例如条件重试、回退行为或串联多个智能体调用），请在工具实现中直接使用 `Runner.run`：
 
 ```python
 @function_tool
@@ -520,15 +520,15 @@ async def run_my_agent() -> str:
     return str(result.final_output)
 ```
 
-### 工具智能体的结构化输入
+### 工具智能体结构化输入
 
-默认情况下，`Agent.as_tool()` 期望单个字符串输入（`{"input": "..."}`），但你可以通过传入 `parameters`（Pydantic 模型或 dataclass 类型）来暴露结构化 schema。
+默认情况下，`Agent.as_tool()` 期望单个字符串输入（`{"input": "..."}`），但你可以通过传入 `parameters`（Pydantic 模型或 dataclass 类型）暴露结构化 schema。
 
 附加选项：
 
 - `include_input_schema=True` 会在生成的嵌套输入中包含完整 JSON Schema。
 - `input_builder=...` 允许你完全自定义结构化工具参数如何转换为嵌套智能体输入。
-- `RunContextWrapper.tool_input` 包含嵌套运行上下文中已解析的结构化载荷。
+- `RunContextWrapper.tool_input` 包含嵌套运行上下文中已解析的结构化负载。
 
 ```python
 from pydantic import BaseModel, Field
@@ -550,17 +550,17 @@ translator_tool = translator_agent.as_tool(
 
 完整可运行示例见 `examples/agent_patterns/agents_as_tools_structured.py`。
 
-### 工具智能体的审批关卡
+### 工具智能体审批门控
 
-`Agent.as_tool(..., needs_approval=...)` 使用与 `function_tool` 相同的审批流程。如果需要审批，运行会暂停，待处理项会出现在 `result.interruptions` 中；然后使用 `result.to_state()`，并在调用 `state.approve(...)` 或 `state.reject(...)` 后恢复。完整暂停/恢复模式见[Human-in-the-loop 指南](human_in_the_loop.md)。
+`Agent.as_tool(..., needs_approval=...)` 使用与 `function_tool` 相同的审批流程。如果需要审批，运行会暂停，待处理项会出现在 `result.interruptions` 中；然后使用 `result.to_state()`，并在调用 `state.approve(...)` 或 `state.reject(...)` 后恢复。完整的暂停/恢复模式见[人在回路指南](human_in_the_loop.md)。
 
 ### 自定义输出提取
 
-在某些情况下，你可能希望在将工具智能体输出返回给中心智能体之前进行修改。这在以下场景中很有用：
+在某些情况下，你可能希望在将工具智能体的输出返回给中心智能体之前进行修改。这在以下场景中很有用：
 
--   从子智能体聊天历史中提取特定信息（例如 JSON 载荷）。
--   转换或重格式化智能体最终答案（例如将 Markdown 转为纯文本或 CSV）。
--   当智能体响应缺失或格式错误时，校验输出或提供回退值。
+-   从子智能体的聊天历史中提取特定信息（例如 JSON 负载）。
+-   转换或重格式化智能体的最终答案（例如将 Markdown 转为纯文本或 CSV）。
+-   在智能体响应缺失或格式错误时，校验输出或提供回退值。
 
 你可以通过向 `as_tool` 方法提供 `custom_output_extractor` 参数来实现：
 
@@ -581,13 +581,14 @@ json_tool = data_agent.as_tool(
 )
 ```
 
-在自定义提取器中，嵌套的 [`RunResult`][agents.result.RunResult] 还会暴露
-[`agent_tool_invocation`][agents.result.RunResultBase.agent_tool_invocation]，当你在后处理嵌套结果时需要外层工具名称、调用 ID 或原始参数时，这很有用。
-参见[结果指南](results.md#agent-as-tool-metadata)。
+在自定义提取器内部，嵌套的 [`RunResult`][agents.result.RunResult] 还会暴露
+[`agent_tool_invocation`][agents.result.RunResultBase.agent_tool_invocation]，这在
+你需要外层工具名称、调用 ID 或原始参数来进行嵌套结果后处理时很有用。
+请参见[Results 指南](results.md#agent-as-tool-metadata)。
 
-### 流式传输嵌套智能体运行
+### 嵌套智能体运行流式传输
 
-向 `as_tool` 传入 `on_stream` 回调，以监听嵌套智能体发出的流式事件，同时在流结束后仍返回其最终输出。
+向 `as_tool` 传递 `on_stream` 回调，可在嵌套智能体运行期间监听其发出的流式事件，同时在流结束后仍返回其最终输出。
 
 ```python
 from agents import AgentToolStreamEvent
@@ -608,14 +609,14 @@ billing_agent_tool = billing_agent.as_tool(
 预期行为：
 
 - 事件类型与 `StreamEvent["type"]` 一致：`raw_response_event`、`run_item_stream_event`、`agent_updated_stream_event`。
-- 提供 `on_stream` 会自动以流式模式运行嵌套智能体，并在返回最终输出前消费完整个流。
-- 处理器可以是同步或异步；每个事件会按到达顺序传递。
-- 当工具通过模型工具调用触发时会有 `tool_call`；直接调用时它可能为 `None`。
+- 提供 `on_stream` 会自动以流式模式运行嵌套智能体，并在返回最终输出前耗尽流。
+- 处理器可以是同步或异步；每个事件都会按到达顺序传递。
+- 当工具通过模型工具调用触发时会有 `tool_call`；直接调用时其值可能为 `None`。
 - 完整可运行示例见 `examples/agent_patterns/agents_as_tools_streaming.py`。
 
 ### 条件工具启用
 
-你可以使用 `is_enabled` 参数在运行时有条件地启用或禁用智能体工具。这使你能够基于上下文、用户偏好或运行时条件，动态筛选哪些工具可供 LLM 使用。
+你可以使用 `is_enabled` 参数在运行时按条件启用或禁用工具智能体。这使你能够根据上下文、用户偏好或运行时条件动态筛选哪些工具可供 LLM 使用。
 
 ```python
 import asyncio
@@ -676,18 +677,18 @@ asyncio.run(main())
 -   **可调用函数**：接收 `(context, agent)` 并返回布尔值的函数
 -   **异步函数**：用于复杂条件逻辑的异步函数
 
-被禁用的工具在运行时会对 LLM 完全隐藏，这在以下场景中很有用：
+被禁用的工具在运行时会对 LLM 完全隐藏，因此适用于：
 
 -   基于用户权限的功能门控
--   特定环境的工具可用性（开发 vs 生产）
+-   特定环境的工具可用性（开发与生产）
 -   不同工具配置的 A/B 测试
--   基于运行时状态的动态工具过滤
+-   基于运行时状态的动态工具筛选
 
 ## 实验性：Codex 工具
 
-`codex_tool` 封装了 Codex CLI，使智能体能够在工具调用期间运行工作区范围任务（shell、文件编辑、MCP 工具）。此接口为实验性功能，未来可能变化。
+`codex_tool` 封装了 Codex CLI，使智能体可在工具调用期间运行工作区范围任务（shell、文件编辑、MCP 工具）。此能力为实验性，可能会变更。
 
-当你希望主智能体在不离开当前运行的情况下，将一个有边界的工作区任务委托给 Codex 时可使用它。默认工具名为 `codex`。如果设置自定义名称，必须是 `codex` 或以 `codex_` 开头。当一个智能体包含多个 Codex 工具时，每个工具都必须使用唯一名称。
+当你希望主智能体在不离开当前运行的情况下，将有边界的工作区任务委派给 Codex 时可使用它。默认工具名称是 `codex`。若设置自定义名称，必须是 `codex` 或以 `codex_` 开头。当一个智能体包含多个 Codex 工具时，每个工具都必须使用唯一名称。
 
 ```python
 from agents import Agent
@@ -701,7 +702,7 @@ agent = Agent(
             sandbox_mode="workspace-write",
             working_directory="/path/to/repo",
             default_thread_options=ThreadOptions(
-                model="gpt-5.2-codex",
+                model="gpt-5.4",
                 model_reasoning_effort="low",
                 network_access_enabled=True,
                 web_search_mode="disabled",
@@ -718,27 +719,27 @@ agent = Agent(
 
 从以下选项组开始：
 
--   执行范围：`sandbox_mode` 和 `working_directory` 定义 Codex 可操作的位置。请配套使用；当工作目录不在 Git 仓库内时，设置 `skip_git_repo_check=True`。
--   线程默认值：`default_thread_options=ThreadOptions(...)` 配置模型、推理强度、审批策略、附加目录、网络访问和网络检索模式。优先使用 `web_search_mode`，而不是旧版 `web_search_enabled`。
--   轮次默认值：`default_turn_options=TurnOptions(...)` 配置每轮行为，例如 `idle_timeout_seconds` 和可选取消 `signal`。
--   工具 I/O：工具调用必须至少包含一个 `inputs` 项，格式为 `{ "type": "text", "text": ... }` 或 `{ "type": "local_image", "path": ... }`。`output_schema` 可用于要求 Codex 返回结构化响应。
+-   执行范围：`sandbox_mode` 和 `working_directory` 定义 Codex 可操作的位置。应配套使用；当工作目录不在 Git 仓库内时，设置 `skip_git_repo_check=True`。
+-   线程默认值：`default_thread_options=ThreadOptions(...)` 配置模型、推理力度、审批策略、附加目录、网络访问和网络检索模式。优先使用 `web_search_mode`，而非旧版 `web_search_enabled`。
+-   回合默认值：`default_turn_options=TurnOptions(...)` 配置每回合行为，例如 `idle_timeout_seconds` 和可选取消 `signal`。
+-   工具 I/O：工具调用必须至少包含一个 `inputs` 项，格式为 `{ "type": "text", "text": ... }` 或 `{ "type": "local_image", "path": ... }`。`output_schema` 可用于要求结构化 Codex 响应。
 
-线程复用与持久化是分开的控制项：
+线程复用与持久化是分离控制：
 
 -   `persist_session=True` 会在对同一工具实例的重复调用中复用一个 Codex 线程。
--   `use_run_context_thread_id=True` 会在共享同一可变上下文对象的跨运行中，将线程 ID 存储并复用在运行上下文中。
--   线程 ID 优先级为：每次调用的 `thread_id`，然后是运行上下文线程 ID（若启用），最后是配置的 `thread_id` 选项。
--   默认运行上下文键：当 `name="codex"` 时为 `codex_thread_id`，当 `name="codex_<suffix>"` 时为 `codex_thread_id_<suffix>`。可通过 `run_context_thread_id_key` 覆盖。
+-   `use_run_context_thread_id=True` 会在跨运行（共享同一可变上下文对象）时将线程 ID 存储并复用在运行上下文中。
+-   线程 ID 优先级为：每次调用的 `thread_id`，然后运行上下文线程 ID（若启用），最后是已配置的 `thread_id` 选项。
+-   默认运行上下文键为：当 `name="codex"` 时是 `codex_thread_id`，当 `name="codex_<suffix>"` 时是 `codex_thread_id_<suffix>`。可通过 `run_context_thread_id_key` 覆盖。
 
 运行时配置：
 
 -   认证：设置 `CODEX_API_KEY`（推荐）或 `OPENAI_API_KEY`，或传入 `codex_options={"api_key": "..."}`。
 -   运行时：`codex_options.base_url` 会覆盖 CLI 基础 URL。
--   二进制解析：设置 `codex_options.codex_path_override`（或 `CODEX_PATH`）以固定 CLI 路径。否则 SDK 会先从 `PATH` 解析 `codex`，再回退到内置 vendor 二进制文件。
--   环境：`codex_options.env` 完整控制子进程环境。提供后，子进程不会继承 `os.environ`。
--   流限制：`codex_options.codex_subprocess_stream_limit_bytes`（或 `OPENAI_AGENTS_CODEX_SUBPROCESS_STREAM_LIMIT_BYTES`）控制 stdout/stderr 读取器限制。有效范围是 `65536` 到 `67108864`；默认是 `8388608`。
--   流式传输：`on_stream` 接收线程/轮次生命周期事件和条目事件（`reasoning`、`command_execution`、`mcp_tool_call`、`file_change`、`web_search`、`todo_list` 以及 `error` 条目更新）。
--   输出：结果包含 `response`、`usage` 和 `thread_id`；usage 会加入 `RunContextWrapper.usage`。
+-   二进制解析：设置 `codex_options.codex_path_override`（或 `CODEX_PATH`）以固定 CLI 路径。否则 SDK 会先从 `PATH` 解析 `codex`，然后回退到捆绑的 vendor 二进制。
+-   环境：`codex_options.env` 完全控制子进程环境。提供后，子进程不会继承 `os.environ`。
+-   流限制：`codex_options.codex_subprocess_stream_limit_bytes`（或 `OPENAI_AGENTS_CODEX_SUBPROCESS_STREAM_LIMIT_BYTES`）控制 stdout/stderr 读取器限制。有效范围是 `65536` 到 `67108864`；默认值为 `8388608`。
+-   流式传输：`on_stream` 接收线程/回合生命周期事件以及条目事件（`reasoning`、`command_execution`、`mcp_tool_call`、`file_change`、`web_search`、`todo_list` 和 `error` 条目更新）。
+-   输出：结果包含 `response`、`usage` 和 `thread_id`；usage 会添加到 `RunContextWrapper.usage`。
 
 参考：
 
