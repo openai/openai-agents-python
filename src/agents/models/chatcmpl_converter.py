@@ -51,7 +51,11 @@ from ..model_settings import MCPToolChoice
 from ..tool import FunctionTool, Tool
 from .fake_id import FAKE_RESPONSES_ID
 
-ResponseInputContentWithAudioParam = Union[ResponseInputContentParam, ResponseInputAudioParam]
+ResponseInputContentWithAudioParam = Union[
+    ResponseInputContentParam,
+    ResponseInputAudioParam,
+    dict[str, Any],
+]
 
 
 class Converter:
@@ -335,6 +339,19 @@ class Converter:
                         image_url={
                             "url": casted_image_param["image_url"],
                             "detail": casted_image_param.get("detail", "auto"),
+                        },
+                    )
+                )
+            elif isinstance(c, dict) and c.get("type") == "video_url":
+                video_payload = c.get("video_url")
+                if not isinstance(video_payload, dict) or not video_payload.get("url"):
+                    raise UserError(f"Only video URLs are supported for video_url {c}")
+                out.append(
+                    cast(
+                        Any,
+                        {
+                            "type": "video_url",
+                            "video_url": {"url": video_payload["url"]},
                         },
                     )
                 )
