@@ -1,8 +1,10 @@
 import asyncio
+import json
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 import pytest
+from pydantic import BaseModel
 
 from agents.exceptions import UserError
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
@@ -1364,7 +1366,7 @@ class TestToolCallExecution:
 
     @pytest.mark.asyncio
     async def test_tool_result_conversion_to_string(self, mock_model, mock_agent):
-        """Test that tool results are converted to strings for model output"""
+        """Test that structured tool results are serialized to JSON for model output."""
         # Create tool that returns non-string result
         tool = _set_default_timeout_fields(Mock(spec=FunctionTool))
         tool.name = "test_function"
@@ -1381,10 +1383,36 @@ class TestToolCallExecution:
 
         await session._handle_tool_call(tool_call_event)
 
-        # Verify result was converted to string
+        # Verify result was serialized to JSON
         sent_call, sent_output, _ = mock_model.sent_tool_outputs[0]
         assert isinstance(sent_output, str)
-        assert sent_output == "{'result': 'data', 'count': 42}"
+        assert sent_output == json.dumps({"result": "data", "count": 42})
+
+    @pytest.mark.asyncio
+    async def test_tool_result_conversion_serializes_pydantic_models(self, mock_model, mock_agent):
+        """Test that pydantic tool results are serialized to JSON for model output."""
+
+        class ToolResult(BaseModel):
+            name: str
+            score: int
+
+        tool = _set_default_timeout_fields(Mock(spec=FunctionTool))
+        tool.name = "test_function"
+        tool.on_invoke_tool = AsyncMock(return_value=ToolResult(name="demo", score=7))
+        tool.needs_approval = False
+
+        mock_agent.get_all_tools.return_value = [tool]
+
+        session = RealtimeSession(mock_model, mock_agent, None)
+
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_pydantic_conversion", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+
+        _sent_call, sent_output, _ = mock_model.sent_tool_outputs[0]
+        assert sent_output == json.dumps({"name": "demo", "score": 7})
 
     @pytest.mark.asyncio
     async def test_mixed_tool_types_filtering(self, mock_model, mock_agent):
