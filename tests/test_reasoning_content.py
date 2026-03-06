@@ -142,6 +142,18 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
     assert reasoning_delta_events[0].delta == "Let me think"
     assert reasoning_delta_events[1].delta == " about this"
 
+    reasoning_done_index = next(
+        index
+        for index, event in enumerate(output_events)
+        if event.type == "response.reasoning_summary_part.done"
+    )
+    first_text_delta_index = next(
+        index
+        for index, event in enumerate(output_events)
+        if event.type == "response.output_text.delta"
+    )
+    assert reasoning_done_index < first_text_delta_index
+
     # verify regular content events were emitted
     content_delta_events = [e for e in output_events if e.type == "response.output_text.delta"]
     assert len(content_delta_events) == 2
