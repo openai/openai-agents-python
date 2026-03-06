@@ -87,7 +87,12 @@ from agents.handoffs import Handoff
 from agents.prompts import Prompt
 from agents.realtime._default_tracker import ModelAudioTracker
 from agents.realtime.audio_formats import to_realtime_audio_format
-from agents.tool import FunctionTool, Tool
+from agents.tool import (
+    FunctionTool,
+    Tool,
+    ensure_function_tool_supports_responses_only_features,
+    ensure_tool_choice_supports_backend,
+)
 from agents.util._types import MaybeAwaitable
 
 from ..exceptions import UserError
@@ -1133,7 +1138,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             )
 
         if "tool_choice" in model_settings:
-            session_create_request.tool_choice = cast(Any, model_settings.get("tool_choice"))
+            tool_choice = model_settings.get("tool_choice")
+            ensure_tool_choice_supports_backend(
+                tool_choice,
+                backend_name="OpenAI Responses models",
+            )
+            session_create_request.tool_choice = cast(Any, tool_choice)
 
         return session_create_request
 
@@ -1144,6 +1154,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         for tool in tools:
             if not isinstance(tool, FunctionTool):
                 raise UserError(f"Tool {tool.name} is unsupported. Must be a function tool.")
+            ensure_function_tool_supports_responses_only_features(
+                tool,
+                backend_name="Realtime models",
+            )
             converted_tools.append(
                 OpenAISessionFunction(
                     name=tool.name,

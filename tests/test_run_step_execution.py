@@ -42,7 +42,9 @@ from agents import (
     TResponseInputItem,
     Usage,
     UserError,
+    tool_namespace,
     tool_output_guardrail,
+    trace,
 )
 from agents.run_internal import run_loop
 from agents.run_internal.run_loop import (
@@ -74,6 +76,7 @@ from .test_responses import (
     get_text_input_item,
     get_text_message,
 )
+from .testing_processor import SPAN_PROCESSOR_TESTING
 from .utils.hitl import (
     RecordingEditor,
     assert_single_approval_interruption,
@@ -84,6 +87,23 @@ from .utils.hitl import (
     make_shell_call,
     reject_tool_call,
 )
+
+
+def _function_span_names() -> list[str]:
+    names: list[str] = []
+    for span in SPAN_PROCESSOR_TESTING.get_ordered_spans(including_empty=True):
+        exported = span.export()
+        if not exported:
+            continue
+        span_data = exported.get("span_data")
+        if not isinstance(span_data, dict):
+            continue
+        if span_data.get("type") != "function":
+            continue
+        name = span_data.get("name")
+        if isinstance(name, str):
+            names.append(name)
+    return names
 
 
 @pytest.mark.asyncio
@@ -259,6 +279,77 @@ async def test_plaintext_agent_shell_output_only_without_message_runs_again():
     assert len(result.generated_items) == 1
     assert isinstance(result.generated_items[0], ToolCallOutputItem)
     assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_plaintext_agent_tool_search_only_without_message_runs_again():
+    agent = Agent(name="test")
+    response = ModelResponse(output=[], usage=Usage(), response_id=None)
+    response.output = cast(
+        Any,
+        [
+            {
+                "type": "tool_search_call",
+                "id": "tsc_step",
+                "arguments": {"paths": ["crm"], "query": "profile"},
+                "execution": "server",
+                "status": "completed",
+            },
+            {
+                "type": "tool_search_output",
+                "id": "tso_step",
+                "execution": "server",
+                "status": "completed",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup_account",
+                        "description": "Look up a CRM account.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "account_id": {
+                                    "type": "string",
+                                }
+                            },
+                            "required": ["account_id"],
+                        },
+                        "defer_loading": True,
+                    }
+                ],
+            },
+        ],
+    )
+
+    result = await get_execute_result(agent, response)
+
+    assert len(result.generated_items) == 2
+    assert getattr(result.generated_items[0].raw_item, "type", None) == "tool_search_call"
+    raw_output = result.generated_items[1].raw_item
+    assert getattr(raw_output, "type", None) == "tool_search_output"
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_plaintext_agent_client_tool_search_requires_manual_handling() -> None:
+    agent = Agent(name="test")
+    response = ModelResponse(output=[], usage=Usage(), response_id=None)
+    response.output = cast(
+        Any,
+        [
+            {
+                "type": "tool_search_call",
+                "id": "tsc_client_step",
+                "call_id": "call_tool_search_client",
+                "arguments": {"paths": ["crm"], "query": "profile"},
+                "execution": "client",
+                "status": "completed",
+            }
+        ],
+    )
+
+    with pytest.raises(ModelBehaviorError, match="Client-executed tool_search calls"):
+        await get_execute_result(agent, response)
 
 
 @pytest.mark.asyncio
@@ -1070,6 +1161,103 @@ async def test_execute_function_tool_calls_parent_cancellation_skips_post_invoke
     assert not failure_handler_called.is_set()
     assert not output_guardrail_called.is_set()
     assert not on_tool_end_called.is_set()
+
+
+@pytest.mark.asyncio
+async def test_execute_function_tool_calls_collapse_trace_name_for_top_level_deferred_tools():
+    async def _shipping_eta(tracking_number: str) -> str:
+        return f"eta:{tracking_number}"
+
+    tool = function_tool(
+        _shipping_eta,
+        name_override="get_shipping_eta",
+        defer_loading=True,
+    )
+    tool_run = ToolRunFunction(
+        tool_call=cast(
+            ResponseFunctionToolCall,
+            get_function_tool_call(
+                "get_shipping_eta",
+                '{"tracking_number":"ZX-123"}',
+                call_id="call-1",
+                namespace="get_shipping_eta",
+            ),
+        ),
+        function_tool=tool,
+    )
+
+    with trace("test_execute_function_tool_calls_collapse_trace_name_for_top_level_deferred_tools"):
+        await execute_function_tool_calls(
+            agent=Agent(name="test", tools=[tool]),
+            tool_runs=[tool_run],
+            hooks=RunHooks(),
+            context_wrapper=RunContextWrapper(None),
+            config=RunConfig(),
+        )
+
+    assert "get_shipping_eta" in _function_span_names()
+    assert "get_shipping_eta.get_shipping_eta" not in _function_span_names()
+
+
+@pytest.mark.asyncio
+async def test_execute_function_tool_calls_preserve_trace_name_for_explicit_namespace():
+    async def _shipping_eta(tracking_number: str) -> str:
+        return f"eta:{tracking_number}"
+
+    tool = tool_namespace(
+        name="shipping",
+        description="Shipping tools",
+        tools=[
+            function_tool(
+                _shipping_eta,
+                name_override="get_shipping_eta",
+                defer_loading=True,
+            )
+        ],
+    )[0]
+    tool_run = ToolRunFunction(
+        tool_call=cast(
+            ResponseFunctionToolCall,
+            get_function_tool_call(
+                "get_shipping_eta",
+                '{"tracking_number":"ZX-123"}',
+                call_id="call-1",
+                namespace="shipping",
+            ),
+        ),
+        function_tool=tool,
+    )
+
+    with trace("test_execute_function_tool_calls_preserve_trace_name_for_explicit_namespace"):
+        await execute_function_tool_calls(
+            agent=Agent(name="test", tools=[tool]),
+            tool_runs=[tool_run],
+            hooks=RunHooks(),
+            context_wrapper=RunContextWrapper(None),
+            config=RunConfig(),
+        )
+
+    assert "shipping.get_shipping_eta" in _function_span_names()
+    assert "get_shipping_eta" not in _function_span_names()
+
+
+@pytest.mark.asyncio
+async def test_execute_function_tool_calls_rejects_reserved_same_name_namespace_shape():
+    async def _lookup_account(customer_id: str) -> str:
+        return f"account:{customer_id}"
+
+    with pytest.raises(UserError, match="synthetic namespace `lookup_account.lookup_account`"):
+        tool_namespace(
+            name="lookup_account",
+            description="Same-name namespace",
+            tools=[
+                function_tool(
+                    _lookup_account,
+                    name_override="lookup_account",
+                    defer_loading=True,
+                )
+            ],
+        )
 
 
 @pytest.mark.asyncio
@@ -2099,6 +2287,48 @@ async def test_function_tool_context_includes_run_config() -> None:
 
 
 @pytest.mark.asyncio
+async def test_deferred_function_tool_context_preserves_search_loaded_namespace() -> None:
+    async def _tool_with_namespace(context: ToolContext[str]) -> str:
+        tool_call_namespace = getattr(context.tool_call, "namespace", None)
+        return json.dumps(
+            {
+                "tool_call_namespace": tool_call_namespace,
+                "tool_namespace": context.tool_namespace,
+            },
+            sort_keys=True,
+        )
+
+    tool = function_tool(
+        _tool_with_namespace,
+        name_override="get_weather",
+        defer_loading=True,
+        failure_error_function=None,
+    )
+    agent = Agent(name="test", tools=[tool])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call(
+                "get_weather",
+                "{}",
+                call_id="call-1",
+                namespace="get_weather",
+            )
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    result = await get_execute_result(agent, response)
+
+    assert len(result.generated_items) == 2
+    assert_item_is_function_tool_call_output(
+        result.generated_items[1],
+        '{"tool_call_namespace": "get_weather", "tool_namespace": "get_weather"}',
+    )
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
 async def test_handoff_output_leads_to_handoff_next_step():
     agent_1 = Agent(name="test_1")
     agent_2 = Agent(name="test_2")
@@ -2426,6 +2656,69 @@ async def test_execute_tools_handles_tool_approval_items(
     result = await run_execute_with_processed_response(scenario.agent, scenario.processed_response)
 
     assert_single_approval_interruption(result, tool_name=scenario.expected_tool_name)
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_preserves_synthetic_namespace_for_deferred_top_level_approval() -> (
+    None
+):
+    async def _deferred_weather() -> str:
+        return "tool_result"
+
+    tool = function_tool(
+        _deferred_weather,
+        name_override="get_weather",
+        defer_loading=True,
+        needs_approval=True,
+    )
+    agent = make_agent(tools=[tool])
+    tool_call = cast(
+        ResponseFunctionToolCall,
+        get_function_tool_call("get_weather", "{}", namespace="get_weather"),
+    )
+    tool_run = ToolRunFunction(function_tool=tool, tool_call=tool_call)
+    processed_response = make_processed_response(functions=[tool_run])
+
+    result = await run_execute_with_processed_response(agent, processed_response)
+    interruption = assert_single_approval_interruption(result, tool_name="get_weather")
+
+    assert interruption.tool_namespace == "get_weather"
+    assert getattr(interruption.raw_item, "namespace", None) == "get_weather"
+
+
+@pytest.mark.asyncio
+async def test_deferred_tool_approval_allows_bare_alias_when_visible_peer_is_disabled() -> None:
+    async def _visible_weather() -> str:
+        return "visible"
+
+    async def _deferred_weather() -> str:
+        return "deferred"
+
+    visible_tool = function_tool(
+        _visible_weather,
+        name_override="get_weather",
+        needs_approval=True,
+        is_enabled=False,
+    )
+    deferred_tool = function_tool(
+        _deferred_weather,
+        name_override="get_weather",
+        defer_loading=True,
+        needs_approval=True,
+    )
+    agent = make_agent(tools=[visible_tool, deferred_tool])
+    tool_call = cast(
+        ResponseFunctionToolCall,
+        get_function_tool_call("get_weather", "{}", namespace="get_weather"),
+    )
+    tool_run = ToolRunFunction(function_tool=deferred_tool, tool_call=tool_call)
+    processed_response = make_processed_response(functions=[tool_run])
+
+    result = await run_execute_with_processed_response(agent, processed_response)
+    interruption = assert_single_approval_interruption(result, tool_name="get_weather")
+
+    assert interruption.tool_namespace == "get_weather"
+    assert interruption._allow_bare_name_alias is True
 
 
 @pytest.mark.asyncio

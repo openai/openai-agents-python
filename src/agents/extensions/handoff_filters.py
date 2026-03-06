@@ -12,6 +12,8 @@ from ..items import (
     RunItem,
     ToolCallItem,
     ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
     TResponseInputItem,
 )
 
@@ -50,6 +52,8 @@ def _remove_tools_from_items(items: tuple[RunItem, ...]) -> tuple[RunItem, ...]:
         if (
             isinstance(item, HandoffCallItem)
             or isinstance(item, HandoffOutputItem)
+            or isinstance(item, ToolSearchCallItem)
+            or isinstance(item, ToolSearchOutputItem)
             or isinstance(item, ToolCallItem)
             or isinstance(item, ToolCallOutputItem)
             or isinstance(item, ReasoningItem)
@@ -68,6 +72,8 @@ def _remove_tool_types_from_input(
         "computer_call",
         "computer_call_output",
         "file_search_call",
+        "tool_search_call",
+        "tool_search_output",
         "web_search_call",
     ]
 

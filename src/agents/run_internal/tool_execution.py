@@ -20,6 +20,20 @@ from openai.types.responses.response_input_item_param import (
 from openai.types.responses.response_input_param import McpApprovalResponse
 from openai.types.responses.response_output_item import McpApprovalRequest
 
+from .._tool_identity import (
+    FunctionToolLookupKey,
+    NamedToolLookupKey,
+    build_function_tool_lookup_map,
+    get_function_tool_lookup_key,
+    get_function_tool_lookup_key_for_call,
+    get_function_tool_trace_name,
+    get_tool_call_namespace,
+    get_tool_call_trace_name,
+    is_deferred_top_level_function_tool,
+    normalize_tool_call_for_function_tool,
+    should_allow_bare_name_approval_alias,
+    tool_trace_name,
+)
 from ..agent import Agent
 from ..agent_tool_state import (
     consume_agent_tool_run_result,
@@ -122,6 +136,7 @@ __all__ = [
     "resolve_approval_interruption",
     "resolve_approval_rejection_message",
     "function_needs_approval",
+    "resolve_enabled_function_tools",
     "execute_function_tool_calls",
     "execute_local_shell_calls",
     "execute_shell_calls",
@@ -503,6 +518,29 @@ def maybe_reset_tool_choice(
     if agent.reset_tool_choice is True and tool_use_tracker.has_used_tools(agent):
         return dataclasses.replace(model_settings, tool_choice=None)
     return model_settings
+
+
+async def resolve_enabled_function_tools(
+    agent: Agent[Any],
+    context_wrapper: RunContextWrapper[Any],
+) -> list[FunctionTool]:
+    """Resolve enabled function tools without triggering MCP tool discovery."""
+
+    async def _check_tool_enabled(tool: FunctionTool) -> bool:
+        attr = tool.is_enabled
+        if isinstance(attr, bool):
+            return attr
+        result = attr(context_wrapper, agent)
+        if inspect.isawaitable(result):
+            return bool(await result)
+        return bool(result)
+
+    function_tools = [tool for tool in agent.tools if isinstance(tool, FunctionTool)]
+    if not function_tools:
+        return []
+
+    enabled_results = await asyncio.gather(*(_check_tool_enabled(tool) for tool in function_tools))
+    return [tool for tool, enabled in zip(function_tools, enabled_results) if enabled]
 
 
 async def initialize_computer_tools(
@@ -945,14 +983,24 @@ async def resolve_approval_status(
     raw_item: Any,
     agent: Agent[Any],
     context_wrapper: RunContextWrapper[Any],
+    tool_namespace: str | None = None,
+    tool_lookup_key: FunctionToolLookupKey | None = None,
     on_approval: Callable[[RunContextWrapper[Any], ToolApprovalItem], Any] | None = None,
 ) -> tuple[bool | None, ToolApprovalItem]:
     """Build approval item, run on_approval hook if needed, and return latest approval status."""
-    approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name=tool_name)
+    approval_item = ToolApprovalItem(
+        agent=agent,
+        raw_item=raw_item,
+        tool_name=tool_name,
+        tool_namespace=tool_namespace,
+        tool_lookup_key=tool_lookup_key,
+    )
     approval_status = context_wrapper.get_approval_status(
         tool_name,
         call_id,
+        tool_namespace=tool_namespace,
         existing_pending=approval_item,
+        tool_lookup_key=tool_lookup_key,
     )
     if approval_status is None and on_approval:
         decision_result = on_approval(context_wrapper, approval_item)
@@ -966,7 +1014,9 @@ async def resolve_approval_status(
         approval_status = context_wrapper.get_approval_status(
             tool_name,
             call_id,
+            tool_namespace=tool_namespace,
             existing_pending=approval_item,
+            tool_lookup_key=tool_lookup_key,
         )
     return approval_status, approval_item
 
@@ -1218,12 +1268,20 @@ class _FunctionToolBatchExecutor:
         self.results_by_tool_run: dict[int, Any] = {}
         self.pending_tasks: set[asyncio.Task[Any]] = set()
         self.propagating_failure: BaseException | None = None
+        self.available_function_tools: list[FunctionTool] = []
 
     async def execute(
         self,
     ) -> tuple[
         list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
     ]:
+        self.available_function_tools = await resolve_enabled_function_tools(
+            self.agent,
+            self.context_wrapper,
+        )
+        for tool_run in self.tool_runs:
+            if tool_run.function_tool not in self.available_function_tools:
+                self.available_function_tools.append(tool_run.function_tool)
         for order, tool_run in enumerate(self.tool_runs):
             self._create_tool_task(tool_run, order)
 
@@ -1342,15 +1400,29 @@ class _FunctionToolBatchExecutor:
         func_tool: FunctionTool,
         tool_call: ResponseFunctionToolCall,
     ) -> Any:
+        raw_tool_call = tool_call
         current_task = asyncio.current_task()
         if current_task is not None:
             self.task_states[current_task].in_post_invoke_phase = False
 
-        with function_span(func_tool.name) as span_fn:
+        tool_call = cast(
+            ResponseFunctionToolCall,
+            normalize_tool_call_for_function_tool(tool_call, func_tool),
+        )
+        trace_tool_name = (
+            get_tool_call_trace_name(tool_call)
+            or get_function_tool_trace_name(func_tool)
+            or func_tool.name
+        )
+        with function_span(trace_tool_name) as span_fn:
+            tool_context_namespace = get_tool_call_namespace(raw_tool_call)
+            if tool_context_namespace is None:
+                tool_context_namespace = get_tool_call_namespace(tool_call)
             tool_context = ToolContext.from_agent_context(
                 self.context_wrapper,
                 tool_call.call_id,
-                tool_call=tool_call,
+                tool_call=raw_tool_call,
+                tool_namespace=tool_context_namespace,
                 agent=self.agent,
                 run_config=self.config,
             )
@@ -1362,6 +1434,7 @@ class _FunctionToolBatchExecutor:
                 approval_result = await self._maybe_execute_tool_approval(
                     func_tool=func_tool,
                     tool_call=tool_call,
+                    raw_tool_call=raw_tool_call,
                     span_fn=span_fn,
                 )
                 if approval_result is not None:
@@ -1394,6 +1467,7 @@ class _FunctionToolBatchExecutor:
         *,
         func_tool: FunctionTool,
         tool_call: ResponseFunctionToolCall,
+        raw_tool_call: ResponseFunctionToolCall,
         span_fn: Span[Any],
     ) -> Any | None:
         needs_approval_result = await function_needs_approval(
@@ -1404,15 +1478,29 @@ class _FunctionToolBatchExecutor:
         if not needs_approval_result:
             return None
 
+        tool_namespace = get_tool_call_namespace(raw_tool_call)
+        if tool_namespace is None and is_deferred_top_level_function_tool(func_tool):
+            tool_namespace = func_tool.name
+        tool_lookup_key = get_function_tool_lookup_key_for_call(raw_tool_call)
+        if is_deferred_top_level_function_tool(func_tool):
+            tool_lookup_key = ("deferred_top_level", func_tool.name)
         approval_status = self.context_wrapper.get_approval_status(
             func_tool.name,
             tool_call.call_id,
+            tool_namespace=tool_namespace,
+            tool_lookup_key=tool_lookup_key,
         )
         if approval_status is None:
             approval_item = ToolApprovalItem(
                 agent=self.agent,
-                raw_item=tool_call,
+                raw_item=raw_tool_call,
                 tool_name=func_tool.name,
+                tool_namespace=tool_namespace,
+                tool_lookup_key=tool_lookup_key,
+                _allow_bare_name_alias=should_allow_bare_name_approval_alias(
+                    func_tool,
+                    self.available_function_tools,
+                ),
             )
             return FunctionToolResult(tool=func_tool, output=None, run_item=approval_item)
 
@@ -1423,7 +1511,7 @@ class _FunctionToolBatchExecutor:
             context_wrapper=self.context_wrapper,
             run_config=self.config,
             tool_type="function",
-            tool_name=func_tool.name,
+            tool_name=tool_trace_name(func_tool.name, tool_namespace) or func_tool.name,
             call_id=tool_call.call_id,
         )
         span_fn.set_error(
@@ -1817,7 +1905,19 @@ async def execute_approved_tools(
 ) -> None:
     """Execute tools that have been approved after an interruption (HITL resume path)."""
     tool_runs: list[ToolRunFunction] = []
-    tool_map: dict[str, Tool] = {tool.name: tool for tool in all_tools or []}
+    tool_map: dict[NamedToolLookupKey, Tool] = cast(
+        dict[NamedToolLookupKey, Tool],
+        build_function_tool_lookup_map(
+            [tool for tool in all_tools or [] if isinstance(tool, FunctionTool)]
+        ),
+    )
+    for tool in all_tools or []:
+        if isinstance(tool, FunctionTool):
+            continue
+        if hasattr(tool, "name"):
+            tool_name = getattr(tool, "name", None)
+            if isinstance(tool_name, str) and tool_name:
+                tool_map[tool_name] = tool
 
     def _append_error(message: str, *, tool_call: Any, tool_name: str, call_id: str) -> None:
         append_approval_error_output(
@@ -1834,6 +1934,15 @@ async def execute_approved_tools(
     ) -> tuple[ResponseFunctionToolCall, FunctionTool, str, str] | None:
         tool_call = interruption.raw_item
         tool_name = interruption.name or RunContextWrapper._resolve_tool_name(interruption)
+        tool_namespace = getattr(interruption, "tool_namespace", None)
+        tool_lookup_key = getattr(
+            interruption, "tool_lookup_key", None
+        ) or get_function_tool_lookup_key(
+            tool_name,
+            tool_namespace,
+        )
+        approval_key = tool_lookup_key
+        display_tool_name = tool_trace_name(tool_name, tool_namespace) or tool_name or "unknown"
         if not tool_name:
             _append_error(
                 message="Tool approval item missing tool name.",
@@ -1854,17 +1963,23 @@ async def execute_approved_tools(
             return None
 
         approval_status = context_wrapper.get_approval_status(
-            tool_name, call_id, existing_pending=interruption
+            tool_name,
+            call_id,
+            tool_namespace=tool_namespace,
+            existing_pending=interruption,
+            tool_lookup_key=tool_lookup_key,
         )
         if approval_status is False:
-            resolved_tool = tool_map.get(tool_name)
+            resolved_tool = tool_map.get(approval_key) if approval_key is not None else None
+            if resolved_tool is None and tool_namespace is None:
+                resolved_tool = tool_map.get(tool_name)
             message = REJECTION_MESSAGE
             if isinstance(resolved_tool, FunctionTool):
                 message = await resolve_approval_rejection_message(
                     context_wrapper=context_wrapper,
                     run_config=run_config,
                     tool_type="function",
-                    tool_name=tool_name,
+                    tool_name=display_tool_name,
                     call_id=call_id,
                 )
             _append_error(
@@ -1884,10 +1999,12 @@ async def execute_approved_tools(
             )
             return None
 
-        tool = tool_map.get(tool_name)
+        tool = tool_map.get(approval_key) if approval_key is not None else None
+        if tool is None and tool_namespace is None:
+            tool = tool_map.get(tool_name)
         if tool is None:
             _append_error(
-                message=f"Tool '{tool_name}' not found.",
+                message=f"Tool '{display_tool_name}' not found.",
                 tool_call=tool_call,
                 tool_name=tool_name,
                 call_id=call_id,
@@ -1896,7 +2013,7 @@ async def execute_approved_tools(
 
         if not isinstance(tool, FunctionTool):
             _append_error(
-                message=f"Tool '{tool_name}' is not a function tool.",
+                message=f"Tool '{display_tool_name}' is not a function tool.",
                 tool_call=tool_call,
                 tool_name=tool_name,
                 call_id=call_id,

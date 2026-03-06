@@ -281,7 +281,7 @@ class FakeModel(Model):
                     sequence_number += 1
 
                 elif isinstance(output_item, ResponseOutputMessage):
-                    for content_index, content_part in enumerate(output_item.content):
+                    for content_index, content_part in enumerate(output_item.content or []):
                         if isinstance(content_part, ResponseOutputText):
                             yield ResponseContentPartAddedEvent(
                                 type="response.content_part.added",

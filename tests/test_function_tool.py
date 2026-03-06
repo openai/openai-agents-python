@@ -15,14 +15,18 @@ from agents import (
     Agent,
     AgentBase,
     FunctionTool,
+    HostedMCPTool,
     ModelBehaviorError,
     RunContextWrapper,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
     ToolOutputGuardrailData,
+    ToolSearchTool,
     ToolTimeoutError,
+    UserError,
     function_tool,
     tool_input_guardrail,
+    tool_namespace,
     tool_output_guardrail,
 )
 from agents.tool import default_tool_error_function
@@ -31,6 +35,60 @@ from agents.tool_context import ToolContext
 
 def argless_function() -> str:
     return "ok"
+
+
+def test_tool_namespace_copies_tools_with_metadata() -> None:
+    tool = function_tool(argless_function)
+
+    namespaced_tools = tool_namespace(
+        name="crm",
+        description="CRM tools",
+        tools=[tool],
+    )
+
+    assert len(namespaced_tools) == 1
+    assert namespaced_tools[0] is not tool
+    assert namespaced_tools[0]._tool_namespace == "crm"
+    assert namespaced_tools[0]._tool_namespace_description == "CRM tools"
+    assert namespaced_tools[0].qualified_name == "crm.argless_function"
+    assert tool._tool_namespace is None
+    assert tool.qualified_name == "argless_function"
+
+
+def test_tool_namespace_requires_keyword_arguments() -> None:
+    tool = function_tool(argless_function)
+
+    with pytest.raises(TypeError):
+        tool_namespace("crm", "CRM tools", [tool])  # type: ignore[misc]
+
+
+def test_tool_namespace_requires_non_empty_description() -> None:
+    tool = function_tool(argless_function)
+
+    with pytest.raises(UserError, match="non-empty description"):
+        tool_namespace(
+            name="crm",
+            description=None,
+            tools=[tool],
+        )
+
+    with pytest.raises(UserError, match="non-empty description"):
+        tool_namespace(
+            name="crm",
+            description="   ",
+            tools=[tool],
+        )
+
+
+def test_tool_namespace_rejects_reserved_same_name_shape() -> None:
+    tool = function_tool(argless_function, name_override="lookup_account")
+
+    with pytest.raises(UserError, match="synthetic namespace `lookup_account.lookup_account`"):
+        tool_namespace(
+            name="lookup_account",
+            description="Same-name namespace",
+            tools=[tool],
+        )
 
 
 @pytest.mark.asyncio
@@ -435,6 +493,67 @@ async def test_is_enabled_bool_and_callable():
     assert len(tools_with_ctx) == 2
     assert tools_with_ctx[0].name == "another_tool"
     assert tools_with_ctx[1].name == "third_tool"
+
+
+@pytest.mark.asyncio
+async def test_get_all_tools_preserves_explicit_tool_search_when_deferred_tools_are_disabled():
+    async def deferred_enabled(ctx: RunContextWrapper[BoolCtx], agent: AgentBase) -> bool:
+        return ctx.context.enable_tools
+
+    @function_tool(defer_loading=True, is_enabled=deferred_enabled)
+    def deferred_lookup() -> str:
+        return "loaded"
+
+    agent = Agent(name="t", tools=[deferred_lookup, ToolSearchTool()])
+
+    tools_with_disabled_context = await agent.get_all_tools(
+        RunContextWrapper(BoolCtx(enable_tools=False))
+    )
+    assert len(tools_with_disabled_context) == 1
+    assert isinstance(tools_with_disabled_context[0], ToolSearchTool)
+
+    tools_with_enabled_context = await agent.get_all_tools(
+        RunContextWrapper(BoolCtx(enable_tools=True))
+    )
+    assert tools_with_enabled_context[0] is deferred_lookup
+    assert isinstance(tools_with_enabled_context[1], ToolSearchTool)
+
+
+@pytest.mark.asyncio
+async def test_get_all_tools_keeps_tool_search_for_namespace_only_tools():
+    namespaced_lookup = tool_namespace(
+        name="crm",
+        description="CRM tools",
+        tools=[function_tool(lambda account_id: account_id, name_override="lookup_account")],
+    )[0]
+
+    agent = Agent(name="t", tools=[namespaced_lookup, ToolSearchTool()])
+
+    tools = await agent.get_all_tools(RunContextWrapper(BoolCtx(enable_tools=False)))
+
+    assert tools[0] is namespaced_lookup
+    assert isinstance(tools[1], ToolSearchTool)
+
+
+@pytest.mark.asyncio
+async def test_get_all_tools_keeps_tool_search_for_deferred_hosted_mcp() -> None:
+    hosted_mcp = HostedMCPTool(
+        tool_config=cast(
+            Any,
+            {
+                "type": "mcp",
+                "server_label": "crm_server",
+                "server_url": "https://example.com/mcp",
+                "defer_loading": True,
+            },
+        )
+    )
+    agent = Agent(name="t", tools=[hosted_mcp, ToolSearchTool()])
+
+    tools = await agent.get_all_tools(RunContextWrapper(BoolCtx(enable_tools=False)))
+
+    assert tools[0] is hosted_mcp
+    assert isinstance(tools[1], ToolSearchTool)
 
 
 @pytest.mark.asyncio
