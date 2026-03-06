@@ -78,24 +78,6 @@ _HEADERS = {"User-Agent": _USER_AGENT}
 _HEADERS_OVERRIDE: ContextVar[dict[str, str] | None] = ContextVar(
     "openai_responses_headers_override", default=None
 )
-_RESPONSES_TOOL_PARAM_TYPES = frozenset(
-    {
-        "apply_patch",
-        "code_interpreter",
-        "computer_use_preview",
-        "file_search",
-        "function",
-        "image_generation",
-        "local_shell",
-        "mcp",
-        "namespace",
-        "shell",
-        "tool_search",
-        "web_search",
-        "web_search_2025_08_26",
-        "web_search_preview",
-    }
-)
 _RESPONSE_INCLUDABLE_VALUES = frozenset(
     value for value in get_args(ResponseIncludable) if isinstance(value, str)
 )
@@ -129,17 +111,15 @@ def _is_openai_omitted_value(value: Any) -> bool:
     return isinstance(value, (Omit, NotGiven))
 
 
-def _is_responses_tool_param(value: object) -> TypeGuard[ResponsesToolParam]:
-    if not isinstance(value, Mapping):
-        return False
-    tool_type = value.get("type")
-    return isinstance(tool_type, str) and tool_type in _RESPONSES_TOOL_PARAM_TYPES
-
-
 def _require_responses_tool_param(value: object) -> ResponsesToolParam:
-    if not _is_responses_tool_param(value):
+    if not isinstance(value, Mapping):
         raise TypeError(f"Invalid Responses tool param payload: {value!r}")
-    return value
+
+    tool_type = value.get("type")
+    if not isinstance(tool_type, str):
+        raise TypeError(f"Invalid Responses tool param payload: {value!r}")
+
+    return cast(ResponsesToolParam, value)
 
 
 def _is_response_includable(value: object) -> TypeGuard[ResponseIncludable]:

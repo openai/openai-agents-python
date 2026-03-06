@@ -15,6 +15,8 @@ from agents import ModelSettings, ModelTracing, ToolSearchTool, __version__
 from agents.exceptions import UserError
 from agents.models.openai_responses import (
     _HEADERS_OVERRIDE as RESP_HEADERS,
+    ConvertedTools,
+    Converter,
     OpenAIResponsesModel,
     OpenAIResponsesWSModel,
     ResponsesWebSocketError,
@@ -717,6 +719,37 @@ def test_build_response_create_kwargs_preserves_unknown_response_include_values(
     )
 
     assert kwargs["include"] == ["response.future_flag"]
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_preserves_unknown_tool_types(monkeypatch) -> None:
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    future_tool = cast(Any, {"type": "future_beta_tool", "label": "preview"})
+
+    monkeypatch.setattr(
+        Converter,
+        "convert_tools",
+        classmethod(
+            lambda cls, tools, handoffs, **kwargs: ConvertedTools(tools=[future_tool], includes=[])
+        ),
+    )
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert kwargs["tools"] == [future_tool]
 
 
 @pytest.mark.allow_call_model_methods
