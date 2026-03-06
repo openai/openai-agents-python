@@ -177,6 +177,88 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_stream_response_keeps_reasoning_item_open_across_interleaved_text(
+    monkeypatch,
+) -> None:
+    chunks = [
+        create_chunk(create_reasoning_delta("Let me think")),
+        create_chunk(create_content_delta("The answer")),
+        create_chunk(create_reasoning_delta(" more carefully")),
+        create_chunk(create_content_delta(" is 42"), include_usage=True),
+    ]
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, create_fake_stream(chunks)
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    output_events = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        output_events.append(event)
+
+    reasoning_part_added_events = [
+        event for event in output_events if event.type == "response.reasoning_summary_part.added"
+    ]
+    assert [event.summary_index for event in reasoning_part_added_events] == [0, 1]
+
+    reasoning_part_done_events = [
+        event for event in output_events if event.type == "response.reasoning_summary_part.done"
+    ]
+    assert [event.summary_index for event in reasoning_part_done_events] == [0, 1]
+
+    first_reasoning_done_index = output_events.index(reasoning_part_done_events[0])
+    first_text_delta_index = next(
+        index
+        for index, event in enumerate(output_events)
+        if event.type == "response.output_text.delta"
+    )
+    second_reasoning_delta_index = next(
+        index
+        for index, event in enumerate(output_events)
+        if event.type == "response.reasoning_summary_text.delta" and event.summary_index == 1
+    )
+    reasoning_item_done_index = next(
+        index
+        for index, event in enumerate(output_events)
+        if event.type == "response.output_item.done" and event.item.type == "reasoning"
+    )
+
+    assert first_reasoning_done_index < first_text_delta_index
+    assert second_reasoning_delta_index > first_text_delta_index
+    assert reasoning_item_done_index > second_reasoning_delta_index
+
+    response_event = output_events[-1]
+    assert response_event.type == "response.completed"
+    assert isinstance(response_event.response.output[0], ResponseReasoningItem)
+    assert [summary.text for summary in response_event.response.output[0].summary] == [
+        "Let me think",
+        " more carefully",
+    ]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_get_response_with_reasoning_content(monkeypatch) -> None:
     """
     Test that when a model returns reasoning content in addition to regular content,
