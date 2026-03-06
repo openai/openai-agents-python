@@ -12,7 +12,7 @@ Required environment variable:
 - `OPENAI_API_KEY`
 
 Optional environment variables:
-- `OPENAI_MODEL` (defaults to `gpt-5.2`)
+- `OPENAI_MODEL` (defaults to `gpt-5.4`)
 - `OPENAI_BASE_URL`
 - `OPENAI_WEBSOCKET_BASE_URL`
 - `EXAMPLES_INTERACTIVE_MODE=auto` (auto-approve HITL prompts for scripted runs)
@@ -160,7 +160,7 @@ async def run_streamed_turn(
 
 
 async def main() -> None:
-    model_name = os.getenv("OPENAI_MODEL", "gpt-5.2-codex")
+    model_name = os.getenv("OPENAI_MODEL", "gpt-5.4")
     policy_agent = Agent(
         name="RefundPolicySpecialist",
         instructions=(
