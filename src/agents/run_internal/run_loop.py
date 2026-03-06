@@ -7,13 +7,19 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses as _dc
-from collections.abc import Awaitable, Callable
+import json
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar, cast
 
 from openai.types.responses import Response, ResponseCompletedEvent, ResponseOutputItemDoneEvent
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
+from .._tool_identity import (
+    NamedToolLookupKey,
+    build_function_tool_lookup_map,
+    get_function_tool_lookup_key_for_call,
+)
 from ..agent import Agent
 from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import (
@@ -34,7 +40,11 @@ from ..items import (
     ToolApprovalItem,
     ToolCallItem,
     ToolCallItemTypes,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
     TResponseInputItem,
+    coerce_tool_search_call_raw_item,
+    coerce_tool_search_output_raw_item,
 )
 from ..lifecycle import RunHooks
 from ..logger import logger
@@ -49,7 +59,7 @@ from ..stream_events import (
     RawResponsesStreamEvent,
     RunItemStreamEvent,
 )
-from ..tool import Tool, dispose_resolved_computers
+from ..tool import FunctionTool, Tool, dispose_resolved_computers
 from ..tracing import Span, SpanError, agent_span, get_current_trace
 from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData
@@ -586,8 +596,8 @@ async def start_streaming(
                         run_state=run_state,
                     )
 
-                    tool_use_tracker.add_tool_use(
-                        current_agent, run_state._last_processed_response.tools_used
+                    tool_use_tracker.record_processed_response(
+                        current_agent, run_state._last_processed_response
                     )
                     streamed_result._tool_use_tracker_snapshot = serialize_tool_use_tracker(
                         tool_use_tracker
@@ -749,6 +759,7 @@ async def start_streaming(
                     streamed_result.new_items.append(synthesized_item)
                     if run_state is not None:
                         run_state._generated_items = list(streamed_result._model_input_items)
+                        run_state._clear_generated_items_last_processed_marker()
                         run_state._session_items = list(streamed_result.new_items)
                     stream_step_items_to_queue([synthesized_item], streamed_result._event_queue)
                     store_setting = current_agent.model_settings.resolve(
@@ -940,6 +951,7 @@ async def start_streaming(
                         run_state._model_responses = streamed_result.raw_responses
                         run_state._last_processed_response = processed_response_for_state
                         run_state._generated_items = streamed_result._model_input_items
+                        run_state._mark_generated_items_merged_with_last_processed()
                         run_state._session_items = list(streamed_result.new_items)
                         run_state._current_step = turn_result.next_step
                         run_state._current_turn = current_turn
@@ -1059,10 +1071,34 @@ async def run_single_turn_streamed(
     """Run a single streamed turn and emit events as results arrive."""
     emitted_tool_call_ids: set[str] = set()
     emitted_reasoning_item_ids: set[str] = set()
-    # Precompute tool name -> tool map once per turn. Dict "last wins" semantics match
-    # execution in process_model_response, so duplicate names (e.g., MCP + local tool)
-    # stream the same description that execution uses.
-    tool_map = {t.name: t for t in all_tools if hasattr(t, "name") and t.name}
+    emitted_tool_search_fingerprints: set[str] = set()
+    # Precompute the lookup map used for streaming descriptions. Function tools use the same
+    # collision-free lookup keys as runtime dispatch, including deferred top-level aliases.
+    tool_map: dict[NamedToolLookupKey, Any] = cast(
+        dict[NamedToolLookupKey, Any],
+        build_function_tool_lookup_map(
+            [tool for tool in all_tools if isinstance(tool, FunctionTool)]
+        ),
+    )
+    for tool in all_tools:
+        tool_name = getattr(tool, "name", None)
+        if not isinstance(tool_name, str) or not tool_name:
+            continue
+        if isinstance(tool, FunctionTool):
+            continue
+        tool_map[tool_name] = tool
+
+    def _tool_search_fingerprint(raw_item: Any) -> str:
+        if isinstance(raw_item, Mapping):
+            payload: Any = dict(raw_item)
+        elif hasattr(raw_item, "model_dump"):
+            payload = cast(Any, raw_item).model_dump(exclude_unset=True)
+        else:
+            payload = {
+                "type": getattr(raw_item, "type", None),
+                "id": getattr(raw_item, "id", None),
+            }
+        return json.dumps(payload, sort_keys=True, default=str)
 
     try:
         turn_input = ItemHelpers.input_to_new_input_list(streamed_result.input)
@@ -1233,8 +1269,33 @@ async def run_single_turn_streamed(
 
         if isinstance(event, ResponseOutputItemDoneEvent):
             output_item = event.item
+            output_item_type = getattr(output_item, "type", None)
 
-            if isinstance(output_item, TOOL_CALL_TYPES):
+            if output_item_type == "tool_search_call":
+                emitted_tool_search_fingerprints.add(_tool_search_fingerprint(output_item))
+                streamed_result._event_queue.put_nowait(
+                    RunItemStreamEvent(
+                        item=ToolSearchCallItem(
+                            raw_item=coerce_tool_search_call_raw_item(output_item),
+                            agent=agent,
+                        ),
+                        name="tool_search_called",
+                    )
+                )
+
+            elif output_item_type == "tool_search_output":
+                emitted_tool_search_fingerprints.add(_tool_search_fingerprint(output_item))
+                streamed_result._event_queue.put_nowait(
+                    RunItemStreamEvent(
+                        item=ToolSearchOutputItem(
+                            raw_item=coerce_tool_search_output_raw_item(output_item),
+                            agent=agent,
+                        ),
+                        name="tool_search_output_created",
+                    )
+                )
+
+            elif isinstance(output_item, TOOL_CALL_TYPES):
                 output_call_id: str | None = getattr(
                     output_item, "call_id", getattr(output_item, "id", None)
                 )
@@ -1248,10 +1309,13 @@ async def run_single_turn_streamed(
 
                     # Look up tool description from precomputed map ("last wins" matches
                     # execution behavior in process_model_response).
-                    tool_name = getattr(output_item, "name", None)
+                    tool_lookup_key = get_function_tool_lookup_key_for_call(output_item)
+                    matched_tool = (
+                        tool_map.get(tool_lookup_key) if tool_lookup_key is not None else None
+                    )
                     tool_description: str | None = None
-                    if isinstance(tool_name, str) and tool_name in tool_map:
-                        tool_description = getattr(tool_map[tool_name], "description", None)
+                    if matched_tool is not None:
+                        tool_description = getattr(matched_tool, "description", None)
 
                     tool_item = ToolCallItem(
                         raw_item=cast(ToolCallItemTypes, output_item),
@@ -1327,6 +1391,16 @@ async def run_single_turn_streamed(
                 isinstance(item, ReasoningItem)
                 and (reasoning_id := getattr(item.raw_item, "id", None))
                 and reasoning_id in emitted_reasoning_item_ids
+            )
+        ]
+
+    if emitted_tool_search_fingerprints:
+        items_to_filter = [
+            item
+            for item in items_to_filter
+            if not (
+                isinstance(item, (ToolSearchCallItem, ToolSearchOutputItem))
+                and _tool_search_fingerprint(item.raw_item) in emitted_tool_search_fingerprints
             )
         ]
 

@@ -3,7 +3,7 @@ from typing import Any, cast
 import pytest
 
 from agents import Agent
-from agents.items import ModelResponse, TResponseInputItem
+from agents.items import ModelResponse, RunItem, TResponseInputItem
 from agents.lifecycle import RunHooks
 from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.result import RunResultStreaming
@@ -108,6 +108,392 @@ def test_mark_input_as_sent_uses_raw_generated_source_for_rebuilt_filtered_item(
         generated_items=cast(list[Any], generated_items),
     )
     assert prepared_again == []
+
+
+def test_hydrate_from_state_skips_restored_tool_search_items_by_object_identity() -> None:
+    tracker = OpenAIServerConversationTracker(conversation_id="conv2c", previous_response_id=None)
+    tool_search_call = {
+        "type": "tool_search_call",
+        "queries": [{"search_term": "account balance"}],
+    }
+    tool_search_result = {
+        "type": "tool_search_output",
+        "results": [{"text": "Balance lookup docs"}],
+    }
+    hydrated_items = [
+        DummyRunItem(tool_search_call, type="tool_search_call_item"),
+        DummyRunItem(tool_search_result, type="tool_search_output_item"),
+    ]
+
+    tracker.hydrate_from_state(
+        original_input=[],
+        generated_items=cast(list[Any], hydrated_items),
+        model_responses=[],
+    )
+
+    prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(list[Any], hydrated_items),
+    )
+
+    assert prepared == []
+
+
+def test_hydrate_from_state_skips_restored_tool_search_items_by_fingerprint() -> None:
+    tracker = OpenAIServerConversationTracker(conversation_id="conv2d", previous_response_id=None)
+    tool_search_call = {
+        "type": "tool_search_call",
+        "queries": [{"search_term": "account balance"}],
+    }
+    tool_search_result = {
+        "type": "tool_search_output",
+        "results": [{"text": "Balance lookup docs"}],
+    }
+    hydrated_items = [
+        DummyRunItem(tool_search_call, type="tool_search_call_item"),
+        DummyRunItem(tool_search_result, type="tool_search_output_item"),
+    ]
+    rebuilt_items = [
+        DummyRunItem(dict(tool_search_call), type="tool_search_call_item"),
+        DummyRunItem(dict(tool_search_result), type="tool_search_output_item"),
+    ]
+
+    tracker.hydrate_from_state(
+        original_input=[],
+        generated_items=cast(list[Any], hydrated_items),
+        model_responses=[],
+    )
+
+    prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(list[Any], rebuilt_items),
+    )
+
+    assert prepared == []
+
+
+def test_hydrate_from_state_skips_restored_tool_search_items_when_created_by_is_stripped() -> None:
+    tracker = OpenAIServerConversationTracker(
+        conversation_id="conv2d-created-by", previous_response_id=None
+    )
+    session_items = [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "call_id": "tool_search_call_1",
+                "arguments": {"query": "account balance"},
+                "execution": "server",
+                "status": "completed",
+                "created_by": "server",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "call_id": "tool_search_call_1",
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+                "created_by": "server",
+            },
+        ),
+    ]
+
+    tracker.hydrate_from_state(
+        original_input=[],
+        generated_items=[],
+        model_responses=[],
+        session_items=session_items,
+    )
+
+    prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(
+            list[RunItem],
+            [
+                DummyRunItem(
+                    {
+                        "type": "tool_search_call",
+                        "call_id": "tool_search_call_1",
+                        "arguments": {"query": "account balance"},
+                        "execution": "server",
+                        "status": "completed",
+                    },
+                    type="tool_search_call_item",
+                ),
+                DummyRunItem(
+                    {
+                        "type": "tool_search_output",
+                        "call_id": "tool_search_call_1",
+                        "execution": "server",
+                        "status": "completed",
+                        "tools": [],
+                    },
+                    type="tool_search_output_item",
+                ),
+            ],
+        ),
+    )
+
+    assert prepared == []
+
+
+def test_hydrate_from_state_skips_restored_tool_search_items_when_only_ids_differ() -> None:
+    tracker = OpenAIServerConversationTracker(
+        conversation_id="conv2d-ids-only", previous_response_id=None
+    )
+    session_items = [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "id": "tool_search_call_saved",
+                "arguments": {"query": "account balance"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "id": "tool_search_output_saved",
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+            },
+        ),
+    ]
+
+    tracker.hydrate_from_state(
+        original_input=[],
+        generated_items=[],
+        model_responses=[],
+        session_items=session_items,
+    )
+
+    prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(
+            list[RunItem],
+            [
+                DummyRunItem(
+                    {
+                        "type": "tool_search_call",
+                        "arguments": {"query": "account balance"},
+                        "execution": "server",
+                        "status": "completed",
+                    },
+                    type="tool_search_call_item",
+                ),
+                DummyRunItem(
+                    {
+                        "type": "tool_search_output",
+                        "execution": "server",
+                        "status": "completed",
+                        "tools": [],
+                    },
+                    type="tool_search_output_item",
+                ),
+            ],
+        ),
+    )
+
+    assert prepared == []
+
+
+def test_prepare_input_keeps_repeated_tool_search_items_with_new_ids() -> None:
+    tracker = OpenAIServerConversationTracker(
+        conversation_id="conv2d-repeated-search", previous_response_id=None
+    )
+
+    prior_response = object.__new__(ModelResponse)
+    prior_response.output = [
+        cast(
+            Any,
+            {
+                "type": "tool_search_call",
+                "id": "tool_search_call_saved",
+                "arguments": {"query": "account balance"},
+                "execution": "server",
+                "status": "completed",
+                "created_by": "server",
+            },
+        ),
+        cast(
+            Any,
+            {
+                "type": "tool_search_output",
+                "id": "tool_search_output_saved",
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+                "created_by": "server",
+            },
+        ),
+    ]
+    prior_response.usage = Usage()
+    prior_response.response_id = "resp-tool-search-repeat-1"
+
+    tracker.track_server_items(prior_response)
+
+    repeated_items = [
+        DummyRunItem(
+            {
+                "type": "tool_search_call",
+                "id": "tool_search_call_repeat",
+                "arguments": {"query": "account balance"},
+                "execution": "server",
+                "status": "completed",
+            },
+            type="tool_search_call_item",
+        ),
+        DummyRunItem(
+            {
+                "type": "tool_search_output",
+                "id": "tool_search_output_repeat",
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+            },
+            type="tool_search_output_item",
+        ),
+    ]
+
+    prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(list[Any], repeated_items),
+    )
+
+    assert prepared == [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "id": "tool_search_call_repeat",
+                "arguments": {"query": "account balance"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "id": "tool_search_output_repeat",
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+            },
+        ),
+    ]
+
+
+def test_track_server_items_skips_live_tool_search_items_on_next_prepare() -> None:
+    tracker = OpenAIServerConversationTracker(conversation_id="conv2e", previous_response_id=None)
+    tool_search_call = cast(
+        Any,
+        {
+            "type": "tool_search_call",
+            "call_id": "tool_search_call_live",
+            "arguments": {"query": "account balance"},
+            "execution": "server",
+            "status": "completed",
+            "created_by": "server",
+        },
+    )
+    tool_search_result = cast(
+        Any,
+        {
+            "type": "tool_search_output",
+            "call_id": "tool_search_call_live",
+            "execution": "server",
+            "status": "completed",
+            "tools": [],
+            "created_by": "server",
+        },
+    )
+    model_response = object.__new__(ModelResponse)
+    model_response.output = [tool_search_call, tool_search_result]
+    model_response.usage = Usage()
+    model_response.response_id = "resp-tool-search"
+
+    tracker.track_server_items(model_response)
+
+    prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(
+            list[RunItem],
+            [
+                DummyRunItem(
+                    {
+                        "type": "tool_search_call",
+                        "call_id": "tool_search_call_live",
+                        "arguments": {"query": "account balance"},
+                        "execution": "server",
+                        "status": "completed",
+                    },
+                    type="tool_search_call_item",
+                ),
+                DummyRunItem(
+                    {
+                        "type": "tool_search_output",
+                        "call_id": "tool_search_call_live",
+                        "execution": "server",
+                        "status": "completed",
+                        "tools": [],
+                    },
+                    type="tool_search_output_item",
+                ),
+            ],
+        ),
+    )
+
+    assert prepared == []
+
+
+def test_track_server_items_filters_pending_tool_search_by_sanitized_fingerprint() -> None:
+    tracker = OpenAIServerConversationTracker(
+        conversation_id="conv2e-pending", previous_response_id=None
+    )
+    tracker.remaining_initial_input = [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "call_id": "tool_search_pending",
+                "arguments": {"query": "account balance"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+        cast(TResponseInputItem, {"id": "keep-me", "type": "message"}),
+    ]
+
+    model_response = object.__new__(ModelResponse)
+    model_response.output = [
+        cast(
+            Any,
+            {
+                "type": "tool_search_call",
+                "call_id": "tool_search_pending",
+                "arguments": {"query": "account balance"},
+                "execution": "server",
+                "status": "completed",
+                "created_by": "server",
+            },
+        )
+    ]
+    model_response.usage = Usage()
+    model_response.response_id = "resp-tool-search-pending"
+
+    tracker.track_server_items(model_response)
+
+    assert tracker.remaining_initial_input == [
+        cast(TResponseInputItem, {"id": "keep-me", "type": "message"})
+    ]
 
 
 def test_track_server_items_filters_remaining_initial_input_by_fingerprint() -> None:

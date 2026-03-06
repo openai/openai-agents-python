@@ -666,9 +666,9 @@ class AgentRunner:
                             )
 
                             if run_state._last_processed_response is not None:
-                                tool_use_tracker.add_tool_use(
+                                tool_use_tracker.record_processed_response(
                                     current_agent,
-                                    run_state._last_processed_response.tools_used,
+                                    run_state._last_processed_response,
                                 )
 
                             original_input = turn_result.original_input

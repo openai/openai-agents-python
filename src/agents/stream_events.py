@@ -34,6 +34,8 @@ class RunItemStreamEvent:
         # This is misspelled, but we can't change it because that would be a breaking change
         "handoff_occured",
         "tool_called",
+        "tool_search_called",
+        "tool_search_output_created",
         "tool_output",
         "reasoning_item_created",
         "mcp_approval_requested",

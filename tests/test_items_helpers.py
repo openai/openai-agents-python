@@ -29,6 +29,8 @@ from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.response_output_text_param import ResponseOutputTextParam
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from openai.types.responses.response_reasoning_item_param import ResponseReasoningItemParam
+from openai.types.responses.response_tool_search_call import ResponseToolSearchCall
+from openai.types.responses.response_tool_search_output_item import ResponseToolSearchOutputItem
 from pydantic import TypeAdapter
 
 from agents import (
@@ -433,6 +435,52 @@ def test_to_input_items_for_reasoning() -> None:
     print(converted_dict)
     print(expected)
     assert converted_dict == expected
+
+
+def test_to_input_items_for_tool_search_strips_created_by() -> None:
+    """Tool-search output items should reuse the replay sanitizer before round-tripping."""
+    tool_search_call = ResponseToolSearchCall(
+        id="tsc_123",
+        call_id="call_tsc_123",
+        arguments={"query": "profile"},
+        execution="server",
+        status="completed",
+        type="tool_search_call",
+        created_by="server",
+    )
+    tool_search_output = ResponseToolSearchOutputItem(
+        id="tso_123",
+        call_id="call_tsc_123",
+        execution="server",
+        status="completed",
+        tools=[],
+        type="tool_search_output",
+        created_by="server",
+    )
+
+    resp = ModelResponse(
+        output=[tool_search_call, tool_search_output], usage=Usage(), response_id=None
+    )
+    input_items = resp.to_input_items()
+
+    assert input_items == [
+        {
+            "id": "tsc_123",
+            "call_id": "call_tsc_123",
+            "arguments": {"query": "profile"},
+            "execution": "server",
+            "status": "completed",
+            "type": "tool_search_call",
+        },
+        {
+            "id": "tso_123",
+            "call_id": "call_tsc_123",
+            "execution": "server",
+            "status": "completed",
+            "tools": [],
+            "type": "tool_search_output",
+        },
+    ]
 
 
 def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:

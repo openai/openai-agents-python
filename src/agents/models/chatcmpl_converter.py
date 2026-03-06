@@ -48,7 +48,12 @@ from ..exceptions import AgentsException, UserError
 from ..handoffs import Handoff
 from ..items import TResponseInputItem, TResponseOutputItem
 from ..model_settings import MCPToolChoice
-from ..tool import FunctionTool, Tool
+from ..tool import (
+    FunctionTool,
+    Tool,
+    ensure_function_tool_supports_responses_only_features,
+    ensure_tool_choice_supports_backend,
+)
 from .fake_id import FAKE_RESPONSES_ID
 
 ResponseInputContentWithAudioParam = Union[
@@ -74,6 +79,10 @@ class Converter:
         elif tool_choice == "none":
             return "none"
         else:
+            ensure_tool_choice_supports_backend(
+                tool_choice,
+                backend_name="OpenAI Responses models",
+            )
             return {
                 "type": "function",
                 "function": {
@@ -333,12 +342,17 @@ class Converter:
                     raise UserError(
                         f"Only image URLs are supported for input_image {casted_image_param}"
                     )
+                detail = casted_image_param.get("detail", "auto")
+                if detail == "original":
+                    # Chat Completions only supports auto/low/high, so preserve the caller's
+                    # highest-fidelity intent with the closest available value.
+                    detail = "high"
                 out.append(
                     ChatCompletionContentPartImageParam(
                         type="image_url",
                         image_url={
                             "url": casted_image_param["image_url"],
-                            "detail": casted_image_param.get("detail", "auto"),
+                            "detail": detail,
                         },
                     )
                 )
@@ -751,6 +765,10 @@ class Converter:
     @classmethod
     def tool_to_openai(cls, tool: Tool) -> ChatCompletionToolParam:
         if isinstance(tool, FunctionTool):
+            ensure_function_tool_supports_responses_only_features(
+                tool,
+                backend_name="Chat Completions-compatible models",
+            )
             return {
                 "type": "function",
                 "function": {

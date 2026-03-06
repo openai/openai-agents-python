@@ -22,6 +22,8 @@ from agents.items import (
     MessageOutputItem,
     ReasoningItem,
     ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
     TResponseInputItem,
 )
 
@@ -58,6 +60,21 @@ def _get_function_result_input_item(content: str) -> TResponseInputItem:
     }
 
 
+def _get_tool_search_call_input_item() -> dict[str, Any]:
+    return {
+        "type": "tool_search_call",
+        "arguments": {"paths": ["crm"], "query": "profile"},
+        "status": "completed",
+    }
+
+
+def _get_tool_search_result_input_item() -> dict[str, Any]:
+    return {
+        "type": "tool_search_output",
+        "tools": [{"type": "tool_reference", "namespace": "crm", "function_name": "lookup"}],
+    }
+
+
 def _get_message_output_run_item(content: str) -> MessageOutputItem:
     return MessageOutputItem(
         agent=fake_agent(),
@@ -83,6 +100,14 @@ def _get_tool_output_run_item(content: str) -> ToolCallOutputItem:
         },
         output=content,
     )
+
+
+def _get_tool_search_call_run_item() -> ToolSearchCallItem:
+    return ToolSearchCallItem(agent=fake_agent(), raw_item=_get_tool_search_call_input_item())
+
+
+def _get_tool_search_output_run_item() -> ToolSearchOutputItem:
+    return ToolSearchOutputItem(agent=fake_agent(), raw_item=_get_tool_search_result_input_item())
 
 
 def _get_handoff_input_item(content: str) -> TResponseInputItem:
@@ -235,6 +260,31 @@ def test_removes_tools_from_new_items_and_history():
     )
     filtered_data = remove_all_tools(handoff_input_data)
     assert len(filtered_data.input_history) == 3
+    assert len(filtered_data.pre_handoff_items) == 1
+    assert len(filtered_data.new_items) == 1
+
+
+def test_removes_tool_search_from_history_and_items() -> None:
+    handoff_input_data = handoff_data(
+        input_history=(
+            _get_message_input_item("Hello1"),
+            cast(TResponseInputItem, _get_tool_search_call_input_item()),
+            cast(TResponseInputItem, _get_tool_search_result_input_item()),
+            _get_message_input_item("Hello2"),
+        ),
+        pre_handoff_items=(
+            _get_tool_search_call_run_item(),
+            _get_message_output_run_item("123"),
+        ),
+        new_items=(
+            _get_tool_search_output_run_item(),
+            _get_message_output_run_item("World"),
+        ),
+    )
+
+    filtered_data = remove_all_tools(handoff_input_data)
+
+    assert len(filtered_data.input_history) == 2
     assert len(filtered_data.pre_handoff_items) == 1
     assert len(filtered_data.new_items) == 1
 

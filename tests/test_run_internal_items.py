@@ -3,11 +3,21 @@ from __future__ import annotations
 from typing import Any, cast
 
 import pytest
+from openai.types.responses import ResponseToolSearchCall, ResponseToolSearchOutputItem
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from agents import Agent
-from agents.items import ReasoningItem, TResponseInputItem
+from agents.exceptions import AgentsException
+from agents.items import (
+    ReasoningItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
+    TResponseInputItem,
+    coerce_tool_search_output_raw_item,
+)
 from agents.models.fake_id import FAKE_RESPONSES_ID
+from agents.result import RunResult
+from agents.run_context import RunContextWrapper
 from agents.run_internal import items as run_items
 
 
@@ -56,6 +66,159 @@ def test_drop_orphan_function_calls_preserves_non_mapping_entries() -> None:
         and entry.get("call_id") == "orphan_call"
         for entry in filtered
     )
+
+
+def test_drop_orphan_function_calls_handles_tool_search_calls() -> None:
+    payload: list[Any] = [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "call_id": "tool_search_orphan",
+                "arguments": {"query": "orphan"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "call_id": "tool_search_keep",
+                "arguments": {"query": "keep"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "call_id": "tool_search_keep",
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+            },
+        ),
+    ]
+
+    filtered = run_items.drop_orphan_function_calls(cast(list[TResponseInputItem], payload))
+
+    assert any(
+        isinstance(entry, dict)
+        and entry.get("type") == "tool_search_call"
+        and entry.get("call_id") == "tool_search_keep"
+        for entry in filtered
+    )
+    assert not any(
+        isinstance(entry, dict)
+        and entry.get("type") == "tool_search_call"
+        and entry.get("call_id") == "tool_search_orphan"
+        for entry in filtered
+    )
+
+
+def test_drop_orphan_function_calls_preserves_hosted_tool_search_pairs_without_call_ids() -> None:
+    payload: list[Any] = [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "call_id": None,
+                "arguments": {"query": "keep"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "call_id": None,
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+            },
+        ),
+    ]
+
+    filtered = run_items.drop_orphan_function_calls(cast(list[TResponseInputItem], payload))
+
+    assert len(filtered) == 2
+    assert cast(dict[str, Any], filtered[0])["type"] == "tool_search_call"
+    assert cast(dict[str, Any], filtered[1])["type"] == "tool_search_output"
+
+
+def test_drop_orphan_function_calls_matches_latest_anonymous_tool_search_call() -> None:
+    payload: list[Any] = [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "call_id": None,
+                "arguments": {"query": "orphan"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "call_id": None,
+                "arguments": {"query": "paired"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "call_id": None,
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+            },
+        ),
+    ]
+
+    filtered = run_items.drop_orphan_function_calls(cast(list[TResponseInputItem], payload))
+
+    assert [cast(dict[str, Any], item)["type"] for item in filtered] == [
+        "tool_search_call",
+        "tool_search_output",
+    ]
+    assert cast(dict[str, Any], filtered[0])["arguments"] == {"query": "paired"}
+
+
+def test_drop_orphan_function_calls_does_not_pair_named_tool_search_with_anonymous_output() -> None:
+    payload: list[Any] = [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_call",
+                "call_id": "orphan_search",
+                "arguments": {"query": "keep"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "call_id": None,
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+            },
+        ),
+    ]
+
+    filtered = run_items.drop_orphan_function_calls(cast(list[TResponseInputItem], payload))
+
+    assert [cast(dict[str, Any], item)["type"] for item in filtered] == ["tool_search_output"]
 
 
 def test_normalize_and_ensure_input_item_format_keep_non_dict_entries() -> None:
@@ -238,3 +401,95 @@ def test_run_item_to_input_item_omits_reasoning_item_ids_when_configured() -> No
     assert isinstance(result, dict)
     assert result.get("type") == "reasoning"
     assert "id" not in result
+
+
+def test_run_item_to_input_item_preserves_tool_search_items() -> None:
+    agent = Agent(name="A")
+    tool_search_call = ToolSearchCallItem(
+        agent=agent,
+        raw_item={"type": "tool_search_call", "queries": [{"search_term": "profile"}]},
+    )
+    tool_search_output = ToolSearchOutputItem(
+        agent=agent,
+        raw_item={"type": "tool_search_output", "results": [{"text": "Customer profile"}]},
+    )
+
+    converted_call = run_items.run_item_to_input_item(tool_search_call)
+    converted_output = run_items.run_item_to_input_item(tool_search_output)
+
+    assert isinstance(converted_call, dict)
+    assert converted_call["type"] == "tool_search_call"
+    assert isinstance(converted_output, dict)
+    assert converted_output["type"] == "tool_search_output"
+
+
+def test_run_item_to_input_item_strips_tool_search_created_by() -> None:
+    agent = Agent(name="A")
+    tool_search_call = ToolSearchCallItem(
+        agent=agent,
+        raw_item=ResponseToolSearchCall(
+            id="tsc_123",
+            type="tool_search_call",
+            arguments={"query": "profile"},
+            execution="client",
+            status="completed",
+            created_by="server",
+        ),
+    )
+    tool_search_output = ToolSearchOutputItem(
+        agent=agent,
+        raw_item=ResponseToolSearchOutputItem(
+            id="tso_123",
+            type="tool_search_output",
+            execution="client",
+            status="completed",
+            tools=[],
+            created_by="server",
+        ),
+    )
+
+    converted_call = run_items.run_item_to_input_item(tool_search_call)
+    converted_output = run_items.run_item_to_input_item(tool_search_output)
+
+    assert isinstance(converted_call, dict)
+    assert converted_call["type"] == "tool_search_call"
+    assert "created_by" not in converted_call
+    assert isinstance(converted_output, dict)
+    assert converted_output["type"] == "tool_search_output"
+    assert "created_by" not in converted_output
+
+
+def test_run_result_to_input_list_preserves_tool_search_items() -> None:
+    agent = Agent(name="A")
+    result = RunResult(
+        input="Find CRM tools",
+        new_items=[
+            ToolSearchCallItem(
+                agent=agent,
+                raw_item={"type": "tool_search_call", "queries": [{"search_term": "profile"}]},
+            ),
+            ToolSearchOutputItem(
+                agent=agent,
+                raw_item={"type": "tool_search_output", "results": [{"text": "Customer profile"}]},
+            ),
+        ],
+        raw_responses=[],
+        final_output="done",
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=RunContextWrapper(context=None),
+        _last_agent=agent,
+    )
+
+    input_items = result.to_input_list()
+
+    assert len(input_items) == 3
+    assert cast(dict[str, Any], input_items[1])["type"] == "tool_search_call"
+    assert cast(dict[str, Any], input_items[2])["type"] == "tool_search_output"
+
+
+def test_coerce_tool_search_output_raw_item_rejects_legacy_type() -> None:
+    with pytest.raises(AgentsException, match="Unexpected tool search output item type"):
+        coerce_tool_search_output_raw_item({"type": "tool_search_result", "results": []})

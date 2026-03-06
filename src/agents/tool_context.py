@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from openai.types.responses import ResponseFunctionToolCall
 
+from ._tool_identity import get_tool_call_namespace, tool_trace_name
 from .agent_tool_state import get_agent_tool_state_scope, set_agent_tool_state_scope
 from .run_context import RunContextWrapper, TContext
 from .usage import Usage
@@ -47,6 +48,9 @@ class ToolContext(RunContextWrapper[TContext]):
     tool_call: ResponseFunctionToolCall | None = None
     """The tool call object associated with this invocation."""
 
+    tool_namespace: str | None = None
+    """The Responses API namespace for this tool call, when present."""
+
     agent: AgentBase[Any] | None = None
     """The active agent for this tool call, when available."""
 
@@ -62,6 +66,7 @@ class ToolContext(RunContextWrapper[TContext]):
         tool_arguments: str | object = _MISSING,
         tool_call: ResponseFunctionToolCall | None = None,
         *,
+        tool_namespace: str | None = None,
         agent: AgentBase[Any] | None = None,
         run_config: RunConfig | None = None,
         turn_input: list[TResponseInputItem] | None = None,
@@ -91,8 +96,18 @@ class ToolContext(RunContextWrapper[TContext]):
             else cast(str, tool_call_id)
         )
         self.tool_call = tool_call
+        self.tool_namespace = (
+            tool_namespace
+            if isinstance(tool_namespace, str)
+            else get_tool_call_namespace(tool_call)
+        )
         self.agent = agent
         self.run_config = run_config
+
+    @property
+    def qualified_tool_name(self) -> str:
+        """Return the tool name qualified by namespace when available."""
+        return tool_trace_name(self.tool_name, self.tool_namespace) or self.tool_name
 
     @classmethod
     def from_agent_context(
@@ -102,6 +117,7 @@ class ToolContext(RunContextWrapper[TContext]):
         tool_call: ResponseFunctionToolCall | None = None,
         agent: AgentBase[Any] | None = None,
         *,
+        tool_namespace: str | None = None,
         run_config: RunConfig | None = None,
     ) -> ToolContext:
         """
@@ -127,6 +143,16 @@ class ToolContext(RunContextWrapper[TContext]):
             tool_call_id=tool_call_id,
             tool_arguments=tool_args,
             tool_call=tool_call,
+            tool_namespace=(
+                tool_namespace
+                if isinstance(tool_namespace, str)
+                else (
+                    getattr(tool_call, "namespace", None)
+                    if tool_call is not None
+                    and isinstance(getattr(tool_call, "namespace", None), str)
+                    else None
+                )
+            ),
             agent=tool_agent,
             run_config=tool_run_config,
             **base_values,

@@ -1860,7 +1860,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "2.20.0"
+version = "2.25.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1872,9 +1872,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6e/5a/f495777c02625bfa18212b6e3b73f1893094f2bf660976eb4bc6f43a1ca2/openai-2.20.0.tar.gz", hash = "sha256:2654a689208cd0bf1098bb9462e8d722af5cbe961e6bba54e6f19fb843d88db1", size = 642355, upload-time = "2026-02-10T19:02:54.145Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/43/2b/a442b206ed74908dd79e2ad1ef3ffaeae66422b1fb506af981f0ef671ba0/openai-2.25.0.tar.gz", hash = "sha256:c3e1965d83c333dbd341eb2c7c8aceb783c272cd57fc57353404d9a443634e29", size = 666577, upload-time = "2026-03-05T18:35:38.292Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b5/a0/cf4297aa51bbc21e83ef0ac018947fa06aea8f2364aad7c96cbf148590e6/openai-2.20.0-py3-none-any.whl", hash = "sha256:38d989c4b1075cd1f76abc68364059d822327cf1a932531d429795f4fc18be99", size = 1098479, upload-time = "2026-02-10T19:02:52.157Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/e6/ca496976bacdd7f86d4fa69359c2d9b5a547d7acbf0ae5cac7bff107ff50/openai-2.25.0-py3-none-any.whl", hash = "sha256:7c7c01a0a4b69771a29913e28d06bc1e9cee8781b4d206bb56cb946d8d2fcb23", size = 1136347, upload-time = "2026-03-05T18:35:36.497Z" },
 ]
 
 [[package]]
@@ -1964,7 +1964,7 @@ requires-dist = [
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.81.0,<2" },
     { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.19.0,<2" },
     { name = "numpy", marker = "python_full_version >= '3.10' and extra == 'voice'", specifier = ">=2.2.0,<3" },
-    { name = "openai", specifier = ">=2.19.0,<3" },
+    { name = "openai", specifier = ">=2.25.0,<3" },
     { name = "pydantic", specifier = ">=2.12.3,<3" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=7" },
     { name = "requests", specifier = ">=2.0,<3" },
