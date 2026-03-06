@@ -183,11 +183,14 @@ class ModelSettings:
     """
 
     def __post_init__(self) -> None:
-        if self.max_parallel_tool_calls is not None and self.max_parallel_tool_calls < 1:
-            raise ValueError(
-                "max_parallel_tool_calls must be a positive integer, "
-                f"got {self.max_parallel_tool_calls}"
-            )
+        if self.max_parallel_tool_calls is not None:
+            if isinstance(self.max_parallel_tool_calls, bool):
+                raise TypeError("max_parallel_tool_calls must be an integer, not bool")
+            if self.max_parallel_tool_calls < 1:
+                raise ValueError(
+                    "max_parallel_tool_calls must be a positive integer, "
+                    f"got {self.max_parallel_tool_calls}"
+                )
 
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the
