@@ -28,6 +28,8 @@ The mental model for handoffs is that the new agent "takes over". It sees the pr
 For example, you could model the translation task above as tool calls instead: rather than handing over to the language-specific agent, you could call the agent as a tool, and then use the result in the next step. This enables things like translating multiple languages at once.
 
 See the [`agents_as_tools.py`](./agents_as_tools.py) file for an example of this.
+See the [`agents_as_tools_streaming.py`](./agents_as_tools_streaming.py) file for a streaming variant that taps into nested agent events via `on_stream`.
+See the [`agents_as_tools_structured.py`](./agents_as_tools_structured.py) file for a structured-input variant using `Agent.as_tool()` parameters.
 
 ## LLM-as-a-judge
 
@@ -52,3 +54,9 @@ You can definitely do this without any special Agents SDK features by using para
 This is really useful for latency: for example, you might have a very fast model that runs the guardrail and a slow model that runs the actual agent. You wouldn't want to wait for the slow model to finish, so guardrails let you quickly reject invalid inputs.
 
 See the [`input_guardrails.py`](./input_guardrails.py) and [`output_guardrails.py`](./output_guardrails.py) files for examples.
+
+## Human in the loop
+
+You can pause runs for manual approval before executing sensitive tools. This is useful for operations like sending money, deleting data, or running destructive commands.
+
+See [`human_in_the_loop.py`](./human_in_the_loop.py) for the base approval flow and [`human_in_the_loop_custom_rejection.py`](./human_in_the_loop_custom_rejection.py) for run-level tool error formatting when approvals are rejected.

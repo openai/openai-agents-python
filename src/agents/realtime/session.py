@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
 from typing_extensions import assert_never
 
 from ..agent import Agent
-from ..exceptions import ModelBehaviorError, UserError
+from ..exceptions import UserError
 from ..handoffs import Handoff
+from ..items import ToolApprovalItem
 from ..logger import logger
+from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
-from ..tool import FunctionTool
+from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, invoke_function_tool
 from ..tool_context import ToolContext
+from ..util._approvals import evaluate_needs_approval_setting
 from .agent import RealtimeAgent
 from .config import RealtimeRunConfig, RealtimeSessionModelSettings, RealtimeUserInput
 from .events import (
@@ -31,6 +35,7 @@ from .events import (
     RealtimeInputAudioTimeoutTriggered,
     RealtimeRawModelEvent,
     RealtimeSessionEvent,
+    RealtimeToolApprovalRequired,
     RealtimeToolEnd,
     RealtimeToolStart,
 )
@@ -58,6 +63,8 @@ from .model_inputs import (
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
 )
+
+REJECTION_MESSAGE = DEFAULT_APPROVAL_REJECTION_MESSAGE
 
 
 class RealtimeSession(RealtimeModelListener):
@@ -113,6 +120,9 @@ class RealtimeSession(RealtimeModelListener):
         self._event_queue: asyncio.Queue[RealtimeSessionEvent] = asyncio.Queue()
         self._closed = False
         self._stored_exception: BaseException | None = None
+        self._pending_tool_calls: dict[
+            str, tuple[RealtimeModelToolCallEvent, RealtimeAgent, FunctionTool, ToolApprovalItem]
+        ] = {}
 
         # Guardrails state tracking
         self._interrupted_response_ids: set[str] = set()
@@ -310,7 +320,7 @@ class RealtimeSession(RealtimeModelListener):
                     for idx, entry in enumerate(incoming_item.content):
                         # Only attempt to preserve for audio-like content
                         if entry.type in ("audio", "input_audio"):
-                            # Use tuple form for Python 3.9 compatibility
+                            # Use tuple form when checking against multiple classes.
                             assert isinstance(entry, (InputAudio, AssistantAudio))
                             # Determine if transcript is missing/empty on the incoming entry
                             entry_transcript = entry.transcript
@@ -390,6 +400,165 @@ class RealtimeSession(RealtimeModelListener):
         """Put an event into the queue."""
         await self._event_queue.put(event)
 
+    async def _function_needs_approval(
+        self, function_tool: FunctionTool, tool_call: RealtimeModelToolCallEvent
+    ) -> bool:
+        """Evaluate a function tool's needs_approval setting with parsed args."""
+        needs_setting = getattr(function_tool, "needs_approval", False)
+        parsed_args: dict[str, Any] = {}
+        if callable(needs_setting):
+            try:
+                parsed_args = json.loads(tool_call.arguments or "{}")
+            except json.JSONDecodeError:
+                parsed_args = {}
+        return await evaluate_needs_approval_setting(
+            needs_setting,
+            self._context_wrapper,
+            parsed_args,
+            tool_call.call_id,
+            strict=False,
+        )
+
+    def _build_tool_approval_item(
+        self, tool: FunctionTool, tool_call: RealtimeModelToolCallEvent, agent: RealtimeAgent
+    ) -> ToolApprovalItem:
+        """Create a ToolApprovalItem for approval tracking."""
+        raw_item = {
+            "type": "function_call",
+            "name": tool.name,
+            "call_id": tool_call.call_id,
+            "arguments": tool_call.arguments,
+        }
+        return ToolApprovalItem(agent=cast(Any, agent), raw_item=raw_item, tool_name=tool.name)
+
+    async def _maybe_request_tool_approval(
+        self,
+        tool_call: RealtimeModelToolCallEvent,
+        *,
+        function_tool: FunctionTool,
+        agent: RealtimeAgent,
+    ) -> bool | None:
+        """Return True/False when approved/rejected, or None when awaiting approval."""
+        approval_item = self._build_tool_approval_item(function_tool, tool_call, agent)
+
+        needs_approval = await self._function_needs_approval(function_tool, tool_call)
+        if not needs_approval:
+            return True
+
+        approval_status = self._context_wrapper.is_tool_approved(
+            function_tool.name, tool_call.call_id
+        )
+        if approval_status is True:
+            return True
+        if approval_status is False:
+            return False
+
+        self._pending_tool_calls[tool_call.call_id] = (
+            tool_call,
+            agent,
+            function_tool,
+            approval_item,
+        )
+        await self._put_event(
+            RealtimeToolApprovalRequired(
+                agent=agent,
+                tool=function_tool,
+                call_id=tool_call.call_id,
+                arguments=tool_call.arguments,
+                info=self._event_info,
+            )
+        )
+        return None
+
+    async def _send_tool_rejection(
+        self,
+        event: RealtimeModelToolCallEvent,
+        *,
+        tool: FunctionTool,
+        agent: RealtimeAgent,
+    ) -> None:
+        """Send a rejection response back to the model and emit an end event."""
+        rejection_message = await self._resolve_approval_rejection_message(
+            tool=tool,
+            call_id=event.call_id,
+        )
+        await self._model.send_event(
+            RealtimeModelSendToolOutput(
+                tool_call=event,
+                output=rejection_message,
+                start_response=True,
+            )
+        )
+
+        await self._put_event(
+            RealtimeToolEnd(
+                info=self._event_info,
+                tool=tool,
+                output=rejection_message,
+                agent=agent,
+                arguments=event.arguments,
+            )
+        )
+
+    async def _resolve_approval_rejection_message(self, *, tool: FunctionTool, call_id: str) -> str:
+        """Resolve model-visible output text for approval rejections."""
+        formatter = self._run_config.get("tool_error_formatter")
+        if formatter is None:
+            return REJECTION_MESSAGE
+
+        try:
+            maybe_message = formatter(
+                ToolErrorFormatterArgs(
+                    kind="approval_rejected",
+                    tool_type="function",
+                    tool_name=tool.name,
+                    call_id=call_id,
+                    default_message=REJECTION_MESSAGE,
+                    run_context=self._context_wrapper,
+                )
+            )
+            message = await maybe_message if inspect.isawaitable(maybe_message) else maybe_message
+        except Exception as exc:
+            logger.error("Tool error formatter failed for %s: %s", tool.name, exc)
+            return REJECTION_MESSAGE
+
+        if message is None:
+            return REJECTION_MESSAGE
+
+        if not isinstance(message, str):
+            logger.error(
+                "Tool error formatter returned non-string for %s: %s",
+                tool.name,
+                type(message).__name__,
+            )
+            return REJECTION_MESSAGE
+
+        return message
+
+    async def approve_tool_call(self, call_id: str, *, always: bool = False) -> None:
+        """Approve a pending tool call and resume execution."""
+        pending = self._pending_tool_calls.pop(call_id, None)
+        if pending is None:
+            return
+
+        tool_call, agent_snapshot, function_tool, approval_item = pending
+        self._context_wrapper.approve_tool(approval_item, always_approve=always)
+
+        if self._async_tool_calls:
+            self._enqueue_tool_call_task(tool_call, agent_snapshot)
+        else:
+            await self._handle_tool_call(tool_call, agent_snapshot=agent_snapshot)
+
+    async def reject_tool_call(self, call_id: str, *, always: bool = False) -> None:
+        """Reject a pending tool call and notify the model."""
+        pending = self._pending_tool_calls.pop(call_id, None)
+        if pending is None:
+            return
+
+        tool_call, agent_snapshot, function_tool, approval_item = pending
+        self._context_wrapper.reject_tool(approval_item, always_reject=always)
+        await self._send_tool_rejection(tool_call, tool=function_tool, agent=agent_snapshot)
+
     async def _handle_tool_call(
         self,
         event: RealtimeModelToolCallEvent,
@@ -406,23 +575,38 @@ class RealtimeSession(RealtimeModelListener):
         handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
 
         if event.name in function_map:
+            func_tool = function_map[event.name]
+            approval_status = await self._maybe_request_tool_approval(
+                event, function_tool=func_tool, agent=agent
+            )
+            if approval_status is False:
+                await self._send_tool_rejection(event, tool=func_tool, agent=agent)
+                return
+            if approval_status is None:
+                return
+
             await self._put_event(
                 RealtimeToolStart(
                     info=self._event_info,
-                    tool=function_map[event.name],
+                    tool=func_tool,
                     agent=agent,
+                    arguments=event.arguments,
                 )
             )
 
-            func_tool = function_map[event.name]
             tool_context = ToolContext(
                 context=self._context_wrapper.context,
                 usage=self._context_wrapper.usage,
                 tool_name=event.name,
                 tool_call_id=event.call_id,
                 tool_arguments=event.arguments,
+                agent=agent,
             )
-            result = await func_tool.on_invoke_tool(tool_context, event.arguments)
+            result = await invoke_function_tool(
+                function_tool=func_tool,
+                context=tool_context,
+                arguments=event.arguments,
+            )
 
             await self._model.send_event(
                 RealtimeModelSendToolOutput(
@@ -436,6 +620,7 @@ class RealtimeSession(RealtimeModelListener):
                     tool=func_tool,
                     output=result,
                     agent=agent,
+                    arguments=event.arguments,
                 )
             )
         elif event.name in handoff_map:
@@ -446,6 +631,7 @@ class RealtimeSession(RealtimeModelListener):
                 tool_name=event.name,
                 tool_call_id=event.call_id,
                 tool_arguments=event.arguments,
+                agent=agent,
             )
 
             # Execute the handoff to get the new agent
@@ -491,7 +677,12 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
         else:
-            raise ModelBehaviorError(f"Tool {event.name} not found")
+            await self._put_event(
+                RealtimeError(
+                    info=self._event_info,
+                    error={"message": f"Tool {event.name} not found"},
+                )
+            )
 
     @classmethod
     def _get_new_history(
@@ -813,6 +1004,9 @@ class RealtimeSession(RealtimeModelListener):
 
         # Close the model connection
         await self._model.close()
+
+        # Clear pending approval tracking
+        self._pending_tool_calls.clear()
 
         # Mark as closed
         self._closed = True

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union
+import json
+import weakref
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union, cast
 
 import pydantic
 from openai.types.responses import (
     Response,
     ResponseComputerToolCall,
     ResponseFileSearchToolCall,
+    ResponseFunctionShellToolCallOutput,
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
     ResponseInputItemParam,
@@ -54,6 +57,7 @@ from .tool import (
     ValidToolOutputPydanticModelsTypeAdapter,
 )
 from .usage import Usage
+from .util._json import _to_dump_compatible
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -72,6 +76,9 @@ TResponseStreamEvent = ResponseStreamEvent
 
 T = TypeVar("T", bound=Union[TResponseOutputItem, TResponseInputItem])
 
+# Distinguish a missing dict entry from an explicit None value.
+_MISSING_ATTR_SENTINEL = object()
+
 
 @dataclass
 class RunItemBase(Generic[T], abc.ABC):
@@ -83,6 +90,49 @@ class RunItemBase(Generic[T], abc.ABC):
     `openai.types.responses.ResponseOutputItem` or an input item
     (i.e. `openai.types.responses.ResponseInputItemParam`).
     """
+
+    _agent_ref: weakref.ReferenceType[Agent[Any]] | None = field(
+        init=False,
+        repr=False,
+        default=None,
+    )
+
+    def __post_init__(self) -> None:
+        # Store a weak reference so we can release the strong reference later if desired.
+        self._agent_ref = weakref.ref(self.agent)
+
+    def __getattribute__(self, name: str) -> Any:
+        if name == "agent":
+            return self._get_agent_via_weakref("agent", "_agent_ref")
+        return super().__getattribute__(name)
+
+    def release_agent(self) -> None:
+        """Release the strong reference to the agent while keeping a weak reference."""
+        if "agent" not in self.__dict__:
+            return
+        agent = self.__dict__["agent"]
+        if agent is None:
+            return
+        self._agent_ref = weakref.ref(agent) if agent is not None else None
+        # Set to None instead of deleting so dataclass repr/asdict keep working.
+        self.__dict__["agent"] = None
+
+    def _get_agent_via_weakref(self, attr_name: str, ref_name: str) -> Any:
+        # Preserve the dataclass field so repr/asdict still read it, but lazily resolve the weakref
+        # when the stored value is None (meaning release_agent already dropped the strong ref).
+        # If the attribute was never overridden we fall back to the default descriptor chain.
+        data = object.__getattribute__(self, "__dict__")
+        value = data.get(attr_name, _MISSING_ATTR_SENTINEL)
+        if value is _MISSING_ATTR_SENTINEL:
+            return object.__getattribute__(self, attr_name)
+        if value is not None:
+            return value
+        ref = object.__getattribute__(self, ref_name)
+        if ref is not None:
+            agent = ref()
+            if agent is not None:
+                return agent
+        return None
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts this item into an input item suitable for passing to the model."""
@@ -131,6 +181,48 @@ class HandoffOutputItem(RunItemBase[TResponseInputItem]):
 
     type: Literal["handoff_output_item"] = "handoff_output_item"
 
+    _source_agent_ref: weakref.ReferenceType[Agent[Any]] | None = field(
+        init=False,
+        repr=False,
+        default=None,
+    )
+    _target_agent_ref: weakref.ReferenceType[Agent[Any]] | None = field(
+        init=False,
+        repr=False,
+        default=None,
+    )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # Maintain weak references so downstream code can release the strong references when safe.
+        self._source_agent_ref = weakref.ref(self.source_agent)
+        self._target_agent_ref = weakref.ref(self.target_agent)
+
+    def __getattribute__(self, name: str) -> Any:
+        if name == "source_agent":
+            # Provide lazy weakref access like the base `agent` field so HandoffOutputItem
+            # callers keep seeing the original agent until GC occurs.
+            return self._get_agent_via_weakref("source_agent", "_source_agent_ref")
+        if name == "target_agent":
+            # Same as above but for the target of the handoff.
+            return self._get_agent_via_weakref("target_agent", "_target_agent_ref")
+        return super().__getattribute__(name)
+
+    def release_agent(self) -> None:
+        super().release_agent()
+        if "source_agent" in self.__dict__:
+            source_agent = self.__dict__["source_agent"]
+            if source_agent is not None:
+                self._source_agent_ref = weakref.ref(source_agent)
+            # Preserve dataclass fields for repr/asdict while dropping strong refs.
+            self.__dict__["source_agent"] = None
+        if "target_agent" in self.__dict__:
+            target_agent = self.__dict__["target_agent"]
+            if target_agent is not None:
+                self._target_agent_ref = weakref.ref(target_agent)
+            # Preserve dataclass fields for repr/asdict while dropping strong refs.
+            self.__dict__["target_agent"] = None
+
 
 ToolCallItemTypes: TypeAlias = Union[
     ResponseFunctionToolCall,
@@ -141,12 +233,13 @@ ToolCallItemTypes: TypeAlias = Union[
     ResponseCodeInterpreterToolCall,
     ImageGenerationCall,
     LocalShellCall,
+    dict[str, Any],
 ]
 """A type that represents a tool call item."""
 
 
 @dataclass
-class ToolCallItem(RunItemBase[ToolCallItemTypes]):
+class ToolCallItem(RunItemBase[Any]):
     """Represents a tool call e.g. a function call or computer action call."""
 
     raw_item: ToolCallItemTypes
@@ -154,14 +247,24 @@ class ToolCallItem(RunItemBase[ToolCallItemTypes]):
 
     type: Literal["tool_call_item"] = "tool_call_item"
 
+    description: str | None = None
+    """Optional tool description if known at item creation time."""
+
+
+ToolCallOutputTypes: TypeAlias = Union[
+    FunctionCallOutput,
+    ComputerCallOutput,
+    LocalShellCallOutput,
+    ResponseFunctionShellToolCallOutput,
+    dict[str, Any],
+]
+
 
 @dataclass
-class ToolCallOutputItem(
-    RunItemBase[Union[FunctionCallOutput, ComputerCallOutput, LocalShellCallOutput]]
-):
+class ToolCallOutputItem(RunItemBase[Any]):
     """Represents the output of a tool call."""
 
-    raw_item: FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput
+    raw_item: ToolCallOutputTypes
     """The raw item from the model."""
 
     output: Any
@@ -170,6 +273,35 @@ class ToolCallOutputItem(
     """
 
     type: Literal["tool_call_output_item"] = "tool_call_output_item"
+
+    def to_input_item(self) -> TResponseInputItem:
+        """Converts the tool output into an input item for the next model turn.
+
+        Hosted tool outputs (e.g. shell/apply_patch) carry a `status` field for the SDK's
+        book-keeping, but the Responses API does not yet accept that parameter. Strip it from the
+        payload we send back to the model while keeping the original raw item intact.
+        """
+
+        if isinstance(self.raw_item, dict):
+            payload = dict(self.raw_item)
+            payload_type = payload.get("type")
+            if payload_type == "shell_call_output":
+                payload = dict(payload)
+                payload.pop("status", None)
+                payload.pop("shell_output", None)
+                payload.pop("provider_data", None)
+                outputs = payload.get("output")
+                if isinstance(outputs, list):
+                    for entry in outputs:
+                        if not isinstance(entry, dict):
+                            continue
+                        outcome = entry.get("outcome")
+                        if isinstance(outcome, dict):
+                            if outcome.get("type") == "exit":
+                                entry["outcome"] = outcome
+            return cast(TResponseInputItem, payload)
+
+        return super().to_input_item()
 
 
 @dataclass
@@ -212,16 +344,126 @@ class MCPApprovalResponseItem(RunItemBase[McpApprovalResponse]):
     type: Literal["mcp_approval_response_item"] = "mcp_approval_response_item"
 
 
+@dataclass
+class CompactionItem(RunItemBase[TResponseInputItem]):
+    """Represents a compaction item from responses.compact."""
+
+    type: Literal["compaction_item"] = "compaction_item"
+
+    def to_input_item(self) -> TResponseInputItem:
+        """Converts this item into an input item suitable for passing to the model."""
+        return self.raw_item
+
+
+# Union type for tool approval raw items - supports function tools, hosted tools, shell tools, etc.
+ToolApprovalRawItem: TypeAlias = Union[
+    ResponseFunctionToolCall,
+    McpCall,
+    McpApprovalRequest,
+    LocalShellCall,
+    dict[str, Any],  # For flexibility with other tool types
+]
+
+
+@dataclass
+class ToolApprovalItem(RunItemBase[Any]):
+    """Tool call that requires approval before execution."""
+
+    raw_item: ToolApprovalRawItem
+    """Raw tool call awaiting approval (function, hosted, shell, etc.)."""
+
+    tool_name: str | None = None
+    """Tool name for approval tracking; falls back to raw_item.name when absent."""
+
+    type: Literal["tool_approval_item"] = "tool_approval_item"
+
+    def __post_init__(self) -> None:
+        """Populate tool_name from the raw item if not provided."""
+        if self.tool_name is None:
+            # Extract name from raw_item - handle different types
+            if isinstance(self.raw_item, dict):
+                self.tool_name = self.raw_item.get("name")
+            elif hasattr(self.raw_item, "name"):
+                self.tool_name = self.raw_item.name
+            else:
+                self.tool_name = None
+
+    def __hash__(self) -> int:
+        """Hash by object identity to keep distinct approvals separate."""
+        return object.__hash__(self)
+
+    def __eq__(self, other: object) -> bool:
+        """Equality is based on object identity."""
+        return self is other
+
+    @property
+    def name(self) -> str | None:
+        """Return the tool name from tool_name or raw_item (backwards compatible)."""
+        if self.tool_name:
+            return self.tool_name
+        if isinstance(self.raw_item, dict):
+            candidate = self.raw_item.get("name") or self.raw_item.get("tool_name")
+        else:
+            candidate = getattr(self.raw_item, "name", None) or getattr(
+                self.raw_item, "tool_name", None
+            )
+        return str(candidate) if candidate is not None else None
+
+    @property
+    def arguments(self) -> str | None:
+        """Return tool call arguments if present on the raw item."""
+        candidate: Any | None = None
+        if isinstance(self.raw_item, dict):
+            candidate = self.raw_item.get("arguments")
+            if candidate is None:
+                candidate = self.raw_item.get("params") or self.raw_item.get("input")
+        elif hasattr(self.raw_item, "arguments"):
+            candidate = self.raw_item.arguments
+        elif hasattr(self.raw_item, "params") or hasattr(self.raw_item, "input"):
+            candidate = getattr(self.raw_item, "params", None) or getattr(
+                self.raw_item, "input", None
+            )
+        if candidate is None:
+            return None
+        if isinstance(candidate, str):
+            return candidate
+        try:
+            return json.dumps(candidate)
+        except (TypeError, ValueError):
+            return str(candidate)
+
+    def _extract_call_id(self) -> str | None:
+        """Return call identifier from the raw item."""
+        if isinstance(self.raw_item, dict):
+            return self.raw_item.get("call_id") or self.raw_item.get("id")
+        return getattr(self.raw_item, "call_id", None) or getattr(self.raw_item, "id", None)
+
+    @property
+    def call_id(self) -> str | None:
+        """Return call identifier from the raw item."""
+        return self._extract_call_id()
+
+    def to_input_item(self) -> TResponseInputItem:
+        """ToolApprovalItem should never be sent as input; raise to surface misuse."""
+        raise AgentsException(
+            "ToolApprovalItem cannot be converted to an input item. "
+            "These items should be filtered out before preparing input for the API."
+        )
+
+
 RunItem: TypeAlias = Union[
     MessageOutputItem,
     HandoffCallItem,
     HandoffOutputItem,
     ToolCallItem,
     ToolCallOutputItem,
+    CompactionItem,
     ReasoningItem,
     MCPListToolsItem,
     MCPApprovalRequestItem,
     MCPApprovalResponseItem,
+    CompactionItem,
+    ToolApprovalItem,
 ]
 """An item generated by an agent."""
 
@@ -240,6 +482,9 @@ class ModelResponse:
     If using OpenAI models via the Responses API, this is the `response_id` parameter, and it can
     be passed to `Runner.run`.
     """
+
+    request_id: str | None = None
+    """The transport request ID for this model call, if provided by the model SDK."""
 
     def to_input_items(self) -> list[TResponseInputItem]:
         """Convert the output into a list of input items suitable for passing to the model."""
@@ -290,7 +535,7 @@ class ItemHelpers:
                     "role": "user",
                 }
             ]
-        return input.copy()
+        return cast(list[TResponseInputItem], _to_dump_compatible(input))
 
     @classmethod
     def text_message_outputs(cls, items: list[RunItem]) -> str:

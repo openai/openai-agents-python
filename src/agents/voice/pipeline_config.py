@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..tracing import TracingConfig
 from ..tracing.util import gen_group_id
 from .model import STTModelSettings, TTSModelSettings, VoiceModelProvider
 from .models.openai_model_provider import OpenAIVoiceModelProvider
@@ -17,6 +18,9 @@ class VoicePipelineConfig:
 
     tracing_disabled: bool = False
     """Whether to disable tracing of the pipeline. Defaults to `False`."""
+
+    tracing: TracingConfig | None = None
+    """Tracing configuration for this pipeline."""
 
     trace_include_sensitive_data: bool = True
     """Whether to include sensitive data in traces. Defaults to `True`. This is specifically for the

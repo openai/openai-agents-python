@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import math
 import os
 import queue
 import random
@@ -28,12 +30,23 @@ class ConsoleSpanExporter(TracingExporter):
 
 
 class BackendSpanExporter(TracingExporter):
+    _OPENAI_TRACING_INGEST_ENDPOINT = "https://api.openai.com/v1/traces/ingest"
+    _OPENAI_TRACING_MAX_FIELD_BYTES = 100_000
+    _OPENAI_TRACING_STRING_TRUNCATION_SUFFIX = "... [truncated]"
+    _OPENAI_TRACING_ALLOWED_USAGE_KEYS = frozenset(
+        {
+            "input_tokens",
+            "output_tokens",
+        }
+    )
+    _UNSERIALIZABLE = object()
+
     def __init__(
         self,
         api_key: str | None = None,
         organization: str | None = None,
         project: str | None = None,
-        endpoint: str = "https://api.openai.com/v1/traces/ingest",
+        endpoint: str = _OPENAI_TRACING_INGEST_ENDPOINT,
         max_retries: int = 3,
         base_delay: float = 1.0,
         max_delay: float = 30.0,
@@ -92,62 +105,346 @@ class BackendSpanExporter(TracingExporter):
         if not items:
             return
 
-        if not self.api_key:
-            logger.warning("OPENAI_API_KEY is not set, skipping trace export")
-            return
+        grouped_items: dict[str | None, list[Trace | Span[Any]]] = {}
+        for item in items:
+            key = item.tracing_api_key
+            grouped_items.setdefault(key, []).append(item)
 
-        data = [item.export() for item in items if item.export()]
-        payload = {"data": data}
+        for item_key, grouped in grouped_items.items():
+            api_key = item_key or self.api_key
+            if not api_key:
+                logger.warning("OPENAI_API_KEY is not set, skipping trace export")
+                continue
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "OpenAI-Beta": "traces=v1",
+            sanitize_for_openai = self._should_sanitize_for_openai_tracing_api()
+            data: list[dict[str, Any]] = []
+            for item in grouped:
+                exported = item.export()
+                if exported:
+                    if sanitize_for_openai:
+                        exported = self._sanitize_for_openai_tracing_api(exported)
+                    data.append(exported)
+            payload = {"data": data}
+
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "OpenAI-Beta": "traces=v1",
+            }
+
+            if self.organization:
+                headers["OpenAI-Organization"] = self.organization
+
+            if self.project:
+                headers["OpenAI-Project"] = self.project
+
+            # Exponential backoff loop
+            attempt = 0
+            delay = self.base_delay
+            while True:
+                attempt += 1
+                try:
+                    response = self._client.post(url=self.endpoint, headers=headers, json=payload)
+
+                    # If the response is successful, break out of the loop
+                    if response.status_code < 300:
+                        logger.debug(f"Exported {len(grouped)} items")
+                        break
+
+                    # If the response is a client error (4xx), we won't retry
+                    if 400 <= response.status_code < 500:
+                        logger.error(
+                            "[non-fatal] Tracing client error %s: %s",
+                            response.status_code,
+                            response.text,
+                        )
+                        break
+
+                    # For 5xx or other unexpected codes, treat it as transient and retry
+                    logger.warning(
+                        f"[non-fatal] Tracing: server error {response.status_code}, retrying."
+                    )
+                except httpx.RequestError as exc:
+                    # Network or other I/O error, we'll retry
+                    logger.warning(f"[non-fatal] Tracing: request failed: {exc}")
+
+                # If we reach here, we need to retry or give up
+                if attempt >= self.max_retries:
+                    logger.error(
+                        "[non-fatal] Tracing: max retries reached, giving up on this batch."
+                    )
+                    break
+
+                # Exponential backoff + jitter
+                sleep_time = delay + random.uniform(0, 0.1 * delay)  # 10% jitter
+                time.sleep(sleep_time)
+                delay = min(delay * 2, self.max_delay)
+
+    def _should_sanitize_for_openai_tracing_api(self) -> bool:
+        return self.endpoint.rstrip("/") == self._OPENAI_TRACING_INGEST_ENDPOINT.rstrip("/")
+
+    def _sanitize_for_openai_tracing_api(self, payload_item: dict[str, Any]) -> dict[str, Any]:
+        """Drop or truncate span fields known to be rejected by traces ingest."""
+        span_data = payload_item.get("span_data")
+        if not isinstance(span_data, dict):
+            return payload_item
+
+        sanitized_span_data = span_data
+        did_mutate = False
+
+        for field_name in ("input", "output"):
+            if field_name not in span_data:
+                continue
+            sanitized_field = self._truncate_span_field_value(span_data[field_name])
+            if sanitized_field is span_data[field_name]:
+                continue
+            if not did_mutate:
+                sanitized_span_data = dict(span_data)
+                did_mutate = True
+            sanitized_span_data[field_name] = sanitized_field
+
+        if span_data.get("type") != "generation":
+            if not did_mutate:
+                return payload_item
+            sanitized_payload_item = dict(payload_item)
+            sanitized_payload_item["span_data"] = sanitized_span_data
+            return sanitized_payload_item
+
+        usage = span_data.get("usage")
+        if not isinstance(usage, dict):
+            if not did_mutate:
+                return payload_item
+            sanitized_payload_item = dict(payload_item)
+            sanitized_payload_item["span_data"] = sanitized_span_data
+            return sanitized_payload_item
+
+        sanitized_usage = self._sanitize_generation_usage_for_openai_tracing_api(usage)
+
+        if sanitized_usage is None:
+            if not did_mutate:
+                sanitized_span_data = dict(span_data)
+                did_mutate = True
+            sanitized_span_data.pop("usage", None)
+        elif sanitized_usage != usage:
+            if not did_mutate:
+                sanitized_span_data = dict(span_data)
+                did_mutate = True
+            sanitized_span_data["usage"] = sanitized_usage
+
+        if not did_mutate:
+            return payload_item
+
+        sanitized_payload_item = dict(payload_item)
+        sanitized_payload_item["span_data"] = sanitized_span_data
+        return sanitized_payload_item
+
+    def _value_json_size_bytes(self, value: Any) -> int:
+        try:
+            serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return self._OPENAI_TRACING_MAX_FIELD_BYTES + 1
+        return len(serialized.encode("utf-8"))
+
+    def _truncate_string_for_json_limit(self, value: str, max_bytes: int) -> str:
+        value_size = self._value_json_size_bytes(value)
+        if value_size <= max_bytes:
+            return value
+
+        suffix = self._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX
+        suffix_size = self._value_json_size_bytes(suffix)
+        if suffix_size > max_bytes:
+            return ""
+        if suffix_size == max_bytes:
+            return suffix
+
+        budget_without_suffix = max_bytes - suffix_size
+        estimated_chars = int(len(value) * budget_without_suffix / max(value_size, 1))
+        estimated_chars = max(0, min(len(value), estimated_chars))
+
+        best = value[:estimated_chars] + suffix
+        best_size = self._value_json_size_bytes(best)
+        while best_size > max_bytes and estimated_chars > 0:
+            overflow_ratio = (best_size - max_bytes) / max(best_size, 1)
+            trim_chars = max(1, int(estimated_chars * overflow_ratio) + 1)
+            estimated_chars = max(0, estimated_chars - trim_chars)
+            best = value[:estimated_chars] + suffix
+            best_size = self._value_json_size_bytes(best)
+
+        return best
+
+    def _truncate_span_field_value(self, value: Any) -> Any:
+        max_bytes = self._OPENAI_TRACING_MAX_FIELD_BYTES
+        if self._value_json_size_bytes(value) <= max_bytes:
+            return value
+
+        sanitized_value = self._sanitize_json_compatible_value(value)
+        if sanitized_value is self._UNSERIALIZABLE:
+            return self._truncated_preview(value)
+
+        return self._truncate_json_value_for_limit(sanitized_value, max_bytes)
+
+    def _truncate_json_value_for_limit(self, value: Any, max_bytes: int) -> Any:
+        if self._value_json_size_bytes(value) <= max_bytes:
+            return value
+
+        if isinstance(value, str):
+            return self._truncate_string_for_json_limit(value, max_bytes)
+
+        if isinstance(value, dict):
+            return self._truncate_mapping_for_json_limit(value, max_bytes)
+
+        if isinstance(value, list):
+            return self._truncate_list_for_json_limit(value, max_bytes)
+
+        return self._truncated_preview(value)
+
+    def _truncate_mapping_for_json_limit(
+        self, value: dict[str, Any], max_bytes: int
+    ) -> dict[str, Any]:
+        truncated = dict(value)
+        current_size = self._value_json_size_bytes(truncated)
+
+        while truncated and current_size > max_bytes:
+            largest_key = max(
+                truncated, key=lambda key: self._value_json_size_bytes(truncated[key])
+            )
+            child = truncated[largest_key]
+            child_size = self._value_json_size_bytes(child)
+            child_budget = max(0, max_bytes - (current_size - child_size))
+            truncated_child = self._truncate_json_value_for_limit(child, child_budget)
+
+            if truncated_child == child:
+                truncated.pop(largest_key)
+            else:
+                truncated[largest_key] = truncated_child
+
+            current_size = self._value_json_size_bytes(truncated)
+
+        return truncated
+
+    def _truncate_list_for_json_limit(self, value: list[Any], max_bytes: int) -> list[Any]:
+        truncated = list(value)
+        current_size = self._value_json_size_bytes(truncated)
+
+        while truncated and current_size > max_bytes:
+            largest_index = max(
+                range(len(truncated)),
+                key=lambda index: self._value_json_size_bytes(truncated[index]),
+            )
+            child = truncated[largest_index]
+            child_size = self._value_json_size_bytes(child)
+            child_budget = max(0, max_bytes - (current_size - child_size))
+            truncated_child = self._truncate_json_value_for_limit(child, child_budget)
+
+            if truncated_child == child:
+                truncated.pop(largest_index)
+            else:
+                truncated[largest_index] = truncated_child
+
+            current_size = self._value_json_size_bytes(truncated)
+
+        return truncated
+
+    def _truncated_preview(self, value: Any) -> dict[str, Any]:
+        type_name = type(value).__name__
+        preview = f"<{type_name} truncated>"
+        if isinstance(value, dict):
+            preview = f"<{type_name} len={len(value)} truncated>"
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            preview = f"<{type_name} len={len(value)} truncated>"
+        elif isinstance(value, (bytes, bytearray, memoryview)):
+            preview = f"<{type_name} bytes={len(value)} truncated>"
+
+        return {
+            "truncated": True,
+            "original_type": type_name,
+            "preview": preview,
         }
 
-        if self.organization:
-            headers["OpenAI-Organization"] = self.organization
+    def _sanitize_generation_usage_for_openai_tracing_api(
+        self, usage: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        input_tokens = usage.get("input_tokens")
+        output_tokens = usage.get("output_tokens")
+        if not self._is_finite_json_number(input_tokens) or not self._is_finite_json_number(
+            output_tokens
+        ):
+            return None
 
-        if self.project:
-            headers["OpenAI-Project"] = self.project
+        details: dict[str, Any] = {}
+        existing_details = usage.get("details")
+        if isinstance(existing_details, dict):
+            for key, value in existing_details.items():
+                if not isinstance(key, str):
+                    continue
+                sanitized_value = self._sanitize_json_compatible_value(value)
+                if sanitized_value is self._UNSERIALIZABLE:
+                    continue
+                details[key] = sanitized_value
 
-        # Exponential backoff loop
-        attempt = 0
-        delay = self.base_delay
-        while True:
-            attempt += 1
+        for key, value in usage.items():
+            if key in self._OPENAI_TRACING_ALLOWED_USAGE_KEYS or key == "details" or value is None:
+                continue
+            sanitized_value = self._sanitize_json_compatible_value(value)
+            if sanitized_value is self._UNSERIALIZABLE:
+                continue
+            details[key] = sanitized_value
+
+        sanitized_usage: dict[str, Any] = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
+        if details:
+            sanitized_usage["details"] = details
+        return sanitized_usage
+
+    def _is_finite_json_number(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return False
+        return isinstance(value, int | float) and not (
+            isinstance(value, float) and not math.isfinite(value)
+        )
+
+    def _sanitize_json_compatible_value(self, value: Any, seen_ids: set[int] | None = None) -> Any:
+        if value is None or isinstance(value, str | bool | int):
+            return value
+        if isinstance(value, float):
+            return value if math.isfinite(value) else self._UNSERIALIZABLE
+        if seen_ids is None:
+            seen_ids = set()
+        if isinstance(value, dict):
+            value_id = id(value)
+            if value_id in seen_ids:
+                return self._UNSERIALIZABLE
+            seen_ids.add(value_id)
+            sanitized_dict: dict[str, Any] = {}
             try:
-                response = self._client.post(url=self.endpoint, headers=headers, json=payload)
-
-                # If the response is successful, break out of the loop
-                if response.status_code < 300:
-                    logger.debug(f"Exported {len(items)} items")
-                    return
-
-                # If the response is a client error (4xx), we won't retry
-                if 400 <= response.status_code < 500:
-                    logger.error(
-                        f"[non-fatal] Tracing client error {response.status_code}: {response.text}"
-                    )
-                    return
-
-                # For 5xx or other unexpected codes, treat it as transient and retry
-                logger.warning(
-                    f"[non-fatal] Tracing: server error {response.status_code}, retrying."
-                )
-            except httpx.RequestError as exc:
-                # Network or other I/O error, we'll retry
-                logger.warning(f"[non-fatal] Tracing: request failed: {exc}")
-
-            # If we reach here, we need to retry or give up
-            if attempt >= self.max_retries:
-                logger.error("[non-fatal] Tracing: max retries reached, giving up on this batch.")
-                return
-
-            # Exponential backoff + jitter
-            sleep_time = delay + random.uniform(0, 0.1 * delay)  # 10% jitter
-            time.sleep(sleep_time)
-            delay = min(delay * 2, self.max_delay)
+                for key, nested_value in value.items():
+                    if not isinstance(key, str):
+                        continue
+                    sanitized_nested = self._sanitize_json_compatible_value(nested_value, seen_ids)
+                    if sanitized_nested is self._UNSERIALIZABLE:
+                        continue
+                    sanitized_dict[key] = sanitized_nested
+            finally:
+                seen_ids.remove(value_id)
+            return sanitized_dict
+        if isinstance(value, list | tuple):
+            value_id = id(value)
+            if value_id in seen_ids:
+                return self._UNSERIALIZABLE
+            seen_ids.add(value_id)
+            sanitized_list: list[Any] = []
+            try:
+                for nested_value in value:
+                    sanitized_nested = self._sanitize_json_compatible_value(nested_value, seen_ids)
+                    if sanitized_nested is self._UNSERIALIZABLE:
+                        continue
+                    sanitized_list.append(sanitized_nested)
+            finally:
+                seen_ids.remove(value_id)
+            return sanitized_list
+        return self._UNSERIALIZABLE
 
     def close(self):
         """Close the underlying HTTP client."""
@@ -295,16 +592,47 @@ class BatchTraceProcessor(TracingProcessor):
             self._exporter.export(items_to_export)
 
 
-# Create a shared global instance:
-_global_exporter = BackendSpanExporter()
-_global_processor = BatchTraceProcessor(_global_exporter)
+# Lazily initialized defaults to avoid creating network clients or threading
+# primitives during module import (important for fork-based process models).
+_global_exporter: BackendSpanExporter | None = None
+_global_processor: BatchTraceProcessor | None = None
+_global_lock = threading.Lock()
 
 
 def default_exporter() -> BackendSpanExporter:
     """The default exporter, which exports traces and spans to the backend in batches."""
-    return _global_exporter
+    global _global_exporter
+
+    exporter = _global_exporter
+    if exporter is not None:
+        return exporter
+
+    with _global_lock:
+        exporter = _global_exporter
+        if exporter is None:
+            exporter = BackendSpanExporter()
+            _global_exporter = exporter
+
+    return exporter
 
 
 def default_processor() -> BatchTraceProcessor:
     """The default processor, which exports traces and spans to the backend in batches."""
-    return _global_processor
+    global _global_exporter
+    global _global_processor
+
+    processor = _global_processor
+    if processor is not None:
+        return processor
+
+    with _global_lock:
+        processor = _global_processor
+        if processor is None:
+            exporter = _global_exporter
+            if exporter is None:
+                exporter = BackendSpanExporter()
+                _global_exporter = exporter
+            processor = BatchTraceProcessor(exporter)
+            _global_processor = processor
+
+    return processor

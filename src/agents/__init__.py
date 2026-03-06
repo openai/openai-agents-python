@@ -8,12 +8,15 @@ from . import _config
 from .agent import (
     Agent,
     AgentBase,
+    AgentToolStreamEvent,
     StopAtTools,
     ToolsToFinalOutputFunction,
     ToolsToFinalOutputResult,
 )
 from .agent_output import AgentOutputSchema, AgentOutputSchemaBase
+from .apply_diff import apply_diff
 from .computer import AsyncComputer, Button, Computer, Environment
+from .editor import ApplyPatchEditor, ApplyPatchOperation, ApplyPatchResult
 from .exceptions import (
     AgentsException,
     InputGuardrailTripwireTriggered,
@@ -23,6 +26,7 @@ from .exceptions import (
     RunErrorDetails,
     ToolInputGuardrailTripwireTriggered,
     ToolOutputGuardrailTripwireTriggered,
+    ToolTimeoutError,
     UserError,
 )
 from .guardrail import (
@@ -34,32 +38,71 @@ from .guardrail import (
     input_guardrail,
     output_guardrail,
 )
-from .handoffs import Handoff, HandoffInputData, HandoffInputFilter, handoff
+from .handoffs import (
+    Handoff,
+    HandoffInputData,
+    HandoffInputFilter,
+    default_handoff_history_mapper,
+    get_conversation_history_wrappers,
+    handoff,
+    nest_handoff_history,
+    reset_conversation_history_wrappers,
+    set_conversation_history_wrappers,
+)
 from .items import (
+    CompactionItem,
     HandoffCallItem,
     HandoffOutputItem,
     ItemHelpers,
+    MCPApprovalRequestItem,
+    MCPApprovalResponseItem,
     MessageOutputItem,
     ModelResponse,
     ReasoningItem,
     RunItem,
+    ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
     TResponseInputItem,
 )
 from .lifecycle import AgentHooks, RunHooks
-from .memory import OpenAIConversationsSession, Session, SessionABC, SQLiteSession
+from .memory import (
+    OpenAIConversationsSession,
+    OpenAIResponsesCompactionArgs,
+    OpenAIResponsesCompactionAwareSession,
+    OpenAIResponsesCompactionSession,
+    Session,
+    SessionABC,
+    SessionSettings,
+    SQLiteSession,
+    is_openai_responses_compaction_aware_session,
+)
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider, ModelTracing
 from .models.multi_provider import MultiProvider
 from .models.openai_chatcompletions import OpenAIChatCompletionsModel
 from .models.openai_provider import OpenAIProvider
-from .models.openai_responses import OpenAIResponsesModel
+from .models.openai_responses import OpenAIResponsesModel, OpenAIResponsesWSModel
 from .prompts import DynamicPromptFunction, GenerateDynamicPromptData, Prompt
 from .repl import run_demo_loop
-from .result import RunResult, RunResultStreaming
-from .run import RunConfig, Runner
-from .run_context import RunContextWrapper, TContext
+from .responses_websocket_session import ResponsesWebSocketSession, responses_websocket_session
+from .result import AgentToolInvocation, RunResult, RunResultStreaming
+from .run import (
+    ReasoningItemIdPolicy,
+    RunConfig,
+    Runner,
+    ToolErrorFormatter,
+    ToolErrorFormatterArgs,
+)
+from .run_context import AgentHookContext, RunContextWrapper, TContext
+from .run_error_handlers import (
+    RunErrorData,
+    RunErrorHandler,
+    RunErrorHandlerInput,
+    RunErrorHandlerResult,
+    RunErrorHandlers,
+)
+from .run_state import RunState
 from .stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
@@ -67,7 +110,9 @@ from .stream_events import (
     StreamEvent,
 )
 from .tool import (
+    ApplyPatchTool,
     CodeInterpreterTool,
+    ComputerProvider,
     ComputerTool,
     FileSearchTool,
     FunctionTool,
@@ -80,6 +125,28 @@ from .tool import (
     MCPToolApprovalFunction,
     MCPToolApprovalFunctionResult,
     MCPToolApprovalRequest,
+    ShellActionRequest,
+    ShellCallData,
+    ShellCallOutcome,
+    ShellCommandOutput,
+    ShellCommandRequest,
+    ShellExecutor,
+    ShellResult,
+    ShellTool,
+    ShellToolContainerAutoEnvironment,
+    ShellToolContainerNetworkPolicy,
+    ShellToolContainerNetworkPolicyAllowlist,
+    ShellToolContainerNetworkPolicyDisabled,
+    ShellToolContainerNetworkPolicyDomainSecret,
+    ShellToolContainerReferenceEnvironment,
+    ShellToolContainerSkill,
+    ShellToolEnvironment,
+    ShellToolHostedEnvironment,
+    ShellToolInlineSkill,
+    ShellToolInlineSkillSource,
+    ShellToolLocalEnvironment,
+    ShellToolLocalSkill,
+    ShellToolSkillReference,
     Tool,
     ToolOutputFileContent,
     ToolOutputFileContentDict,
@@ -89,7 +156,9 @@ from .tool import (
     ToolOutputTextDict,
     WebSearchTool,
     default_tool_error_function,
+    dispose_resolved_computers,
     function_tool,
+    resolve_computer,
 )
 from .tool_guardrails import (
     ToolGuardrailFunctionOutput,
@@ -178,6 +247,15 @@ def set_default_openai_api(api: Literal["chat_completions", "responses"]) -> Non
     _config.set_default_openai_api(api)
 
 
+def set_default_openai_responses_transport(transport: Literal["http", "websocket"]) -> None:
+    """Set the default transport for OpenAI Responses API requests.
+
+    By default, the Responses API uses the HTTP transport. Set this to ``"websocket"`` to use
+    websocket transport when the OpenAI provider resolves a Responses model.
+    """
+    _config.set_default_openai_responses_transport(transport)
+
+
 def enable_verbose_stdout_logging():
     """Enables verbose logging to stdout. This is useful for debugging."""
     logger = logging.getLogger("openai.agents")
@@ -188,10 +266,17 @@ def enable_verbose_stdout_logging():
 __all__ = [
     "Agent",
     "AgentBase",
+    "AgentToolStreamEvent",
     "StopAtTools",
     "ToolsToFinalOutputFunction",
     "ToolsToFinalOutputResult",
+    "default_handoff_history_mapper",
+    "get_conversation_history_wrappers",
+    "nest_handoff_history",
+    "reset_conversation_history_wrappers",
+    "set_conversation_history_wrappers",
     "Runner",
+    "apply_diff",
     "run_demo_loop",
     "Model",
     "ModelProvider",
@@ -201,6 +286,7 @@ __all__ = [
     "MultiProvider",
     "OpenAIProvider",
     "OpenAIResponsesModel",
+    "OpenAIResponsesWSModel",
     "AgentOutputSchema",
     "AgentOutputSchemaBase",
     "Computer",
@@ -217,6 +303,7 @@ __all__ = [
     "Prompt",
     "MaxTurnsExceeded",
     "ModelBehaviorError",
+    "ToolTimeoutError",
     "UserError",
     "InputGuardrail",
     "InputGuardrailResult",
@@ -244,6 +331,9 @@ __all__ = [
     "RunItem",
     "HandoffCallItem",
     "HandoffOutputItem",
+    "ToolApprovalItem",
+    "MCPApprovalRequestItem",
+    "MCPApprovalResponseItem",
     "ToolCallItem",
     "ToolCallOutputItem",
     "ReasoningItem",
@@ -252,14 +342,32 @@ __all__ = [
     "AgentHooks",
     "Session",
     "SessionABC",
+    "SessionSettings",
     "SQLiteSession",
     "OpenAIConversationsSession",
+    "OpenAIResponsesCompactionSession",
+    "OpenAIResponsesCompactionArgs",
+    "OpenAIResponsesCompactionAwareSession",
+    "is_openai_responses_compaction_aware_session",
+    "CompactionItem",
+    "AgentHookContext",
     "RunContextWrapper",
     "TContext",
     "RunErrorDetails",
+    "RunErrorData",
+    "RunErrorHandler",
+    "RunErrorHandlerInput",
+    "RunErrorHandlerResult",
+    "RunErrorHandlers",
+    "AgentToolInvocation",
     "RunResult",
     "RunResultStreaming",
+    "ResponsesWebSocketSession",
     "RunConfig",
+    "ReasoningItemIdPolicy",
+    "ToolErrorFormatter",
+    "ToolErrorFormatterArgs",
+    "RunState",
     "RawResponsesStreamEvent",
     "RunItemStreamEvent",
     "AgentUpdatedStreamEvent",
@@ -267,12 +375,39 @@ __all__ = [
     "FunctionTool",
     "FunctionToolResult",
     "ComputerTool",
+    "ComputerProvider",
     "FileSearchTool",
     "CodeInterpreterTool",
     "ImageGenerationTool",
     "LocalShellCommandRequest",
     "LocalShellExecutor",
     "LocalShellTool",
+    "ShellActionRequest",
+    "ShellCallData",
+    "ShellCallOutcome",
+    "ShellCommandOutput",
+    "ShellCommandRequest",
+    "ShellToolLocalSkill",
+    "ShellToolSkillReference",
+    "ShellToolInlineSkillSource",
+    "ShellToolInlineSkill",
+    "ShellToolContainerSkill",
+    "ShellToolContainerNetworkPolicyDomainSecret",
+    "ShellToolContainerNetworkPolicyAllowlist",
+    "ShellToolContainerNetworkPolicyDisabled",
+    "ShellToolContainerNetworkPolicy",
+    "ShellToolLocalEnvironment",
+    "ShellToolContainerAutoEnvironment",
+    "ShellToolContainerReferenceEnvironment",
+    "ShellToolHostedEnvironment",
+    "ShellToolEnvironment",
+    "ShellExecutor",
+    "ShellResult",
+    "ShellTool",
+    "ApplyPatchEditor",
+    "ApplyPatchOperation",
+    "ApplyPatchResult",
+    "ApplyPatchTool",
     "Tool",
     "WebSearchTool",
     "HostedMCPTool",
@@ -286,6 +421,8 @@ __all__ = [
     "ToolOutputFileContent",
     "ToolOutputFileContentDict",
     "function_tool",
+    "resolve_computer",
+    "dispose_resolved_computers",
     "Usage",
     "add_trace_processor",
     "agent_span",
@@ -322,6 +459,8 @@ __all__ = [
     "set_default_openai_key",
     "set_default_openai_client",
     "set_default_openai_api",
+    "set_default_openai_responses_transport",
+    "responses_websocket_session",
     "set_tracing_export_api_key",
     "enable_verbose_stdout_logging",
     "gen_trace_id",

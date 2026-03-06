@@ -29,6 +29,6 @@ class FinancialReportData(BaseModel):
 writer_agent = Agent(
     name="FinancialWriterAgent",
     instructions=WRITER_PROMPT,
-    model="gpt-4.1",
+    model="gpt-5.2",
     output_type=FinancialReportData,
 )

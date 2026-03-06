@@ -3,12 +3,17 @@ from __future__ import annotations
 import abc
 import asyncio
 import inspect
+import sys
 from collections.abc import Awaitable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar, Union, cast
 
+import httpx
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup  # pyright: ignore[reportMissingImports]
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
 from mcp.client.session import MessageHandlerFnT
@@ -21,9 +26,46 @@ from typing_extensions import NotRequired, TypedDict
 from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
-from .util import HttpClientFactory, ToolFilter, ToolFilterContext, ToolFilterStatic
+from ..tool import ToolErrorFunction
+from ..util._types import MaybeAwaitable
+from .util import (
+    HttpClientFactory,
+    MCPToolMetaResolver,
+    ToolFilter,
+    ToolFilterContext,
+    ToolFilterStatic,
+)
+
+
+class RequireApprovalToolList(TypedDict, total=False):
+    tool_names: list[str]
+
+
+class RequireApprovalObject(TypedDict, total=False):
+    always: RequireApprovalToolList
+    never: RequireApprovalToolList
+
+
+RequireApprovalPolicy = Literal["always", "never"]
+RequireApprovalMapping = dict[str, RequireApprovalPolicy]
+if TYPE_CHECKING:
+    RequireApprovalSetting = (
+        RequireApprovalPolicy | RequireApprovalObject | RequireApprovalMapping | bool | None
+    )
+else:
+    RequireApprovalSetting = Union[  # noqa: UP007
+        RequireApprovalPolicy, RequireApprovalObject, RequireApprovalMapping, bool, None
+    ]
+
 
 T = TypeVar("T")
+
+
+class _UnsetType:
+    pass
+
+
+_UNSET = _UnsetType()
 
 if TYPE_CHECKING:
     from ..agent import AgentBase
@@ -32,7 +74,13 @@ if TYPE_CHECKING:
 class MCPServer(abc.ABC):
     """Base class for Model Context Protocol servers."""
 
-    def __init__(self, use_structured_content: bool = False):
+    def __init__(
+        self,
+        use_structured_content: bool = False,
+        require_approval: RequireApprovalSetting = None,
+        failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
+        tool_meta_resolver: MCPToolMetaResolver | None = None,
+    ):
         """
         Args:
             use_structured_content: Whether to use `tool_result.structured_content` when calling an
@@ -40,8 +88,22 @@ class MCPServer(abc.ABC):
                 include the structured content in the `tool_result.content`, and using it by
                 default will cause duplicate content. You can set this to True if you know the
                 server will not duplicate the structured content in the `tool_result.content`.
+            require_approval: Approval policy for tools on this server. Accepts "always"/"never",
+                a dict of tool names to those values, a boolean, or an object with always/never
+                tool lists (mirroring TS requireApproval). Normalized into a needs_approval policy.
+            failure_error_function: Optional function used to convert MCP tool failures into
+                a model-visible error message. If explicitly set to None, tool errors will be
+                raised instead of converted. If left unset, the agent-level configuration (or
+                SDK default) will be used.
+            tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
+                tool calls. It is invoked by the Agents SDK before calling `call_tool`.
         """
         self.use_structured_content = use_structured_content
+        self._needs_approval_policy = self._normalize_needs_approval(
+            require_approval=require_approval
+        )
+        self._failure_error_function = failure_error_function
+        self.tool_meta_resolver = tool_meta_resolver
 
     @abc.abstractmethod
     async def connect(self):
@@ -74,9 +136,24 @@ class MCPServer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
         """Invoke a tool on the server."""
         pass
+
+    @property
+    def cached_tools(self) -> list[MCPTool] | None:
+        """Return the most recently fetched tools list, if available.
+
+        Implementations may return `None` when tools have not been fetched yet or caching is
+        disabled.
+        """
+
+        return None
 
     @abc.abstractmethod
     async def list_prompts(
@@ -92,9 +169,105 @@ class MCPServer(abc.ABC):
         """Get a specific prompt from the server."""
         pass
 
+    @staticmethod
+    def _normalize_needs_approval(
+        *,
+        require_approval: RequireApprovalSetting,
+    ) -> (
+        bool
+        | dict[str, bool]
+        | Callable[[RunContextWrapper[Any], AgentBase, MCPTool], MaybeAwaitable[bool]]
+    ):
+        """Normalize approval inputs to booleans or a name->bool map."""
+
+        if require_approval is None:
+            return False
+
+        def _to_bool(value: str) -> bool:
+            return value == "always"
+
+        def _is_tool_list_schema(value: object) -> bool:
+            if not isinstance(value, dict):
+                return False
+            for key in ("always", "never"):
+                if key not in value:
+                    continue
+                entry = value.get(key)
+                if isinstance(entry, dict) and "tool_names" in entry:
+                    return True
+            return False
+
+        if isinstance(require_approval, dict) and _is_tool_list_schema(require_approval):
+            always_entry: RequireApprovalToolList | Any = require_approval.get("always", {})
+            never_entry: RequireApprovalToolList | Any = require_approval.get("never", {})
+            always_names = (
+                always_entry.get("tool_names", []) if isinstance(always_entry, dict) else []
+            )
+            never_names = never_entry.get("tool_names", []) if isinstance(never_entry, dict) else []
+            tool_list_mapping: dict[str, bool] = {}
+            for name in always_names:
+                tool_list_mapping[str(name)] = True
+            for name in never_names:
+                tool_list_mapping[str(name)] = False
+            return tool_list_mapping
+
+        if isinstance(require_approval, dict):
+            tool_mapping: dict[str, bool] = {}
+            for name, value in require_approval.items():
+                if isinstance(value, bool):
+                    tool_mapping[str(name)] = value
+                elif isinstance(value, str) and value in ("always", "never"):
+                    tool_mapping[str(name)] = _to_bool(value)
+            return tool_mapping
+
+        if isinstance(require_approval, bool):
+            return require_approval
+
+        return _to_bool(require_approval)
+
+    def _get_needs_approval_for_tool(
+        self,
+        tool: MCPTool,
+        agent: AgentBase | None,
+    ) -> bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]:
+        """Return a FunctionTool.needs_approval value for a given MCP tool."""
+
+        policy = self._needs_approval_policy
+
+        if callable(policy):
+            if agent is None:
+                return True
+
+            async def _needs_approval(
+                run_context: RunContextWrapper[Any], _args: dict[str, Any], _call_id: str
+            ) -> bool:
+                result = policy(run_context, agent, tool)
+                if inspect.isawaitable(result):
+                    result = await result
+                return bool(result)
+
+            return _needs_approval
+
+        if isinstance(policy, dict):
+            return bool(policy.get(tool.name, False))
+
+        return bool(policy)
+
+    def _get_failure_error_function(
+        self, agent_failure_error_function: ToolErrorFunction | None
+    ) -> ToolErrorFunction | None:
+        """Return the effective error handler for MCP tool failures."""
+        if self._failure_error_function is _UNSET:
+            return agent_failure_error_function
+        return cast(ToolErrorFunction | None, self._failure_error_function)
+
 
 class _MCPServerWithClientSession(MCPServer, abc.ABC):
     """Base class for MCP servers that use a `ClientSession` to communicate with the server."""
+
+    @property
+    def cached_tools(self) -> list[MCPTool] | None:
+        return self._tools_list
 
     def __init__(
         self,
@@ -105,6 +278,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
+        require_approval: RequireApprovalSetting = None,
+        failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
+        tool_meta_resolver: MCPToolMetaResolver | None = None,
     ):
         """
         Args:
@@ -128,8 +304,22 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 backoff between retries.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
+            require_approval: Approval policy for tools on this server. Accepts "always"/"never",
+                a dict of tool names to those values, a boolean, or an object with always/never
+                tool lists.
+            failure_error_function: Optional function used to convert MCP tool failures into
+                a model-visible error message. If explicitly set to None, tool errors will be
+                raised instead of converted. If left unset, the agent-level configuration (or
+                SDK default) will be used.
+            tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
+                tool calls. It is invoked by the Agents SDK before calling `call_tool`.
         """
-        super().__init__(use_structured_content=use_structured_content)
+        super().__init__(
+            use_structured_content=use_structured_content,
+            require_approval=require_approval,
+            failure_error_function=failure_error_function,
+            tool_meta_resolver=tool_meta_resolver,
+        )
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
         self._cleanup_lock: asyncio.Lock = asyncio.Lock()
@@ -150,8 +340,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def _apply_tool_filter(
         self,
         tools: list[MCPTool],
-        run_context: RunContextWrapper[Any],
-        agent: AgentBase,
+        run_context: RunContextWrapper[Any] | None = None,
+        agent: AgentBase | None = None,
     ) -> list[MCPTool]:
         """Apply the tool filter to the list of tools."""
         if self.tool_filter is None:
@@ -163,6 +353,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         # Handle callable tool filter (dynamic filter)
         else:
+            if run_context is None or agent is None:
+                raise UserError("run_context and agent are required for dynamic tool filtering")
             return await self._apply_dynamic_tool_filter(tools, run_context, agent)
 
     def _apply_static_tool_filter(
@@ -249,6 +441,35 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         """Invalidate the tools cache."""
         self._cache_dirty = True
 
+    def _extract_http_error_from_exception(self, e: Exception) -> Exception | None:
+        """Extract HTTP error from exception or ExceptionGroup."""
+        if isinstance(e, (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException)):
+            return e
+
+        # Check if it's an ExceptionGroup containing HTTP errors
+        if isinstance(e, BaseExceptionGroup):
+            for exc in e.exceptions:
+                if isinstance(
+                    exc, (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException)
+                ):
+                    return exc
+
+        return None
+
+    def _raise_user_error_for_http_error(self, http_error: Exception) -> None:
+        """Raise appropriate UserError for HTTP error."""
+        error_message = f"Failed to connect to MCP server '{self.name}': "
+        if isinstance(http_error, httpx.HTTPStatusError):
+            error_message += f"HTTP error {http_error.response.status_code} ({http_error.response.reason_phrase})"  # noqa: E501
+
+        elif isinstance(http_error, httpx.ConnectError):
+            error_message += "Could not reach the server."
+
+        elif isinstance(http_error, httpx.TimeoutException):
+            error_message += "Connection timeout."
+
+        raise UserError(error_message) from http_error
+
     async def _run_with_retries(self, func: Callable[[], Awaitable[T]]) -> T:
         attempts = 0
         while True:
@@ -263,6 +484,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     async def connect(self):
         """Connect to the server."""
+        connection_succeeded = False
         try:
             transport = await self.exit_stack.enter_async_context(self.create_streams())
             # streamablehttp_client returns (read, write, get_session_id)
@@ -283,10 +505,49 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             server_result = await session.initialize()
             self.server_initialize_result = server_result
             self.session = session
+            connection_succeeded = True
         except Exception as e:
-            logger.error(f"Error initializing MCP server: {e}")
-            await self.cleanup()
+            # Try to extract HTTP error from exception or ExceptionGroup
+            http_error = self._extract_http_error_from_exception(e)
+            if http_error:
+                self._raise_user_error_for_http_error(http_error)
+
+            # For CancelledError, preserve cancellation semantics - don't wrap it.
+            # If it's masking an HTTP error, cleanup() will extract and raise UserError.
+            if isinstance(e, asyncio.CancelledError):
+                raise
+
+            # For HTTP-related errors, wrap them
+            if isinstance(e, (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException)):
+                self._raise_user_error_for_http_error(e)
+
+            # For other errors, re-raise as-is (don't wrap non-HTTP errors)
             raise
+        finally:
+            # Always attempt cleanup on error, but suppress cleanup errors that mask the original
+            if not connection_succeeded:
+                try:
+                    await self.cleanup()
+                except UserError:
+                    # Re-raise UserError from cleanup (contains the real HTTP error)
+                    raise
+                except Exception as cleanup_error:
+                    # Suppress RuntimeError about cancel scopes during cleanup - this is a known
+                    # issue with the MCP library's async generator cleanup and shouldn't mask the
+                    # original error
+                    if isinstance(cleanup_error, RuntimeError) and "cancel scope" in str(
+                        cleanup_error
+                    ):
+                        logger.debug(
+                            f"Ignoring cancel scope error during cleanup of MCP server "
+                            f"'{self.name}': {cleanup_error}"
+                        )
+                    else:
+                        # Log other cleanup errors but don't raise - original error is more
+                        # important
+                        logger.warning(
+                            f"Error during cleanup of MCP server '{self.name}': {cleanup_error}"
+                        )
 
     async def list_tools(
         self,
@@ -299,32 +560,97 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         session = self.session
         assert session is not None
 
-        # Return from cache if caching is enabled, we have tools, and the cache is not dirty
-        if self.cache_tools_list and not self._cache_dirty and self._tools_list:
-            tools = self._tools_list
-        else:
-            # Fetch the tools from the server
-            result = await self._run_with_retries(lambda: session.list_tools())
-            self._tools_list = result.tools
-            self._cache_dirty = False
-            tools = self._tools_list
+        try:
+            # Return from cache if caching is enabled, we have tools, and the cache is not dirty
+            if self.cache_tools_list and not self._cache_dirty and self._tools_list:
+                tools = self._tools_list
+            else:
+                # Fetch the tools from the server
+                result = await self._run_with_retries(lambda: session.list_tools())
+                self._tools_list = result.tools
+                self._cache_dirty = False
+                tools = self._tools_list
 
-        # Filter tools based on tool_filter
-        filtered_tools = tools
-        if self.tool_filter is not None:
-            if run_context is None or agent is None:
-                raise UserError("run_context and agent are required for dynamic tool filtering")
-            filtered_tools = await self._apply_tool_filter(filtered_tools, run_context, agent)
-        return filtered_tools
+            # Filter tools based on tool_filter
+            filtered_tools = tools
+            if self.tool_filter is not None:
+                filtered_tools = await self._apply_tool_filter(filtered_tools, run_context, agent)
+            return filtered_tools
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            raise UserError(
+                f"Failed to list tools from MCP server '{self.name}': HTTP error {status_code}"
+            ) from e
+        except httpx.ConnectError as e:
+            raise UserError(
+                f"Failed to list tools from MCP server '{self.name}': Connection lost. "
+                f"The server may have disconnected."
+            ) from e
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
         """Invoke a tool on the server."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
         session = self.session
         assert session is not None
 
-        return await self._run_with_retries(lambda: session.call_tool(tool_name, arguments))
+        try:
+            self._validate_required_parameters(tool_name=tool_name, arguments=arguments)
+            if meta is None:
+                return await self._run_with_retries(lambda: session.call_tool(tool_name, arguments))
+            return await self._run_with_retries(
+                lambda: session.call_tool(tool_name, arguments, meta=meta)
+            )
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            raise UserError(
+                f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                f"HTTP error {status_code}"
+            ) from e
+        except httpx.ConnectError as e:
+            raise UserError(
+                f"Failed to call tool '{tool_name}' on MCP server '{self.name}': Connection lost. "
+                f"The server may have disconnected."
+            ) from e
+
+    def _validate_required_parameters(
+        self, tool_name: str, arguments: dict[str, Any] | None
+    ) -> None:
+        """Validate required tool parameters from cached MCP tool schemas before invocation."""
+        if self._tools_list is None:
+            return
+
+        tool = next((item for item in self._tools_list if item.name == tool_name), None)
+        if tool is None or not isinstance(tool.inputSchema, dict):
+            return
+
+        raw_required = tool.inputSchema.get("required")
+        if not isinstance(raw_required, list) or not raw_required:
+            return
+
+        if arguments is None:
+            arguments_to_validate: dict[str, Any] = {}
+        elif isinstance(arguments, dict):
+            arguments_to_validate = arguments
+        else:
+            raise UserError(
+                f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                "arguments must be an object."
+            )
+
+        required_names = [name for name in raw_required if isinstance(name, str)]
+        missing = [name for name in required_names if name not in arguments_to_validate]
+        if missing:
+            missing_text = ", ".join(sorted(missing))
+            raise UserError(
+                f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                f"missing required parameters: {missing_text}"
+            )
 
     async def list_prompts(
         self,
@@ -347,10 +673,76 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def cleanup(self):
         """Cleanup the server."""
         async with self._cleanup_lock:
+            # Only raise HTTP errors if we're cleaning up after a failed connection.
+            # During normal teardown (via __aexit__), log but don't raise to avoid
+            # masking the original exception.
+            is_failed_connection_cleanup = self.session is None
+
             try:
                 await self.exit_stack.aclose()
+            except asyncio.CancelledError as e:
+                logger.debug(f"Cleanup cancelled for MCP server '{self.name}': {e}")
+                raise
+            except BaseExceptionGroup as eg:
+                # Extract HTTP errors from ExceptionGroup raised during cleanup
+                # This happens when background tasks fail (e.g., HTTP errors)
+                http_error = None
+                connect_error = None
+                timeout_error = None
+                error_message = f"Failed to connect to MCP server '{self.name}': "
+
+                for exc in eg.exceptions:
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        http_error = exc
+                    elif isinstance(exc, httpx.ConnectError):
+                        connect_error = exc
+                    elif isinstance(exc, httpx.TimeoutException):
+                        timeout_error = exc
+
+                # Only raise HTTP errors if we're cleaning up after a failed connection.
+                # During normal teardown, log them instead.
+                if http_error:
+                    if is_failed_connection_cleanup:
+                        error_message += f"HTTP error {http_error.response.status_code} ({http_error.response.reason_phrase})"  # noqa: E501
+                        raise UserError(error_message) from http_error
+                    else:
+                        # Normal teardown - log but don't raise
+                        logger.warning(
+                            f"HTTP error during cleanup of MCP server '{self.name}': {http_error}"
+                        )
+                elif connect_error:
+                    if is_failed_connection_cleanup:
+                        error_message += "Could not reach the server."
+                        raise UserError(error_message) from connect_error
+                    else:
+                        logger.warning(
+                            f"Connection error during cleanup of MCP server '{self.name}': {connect_error}"  # noqa: E501
+                        )
+                elif timeout_error:
+                    if is_failed_connection_cleanup:
+                        error_message += "Connection timeout."
+                        raise UserError(error_message) from timeout_error
+                    else:
+                        logger.warning(
+                            f"Timeout error during cleanup of MCP server '{self.name}': {timeout_error}"  # noqa: E501
+                        )
+                else:
+                    # No HTTP error found, suppress RuntimeError about cancel scopes
+                    has_cancel_scope_error = any(
+                        isinstance(exc, RuntimeError) and "cancel scope" in str(exc)
+                        for exc in eg.exceptions
+                    )
+                    if has_cancel_scope_error:
+                        logger.debug(f"Ignoring cancel scope error during cleanup: {eg}")
+                    else:
+                        logger.error(f"Error cleaning up server: {eg}")
             except Exception as e:
-                logger.error(f"Error cleaning up server: {e}")
+                # Suppress RuntimeError about cancel scopes - this is a known issue with the MCP
+                # library when background tasks fail during async generator cleanup
+                if isinstance(e, RuntimeError) and "cancel scope" in str(e):
+                    logger.debug(f"Ignoring cancel scope error during cleanup: {e}")
+                else:
+                    logger.error(f"Error cleaning up server: {e}")
             finally:
                 self.session = None
 
@@ -401,6 +793,9 @@ class MCPServerStdio(_MCPServerWithClientSession):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
+        require_approval: RequireApprovalSetting = None,
+        failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
+        tool_meta_resolver: MCPToolMetaResolver | None = None,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -430,15 +825,26 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 backoff between retries.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
+            require_approval: Approval policy for tools on this server. Accepts "always"/"never",
+                a dict of tool names to those values, or an object with always/never tool lists.
+            failure_error_function: Optional function used to convert MCP tool failures into
+                a model-visible error message. If explicitly set to None, tool errors will be
+                raised instead of converted. If left unset, the agent-level configuration (or
+                SDK default) will be used.
+            tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
+                tool calls. It is invoked by the Agents SDK before calling `call_tool`.
         """
         super().__init__(
-            cache_tools_list,
-            client_session_timeout_seconds,
-            tool_filter,
-            use_structured_content,
-            max_retry_attempts,
-            retry_backoff_seconds_base,
+            cache_tools_list=cache_tools_list,
+            client_session_timeout_seconds=client_session_timeout_seconds,
+            tool_filter=tool_filter,
+            use_structured_content=use_structured_content,
+            max_retry_attempts=max_retry_attempts,
+            retry_backoff_seconds_base=retry_backoff_seconds_base,
             message_handler=message_handler,
+            require_approval=require_approval,
+            failure_error_function=failure_error_function,
+            tool_meta_resolver=tool_meta_resolver,
         )
 
         self.params = StdioServerParameters(
@@ -503,6 +909,9 @@ class MCPServerSse(_MCPServerWithClientSession):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
+        require_approval: RequireApprovalSetting = None,
+        failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
+        tool_meta_resolver: MCPToolMetaResolver | None = None,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -534,15 +943,26 @@ class MCPServerSse(_MCPServerWithClientSession):
                 backoff between retries.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
+            require_approval: Approval policy for tools on this server. Accepts "always"/"never",
+                a dict of tool names to those values, or an object with always/never tool lists.
+            failure_error_function: Optional function used to convert MCP tool failures into
+                a model-visible error message. If explicitly set to None, tool errors will be
+                raised instead of converted. If left unset, the agent-level configuration (or
+                SDK default) will be used.
+            tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
+                tool calls. It is invoked by the Agents SDK before calling `call_tool`.
         """
         super().__init__(
-            cache_tools_list,
-            client_session_timeout_seconds,
-            tool_filter,
-            use_structured_content,
-            max_retry_attempts,
-            retry_backoff_seconds_base,
+            cache_tools_list=cache_tools_list,
+            client_session_timeout_seconds=client_session_timeout_seconds,
+            tool_filter=tool_filter,
+            use_structured_content=use_structured_content,
+            max_retry_attempts=max_retry_attempts,
+            retry_backoff_seconds_base=retry_backoff_seconds_base,
             message_handler=message_handler,
+            require_approval=require_approval,
+            failure_error_function=failure_error_function,
+            tool_meta_resolver=tool_meta_resolver,
         )
 
         self.params = params
@@ -610,6 +1030,9 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
+        require_approval: RequireApprovalSetting = None,
+        failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
+        tool_meta_resolver: MCPToolMetaResolver | None = None,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -642,15 +1065,26 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 backoff between retries.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
+            require_approval: Approval policy for tools on this server. Accepts "always"/"never",
+                a dict of tool names to those values, or an object with always/never tool lists.
+            failure_error_function: Optional function used to convert MCP tool failures into
+                a model-visible error message. If explicitly set to None, tool errors will be
+                raised instead of converted. If left unset, the agent-level configuration (or
+                SDK default) will be used.
+            tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
+                tool calls. It is invoked by the Agents SDK before calling `call_tool`.
         """
         super().__init__(
-            cache_tools_list,
-            client_session_timeout_seconds,
-            tool_filter,
-            use_structured_content,
-            max_retry_attempts,
-            retry_backoff_seconds_base,
+            cache_tools_list=cache_tools_list,
+            client_session_timeout_seconds=client_session_timeout_seconds,
+            tool_filter=tool_filter,
+            use_structured_content=use_structured_content,
+            max_retry_attempts=max_retry_attempts,
+            retry_backoff_seconds_base=retry_backoff_seconds_base,
             message_handler=message_handler,
+            require_approval=require_approval,
+            failure_error_function=failure_error_function,
+            tool_meta_resolver=tool_meta_resolver,
         )
 
         self.params = params

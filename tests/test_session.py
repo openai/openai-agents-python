@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from agents import Agent, RunConfig, Runner, SQLiteSession, TResponseInputItem
-from agents.exceptions import UserError
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
@@ -371,10 +370,8 @@ async def test_sqlite_session_get_items_with_limit():
 
 @pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
 @pytest.mark.asyncio
-async def test_session_memory_rejects_both_session_and_list_input(runner_method):
-    """Test that passing both a session and list input raises a UserError across all runner
-    methods.
-    """
+async def test_session_memory_appends_list_input_by_default(runner_method):
+    """Test that list inputs are appended to session history when no callback is provided."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_validation.db"
         session_id = "test_validation_parametrized"
@@ -383,19 +380,18 @@ async def test_session_memory_rejects_both_session_and_list_input(runner_method)
         model = FakeModel()
         agent = Agent(name="test", model=model)
 
-        # Test that providing both a session and a list input raises a UserError
-        model.set_next_output([get_text_message("This shouldn't run")])
-
-        list_input = [
-            {"role": "user", "content": "Test message"},
+        initial_history: list[TResponseInputItem] = [
+            {"role": "user", "content": "Earlier message"},
+            {"role": "assistant", "content": "Saved reply"},
         ]
+        await session.add_items(initial_history)
 
-        with pytest.raises(UserError) as exc_info:
-            await run_agent_async(runner_method, agent, list_input, session=session)
+        list_input = [{"role": "user", "content": "Test message"}]
 
-        # Verify the error message explains the issue
-        assert "list inputs require a `RunConfig.session_input_callback" in str(exc_info.value)
-        assert "to manage the history manually" in str(exc_info.value)
+        model.set_next_output([get_text_message("This should run")])
+        await run_agent_async(runner_method, agent, list_input, session=session)
+
+        assert model.last_turn_args["input"] == initial_history + list_input
 
         session.close()
 
@@ -533,4 +529,180 @@ async def test_sqlite_session_concurrent_access():
         contents = {item.get("content") for item in retrieved}
         expected = {f"Message {i}" for i in range(10)}
         assert contents == expected
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_session_add_items_exception_propagates_in_streamed():
+    """Test that exceptions from session.add_items are properly propagated
+    in run_streamed instead of causing the stream to hang forever.
+    Regression test for https://github.com/openai/openai-agents-python/issues/2130
+    """
+    session = SQLiteSession("test_exception_session")
+
+    async def _failing_add_items(_items):
+        raise RuntimeError("Simulated session.add_items failure")
+
+    session.add_items = _failing_add_items  # type: ignore[method-assign]
+
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    model.set_next_output([get_text_message("This should not be reached")])
+
+    result = Runner.run_streamed(agent, "Hello", session=session)
+
+    async def consume_stream():
+        async for _event in result.stream_events():
+            pass
+
+    with pytest.raises(RuntimeError, match="Simulated session.add_items failure"):
+        # Timeout ensures test fails fast instead of hanging forever if bug regresses
+        await asyncio.wait_for(consume_stream(), timeout=5.0)
+
+    session.close()
+
+
+# ============================================================================
+# SessionSettings Tests
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_session_settings_default():
+    """Test that session_settings defaults to empty SessionSettings."""
+    from agents.memory import SessionSettings
+
+    session = SQLiteSession("default_settings_test")
+
+    # Should have default SessionSettings
+    assert isinstance(session.session_settings, SessionSettings)
+    assert session.session_settings.limit is None
+
+    session.close()
+
+
+@pytest.mark.asyncio
+async def test_session_settings_constructor():
+    """Test passing session_settings via constructor."""
+    from agents.memory import SessionSettings
+
+    session = SQLiteSession("constructor_settings_test", session_settings=SessionSettings(limit=5))
+
+    assert session.session_settings is not None
+    assert session.session_settings.limit == 5
+
+    session.close()
+
+
+@pytest.mark.asyncio
+async def test_get_items_uses_session_settings_limit():
+    """Test that get_items uses session_settings.limit as default."""
+    from agents.memory import SessionSettings
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_settings_limit.db"
+        session = SQLiteSession(
+            "uses_settings_limit_test", db_path, session_settings=SessionSettings(limit=3)
+        )
+
+        # Add 5 items
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"Message {i}"} for i in range(5)
+        ]
+        await session.add_items(items)
+
+        # get_items() with no limit should use session_settings.limit=3
+        retrieved = await session.get_items()
+        assert len(retrieved) == 3
+        # Should get the last 3 items
+        assert retrieved[0].get("content") == "Message 2"
+        assert retrieved[1].get("content") == "Message 3"
+        assert retrieved[2].get("content") == "Message 4"
+
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_get_items_explicit_limit_overrides_session_settings():
+    """Test that explicit limit parameter overrides session_settings."""
+    from agents.memory import SessionSettings
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_override.db"
+        session = SQLiteSession(
+            "explicit_override_test", db_path, session_settings=SessionSettings(limit=5)
+        )
+
+        # Add 10 items
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"Message {i}"} for i in range(10)
+        ]
+        await session.add_items(items)
+
+        # Explicit limit=2 should override session_settings.limit=5
+        retrieved = await session.get_items(limit=2)
+        assert len(retrieved) == 2
+        assert retrieved[0].get("content") == "Message 8"
+        assert retrieved[1].get("content") == "Message 9"
+
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_session_settings_resolve():
+    """Test SessionSettings.resolve() method."""
+    from agents.memory import SessionSettings
+
+    base = SessionSettings(limit=100)
+    override = SessionSettings(limit=50)
+
+    final = base.resolve(override)
+
+    assert final.limit == 50  # Override wins
+    assert base.limit == 100  # Original unchanged
+
+    # Resolving with None returns self
+    final_none = base.resolve(None)
+    assert final_none.limit == 100
+
+
+@pytest.mark.asyncio
+async def test_runner_with_session_settings_override():
+    """Test that RunConfig can override session's default settings."""
+    from agents.memory import SessionSettings
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_runner_override.db"
+
+        # Session with default limit=100
+        session = SQLiteSession(
+            "runner_override_test", db_path, session_settings=SessionSettings(limit=100)
+        )
+
+        # Add some history
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"Turn {i}"} for i in range(10)
+        ]
+        await session.add_items(items)
+
+        model = FakeModel()
+        agent = Agent(name="test", model=model)
+        model.set_next_output([get_text_message("Got it")])
+
+        await Runner.run(
+            agent,
+            "New question",
+            session=session,
+            run_config=RunConfig(
+                session_settings=SessionSettings(limit=2)  # Override to 2
+            ),
+        )
+
+        # Verify the agent received only the last 2 history items + new question
+        last_input = model.last_turn_args["input"]
+        # Filter out the new "New question" input
+        history_items = [item for item in last_input if item.get("content") != "New question"]
+        # Should have 2 history items (last two from the 10 we added)
+        assert len(history_items) == 2
+
         session.close()

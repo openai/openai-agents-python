@@ -28,6 +28,7 @@ from .events import (
     RealtimeHistoryUpdated,
     RealtimeRawModelEvent,
     RealtimeSessionEvent,
+    RealtimeToolApprovalRequired,
     RealtimeToolEnd,
     RealtimeToolStart,
 )
@@ -84,6 +85,7 @@ from .model_inputs import (
 )
 from .openai_realtime import (
     DEFAULT_MODEL_SETTINGS,
+    OpenAIRealtimeSIPModel,
     OpenAIRealtimeWebSocketModel,
     get_api_key,
 )
@@ -126,6 +128,7 @@ __all__ = [
     "RealtimeHistoryUpdated",
     "RealtimeRawModelEvent",
     "RealtimeSessionEvent",
+    "RealtimeToolApprovalRequired",
     "RealtimeToolEnd",
     "RealtimeToolStart",
     # Items
@@ -176,6 +179,7 @@ __all__ = [
     "RealtimeModelUserInputMessage",
     # OpenAI Realtime
     "DEFAULT_MODEL_SETTINGS",
+    "OpenAIRealtimeSIPModel",
     "OpenAIRealtimeWebSocketModel",
     "get_api_key",
     # Session

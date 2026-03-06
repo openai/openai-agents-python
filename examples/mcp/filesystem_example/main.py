@@ -20,13 +20,13 @@ async def run(mcp_server: MCPServer):
     print(result.final_output)
 
     # Ask about books
-    message = "What is my #1 favorite book?"
+    message = "Read favorite_books.txt and tell me my #1 favorite book."
     print(f"\n\nRunning: {message}")
     result = await Runner.run(starting_agent=agent, input=message)
     print(result.final_output)
 
     # Ask a question that reads then reasons.
-    message = "Look at my favorite songs. Suggest one new song that I might like."
+    message = "Read favorite_songs.txt and suggest one new song that I might like."
     print(f"\n\nRunning: {message}")
     result = await Runner.run(starting_agent=agent, input=message)
     print(result.final_output)

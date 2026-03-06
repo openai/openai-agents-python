@@ -3,6 +3,7 @@ import asyncio
 from pydantic import BaseModel
 
 from agents import Agent, Runner, trace
+from examples.auto_mode import input_with_fallback
 
 """
 This example demonstrates a deterministic flow, where each step is performed by an agent.
@@ -39,7 +40,10 @@ story_agent = Agent(
 
 
 async def main():
-    input_prompt = input("What kind of story do you want? ")
+    input_prompt = input_with_fallback(
+        "What kind of story do you want? ",
+        "Write a short sci-fi story.",
+    )
 
     # Ensure the entire workflow is a single trace
     with trace("Deterministic story flow"):

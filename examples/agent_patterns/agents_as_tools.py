@@ -1,6 +1,7 @@
 import asyncio
 
 from agents import Agent, ItemHelpers, MessageOutputItem, Runner, trace
+from examples.auto_mode import input_with_fallback
 
 """
 This example shows the agents-as-tools pattern. The frontline agent receives a user message and
@@ -56,7 +57,10 @@ synthesizer_agent = Agent(
 
 
 async def main():
-    msg = input("Hi! What would you like translated, and to which languages? ")
+    msg = input_with_fallback(
+        "Hi! What would you like translated, and to which languages? ",
+        "Translate 'Hello, world!' to French and Spanish.",
+    )
 
     # Run the entire orchestration in a single trace
     with trace("Orchestrator evaluator"):

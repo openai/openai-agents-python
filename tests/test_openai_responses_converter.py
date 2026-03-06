@@ -23,6 +23,8 @@ We test the following aspects:
   one `ComputerTool`.
 """
 
+from typing import Any, cast
+
 import pytest
 from openai import omit
 from pydantic import BaseModel
@@ -34,6 +36,7 @@ from agents import (
     ComputerTool,
     FileSearchTool,
     Handoff,
+    ShellTool,
     Tool,
     UserError,
     WebSearchTool,
@@ -41,6 +44,43 @@ from agents import (
     handoff,
 )
 from agents.models.openai_responses import Converter
+
+
+class DummyComputer(Computer):
+    @property
+    def environment(self):
+        return "mac"
+
+    @property
+    def dimensions(self):
+        return (800, 600)
+
+    def screenshot(self) -> str:
+        raise NotImplementedError
+
+    def click(self, x: int, y: int, button: str) -> None:
+        raise NotImplementedError
+
+    def double_click(self, x: int, y: int) -> None:
+        raise NotImplementedError
+
+    def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+        raise NotImplementedError
+
+    def type(self, text: str) -> None:
+        raise NotImplementedError
+
+    def wait(self) -> None:
+        raise NotImplementedError
+
+    def move(self, x: int, y: int) -> None:
+        raise NotImplementedError
+
+    def keypress(self, keys: list[str]) -> None:
+        raise NotImplementedError
+
+    def drag(self, path: list[tuple[int, int]]) -> None:
+        raise NotImplementedError
 
 
 def test_convert_tool_choice_standard_values():
@@ -110,43 +150,6 @@ def test_convert_tools_basic_types_and_includes():
     # Web search tool with custom params
     web_tool = WebSearchTool(user_location=None, search_context_size="high")
 
-    # Dummy computer tool subclassing the Computer ABC with minimal methods.
-    class DummyComputer(Computer):
-        @property
-        def environment(self):
-            return "mac"
-
-        @property
-        def dimensions(self):
-            return (800, 600)
-
-        def screenshot(self) -> str:
-            raise NotImplementedError
-
-        def click(self, x: int, y: int, button: str) -> None:
-            raise NotImplementedError
-
-        def double_click(self, x: int, y: int) -> None:
-            raise NotImplementedError
-
-        def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
-            raise NotImplementedError
-
-        def type(self, text: str) -> None:
-            raise NotImplementedError
-
-        def wait(self) -> None:
-            raise NotImplementedError
-
-        def move(self, x: int, y: int) -> None:
-            raise NotImplementedError
-
-        def keypress(self, keys: list[str]) -> None:
-            raise NotImplementedError
-
-        def drag(self, path: list[tuple[int, int]]) -> None:
-            raise NotImplementedError
-
     # Wrap our concrete computer in a ComputerTool for conversion.
     comp_tool = ComputerTool(computer=DummyComputer())
     tools: list[Tool] = [tool_fn, file_tool, web_tool, comp_tool]
@@ -187,6 +190,127 @@ def test_convert_tools_basic_types_and_includes():
         Converter.convert_tools(tools=[comp_tool, comp_tool], handoffs=[])
 
 
+def test_convert_tools_shell_local_environment() -> None:
+    shell_tool = ShellTool(executor=lambda request: "ok")
+
+    converted = Converter.convert_tools(tools=[shell_tool], handoffs=[])
+
+    assert converted.tools == [{"type": "shell", "environment": {"type": "local"}}]
+    assert converted.includes == []
+
+
+def test_convert_tools_shell_container_reference_environment() -> None:
+    shell_tool = ShellTool(environment={"type": "container_reference", "container_id": "cntr_123"})
+
+    converted = Converter.convert_tools(tools=[shell_tool], handoffs=[])
+
+    assert converted.tools == [
+        {
+            "type": "shell",
+            "environment": {
+                "type": "container_reference",
+                "container_id": "cntr_123",
+            },
+        }
+    ]
+
+
+def test_convert_tools_shell_container_auto_environment() -> None:
+    shell_tool = ShellTool(
+        environment={
+            "type": "container_auto",
+            "file_ids": ["file-123"],
+            "memory_limit": "1g",
+            "network_policy": {
+                "type": "allowlist",
+                "allowed_domains": ["example.com"],
+                "domain_secrets": [{"domain": "example.com", "name": "TOKEN", "value": "secret"}],
+            },
+            "skills": [
+                {"type": "skill_reference", "skill_id": "skill_123", "version": "latest"},
+                {
+                    "type": "inline",
+                    "name": "csv-workbench",
+                    "description": "Analyze CSV files.",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/zip",
+                        "data": "ZmFrZS16aXA=",
+                    },
+                },
+            ],
+        }
+    )
+
+    converted = Converter.convert_tools(tools=[shell_tool], handoffs=[])
+
+    assert converted.tools == [
+        {
+            "type": "shell",
+            "environment": {
+                "type": "container_auto",
+                "file_ids": ["file-123"],
+                "memory_limit": "1g",
+                "network_policy": {
+                    "type": "allowlist",
+                    "allowed_domains": ["example.com"],
+                    "domain_secrets": [
+                        {"domain": "example.com", "name": "TOKEN", "value": "secret"}
+                    ],
+                },
+                "skills": [
+                    {
+                        "type": "skill_reference",
+                        "skill_id": "skill_123",
+                        "version": "latest",
+                    },
+                    {
+                        "type": "inline",
+                        "name": "csv-workbench",
+                        "description": "Analyze CSV files.",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/zip",
+                            "data": "ZmFrZS16aXA=",
+                        },
+                    },
+                ],
+            },
+        }
+    ]
+
+
+def test_convert_tools_shell_environment_passes_through_unknown_fields() -> None:
+    shell_tool = ShellTool(
+        environment=cast(
+            Any,
+            {
+                "type": "container_auto",
+                "network_policy": {
+                    "type": "future_mode",
+                    "allowed_domains": ["example.com"],
+                    "some_new_field": "keep-me",
+                },
+            },
+        )
+    )
+
+    converted = Converter.convert_tools(tools=[shell_tool], handoffs=[])
+    assert converted.tools == [
+        {
+            "type": "shell",
+            "environment": {
+                "type": "container_auto",
+                "network_policy": {
+                    "type": "future_mode",
+                    "allowed_domains": ["example.com"],
+                    "some_new_field": "keep-me",
+                },
+            },
+        }
+    ]
+
+
 def test_convert_tools_includes_handoffs():
     """
     When handoff objects are included, `convert_tools` should append their
@@ -203,3 +327,9 @@ def test_convert_tools_includes_handoffs():
     assert handoff_tool.get("description") == Handoff.default_tool_description(agent)
     # No includes for handoffs by default.
     assert converted.includes == []
+
+
+def test_convert_tools_requires_initialized_computer():
+    comp_tool = ComputerTool(computer=lambda **_: DummyComputer())
+    with pytest.raises(UserError, match="resolve_computer"):
+        Converter.convert_tools(tools=[comp_tool], handoffs=[])

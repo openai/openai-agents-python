@@ -24,6 +24,44 @@ matrix below summarises the options that the Python SDK supports.
 
 The sections below walk through each option, how to configure it, and when to prefer one transport over another.
 
+## Agent-level MCP configuration
+
+In addition to choosing a transport, you can tune how MCP tools are prepared by setting `Agent.mcp_config`.
+
+```python
+from agents import Agent
+
+agent = Agent(
+    name="Assistant",
+    mcp_servers=[server],
+    mcp_config={
+        # Try to convert MCP tool schemas to strict JSON schema.
+        "convert_schemas_to_strict": True,
+        # If None, MCP tool failures are raised as exceptions instead of
+        # returning model-visible error text.
+        "failure_error_function": None,
+    },
+)
+```
+
+Notes:
+
+- `convert_schemas_to_strict` is best-effort. If a schema cannot be converted, the original schema is used.
+- `failure_error_function` controls how MCP tool call failures are surfaced to the model.
+- When `failure_error_function` is unset, the SDK uses the default tool error formatter.
+- Server-level `failure_error_function` overrides `Agent.mcp_config["failure_error_function"]` for that server.
+
+## Shared patterns across transports
+
+After you choose a transport, most integrations need the same follow-up decisions:
+
+- How to expose only a subset of tools ([Tool filtering](#tool-filtering)).
+- Whether the server also provides reusable prompts ([Prompts](#prompts)).
+- Whether `list_tools()` should be cached ([Caching](#caching)).
+- How MCP activity appears in traces ([Tracing](#tracing)).
+
+For local MCP servers (`MCPServerStdio`, `MCPServerSse`, `MCPServerStreamableHttp`), approval policies and per-call `_meta` payloads are also shared concepts. The Streamable HTTP section shows the most complete examples, and the same patterns apply to the other local transports.
+
 ## 1. Hosted MCP server tools
 
 Hosted tools push the entire tool round-trip into OpenAI's infrastructure. Instead of your code listing and calling tools, the
@@ -66,7 +104,7 @@ The hosted server exposes its tools automatically; you do not add it to `mcp_ser
 
 ### Streaming hosted MCP results
 
-Hosted tools support streaming results in exactly the same way as function tools. Pass `stream=True` to `Runner.run_streamed` to
+Hosted tools support streaming results in exactly the same way as function tools. Use `Runner.run_streamed` to
 consume incremental MCP output while the model is still working:
 
 ```python
@@ -178,8 +216,67 @@ The constructor accepts additional options:
 - `use_structured_content` toggles whether `tool_result.structured_content` is preferred over textual output.
 - `max_retry_attempts` and `retry_backoff_seconds_base` add automatic retries for `list_tools()` and `call_tool()`.
 - `tool_filter` lets you expose only a subset of tools (see [Tool filtering](#tool-filtering)).
+- `require_approval` enables human-in-the-loop approval policies on local MCP tools.
+- `failure_error_function` customizes model-visible MCP tool failure messages; set it to `None` to raise errors instead.
+- `tool_meta_resolver` injects per-call MCP `_meta` payloads before `call_tool()`.
+
+### Approval policies for local MCP servers
+
+`MCPServerStdio`, `MCPServerSse`, and `MCPServerStreamableHttp` all accept `require_approval`.
+
+Supported forms:
+
+- `"always"` or `"never"` for all tools.
+- `True` / `False` (equivalent to always/never).
+- A per-tool map, for example `{"delete_file": "always", "read_file": "never"}`.
+- A grouped object:
+  `{"always": {"tool_names": [...]}, "never": {"tool_names": [...]}}`.
+
+```python
+async with MCPServerStreamableHttp(
+    name="Filesystem MCP",
+    params={"url": "http://localhost:8000/mcp"},
+    require_approval={"always": {"tool_names": ["delete_file"]}},
+) as server:
+    ...
+```
+
+For a full pause/resume flow, see [Human-in-the-loop](human_in_the_loop.md) and `examples/mcp/get_all_mcp_tools_example/main.py`.
+
+### Per-call metadata with `tool_meta_resolver`
+
+Use `tool_meta_resolver` when your MCP server expects request metadata in `_meta` (for example, tenant IDs or trace context). The example below assumes you pass a `dict` as `context` to `Runner.run(...)`.
+
+```python
+from agents.mcp import MCPServerStreamableHttp, MCPToolMetaContext
+
+
+def resolve_meta(context: MCPToolMetaContext) -> dict[str, str] | None:
+    run_context_data = context.run_context.context or {}
+    tenant_id = run_context_data.get("tenant_id")
+    if tenant_id is None:
+        return None
+    return {"tenant_id": str(tenant_id), "source": "agents-sdk"}
+
+
+server = MCPServerStreamableHttp(
+    name="Metadata-aware MCP",
+    params={"url": "http://localhost:8000/mcp"},
+    tool_meta_resolver=resolve_meta,
+)
+```
+
+If your run context is a Pydantic model, dataclass, or custom class, read the tenant ID with attribute access instead.
+
+### MCP tool outputs: text and images
+
+When an MCP tool returns image content, the SDK maps it to image tool output entries automatically. Mixed text/image responses are forwarded as a list of output items, so agents can consume MCP image results the same way they consume image output from regular function tools.
 
 ## 3. HTTP with SSE MCP servers
+
+!!! warning
+
+    The MCP project has deprecated the Server-Sent Events transport. Prefer Streamable HTTP or stdio for new integrations and keep SSE only for legacy servers.
 
 If the MCP server implements the HTTP with SSE transport, instantiate
 [`MCPServerSse`][agents.mcp.server.MCPServerSse]. Apart from the transport, the API is identical to the Streamable HTTP server.
@@ -238,6 +335,42 @@ async with MCPServerStdio(
     result = await Runner.run(agent, "List the files available to you.")
     print(result.final_output)
 ```
+
+## 5. MCP server manager
+
+When you have multiple MCP servers, use `MCPServerManager` to connect them up front and expose the connected subset to your agents.
+See the [MCPServerManager API reference](ref/mcp/manager.md) for constructor options and reconnect behavior.
+
+```python
+from agents import Agent, Runner
+from agents.mcp import MCPServerManager, MCPServerStreamableHttp
+
+servers = [
+    MCPServerStreamableHttp(name="calendar", params={"url": "http://localhost:8000/mcp"}),
+    MCPServerStreamableHttp(name="docs", params={"url": "http://localhost:8001/mcp"}),
+]
+
+async with MCPServerManager(servers) as manager:
+    agent = Agent(
+        name="Assistant",
+        instructions="Use MCP tools when they help.",
+        mcp_servers=manager.active_servers,
+    )
+    result = await Runner.run(agent, "Which MCP tools are available?")
+    print(result.final_output)
+```
+
+Key behaviors:
+
+- `active_servers` includes only successfully connected servers when `drop_failed_servers=True` (the default).
+- Failures are tracked in `failed_servers` and `errors`.
+- Set `strict=True` to raise on the first connection failure.
+- Call `reconnect(failed_only=True)` to retry failed servers, or `reconnect(failed_only=False)` to restart all servers.
+- Use `connect_timeout_seconds`, `cleanup_timeout_seconds`, and `connect_in_parallel` to tune lifecycle behavior.
+
+## Common server capabilities
+
+The sections below apply across MCP server transports (with the exact API surface depending on the server class).
 
 ## Tool filtering
 

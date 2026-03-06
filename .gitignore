@@ -45,6 +45,7 @@ htmlcov/
 .coverage
 .coverage.*
 .cache
+.tmp/
 nosetests.xml
 coverage.xml
 *.cover
@@ -148,3 +149,5 @@ cython_debug/
 
 # Redis database files
 dump.rdb
+
+tmp/

@@ -18,7 +18,7 @@ Write a poem in {{poem_style}}
 4. Run the example with the `--prompt-id` flag.
 """
 
-DEFAULT_PROMPT_ID = "pmpt_6850729e8ba481939fd439e058c69ee004afaa19c520b78b"
+DEFAULT_PROMPT_ID = "pmpt_6965a984c7ac8194a8f4e79b00f838840118c1e58beb3332"
 
 
 class DynamicContext:

@@ -16,6 +16,7 @@ def test_to_dump_compatible():
                     type="output_text",
                     text="Hey, what's up?",
                     annotations=[],
+                    logprobs=[],
                 )
             ].__iter__(),
             role="assistant",
@@ -28,5 +29,5 @@ def test_to_dump_compatible():
     result = json.dumps(_to_dump_compatible(input_iter))
     assert (
         result
-        == """[{"id": "a75654dc-7492-4d1c-bce0-89e8312fbdd7", "content": [{"type": "output_text", "text": "Hey, what's up?", "annotations": []}], "role": "assistant", "status": "completed", "type": "message"}]"""  # noqa: E501
+        == """[{"id": "a75654dc-7492-4d1c-bce0-89e8312fbdd7", "content": [{"type": "output_text", "text": "Hey, what's up?", "annotations": [], "logprobs": []}], "role": "assistant", "status": "completed", "type": "message"}]"""  # noqa: E501
     )

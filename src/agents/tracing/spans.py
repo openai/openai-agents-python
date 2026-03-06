@@ -172,6 +172,17 @@ class Span(abc.ABC, Generic[TSpanData]):
         """
         pass
 
+    @property
+    @abc.abstractmethod
+    def tracing_api_key(self) -> str | None:
+        """The API key to use when exporting this span."""
+        pass
+
+    @property
+    def trace_metadata(self) -> dict[str, Any] | None:
+        """Trace-level metadata inherited by this span, if available."""
+        return None
+
 
 class NoOpSpan(Span[TSpanData]):
     """A no-op implementation of Span that doesn't record any data.
@@ -243,6 +254,10 @@ class NoOpSpan(Span[TSpanData]):
     def ended_at(self) -> str | None:
         return None
 
+    @property
+    def tracing_api_key(self) -> str | None:
+        return None
+
 
 class SpanImpl(Span[TSpanData]):
     __slots__ = (
@@ -255,6 +270,8 @@ class SpanImpl(Span[TSpanData]):
         "_prev_span_token",
         "_processor",
         "_span_data",
+        "_tracing_api_key",
+        "_trace_metadata",
     )
 
     def __init__(
@@ -264,6 +281,8 @@ class SpanImpl(Span[TSpanData]):
         parent_id: str | None,
         processor: TracingProcessor,
         span_data: TSpanData,
+        tracing_api_key: str | None,
+        trace_metadata: dict[str, Any] | None = None,
     ):
         self._trace_id = trace_id
         self._span_id = span_id or util.gen_span_id()
@@ -274,6 +293,8 @@ class SpanImpl(Span[TSpanData]):
         self._error: SpanError | None = None
         self._prev_span_token: contextvars.Token[Span[TSpanData] | None] | None = None
         self._span_data = span_data
+        self._tracing_api_key = tracing_api_key
+        self._trace_metadata = trace_metadata
 
     @property
     def trace_id(self) -> str:
@@ -338,6 +359,14 @@ class SpanImpl(Span[TSpanData]):
     @property
     def ended_at(self) -> str | None:
         return self._ended_at
+
+    @property
+    def tracing_api_key(self) -> str | None:
+        return self._tracing_api_key
+
+    @property
+    def trace_metadata(self) -> dict[str, Any] | None:
+        return self._trace_metadata
 
     def export(self) -> dict[str, Any] | None:
         return {

@@ -10,7 +10,7 @@ from typing_extensions import TypedDict
 from agents.agent import Agent
 from agents.lifecycle import AgentHooks
 from agents.run import Runner
-from agents.run_context import RunContextWrapper, TContext
+from agents.run_context import AgentHookContext, RunContextWrapper, TContext
 from agents.tool import Tool
 
 from .fake_model import FakeModel
@@ -30,7 +30,7 @@ class AgentHooksForTests(AgentHooks):
     def reset(self):
         self.events.clear()
 
-    async def on_start(self, context: RunContextWrapper[TContext], agent: Agent[TContext]) -> None:
+    async def on_start(self, context: AgentHookContext[TContext], agent: Agent[TContext]) -> None:
         self.events["on_start"] += 1
 
     async def on_end(
@@ -424,3 +424,70 @@ async def test_base_agent_hooks_dont_crash():
     output = Runner.run_streamed(agent_3, input="user_message")
     async for _ in output.stream_events():
         pass
+
+
+class AgentHooksWithTurnInput(AgentHooks):
+    """Agent hooks that capture turn_input from on_start."""
+
+    def __init__(self):
+        self.captured_turn_inputs: list[list[Any]] = []
+
+    async def on_start(self, context: AgentHookContext[TContext], agent: Agent[TContext]) -> None:
+        self.captured_turn_inputs.append(list(context.turn_input))
+
+
+@pytest.mark.asyncio
+async def test_agent_hooks_receives_turn_input_string():
+    """Test that on_start receives turn_input when input is a string."""
+    hooks = AgentHooksWithTurnInput()
+    model = FakeModel()
+    agent = Agent(name="test", model=model, hooks=hooks)
+
+    model.set_next_output([get_text_message("response")])
+    await Runner.run(agent, input="hello world")
+
+    assert len(hooks.captured_turn_inputs) == 1
+    turn_input = hooks.captured_turn_inputs[0]
+    assert len(turn_input) == 1
+    assert turn_input[0]["content"] == "hello world"
+    assert turn_input[0]["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_agent_hooks_receives_turn_input_list():
+    """Test that on_start receives turn_input when input is a list."""
+    hooks = AgentHooksWithTurnInput()
+    model = FakeModel()
+    agent = Agent(name="test", model=model, hooks=hooks)
+
+    input_items: list[Any] = [
+        {"role": "user", "content": "first message"},
+        {"role": "user", "content": "second message"},
+    ]
+
+    model.set_next_output([get_text_message("response")])
+    await Runner.run(agent, input=input_items)
+
+    assert len(hooks.captured_turn_inputs) == 1
+    turn_input = hooks.captured_turn_inputs[0]
+    assert len(turn_input) == 2
+    assert turn_input[0]["content"] == "first message"
+    assert turn_input[1]["content"] == "second message"
+
+
+@pytest.mark.asyncio
+async def test_agent_hooks_receives_turn_input_streamed():
+    """Test that on_start receives turn_input in streamed mode."""
+    hooks = AgentHooksWithTurnInput()
+    model = FakeModel()
+    agent = Agent(name="test", model=model, hooks=hooks)
+
+    model.set_next_output([get_text_message("response")])
+    result = Runner.run_streamed(agent, input="streamed input")
+    async for _ in result.stream_events():
+        pass
+
+    assert len(hooks.captured_turn_inputs) == 1
+    turn_input = hooks.captured_turn_inputs[0]
+    assert len(turn_input) == 1
+    assert turn_input[0]["content"] == "streamed input"

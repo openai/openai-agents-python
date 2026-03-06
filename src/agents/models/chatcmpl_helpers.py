@@ -3,6 +3,12 @@ from __future__ import annotations
 from contextvars import ContextVar
 
 from openai import AsyncOpenAI
+from openai.types.chat.chat_completion_token_logprob import ChatCompletionTokenLogprob
+from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
+from openai.types.responses.response_text_delta_event import (
+    Logprob as DeltaLogprob,
+    LogprobTopLogprob as DeltaTopLogprob,
+)
 
 from ..model_settings import ModelSettings
 from ..version import __version__
@@ -41,3 +47,76 @@ class ChatCmplHelpers:
         )
         stream_options = {"include_usage": include_usage} if include_usage is not None else None
         return stream_options
+
+    @classmethod
+    def convert_logprobs_for_output_text(
+        cls, logprobs: list[ChatCompletionTokenLogprob] | None
+    ) -> list[Logprob] | None:
+        if not logprobs:
+            return None
+
+        converted: list[Logprob] = []
+        for token_logprob in logprobs:
+            converted.append(
+                Logprob(
+                    token=token_logprob.token,
+                    logprob=token_logprob.logprob,
+                    bytes=token_logprob.bytes or [],
+                    top_logprobs=[
+                        LogprobTopLogprob(
+                            token=top_logprob.token,
+                            logprob=top_logprob.logprob,
+                            bytes=top_logprob.bytes or [],
+                        )
+                        for top_logprob in token_logprob.top_logprobs
+                    ],
+                )
+            )
+        return converted
+
+    @classmethod
+    def convert_logprobs_for_text_delta(
+        cls, logprobs: list[ChatCompletionTokenLogprob] | None
+    ) -> list[DeltaLogprob] | None:
+        if not logprobs:
+            return None
+
+        converted: list[DeltaLogprob] = []
+        for token_logprob in logprobs:
+            converted.append(
+                DeltaLogprob(
+                    token=token_logprob.token,
+                    logprob=token_logprob.logprob,
+                    top_logprobs=[
+                        DeltaTopLogprob(
+                            token=top_logprob.token,
+                            logprob=top_logprob.logprob,
+                        )
+                        for top_logprob in token_logprob.top_logprobs
+                    ]
+                    or None,
+                )
+            )
+        return converted
+
+    @classmethod
+    def clean_gemini_tool_call_id(cls, tool_call_id: str, model: str | None = None) -> str:
+        """Clean up litellm's __thought__ suffix from Gemini tool call IDs.
+
+        LiteLLM adds a "__thought__" suffix to Gemini tool call IDs to track thought
+        signatures. This suffix is redundant since we can get thought_signature from
+        provider_specific_fields, and this hack causes validation errors when cross-model
+        passing to other models.
+
+        See: https://github.com/BerriAI/litellm/pull/16895
+
+        Args:
+            tool_call_id: The tool call ID to clean.
+            model: The model name (used to check if it's a Gemini model).
+
+        Returns:
+            The cleaned tool call ID with "__thought__" suffix removed if present.
+        """
+        if model and "gemini" in model.lower() and "__thought__" in tool_call_id:
+            return tool_call_id.split("__thought__")[0]
+        return tool_call_id

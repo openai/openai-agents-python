@@ -23,6 +23,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Agent lifecycle management
     -   Dynamic system prompts
     -   Streaming outputs (text, items, function call args)
+    -   Responses websocket transport with a shared session helper across turns (`examples/basic/stream_ws.py`)
     -   Prompt templates
     -   File handling (local and remote, images and PDFs)
     -   Usage tracking
@@ -57,8 +58,10 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Advanced SQLite session storage
     -   Redis session storage
     -   SQLAlchemy session storage
+    -   Dapr state store session storage
     -   Encrypted session storage
-    -   OpenAI session storage
+    -   OpenAI Conversations session storage
+    -   Responses compaction session storage
 
 -   **[model_providers](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers):**
     Explore how to use non-OpenAI models with the SDK, including custom providers and LiteLLM integration.
@@ -66,9 +69,10 @@ Check out a variety of sample implementations of the SDK in the examples section
 -   **[realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime):**
     Examples showing how to build real-time experiences using the SDK, including:
 
-    -   Web applications
-    -   Command-line interfaces
-    -   Twilio integration
+    -   Web application patterns with structured text and image messages
+    -   Command-line audio loops and playback handling
+    -   Twilio Media Streams integration over WebSocket
+    -   Twilio SIP integration using Realtime Calls API attach flows
 
 -   **[reasoning_content](https://github.com/openai/openai-agents-python/tree/main/examples/reasoning_content):**
     Examples demonstrating how to work with reasoning content and structured outputs.
@@ -77,13 +81,17 @@ Check out a variety of sample implementations of the SDK in the examples section
     Simple deep research clone that demonstrates complex multi-agent research workflows.
 
 -   **[tools](https://github.com/openai/openai-agents-python/tree/main/examples/tools):**
-    Learn how to implement OAI hosted tools such as:
+    Learn how to implement OAI hosted tools and experimental Codex tooling such as:
 
     -   Web search and web search with filters
     -   File search
     -   Code interpreter
+    -   Hosted container shell with inline skills (`examples/tools/container_shell_inline_skill.py`)
+    -   Hosted container shell with skill references (`examples/tools/container_shell_skill_reference.py`)
     -   Computer use
     -   Image generation
+    -   Experimental Codex tool workflows (`examples/tools/codex.py`)
+    -   Experimental Codex same-thread workflows (`examples/tools/codex_same_thread.py`)
 
 -   **[voice](https://github.com/openai/openai-agents-python/tree/main/examples/voice):**
     See examples of voice agents, using our TTS and STT models, including streamed voice examples.

@@ -26,6 +26,30 @@ def test_default_model_env_gpt_5():
     assert get_default_model_settings().reasoning.effort == "low"  # type: ignore[union-attr]
 
 
+@patch.dict(os.environ, {"OPENAI_DEFAULT_MODEL": "gpt-5.1"})
+def test_default_model_env_gpt_5_1():
+    assert get_default_model() == "gpt-5.1"
+    assert is_gpt_5_default() is True
+    assert gpt_5_reasoning_settings_required(get_default_model()) is True
+    assert get_default_model_settings().reasoning.effort == "none"  # type: ignore[union-attr]
+
+
+@patch.dict(os.environ, {"OPENAI_DEFAULT_MODEL": "gpt-5.2"})
+def test_default_model_env_gpt_5_2():
+    assert get_default_model() == "gpt-5.2"
+    assert is_gpt_5_default() is True
+    assert gpt_5_reasoning_settings_required(get_default_model()) is True
+    assert get_default_model_settings().reasoning.effort == "none"  # type: ignore[union-attr]
+
+
+@patch.dict(os.environ, {"OPENAI_DEFAULT_MODEL": "gpt-5.2-codex"})
+def test_default_model_env_gpt_5_2_codex():
+    assert get_default_model() == "gpt-5.2-codex"
+    assert is_gpt_5_default() is True
+    assert gpt_5_reasoning_settings_required(get_default_model()) is True
+    assert get_default_model_settings().reasoning.effort == "low"  # type: ignore[union-attr]
+
+
 @patch.dict(os.environ, {"OPENAI_DEFAULT_MODEL": "gpt-5-mini"})
 def test_default_model_env_gpt_5_mini():
     assert get_default_model() == "gpt-5-mini"

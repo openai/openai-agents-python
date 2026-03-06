@@ -19,8 +19,8 @@ from agents import (
     RunHooks,
     Runner,
 )
-from agents._run_impl import LocalShellAction, ToolRunLocalShellCall
 from agents.items import ToolCallOutputItem
+from agents.run_internal.run_loop import LocalShellAction, ToolRunLocalShellCall
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
@@ -144,6 +144,7 @@ async def test_runner_executes_local_shell_calls() -> None:
 
     local_shell_output = items[2]
     assert isinstance(local_shell_output, ToolCallOutputItem)
+    assert isinstance(local_shell_output.raw_item, dict)
     assert local_shell_output.raw_item.get("type") == "local_shell_call_output"
     assert local_shell_output.output == "shell result"
 

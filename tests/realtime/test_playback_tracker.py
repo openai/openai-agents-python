@@ -36,9 +36,13 @@ class TestPlaybackTracker:
         await model._send_interrupt(RealtimeModelSendInterrupt())
 
         # Should use custom tracker's 500ms elapsed time
-        model._send_raw_message.assert_called_once()
-        call_args = model._send_raw_message.call_args[0][0]
-        assert call_args.audio_end_ms == 500
+        truncate_events = [
+            call.args[0]
+            for call in model._send_raw_message.await_args_list
+            if getattr(call.args[0], "type", None) == "conversation.item.truncate"
+        ]
+        assert truncate_events
+        assert truncate_events[0].audio_end_ms == 500
 
     @pytest.mark.asyncio
     async def test_interrupt_skipped_when_no_audio_playing(self, model):
@@ -52,6 +56,48 @@ class TestPlaybackTracker:
         # Should not send any interrupt message
         model._send_raw_message.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_interrupt_skips_when_elapsed_exceeds_audio_length(self, model):
+        """Test interrupt skips truncation when playback appears complete."""
+        model._send_raw_message = AsyncMock()
+        model._audio_state_tracker.set_audio_format("pcm16")
+
+        # 48_000 bytes of PCM16 at 24kHz equals ~1000ms of audio.
+        model._audio_state_tracker.on_audio_delta("item_1", 0, b"a" * 48_000)
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("item_1", 0, 2000.0)
+
+        await model._send_interrupt(RealtimeModelSendInterrupt())
+
+        truncate_events = [
+            call.args[0]
+            for call in model._send_raw_message.await_args_list
+            if getattr(call.args[0], "type", None) == "conversation.item.truncate"
+        ]
+        assert truncate_events == []
+
+    @pytest.mark.asyncio
+    async def test_interrupt_sends_truncate_when_ongoing_response(self, model):
+        """Test interrupt still truncates while response is ongoing."""
+        model._ongoing_response = True
+        model._send_raw_message = AsyncMock()
+        model._audio_state_tracker.set_audio_format("pcm16")
+
+        # 48_000 bytes of PCM16 at 24kHz equals ~1000ms of audio.
+        model._audio_state_tracker.on_audio_delta("item_1", 0, b"a" * 48_000)
+        model._playback_tracker = RealtimePlaybackTracker()
+        model._playback_tracker.on_play_ms("item_1", 0, 2000.0)
+
+        await model._send_interrupt(RealtimeModelSendInterrupt())
+
+        truncate_events = [
+            call.args[0]
+            for call in model._send_raw_message.await_args_list
+            if getattr(call.args[0], "type", None) == "conversation.item.truncate"
+        ]
+        assert truncate_events
+        assert truncate_events[0].audio_end_ms == 2000
+
     def test_audio_state_accumulation_across_deltas(self):
         """Test ModelAudioTracker accumulates audio length across multiple deltas."""
 
@@ -64,9 +110,9 @@ class TestPlaybackTracker:
 
         state = tracker.get_state("item_1", 0)
         assert state is not None
-        # Should accumulate: 8 bytes / 24 / 2 * 1000 = 166.67ms
-        expected_length = (8 / 24 / 2) * 1000
-        assert abs(state.audio_length_ms - expected_length) < 0.01
+        # Should accumulate: 8 bytes -> 4 samples -> (4 / 24000) * 1000 ≈ 0.167ms
+        expected_length = (8 / (24_000 * 2)) * 1000
+        assert state.audio_length_ms == pytest.approx(expected_length, rel=0, abs=1e-6)
 
     def test_state_cleanup_on_interruption(self):
         """Test both trackers properly reset state on interruption."""
@@ -105,8 +151,9 @@ class TestPlaybackTracker:
         # Test PCM format (24kHz, default)
         pcm_bytes = b"test"  # 4 bytes
         pcm_length = calculate_audio_length_ms("pcm16", pcm_bytes)
-        assert pcm_length == (4 / 24 / 2) * 1000  # ~83.33ms
+        expected_pcm = (len(pcm_bytes) / (24_000 * 2)) * 1000
+        assert pcm_length == pytest.approx(expected_pcm, rel=0, abs=1e-6)
 
         # Test None format (defaults to PCM)
         none_length = calculate_audio_length_ms(None, pcm_bytes)
-        assert none_length == pcm_length
+        assert none_length == pytest.approx(expected_pcm, rel=0, abs=1e-6)

@@ -1,10 +1,24 @@
 # Tools
 
-Tools let agents take actions: things like fetching data, running code, calling external APIs, and even using a computer. There are three classes of tools in the Agent SDK:
+Tools let agents take actions: things like fetching data, running code, calling external APIs, and even using a computer. The SDK supports five categories:
 
--   Hosted tools: these run on LLM servers alongside the AI models. OpenAI offers retrieval, web search and computer use as hosted tools.
--   Function calling: these allow you to use any Python function as a tool.
--   Agents as tools: this allows you to use an agent as a tool, allowing Agents to call other agents without handing off to them.
+-   Hosted OpenAI tools: run alongside the model on OpenAI servers.
+-   Local/runtime execution tools: `ComputerTool` and `ApplyPatchTool` always run in your environment, while `ShellTool` can run locally or in a hosted container.
+-   Function calling: wrap any Python function as a tool.
+-   Agents as tools: expose an agent as a callable tool without a full handoff.
+-   Experimental: Codex tool: run workspace-scoped Codex tasks from a tool call.
+
+## Choosing a tool type
+
+Use this page as a catalog, then jump to the section that matches the runtime you control.
+
+| If you want to... | Start here |
+| --- | --- |
+| Use OpenAI-managed tools (web search, file search, code interpreter, hosted MCP, image generation) | [Hosted tools](#hosted-tools) |
+| Run tools in your own process or environment | [Local runtime tools](#local-runtime-tools) |
+| Wrap Python functions as tools | [Function tools](#function-tools) |
+| Let one agent call another without a handoff | [Agents as tools](#agents-as-tools) |
+| Run workspace-scoped Codex tasks from an agent | [Experimental: Codex tool](#experimental-codex-tool) |
 
 ## Hosted tools
 
@@ -12,11 +26,14 @@ OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agent
 
 -   The [`WebSearchTool`][agents.tool.WebSearchTool] lets an agent search the web.
 -   The [`FileSearchTool`][agents.tool.FileSearchTool] allows retrieving information from your OpenAI Vector Stores.
--   The [`ComputerTool`][agents.tool.ComputerTool] allows automating computer use tasks.
 -   The [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] lets the LLM execute code in a sandboxed environment.
 -   The [`HostedMCPTool`][agents.tool.HostedMCPTool] exposes a remote MCP server's tools to the model.
 -   The [`ImageGenerationTool`][agents.tool.ImageGenerationTool] generates images from a prompt.
--   The [`LocalShellTool`][agents.tool.LocalShellTool] runs shell commands on your machine.
+
+Advanced hosted search options:
+
+-   `FileSearchTool` supports `filters`, `ranking_options`, and `include_search_results` in addition to `vector_store_ids` and `max_num_results`.
+-   `WebSearchTool` supports `filters`, `user_location`, and `search_context_size`.
 
 ```python
 from agents import Agent, FileSearchTool, Runner, WebSearchTool
@@ -35,6 +52,109 @@ agent = Agent(
 async def main():
     result = await Runner.run(agent, "Which coffee shop should I go to, taking into account my preferences and the weather today in SF?")
     print(result.final_output)
+```
+
+### Hosted container shell + skills
+
+`ShellTool` also supports OpenAI-hosted container execution. Use this mode when you want the model to run shell commands in a managed container instead of your local runtime.
+
+```python
+from agents import Agent, Runner, ShellTool, ShellToolSkillReference
+
+csv_skill: ShellToolSkillReference = {
+    "type": "skill_reference",
+    "skill_id": "skill_698bbe879adc81918725cbc69dcae7960bc5613dadaed377",
+    "version": "1",
+}
+
+agent = Agent(
+    name="Container shell agent",
+    model="gpt-5.2",
+    instructions="Use the mounted skill when helpful.",
+    tools=[
+        ShellTool(
+            environment={
+                "type": "container_auto",
+                "network_policy": {"type": "disabled"},
+                "skills": [csv_skill],
+            }
+        )
+    ],
+)
+
+result = await Runner.run(
+    agent,
+    "Use the configured skill to analyze CSV files in /mnt/data and summarize totals by region.",
+)
+print(result.final_output)
+```
+
+To reuse an existing container in later runs, set `environment={"type": "container_reference", "container_id": "cntr_..."}`.
+
+What to know:
+
+-   Hosted shell is available through the Responses API shell tool.
+-   `container_auto` provisions a container for the request; `container_reference` reuses an existing one.
+-   `container_auto` can also include `file_ids` and `memory_limit`.
+-   `environment.skills` accepts skill references and inline skill bundles.
+-   With hosted environments, do not set `executor`, `needs_approval`, or `on_approval` on `ShellTool`.
+-   `network_policy` supports `disabled` and `allowlist` modes.
+-   In allowlist mode, `network_policy.domain_secrets` can inject domain-scoped secrets by name.
+-   See `examples/tools/container_shell_skill_reference.py` and `examples/tools/container_shell_inline_skill.py` for complete examples.
+-   OpenAI platform guides: [Shell](https://platform.openai.com/docs/guides/tools-shell) and [Skills](https://platform.openai.com/docs/guides/tools-skills).
+
+## Local runtime tools
+
+Local runtime tools execute outside the model response itself. The model still decides when to call them, but your application or configured execution environment performs the actual work.
+
+`ComputerTool` and `ApplyPatchTool` always require local implementations that you provide. `ShellTool` spans both modes: use the hosted-container configuration above when you want managed execution, or the local runtime configuration below when you want commands to run in your own process.
+
+Local runtime tools require you to supply implementations:
+
+-   [`ComputerTool`][agents.tool.ComputerTool]: implement the [`Computer`][agents.computer.Computer] or [`AsyncComputer`][agents.computer.AsyncComputer] interface to enable GUI/browser automation.
+-   [`ShellTool`][agents.tool.ShellTool]: the latest shell tool for both local execution and hosted container execution.
+-   [`LocalShellTool`][agents.tool.LocalShellTool]: legacy local-shell integration.
+-   [`ApplyPatchTool`][agents.tool.ApplyPatchTool]: implement [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor] to apply diffs locally.
+-   Local shell skills are available with `ShellTool(environment={"type": "local", "skills": [...]})`.
+
+```python
+from agents import Agent, ApplyPatchTool, ShellTool
+from agents.computer import AsyncComputer
+from agents.editor import ApplyPatchResult, ApplyPatchOperation, ApplyPatchEditor
+
+
+class NoopComputer(AsyncComputer):
+    environment = "browser"
+    dimensions = (1024, 768)
+    async def screenshot(self): return ""
+    async def click(self, x, y, button): ...
+    async def double_click(self, x, y): ...
+    async def scroll(self, x, y, scroll_x, scroll_y): ...
+    async def type(self, text): ...
+    async def wait(self): ...
+    async def move(self, x, y): ...
+    async def keypress(self, keys): ...
+    async def drag(self, path): ...
+
+
+class NoopEditor(ApplyPatchEditor):
+    async def create_file(self, op: ApplyPatchOperation): return ApplyPatchResult(status="completed")
+    async def update_file(self, op: ApplyPatchOperation): return ApplyPatchResult(status="completed")
+    async def delete_file(self, op: ApplyPatchOperation): return ApplyPatchResult(status="completed")
+
+
+async def run_shell(request):
+    return "shell output"
+
+
+agent = Agent(
+    name="Local tools agent",
+    tools=[
+        ShellTool(executor=run_shell),
+        ApplyPatchTool(editor=NoopEditor()),
+        # ComputerTool expects a Computer/AsyncComputer implementation; omitted here for brevity.
+    ],
+)
 ```
 
 ## Function tools
@@ -188,7 +308,7 @@ Sometimes, you don't want to use a Python function as a tool. You can directly c
 -   `name`
 -   `description`
 -   `params_json_schema`, which is the JSON schema for the arguments
--   `on_invoke_tool`, which is an async function that receives a [`ToolContext`][agents.tool_context.ToolContext] and the arguments as a JSON string, and must return the tool output as a string.
+-   `on_invoke_tool`, which is an async function that receives a [`ToolContext`][agents.tool_context.ToolContext] and the arguments as a JSON string, and returns tool output (for example, text, structured tool output objects, or a list of outputs).
 
 ```python
 from typing import Any
@@ -229,6 +349,110 @@ As mentioned before, we automatically parse the function signature to extract th
 2. We use `griffe` to parse docstrings. Supported docstring formats are `google`, `sphinx` and `numpy`. We attempt to automatically detect the docstring format, but this is best-effort and you can explicitly set it when calling `function_tool`. You can also disable docstring parsing by setting `use_docstring_info` to `False`.
 
 The code for the schema extraction lives in [`agents.function_schema`][].
+
+### Constraining and describing arguments with Pydantic Field
+
+You can use Pydantic's [`Field`](https://docs.pydantic.dev/latest/concepts/fields/) to add constraints (e.g. min/max for numbers, length or pattern for strings) and descriptions to tool arguments. As in Pydantic, both forms are supported: default-based (`arg: int = Field(..., ge=1)`) and `Annotated` (`arg: Annotated[int, Field(..., ge=1)]`). The generated JSON schema and validation include these constraints.
+
+```python
+from typing import Annotated
+from pydantic import Field
+from agents import function_tool
+
+# Default-based form
+@function_tool
+def score_a(score: int = Field(..., ge=0, le=100, description="Score from 0 to 100")) -> str:
+    return f"Score recorded: {score}"
+
+# Annotated form
+@function_tool
+def score_b(score: Annotated[int, Field(..., ge=0, le=100, description="Score from 0 to 100")]) -> str:
+    return f"Score recorded: {score}"
+```
+
+### Function tool timeouts
+
+You can set per-call timeouts for async function tools with `@function_tool(timeout=...)`.
+
+```python
+import asyncio
+from agents import Agent, Runner, function_tool
+
+
+@function_tool(timeout=2.0)
+async def slow_lookup(query: str) -> str:
+    await asyncio.sleep(10)
+    return f"Result for {query}"
+
+
+agent = Agent(
+    name="Timeout demo",
+    instructions="Use tools when helpful.",
+    tools=[slow_lookup],
+)
+```
+
+When a timeout is reached, the default behavior is `timeout_behavior="error_as_result"`, which sends a model-visible timeout message (for example, `Tool 'slow_lookup' timed out after 2 seconds.`).
+
+You can control timeout handling:
+
+-   `timeout_behavior="error_as_result"` (default): return a timeout message to the model so it can recover.
+-   `timeout_behavior="raise_exception"`: raise [`ToolTimeoutError`][agents.exceptions.ToolTimeoutError] and fail the run.
+-   `timeout_error_function=...`: customize the timeout message when using `error_as_result`.
+
+```python
+import asyncio
+from agents import Agent, Runner, ToolTimeoutError, function_tool
+
+
+@function_tool(timeout=1.5, timeout_behavior="raise_exception")
+async def slow_tool() -> str:
+    await asyncio.sleep(5)
+    return "done"
+
+
+agent = Agent(name="Timeout hard-fail", tools=[slow_tool])
+
+try:
+    await Runner.run(agent, "Run the tool")
+except ToolTimeoutError as e:
+    print(f"{e.tool_name} timed out in {e.timeout_seconds} seconds")
+```
+
+!!! note
+
+    Timeout configuration is supported only for async `@function_tool` handlers.
+
+### Handling errors in function tools
+
+When you create a function tool via `@function_tool`, you can pass a `failure_error_function`. This is a function that provides an error response to the LLM in case the tool call crashes.
+
+-   By default (i.e. if you don't pass anything), it runs a `default_tool_error_function` which tells the LLM an error occurred.
+-   If you pass your own error function, it runs that instead, and sends the response to the LLM.
+-   If you explicitly pass `None`, then any tool call errors will be re-raised for you to handle. This could be a `ModelBehaviorError` if the model produced invalid JSON, or a `UserError` if your code crashed, etc.
+
+```python
+from agents import function_tool, RunContextWrapper
+from typing import Any
+
+def my_custom_error_function(context: RunContextWrapper[Any], error: Exception) -> str:
+    """A custom function to provide a user-friendly error message."""
+    print(f"A tool call failed with the following error: {error}")
+    return "An internal server error occurred. Please try again later."
+
+@function_tool(failure_error_function=my_custom_error_function)
+def get_user_profile(user_id: str) -> str:
+    """Fetches a user profile from a mock API.
+     This function demonstrates a 'flaky' or failing API call.
+    """
+    if user_id == "user_123":
+        return "User profile for user_123 successfully retrieved."
+    else:
+        raise ValueError(f"Could not retrieve profile for user_id: {user_id}. API returned an error.")
+
+```
+
+If you are manually creating a `FunctionTool` object, then you must handle errors inside the `on_invoke_tool` function.
 
 ## Agents as tools
 
@@ -273,7 +497,7 @@ async def main():
 
 ### Customizing tool-agents
 
-The `agent.as_tool` function is a convenience method to make it easy to turn an agent into a tool. It doesn't support all configuration though; for example, you can't set `max_turns`. For advanced use cases, use `Runner.run` directly in your tool implementation:
+The `agent.as_tool` function is a convenience method to make it easy to turn an agent into a tool. It supports common runtime options such as `max_turns`, `run_config`, `hooks`, `previous_response_id`, `conversation_id`, `session`, and `needs_approval`. It also supports structured input with `parameters`, `input_builder`, and `include_input_schema`. For advanced orchestration (for example, conditional retries, fallback behavior, or chaining multiple agent calls), use `Runner.run` directly in your tool implementation:
 
 ```python
 @function_tool
@@ -291,6 +515,40 @@ async def run_my_agent() -> str:
 
     return str(result.final_output)
 ```
+
+### Structured input for tool-agents
+
+By default, `Agent.as_tool()` expects a single string input (`{"input": "..."}`), but you can expose a structured schema by passing `parameters` (a Pydantic model or dataclass type).
+
+Additional options:
+
+- `include_input_schema=True` includes the full JSON Schema in the generated nested input.
+- `input_builder=...` lets you fully customize how structured tool arguments become nested agent input.
+- `RunContextWrapper.tool_input` contains the parsed structured payload inside the nested run context.
+
+```python
+from pydantic import BaseModel, Field
+
+
+class TranslationInput(BaseModel):
+    text: str = Field(description="Text to translate.")
+    source: str = Field(description="Source language.")
+    target: str = Field(description="Target language.")
+
+
+translator_tool = translator_agent.as_tool(
+    tool_name="translate_text",
+    tool_description="Translate text between languages.",
+    parameters=TranslationInput,
+    include_input_schema=True,
+)
+```
+
+See `examples/agent_patterns/agents_as_tools_structured.py` for a complete runnable example.
+
+### Approval gates for tool-agents
+
+`Agent.as_tool(..., needs_approval=...)` uses the same approval flow as `function_tool`. If approval is required, the run pauses and pending items appear in `result.interruptions`; then use `result.to_state()` and resume after calling `state.approve(...)` or `state.reject(...)`. See the [Human-in-the-loop guide](human_in_the_loop.md) for the full pause/resume pattern.
 
 ### Custom output extraction
 
@@ -318,6 +576,39 @@ json_tool = data_agent.as_tool(
     custom_output_extractor=extract_json_payload,
 )
 ```
+
+Inside a custom extractor, the nested [`RunResult`][agents.result.RunResult] also exposes
+[`agent_tool_invocation`][agents.result.RunResultBase.agent_tool_invocation], which is useful when
+you need the outer tool name, call ID, or raw arguments while post-processing the nested result.
+See the [Results guide](results.md#agent-as-tool-metadata).
+
+### Streaming nested agent runs
+
+Pass an `on_stream` callback to `as_tool` to listen to streaming events emitted by the nested agent while still returning its final output once the stream completes.
+
+```python
+from agents import AgentToolStreamEvent
+
+
+async def handle_stream(event: AgentToolStreamEvent) -> None:
+    # Inspect the underlying StreamEvent along with agent metadata.
+    print(f"[stream] {event['agent'].name} :: {event['event'].type}")
+
+
+billing_agent_tool = billing_agent.as_tool(
+    tool_name="billing_helper",
+    tool_description="Answer billing questions.",
+    on_stream=handle_stream,  # Can be sync or async.
+)
+```
+
+What to expect:
+
+- Event types mirror `StreamEvent["type"]`: `raw_response_event`, `run_item_stream_event`, `agent_updated_stream_event`.
+- Providing `on_stream` automatically runs the nested agent in streaming mode and drains the stream before returning the final output.
+- The handler may be synchronous or asynchronous; each event is delivered in order as it arrives.
+- `tool_call` is present when the tool is invoked via a model tool call; direct calls may leave it `None`.
+- See `examples/agent_patterns/agents_as_tools_streaming.py` for a complete runnable sample.
 
 ### Conditional tool enabling
 
@@ -389,33 +680,66 @@ Disabled tools are completely hidden from the LLM at runtime, making this useful
 -   A/B testing different tool configurations
 -   Dynamic tool filtering based on runtime state
 
-## Handling errors in function tools
+## Experimental: Codex tool
 
-When you create a function tool via `@function_tool`, you can pass a `failure_error_function`. This is a function that provides an error response to the LLM in case the tool call crashes.
+The `codex_tool` wraps the Codex CLI so an agent can run workspace-scoped tasks (shell, file edits, MCP tools) during a tool call. This surface is experimental and may change.
 
--   By default (i.e. if you don't pass anything), it runs a `default_tool_error_function` which tells the LLM an error occurred.
--   If you pass your own error function, it runs that instead, and sends the response to the LLM.
--   If you explicitly pass `None`, then any tool call errors will be re-raised for you to handle. This could be a `ModelBehaviorError` if the model produced invalid JSON, or a `UserError` if your code crashed, etc.
+Use it when you want the main agent to delegate a bounded workspace task to Codex without leaving the current run. By default, the tool name is `codex`. If you set a custom name, it must be `codex` or start with `codex_`. When an agent includes multiple Codex tools, each must use a unique name.
 
 ```python
-from agents import function_tool, RunContextWrapper
-from typing import Any
+from agents import Agent
+from agents.extensions.experimental.codex import ThreadOptions, TurnOptions, codex_tool
 
-def my_custom_error_function(context: RunContextWrapper[Any], error: Exception) -> str:
-    """A custom function to provide a user-friendly error message."""
-    print(f"A tool call failed with the following error: {error}")
-    return "An internal server error occurred. Please try again later."
-
-@function_tool(failure_error_function=my_custom_error_function)
-def get_user_profile(user_id: str) -> str:
-    """Fetches a user profile from a mock API.
-     This function demonstrates a 'flaky' or failing API call.
-    """
-    if user_id == "user_123":
-        return "User profile for user_123 successfully retrieved."
-    else:
-        raise ValueError(f"Could not retrieve profile for user_id: {user_id}. API returned an error.")
-
+agent = Agent(
+    name="Codex Agent",
+    instructions="Use the codex tool to inspect the workspace and answer the question.",
+    tools=[
+        codex_tool(
+            sandbox_mode="workspace-write",
+            working_directory="/path/to/repo",
+            default_thread_options=ThreadOptions(
+                model="gpt-5.2-codex",
+                model_reasoning_effort="low",
+                network_access_enabled=True,
+                web_search_mode="disabled",
+                approval_policy="never",
+            ),
+            default_turn_options=TurnOptions(
+                idle_timeout_seconds=60,
+            ),
+            persist_session=True,
+        )
+    ],
+)
 ```
 
-If you are manually creating a `FunctionTool` object, then you must handle errors inside the `on_invoke_tool` function.
+Start with these option groups:
+
+-   Execution surface: `sandbox_mode` and `working_directory` define where Codex can operate. Pair them together, and set `skip_git_repo_check=True` when the working directory is not inside a Git repository.
+-   Thread defaults: `default_thread_options=ThreadOptions(...)` configures the model, reasoning effort, approval policy, additional directories, network access, and web search mode. Prefer `web_search_mode` over the legacy `web_search_enabled`.
+-   Turn defaults: `default_turn_options=TurnOptions(...)` configures per-turn behavior such as `idle_timeout_seconds` and the optional cancellation `signal`.
+-   Tool I/O: tool calls must include at least one `inputs` item with `{ "type": "text", "text": ... }` or `{ "type": "local_image", "path": ... }`. `output_schema` lets you require structured Codex responses.
+
+Thread reuse and persistence are separate controls:
+
+-   `persist_session=True` reuses one Codex thread for repeated calls to the same tool instance.
+-   `use_run_context_thread_id=True` stores and reuses the thread ID in run context across runs that share the same mutable context object.
+-   Thread ID precedence is: per-call `thread_id`, then run-context thread ID (if enabled), then the configured `thread_id` option.
+-   The default run-context key is `codex_thread_id` for `name="codex"` and `codex_thread_id_<suffix>` for `name="codex_<suffix>"`. Override it with `run_context_thread_id_key`.
+
+Runtime configuration:
+
+-   Auth: set `CODEX_API_KEY` (preferred) or `OPENAI_API_KEY`, or pass `codex_options={"api_key": "..."}`.
+-   Runtime: `codex_options.base_url` overrides the CLI base URL.
+-   Binary resolution: set `codex_options.codex_path_override` (or `CODEX_PATH`) to pin the CLI path. Otherwise the SDK resolves `codex` from `PATH`, then falls back to the bundled vendor binary.
+-   Environment: `codex_options.env` fully controls the subprocess environment. When it is provided, the subprocess does not inherit `os.environ`.
+-   Stream limits: `codex_options.codex_subprocess_stream_limit_bytes` (or `OPENAI_AGENTS_CODEX_SUBPROCESS_STREAM_LIMIT_BYTES`) controls stdout/stderr reader limits. Valid range is `65536` to `67108864`; default is `8388608`.
+-   Streaming: `on_stream` receives thread/turn lifecycle events and item events (`reasoning`, `command_execution`, `mcp_tool_call`, `file_change`, `web_search`, `todo_list`, and `error` item updates).
+-   Outputs: results include `response`, `usage`, and `thread_id`; usage is added to `RunContextWrapper.usage`.
+
+Reference:
+
+-   [Codex tool API reference](ref/extensions/experimental/codex/codex_tool.md)
+-   [ThreadOptions reference](ref/extensions/experimental/codex/thread_options.md)
+-   [TurnOptions reference](ref/extensions/experimental/codex/turn_options.md)
+-   See `examples/tools/codex.py` and `examples/tools/codex_same_thread.py` for complete runnable samples.

@@ -7,6 +7,11 @@ from openai.types.chat.chat_completion_chunk import (
     ChoiceDelta,
     ChoiceDeltaToolCall,
     ChoiceDeltaToolCallFunction,
+    ChoiceLogprobs,
+)
+from openai.types.chat.chat_completion_token_logprob import (
+    ChatCompletionTokenLogprob,
+    TopLogprob,
 )
 from openai.types.completion_usage import (
     CompletionTokensDetails,
@@ -15,6 +20,7 @@ from openai.types.completion_usage import (
 )
 from openai.types.responses import (
     Response,
+    ResponseCompletedEvent,
     ResponseFunctionToolCall,
     ResponseOutputMessage,
     ResponseOutputRefusal,
@@ -126,6 +132,113 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
     assert completed_resp.usage.total_tokens == 12
     assert completed_resp.usage.input_tokens_details.cached_tokens == 2
     assert completed_resp.usage.output_tokens_details.reasoning_tokens == 3
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_includes_logprobs(monkeypatch) -> None:
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[
+            Choice(
+                index=0,
+                delta=ChoiceDelta(content="Hi"),
+                logprobs=ChoiceLogprobs(
+                    content=[
+                        ChatCompletionTokenLogprob(
+                            token="Hi",
+                            logprob=-0.5,
+                            bytes=[1],
+                            top_logprobs=[TopLogprob(token="Hi", logprob=-0.5, bytes=[1])],
+                        )
+                    ]
+                ),
+            )
+        ],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[
+            Choice(
+                index=0,
+                delta=ChoiceDelta(content=" there"),
+                logprobs=ChoiceLogprobs(
+                    content=[
+                        ChatCompletionTokenLogprob(
+                            token=" there",
+                            logprob=-0.25,
+                            bytes=[2],
+                            top_logprobs=[TopLogprob(token=" there", logprob=-0.25, bytes=[2])],
+                        )
+                    ]
+                ),
+            )
+        ],
+        usage=CompletionUsage(
+            completion_tokens=5,
+            prompt_tokens=7,
+            total_tokens=12,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=2),
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=3),
+        ),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for c in (chunk1, chunk2):
+            yield c
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    output_events = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        output_events.append(event)
+
+    text_delta_events = [
+        event for event in output_events if event.type == "response.output_text.delta"
+    ]
+    assert len(text_delta_events) == 2
+    assert [lp.token for lp in text_delta_events[0].logprobs] == ["Hi"]
+    assert [lp.token for lp in text_delta_events[1].logprobs] == [" there"]
+
+    completed_event = next(event for event in output_events if event.type == "response.completed")
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    completed_resp = completed_event.response
+    assert isinstance(completed_resp.output[0], ResponseOutputMessage)
+    text_part = completed_resp.output[0].content[0]
+    assert isinstance(text_part, ResponseOutputText)
+    assert text_part.text == "Hi there"
+    assert text_part.logprobs is not None
+    assert [lp.token for lp in text_part.logprobs] == ["Hi", " there"]
 
 
 @pytest.mark.allow_call_model_methods

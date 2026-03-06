@@ -18,12 +18,21 @@ def test_to_openai_with_function_tool():
     result = Converter.tool_to_openai(tool)
 
     assert result["type"] == "function"
-    assert result["function"]["name"] == "some_function"
-    params = result.get("function", {}).get("parameters")
+    function_def = result["function"]
+    assert function_def["name"] == "some_function"
+    assert function_def["strict"] is True
+    params = function_def.get("parameters")
     assert params is not None
     properties = params.get("properties", {})
     assert isinstance(properties, dict)
     assert properties.keys() == {"a", "b"}
+
+
+def test_to_openai_respects_non_strict_function_tool():
+    tool = function_tool(some_function, strict_mode=False)
+    result = Converter.tool_to_openai(tool)
+
+    assert result["function"]["strict"] is False
 
 
 class Foo(BaseModel):
@@ -39,6 +48,7 @@ def test_convert_handoff_tool():
     assert result["type"] == "function"
     assert result["function"]["name"] == Handoff.default_tool_name(agent)
     assert result["function"].get("description") == Handoff.default_tool_description(agent)
+    assert result["function"].get("strict") is True
     params = result.get("function", {}).get("parameters")
     assert params is not None
 

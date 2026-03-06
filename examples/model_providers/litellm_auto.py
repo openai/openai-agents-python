@@ -32,7 +32,7 @@ async def main():
         name="Assistant",
         instructions="You only respond in haikus.",
         # We prefix with litellm/ to tell the Runner to use the LitellmModel
-        model="litellm/anthropic/claude-3-5-sonnet-20240620",
+        model="litellm/anthropic/claude-sonnet-4-5-20250929",
         tools=[get_weather],
         model_settings=ModelSettings(tool_choice="required"),
         output_type=Result,

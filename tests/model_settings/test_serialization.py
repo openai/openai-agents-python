@@ -56,6 +56,7 @@ def test_all_fields_serialization() -> None:
         reasoning=Reasoning(),
         metadata={"foo": "bar"},
         store=False,
+        prompt_cache_retention="24h",
         include_usage=False,
         response_include=["reasoning.encrypted_content"],
         top_logprobs=1,

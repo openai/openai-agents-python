@@ -1,4 +1,4 @@
-# Agent Visualization
+# Agent visualization
 
 Agent visualization allows you to generate a structured graphical representation of agents and their relationships using **Graphviz**. This is useful for understanding how agents, tools, and handoffs interact within an application.
 
@@ -10,16 +10,16 @@ Install the optional `viz` dependency group:
 pip install "openai-agents[viz]"
 ```
 
-## Generating a Graph
+## Generating a graph
 
 You can generate an agent visualization using the `draw_graph` function. This function creates a directed graph where:
 
 - **Agents** are represented as yellow boxes.
-- **MCP Servers** are represented as grey boxes.
+- **MCP servers** are represented as grey boxes.
 - **Tools** are represented as green ellipses.
 - **Handoffs** are directed edges from one agent to another.
 
-### Example Usage
+### Example usage
 
 ```python
 import os
@@ -68,14 +68,14 @@ draw_graph(triage_agent)
 This generates a graph that visually represents the structure of the **triage agent** and its connections to sub-agents and tools.
 
 
-## Understanding the Visualization
+## Understanding the visualization
 
 The generated graph includes:
 
 - A **start node** (`__start__`) indicating the entry point.
 - Agents represented as **rectangles** with yellow fill.
 - Tools represented as **ellipses** with green fill.
-- MCP Servers represented as **rectangles** with grey fill.
+- MCP servers represented as **rectangles** with grey fill.
 - Directed edges indicating interactions:
   - **Solid arrows** for agent-to-agent handoffs.
   - **Dotted arrows** for tool invocations.
@@ -86,16 +86,16 @@ The generated graph includes:
 `agents` package (verified in **v0.2.8**). If you don’t see MCP boxes
 in your visualization, upgrade to the latest release.
 
-## Customizing the Graph
+## Customizing the graph
 
-### Showing the Graph
+### Showing the graph
 By default, `draw_graph` displays the graph inline. To show the graph in a separate window, write the following:
 
 ```python
 draw_graph(triage_agent).view()
 ```
 
-### Saving the Graph
+### Saving the graph
 By default, `draw_graph` displays the graph inline. To save it as a file, specify a filename:
 
 ```python

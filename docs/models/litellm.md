@@ -88,3 +88,13 @@ agent = Agent(
 ```
 
 With `include_usage=True`, LiteLLM requests report token and request counts through `result.context_wrapper.usage` just like the built-in OpenAI models.
+
+## Troubleshooting
+
+If you see Pydantic serializer warnings from LiteLLM responses, enable a small compatibility patch by setting:
+
+```bash
+export OPENAI_AGENTS_ENABLE_LITELLM_SERIALIZER_PATCH=true
+```
+
+This opt-in flag suppresses known LiteLLM serializer warnings while preserving normal behavior. Turn it off (unset or `false`) if you do not need it.

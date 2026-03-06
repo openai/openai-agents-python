@@ -25,6 +25,7 @@ CHANNELS = 1
 ENERGY_THRESHOLD = 0.015  # RMS threshold for barge‑in while assistant is speaking
 PREBUFFER_CHUNKS = 3  # initial jitter buffer (~120ms with 40ms chunks)
 FADE_OUT_MS = 12  # short fade to avoid clicks when interrupting
+PLAYBACK_ECHO_MARGIN = 0.002  # extra energy above playback echo required to count as speech
 
 # Set up logging for OpenAI agents SDK
 # logging.basicConfig(
@@ -78,6 +79,7 @@ class NoUIDemo:
         self.fade_total_samples = 0
         self.fade_done_samples = 0
         self.fade_samples = int(SAMPLE_RATE * (FADE_OUT_MS / 1000.0))
+        self.playback_rms = 0.0  # smoothed playback energy to filter out echo
 
     def _output_callback(self, outdata, frames: int, time, status) -> None:
         """Callback for audio output - handles continuous audio stream from server."""
@@ -123,6 +125,7 @@ class NoUIDemo:
                 gain = 1.0 - (idx / float(self.fade_total_samples))
                 ramped = np.clip(src * gain, -32768.0, 32767.0).astype(np.int16)
                 outdata[samples_filled : samples_filled + n, 0] = ramped
+                self._update_playback_rms(ramped)
 
                 # Optionally report played bytes (ramped) to playback tracker
                 try:
@@ -183,6 +186,7 @@ class NoUIDemo:
                 chunk_data = samples[self.chunk_position : self.chunk_position + samples_to_copy]
                 # More efficient: direct assignment for mono audio instead of reshape
                 outdata[samples_filled : samples_filled + samples_to_copy, 0] = chunk_data
+                self._update_playback_rms(chunk_data)
                 samples_filled += samples_to_copy
                 self.chunk_position += samples_to_copy
 
@@ -273,14 +277,6 @@ class NoUIDemo:
         read_size = int(SAMPLE_RATE * CHUNK_LENGTH_S)
 
         try:
-            # Simple energy-based barge-in: if user speaks while audio is playing, interrupt.
-            def rms_energy(samples: np.ndarray[Any, np.dtype[Any]]) -> float:
-                if samples.size == 0:
-                    return 0.0
-                # Normalize int16 to [-1, 1]
-                x = samples.astype(np.float32) / 32768.0
-                return float(np.sqrt(np.mean(x * x)))
-
             while self.recording:
                 # Check if there's enough data to read
                 if self.audio_stream.read_available < read_size:
@@ -300,7 +296,13 @@ class NoUIDemo:
                 if assistant_playing:
                     # Compute RMS energy to detect speech while assistant is talking
                     samples = data.reshape(-1)
-                    if rms_energy(samples) >= ENERGY_THRESHOLD:
+                    mic_rms = self._compute_rms(samples)
+                    # Require the mic to be louder than the echo of the assistant playback.
+                    playback_gate = max(
+                        ENERGY_THRESHOLD,
+                        self.playback_rms * 0.6 + PLAYBACK_ECHO_MARGIN,
+                    )
+                    if mic_rms >= playback_gate:
                         # Locally flush queued assistant audio for snappier interruption.
                         self.interrupt_event.set()
                         await self.session.send_audio(audio_bytes)
@@ -355,6 +357,18 @@ class NoUIDemo:
                 print(f"Unknown event type: {event.type}")
         except Exception as e:
             print(f"Error processing event: {_truncate_str(str(e), 200)}")
+
+    def _compute_rms(self, samples: np.ndarray[Any, np.dtype[Any]]) -> float:
+        """Compute RMS energy for int16 samples normalized to [-1, 1]."""
+        if samples.size == 0:
+            return 0.0
+        x = samples.astype(np.float32) / 32768.0
+        return float(np.sqrt(np.mean(x * x)))
+
+    def _update_playback_rms(self, samples: np.ndarray[Any, np.dtype[Any]]) -> None:
+        """Keep a smoothed estimate of playback energy to filter out echo feedback."""
+        sample_rms = self._compute_rms(samples)
+        self.playback_rms = 0.9 * self.playback_rms + 0.1 * sample_rms
 
 
 if __name__ == "__main__":

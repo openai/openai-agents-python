@@ -4,7 +4,7 @@ import json
 import os
 from datetime import datetime
 
-from agents import Agent, HostedMCPTool, Runner
+from agents import Agent, HostedMCPTool, Runner, RunResult, RunResultStreaming
 
 # import logging
 # logging.basicConfig(level=logging.DEBUG)
@@ -33,9 +33,10 @@ async def main(verbose: bool, stream: bool):
     )
 
     today = datetime.now().strftime("%Y-%m-%d")
+    run_result: RunResult | RunResultStreaming
     if stream:
-        result = Runner.run_streamed(agent, f"What is my schedule for {today}?")
-        async for event in result.stream_events():
+        run_result = Runner.run_streamed(agent, f"What is my schedule for {today}?")
+        async for event in run_result.stream_events():
             if event.type == "raw_response_event":
                 if event.data.type.startswith("response.output_item"):
                     print(json.dumps(event.data.to_dict(), indent=2))
@@ -45,11 +46,11 @@ async def main(verbose: bool, stream: bool):
                     print(event.data.delta, end="", flush=True)
         print()
     else:
-        res = await Runner.run(agent, f"What is my schedule for {today}?")
-        print(res.final_output)
+        run_result = await Runner.run(agent, f"What is my schedule for {today}?")
+        print(run_result.final_output)
 
     if verbose:
-        for item in res.new_items:
+        for item in run_result.new_items:
             print(item)
 
 

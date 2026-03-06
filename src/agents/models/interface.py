@@ -36,6 +36,14 @@ class ModelTracing(enum.Enum):
 class Model(abc.ABC):
     """The base interface for calling an LLM."""
 
+    async def close(self) -> None:
+        """Release any resources held by the model.
+
+        Models that maintain persistent connections can override this. The default implementation
+        is a no-op.
+        """
+        return None
+
     @abc.abstractmethod
     async def get_response(
         self,
@@ -123,3 +131,11 @@ class ModelProvider(abc.ABC):
         Returns:
             The model.
         """
+
+    async def aclose(self) -> None:
+        """Release any resources held by the provider.
+
+        Providers that cache persistent models or network connections can override this. The
+        default implementation is a no-op.
+        """
+        return None

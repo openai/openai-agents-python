@@ -421,7 +421,7 @@ async def test_soft_cancel_with_handoff():
 
     handoff_seen = False
     async for event in result.stream_events():
-        if event.type == "run_item_stream_event" and event.name == "handoff_occured":
+        if event.type == "run_item_stream_event" and event.name == "handoff_requested":
             handoff_seen = True
             # Cancel right after handoff
             result.cancel(mode="after_turn")

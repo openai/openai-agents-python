@@ -69,6 +69,10 @@ class RealtimeToolStart:
     """The agent that updated."""
 
     tool: Tool
+    """The tool being called."""
+
+    arguments: str
+    """The arguments passed to the tool as a JSON string."""
 
     info: RealtimeEventInfo
     """Common info for all events, such as the context."""
@@ -86,6 +90,9 @@ class RealtimeToolEnd:
     tool: Tool
     """The tool that was called."""
 
+    arguments: str
+    """The arguments passed to the tool as a JSON string."""
+
     output: Any
     """The output of the tool call."""
 
@@ -93,6 +100,28 @@ class RealtimeToolEnd:
     """Common info for all events, such as the context."""
 
     type: Literal["tool_end"] = "tool_end"
+
+
+@dataclass
+class RealtimeToolApprovalRequired:
+    """A tool call requires human approval before execution."""
+
+    agent: RealtimeAgent
+    """The agent requesting approval."""
+
+    tool: Tool
+    """The tool awaiting approval."""
+
+    call_id: str
+    """The tool call identifier."""
+
+    arguments: str
+    """The arguments passed to the tool as a JSON string."""
+
+    info: RealtimeEventInfo
+    """Common info for all events, such as the context."""
+
+    type: Literal["tool_approval_required"] = "tool_approval_required"
 
 
 @dataclass
@@ -232,6 +261,7 @@ RealtimeSessionEvent: TypeAlias = Union[
     RealtimeHandoffEvent,
     RealtimeToolStart,
     RealtimeToolEnd,
+    RealtimeToolApprovalRequired,
     RealtimeRawModelEvent,
     RealtimeAudioEnd,
     RealtimeAudio,

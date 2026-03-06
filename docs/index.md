@@ -3,9 +3,8 @@
 The [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) enables you to build agentic AI apps in a lightweight, easy-to-use package with very few abstractions. It's a production-ready upgrade of our previous experimentation for agents, [Swarm](https://github.com/openai/swarm/tree/main). The Agents SDK has a very small set of primitives:
 
 -   **Agents**, which are LLMs equipped with instructions and tools
--   **Handoffs**, which allow agents to delegate to other agents for specific tasks
+-   **Agents as tools / Handoffs**, which allow agents to delegate to other agents for specific tasks
 -   **Guardrails**, which enable validation of agent inputs and outputs
--   **Sessions**, which automatically maintains conversation history across agent runs
 
 In combination with Python, these primitives are powerful enough to express complex relationships between tools and agents, and allow you to build real-world applications without a steep learning curve. In addition, the SDK comes with built-in **tracing** that lets you visualize and debug your agentic flows, as well as evaluate them and even fine-tune models for your application.
 
@@ -18,13 +17,16 @@ The SDK has two driving design principles:
 
 Here are the main features of the SDK:
 
--   Agent loop: Built-in agent loop that handles calling tools, sending results to the LLM, and looping until the LLM is done.
--   Python-first: Use built-in language features to orchestrate and chain agents, rather than needing to learn new abstractions.
--   Handoffs: A powerful feature to coordinate and delegate between multiple agents.
--   Guardrails: Run input validations and checks in parallel to your agents, breaking early if the checks fail.
--   Sessions: Automatic conversation history management across agent runs, eliminating manual state handling.
--   Function tools: Turn any Python function into a tool, with automatic schema generation and Pydantic-powered validation.
--   Tracing: Built-in tracing that lets you visualize, debug and monitor your workflows, as well as use the OpenAI suite of evaluation, fine-tuning and distillation tools.
+-   **Agent loop**: A built-in agent loop that handles tool invocation, sends results back to the LLM, and continues until the task is complete.
+-   **Python-first**: Use built-in language features to orchestrate and chain agents, rather than needing to learn new abstractions.
+-   **Agents as tools / Handoffs**: A powerful mechanism for coordinating and delegating work across multiple agents.
+-   **Guardrails**: Run input validation and safety checks in parallel with agent execution, and fail fast when checks do not pass.
+-   **Function tools**: Turn any Python function into a tool with automatic schema generation and Pydantic-powered validation.
+-   **MCP server tool calling**: Built-in MCP server tool integration that works the same way as function tools.
+-   **Sessions**: A persistent memory layer for maintaining working context within an agent loop.
+-   **Human in the loop**: Built-in mechanisms for involving humans across agent runs.
+-   **Tracing**: Built-in tracing for visualizing, debugging, and monitoring workflows, with support for the OpenAI suite of evaluation, fine-tuning, and distillation tools.
+-   **Realtime Agents**: Build powerful voice agents with features such as automatic interruption detection, context management, guardrails, and more.
 
 ## Installation
 
@@ -52,3 +54,24 @@ print(result.final_output)
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
+
+## Start here
+
+-   Build your first text-based agent with the [Quickstart](quickstart.md).
+-   Then decide how you want to carry state across turns in [Running agents](running_agents.md#choose-a-memory-strategy).
+-   If you are deciding between handoffs and manager-style orchestration, read [Agent orchestration](multi_agent.md).
+
+## Choose your path
+
+Use this table when you know the job you want to do, but not which page explains it.
+
+| Goal | Start here |
+| --- | --- |
+| Build the first text agent and see one complete run | [Quickstart](quickstart.md) |
+| Add function tools, hosted tools, or agents as tools | [Tools](tools.md) |
+| Decide between handoffs and manager-style orchestration | [Agent orchestration](multi_agent.md) |
+| Keep memory across turns | [Running agents](running_agents.md#choose-a-memory-strategy) and [Sessions](sessions/index.md) |
+| Use OpenAI models, websocket transport, or non-OpenAI providers | [Models](models/index.md) |
+| Review outputs, run items, interruptions, and resume state | [Results](results.md) |
+| Build a low-latency voice agent | [Realtime agents quickstart](realtime/quickstart.md) and [Realtime transport](realtime/transport.md) |
+| Build a speech-to-text / agent / text-to-speech pipeline | [Voice pipeline quickstart](voice/quickstart.md) |

@@ -9,9 +9,14 @@ from openai import AsyncOpenAI, AsyncStream, Omit, omit
 from openai.types import ChatModel
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice
-from openai.types.responses import Response
+from openai.types.responses import (
+    Response,
+    ResponseOutputItem,
+    ResponseOutputMessage,
+    ResponseOutputText,
+)
+from openai.types.responses.response_output_text import Logprob
 from openai.types.responses.response_prompt_param import ResponsePromptParam
-from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from .. import _debug
 from ..agent_output import AgentOutputSchemaBase
@@ -102,18 +107,9 @@ class OpenAIChatCompletionsModel(Model):
                     input_tokens=response.usage.prompt_tokens,
                     output_tokens=response.usage.completion_tokens,
                     total_tokens=response.usage.total_tokens,
-                    input_tokens_details=InputTokensDetails(
-                        cached_tokens=getattr(
-                            response.usage.prompt_tokens_details, "cached_tokens", 0
-                        )
-                        or 0,
-                    ),
-                    output_tokens_details=OutputTokensDetails(
-                        reasoning_tokens=getattr(
-                            response.usage.completion_tokens_details, "reasoning_tokens", 0
-                        )
-                        or 0,
-                    ),
+                    # BeforeValidator in Usage normalizes these from Chat Completions types
+                    input_tokens_details=response.usage.prompt_tokens_details,  # type: ignore[arg-type]
+                    output_tokens_details=response.usage.completion_tokens_details,  # type: ignore[arg-type]
                 )
                 if response.usage
                 else Usage()
@@ -123,17 +119,51 @@ class OpenAIChatCompletionsModel(Model):
                     [message.model_dump()] if message is not None else []
                 )
             span_generation.span_data.usage = {
+                "requests": usage.requests,
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+                "input_tokens_details": usage.input_tokens_details.model_dump(),
+                "output_tokens_details": usage.output_tokens_details.model_dump(),
             }
 
-            items = Converter.message_to_output_items(message) if message is not None else []
+            # Build provider_data for provider_specific_fields
+            provider_data = {"model": self.model}
+            if message is not None and hasattr(response, "id"):
+                provider_data["response_id"] = response.id
+
+            items = (
+                Converter.message_to_output_items(message, provider_data=provider_data)
+                if message is not None
+                else []
+            )
+
+            logprob_models = None
+            if first_choice and first_choice.logprobs and first_choice.logprobs.content:
+                logprob_models = ChatCmplHelpers.convert_logprobs_for_output_text(
+                    first_choice.logprobs.content
+                )
+
+            if logprob_models:
+                self._attach_logprobs_to_output(items, logprob_models)
 
             return ModelResponse(
                 output=items,
                 usage=usage,
                 response_id=None,
             )
+
+    def _attach_logprobs_to_output(
+        self, output_items: list[ResponseOutputItem], logprobs: list[Logprob]
+    ) -> None:
+        for output_item in output_items:
+            if not isinstance(output_item, ResponseOutputMessage):
+                continue
+
+            for content in output_item.content:
+                if isinstance(content, ResponseOutputText):
+                    content.logprobs = logprobs
+                    return
 
     async def stream_response(
         self,
@@ -170,7 +200,9 @@ class OpenAIChatCompletionsModel(Model):
             )
 
             final_response: Response | None = None
-            async for chunk in ChatCmplStreamHandler.handle_stream(response, stream):
+            async for chunk in ChatCmplStreamHandler.handle_stream(
+                response, stream, model=self.model
+            ):
                 yield chunk
 
                 if chunk.type == "response.completed":
@@ -181,8 +213,20 @@ class OpenAIChatCompletionsModel(Model):
 
             if final_response and final_response.usage:
                 span_generation.span_data.usage = {
+                    "requests": 1,
                     "input_tokens": final_response.usage.input_tokens,
                     "output_tokens": final_response.usage.output_tokens,
+                    "total_tokens": final_response.usage.total_tokens,
+                    "input_tokens_details": (
+                        final_response.usage.input_tokens_details.model_dump()
+                        if final_response.usage.input_tokens_details
+                        else {"cached_tokens": 0}
+                    ),
+                    "output_tokens_details": (
+                        final_response.usage.output_tokens_details.model_dump()
+                        if final_response.usage.output_tokens_details
+                        else {"reasoning_tokens": 0}
+                    ),
                 }
 
     @overload
@@ -228,7 +272,7 @@ class OpenAIChatCompletionsModel(Model):
         stream: bool = False,
         prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
-        converted_messages = Converter.items_to_messages(input)
+        converted_messages = Converter.items_to_messages(input, model=self.model)
 
         if system_instructions:
             converted_messages.insert(
@@ -308,6 +352,7 @@ class OpenAIChatCompletionsModel(Model):
             reasoning_effort=self._non_null_or_omit(reasoning_effort),
             verbosity=self._non_null_or_omit(model_settings.verbosity),
             top_logprobs=self._non_null_or_omit(model_settings.top_logprobs),
+            prompt_cache_retention=self._non_null_or_omit(model_settings.prompt_cache_retention),
             extra_headers=self._merge_headers(model_settings),
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,

@@ -24,3 +24,11 @@ def set_default_openai_api(api: Literal["chat_completions", "responses"]) -> Non
         _openai_shared.set_use_responses_by_default(False)
     else:
         _openai_shared.set_use_responses_by_default(True)
+
+
+def set_default_openai_responses_transport(transport: Literal["http", "websocket"]) -> None:
+    if transport not in {"http", "websocket"}:
+        raise ValueError(
+            "Invalid OpenAI Responses transport. Expected one of: 'http', 'websocket'."
+        )
+    _openai_shared.set_default_openai_responses_transport(transport)

@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 from rich.console import Console
 
-from agents import Runner, RunResult, custom_span, gen_trace_id, trace
+from agents import Runner, RunResult, RunResultStreaming, custom_span, gen_trace_id, trace
 
 from .agents.financials_agent import financials_agent
 from .agents.planner_agent import FinancialSearchItem, FinancialSearchPlan, planner_agent
@@ -17,7 +17,7 @@ from .agents.writer_agent import FinancialReportData, writer_agent
 from .printer import Printer
 
 
-async def _summary_extractor(run_result: RunResult) -> str:
+async def _summary_extractor(run_result: RunResult | RunResultStreaming) -> str:
     """Custom output extractor for sub‑agents that return an AnalysisSummary."""
     # The financial/risk analyst agents emit an AnalysisSummary with a `summary` field.
     # We want the tool call to return just that summary text so the writer can drop it inline.
@@ -77,15 +77,27 @@ class FinancialResearchManager:
             tasks = [asyncio.create_task(self._search(item)) for item in search_plan.searches]
             results: list[str] = []
             num_completed = 0
+            num_succeeded = 0
+            num_failed = 0
             for task in asyncio.as_completed(tasks):
                 result = await task
                 if result is not None:
                     results.append(result)
+                    num_succeeded += 1
+                else:
+                    num_failed += 1
                 num_completed += 1
+                status = f"Searching... {num_completed}/{len(tasks)} finished"
+                if num_failed:
+                    status += f" ({num_succeeded} succeeded, {num_failed} failed)"
                 self.printer.update_item(
-                    "searching", f"Searching... {num_completed}/{len(tasks)} completed"
+                    "searching",
+                    status,
                 )
-            self.printer.mark_item_done("searching")
+            summary = f"Searches finished: {num_succeeded}/{len(tasks)} succeeded"
+            if num_failed:
+                summary += f", {num_failed} failed"
+            self.printer.update_item("searching", summary, is_done=True)
             return results
 
     async def _search(self, item: FinancialSearchItem) -> str | None:

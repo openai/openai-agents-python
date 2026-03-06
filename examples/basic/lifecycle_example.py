@@ -1,11 +1,12 @@
 import asyncio
 import random
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from pydantic import BaseModel
 
 from agents import (
     Agent,
+    AgentHookContext,
     AgentHooks,
     RunContextWrapper,
     RunHooks,
@@ -15,15 +16,18 @@ from agents import (
     function_tool,
 )
 from agents.items import ModelResponse, TResponseInputItem
+from agents.tool_context import ToolContext
+from examples.auto_mode import input_with_fallback
 
 
 class LoggingHooks(AgentHooks[Any]):
     async def on_start(
         self,
-        context: RunContextWrapper[Any],
+        context: AgentHookContext[Any],
         agent: Agent[Any],
     ) -> None:
-        print(f"#### {agent.name} is starting.")
+        # Access the turn_input from the context to see what input the agent received
+        print(f"#### {agent.name} is starting with turn_input: {context.turn_input}")
 
     async def on_end(
         self,
@@ -41,10 +45,11 @@ class ExampleHooks(RunHooks):
     def _usage_to_str(self, usage: Usage) -> str:
         return f"{usage.requests} requests, {usage.input_tokens} input tokens, {usage.output_tokens} output tokens, {usage.total_tokens} total tokens"
 
-    async def on_agent_start(self, context: RunContextWrapper, agent: Agent) -> None:
+    async def on_agent_start(self, context: AgentHookContext, agent: Agent) -> None:
         self.event_counter += 1
+        # Access the turn_input from the context to see what input the agent received
         print(
-            f"### {self.event_counter}: Agent {agent.name} started. Usage: {self._usage_to_str(context.usage)}"
+            f"### {self.event_counter}: Agent {agent.name} started. turn_input: {context.turn_input}. Usage: {self._usage_to_str(context.usage)}"
         )
 
     async def on_llm_start(
@@ -69,18 +74,28 @@ class ExampleHooks(RunHooks):
             f"### {self.event_counter}: Agent {agent.name} ended with output {output}. Usage: {self._usage_to_str(context.usage)}"
         )
 
+    # Note: The on_tool_start and on_tool_end hooks apply only to local tools.
+    # They do not include hosted tools that run on the OpenAI server side,
+    # such as WebSearchTool, FileSearchTool, CodeInterpreterTool, HostedMCPTool,
+    # or other built-in hosted tools.
     async def on_tool_start(self, context: RunContextWrapper, agent: Agent, tool: Tool) -> None:
         self.event_counter += 1
+        # While this type cast is not ideal,
+        # we don't plan to change the context arg type in the near future for backwards compatibility.
+        tool_context = cast(ToolContext[Any], context)
         print(
-            f"### {self.event_counter}: Tool {tool.name} started. name={context.tool_name}, call_id={context.tool_call_id}, args={context.tool_arguments}. Usage: {self._usage_to_str(context.usage)}"  # type: ignore[attr-defined]
+            f"### {self.event_counter}: Tool {tool.name} started. name={tool_context.tool_name}, call_id={tool_context.tool_call_id}, args={tool_context.tool_arguments}. Usage: {self._usage_to_str(tool_context.usage)}"
         )
 
     async def on_tool_end(
         self, context: RunContextWrapper, agent: Agent, tool: Tool, result: str
     ) -> None:
         self.event_counter += 1
+        # While this type cast is not ideal,
+        # we don't plan to change the context arg type in the near future for backwards compatibility.
+        tool_context = cast(ToolContext[Any], context)
         print(
-            f"### {self.event_counter}: Tool {tool.name} finished. result={result}, name={context.tool_name}, call_id={context.tool_call_id}, args={context.tool_arguments}. Usage: {self._usage_to_str(context.usage)}"  # type: ignore[attr-defined]
+            f"### {self.event_counter}: Tool {tool.name} finished. result={result}, name={tool_context.tool_name}, call_id={tool_context.tool_call_id}, args={tool_context.tool_arguments}. Usage: {self._usage_to_str(tool_context.usage)}"
         )
 
     async def on_handoff(
@@ -132,7 +147,7 @@ start_agent = Agent(
 
 
 async def main() -> None:
-    user_input = input("Enter a max number: ")
+    user_input = input_with_fallback("Enter a max number: ", "50")
     try:
         max_number = int(user_input)
         await Runner.run(

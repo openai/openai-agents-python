@@ -1,19 +1,45 @@
+from __future__ import annotations
+
+import copy
 import functools
+import inspect
 import json
+from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, Union
+from typing import TYPE_CHECKING, Any, Callable, Protocol, Union
 
 import httpx
 from typing_extensions import NotRequired, TypedDict
 
 from .. import _debug
 from ..exceptions import AgentsException, ModelBehaviorError, UserError
+
+try:
+    from mcp.shared.exceptions import McpError as _McpError
+except ImportError:  # pragma: no cover – mcp is optional on Python < 3.10
+    _McpError = None  # type: ignore[assignment, misc]
 from ..logger import logger
 from ..run_context import RunContextWrapper
 from ..strict_schema import ensure_strict_json_schema
-from ..tool import FunctionTool, Tool
+from ..tool import (
+    FunctionTool,
+    Tool,
+    ToolErrorFunction,
+    ToolOutputImageDict,
+    ToolOutputTextDict,
+    _build_handled_function_tool_error_handler,
+    _build_wrapped_function_tool,
+    default_tool_error_function,
+)
 from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
 from ..util._types import MaybeAwaitable
+
+if TYPE_CHECKING:
+    ToolOutputItem = ToolOutputTextDict | ToolOutputImageDict
+    ToolOutput = str | ToolOutputItem | list[ToolOutputItem]
+else:
+    ToolOutputItem = Union[ToolOutputTextDict, ToolOutputImageDict]  # noqa: UP007
+    ToolOutput = Union[str, ToolOutputItem, list[ToolOutputItem]]  # noqa: UP007
 
 if TYPE_CHECKING:
     from mcp.types import Tool as MCPTool
@@ -31,9 +57,9 @@ class HttpClientFactory(Protocol):
 
     def __call__(
         self,
-        headers: Optional[dict[str, str]] = None,
-        timeout: Optional[httpx.Timeout] = None,
-        auth: Optional[httpx.Auth] = None,
+        headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
     ) -> httpx.AsyncClient: ...
 
 
@@ -44,14 +70,17 @@ class ToolFilterContext:
     run_context: RunContextWrapper[Any]
     """The current run context."""
 
-    agent: "AgentBase"
+    agent: AgentBase
     """The agent that is requesting the tool list."""
 
     server_name: str
     """The name of the MCP server."""
 
 
-ToolFilterCallable = Callable[["ToolFilterContext", "MCPTool"], MaybeAwaitable[bool]]
+if TYPE_CHECKING:
+    ToolFilterCallable = Callable[[ToolFilterContext, MCPTool], MaybeAwaitable[bool]]
+else:
+    ToolFilterCallable = Callable[[ToolFilterContext, Any], MaybeAwaitable[bool]]
 """A function that determines whether a tool should be available.
 
 Args:
@@ -75,14 +104,51 @@ class ToolFilterStatic(TypedDict):
     If set, these tools will be filtered out."""
 
 
-ToolFilter = Union[ToolFilterCallable, ToolFilterStatic, None]
+if TYPE_CHECKING:
+    ToolFilter = ToolFilterCallable | ToolFilterStatic | None
+else:
+    ToolFilter = Union[ToolFilterCallable, ToolFilterStatic, None]  # noqa: UP007
 """A tool filter that can be either a function, static configuration, or None (no filtering)."""
 
 
+@dataclass
+class MCPToolMetaContext:
+    """Context information available to MCP tool meta resolver functions."""
+
+    run_context: RunContextWrapper[Any]
+    """The current run context."""
+
+    server_name: str
+    """The name of the MCP server."""
+
+    tool_name: str
+    """The name of the tool being invoked."""
+
+    arguments: dict[str, Any] | None
+    """The parsed tool arguments."""
+
+
+if TYPE_CHECKING:
+    MCPToolMetaResolver = Callable[
+        [MCPToolMetaContext],
+        MaybeAwaitable[dict[str, Any] | None],
+    ]
+else:
+    MCPToolMetaResolver = Callable[..., Any]
+"""A function that produces MCP request metadata for tool calls.
+
+Args:
+    context: Context information about the tool invocation.
+
+Returns:
+    A dict to send as MCP `_meta`, or None to omit metadata.
+"""
+
+
 def create_static_tool_filter(
-    allowed_tool_names: Optional[list[str]] = None,
-    blocked_tool_names: Optional[list[str]] = None,
-) -> Optional[ToolFilterStatic]:
+    allowed_tool_names: list[str] | None = None,
+    blocked_tool_names: list[str] | None = None,
+) -> ToolFilterStatic | None:
     """Create a static tool filter from allowlist and blocklist parameters.
 
     This is a convenience function for creating a ToolFilterStatic.
@@ -112,17 +178,22 @@ class MCPUtil:
     @classmethod
     async def get_all_function_tools(
         cls,
-        servers: list["MCPServer"],
+        servers: list[MCPServer],
         convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
-        agent: "AgentBase",
+        agent: AgentBase,
+        failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
         tools = []
         tool_names: set[str] = set()
         for server in servers:
             server_tools = await cls.get_function_tools(
-                server, convert_schemas_to_strict, run_context, agent
+                server,
+                convert_schemas_to_strict,
+                run_context,
+                agent,
+                failure_error_function=failure_error_function,
             )
             server_tool_names = {tool.name for tool in server_tools}
             if len(server_tool_names & tool_names) > 0:
@@ -138,10 +209,11 @@ class MCPUtil:
     @classmethod
     async def get_function_tools(
         cls,
-        server: "MCPServer",
+        server: MCPServer,
         convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
-        agent: "AgentBase",
+        agent: AgentBase,
+        failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
 
@@ -149,14 +221,38 @@ class MCPUtil:
             tools = await server.list_tools(run_context, agent)
             span.span_data.result = [tool.name for tool in tools]
 
-        return [cls.to_function_tool(tool, server, convert_schemas_to_strict) for tool in tools]
+        return [
+            cls.to_function_tool(
+                tool,
+                server,
+                convert_schemas_to_strict,
+                agent,
+                failure_error_function=failure_error_function,
+            )
+            for tool in tools
+        ]
 
     @classmethod
     def to_function_tool(
-        cls, tool: "MCPTool", server: "MCPServer", convert_schemas_to_strict: bool
+        cls,
+        tool: MCPTool,
+        server: MCPServer,
+        convert_schemas_to_strict: bool,
+        agent: AgentBase | None = None,
+        failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     ) -> FunctionTool:
-        """Convert an MCP tool to an Agents SDK function tool."""
-        invoke_func = functools.partial(cls.invoke_mcp_tool, server, tool)
+        """Convert an MCP tool to an Agents SDK function tool.
+
+        The ``agent`` parameter is optional for backward compatibility with older
+        call sites that used ``MCPUtil.to_function_tool(tool, server, strict)``.
+        When omitted, this helper preserves the historical behavior for static
+        policies. If the server uses a callable approval policy, approvals default
+        to required to avoid bypassing dynamic checks.
+        """
+        invoke_func_impl = functools.partial(cls.invoke_mcp_tool, server, tool)
+        effective_failure_error_function = server._get_failure_error_function(
+            failure_error_function
+        )
         schema, is_strict = tool.inputSchema, False
 
         # MCP spec doesn't require the inputSchema to have `properties`, but OpenAI spec does.
@@ -170,19 +266,78 @@ class MCPUtil:
             except Exception as e:
                 logger.info(f"Error converting MCP schema to strict mode: {e}")
 
-        return FunctionTool(
+        needs_approval: (
+            bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
+        ) = server._get_needs_approval_for_tool(tool, agent)
+
+        function_tool = _build_wrapped_function_tool(
             name=tool.name,
             description=tool.description or "",
             params_json_schema=schema,
-            on_invoke_tool=invoke_func,
+            invoke_tool_impl=invoke_func_impl,
+            on_handled_error=_build_handled_function_tool_error_handler(
+                span_message="Error running tool (non-fatal)",
+                log_label="MCP tool",
+            ),
+            failure_error_function=effective_failure_error_function,
             strict_json_schema=is_strict,
+            needs_approval=needs_approval,
         )
+        return function_tool
+
+    @staticmethod
+    def _merge_mcp_meta(
+        resolved_meta: dict[str, Any] | None,
+        explicit_meta: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if resolved_meta is None and explicit_meta is None:
+            return None
+        merged: dict[str, Any] = {}
+        if resolved_meta is not None:
+            merged.update(resolved_meta)
+        if explicit_meta is not None:
+            merged.update(explicit_meta)
+        return merged
+
+    @classmethod
+    async def _resolve_meta(
+        cls,
+        server: MCPServer,
+        context: RunContextWrapper[Any],
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        meta_resolver = getattr(server, "tool_meta_resolver", None)
+        if meta_resolver is None:
+            return None
+
+        arguments_copy = copy.deepcopy(arguments) if arguments is not None else None
+        resolver_context = MCPToolMetaContext(
+            run_context=context,
+            server_name=server.name,
+            tool_name=tool_name,
+            arguments=arguments_copy,
+        )
+        result = meta_resolver(resolver_context)
+        if inspect.isawaitable(result):
+            result = await result
+        if result is None:
+            return None
+        if not isinstance(result, dict):
+            raise TypeError("MCP meta resolver must return a dict or None.")
+        return result
 
     @classmethod
     async def invoke_mcp_tool(
-        cls, server: "MCPServer", tool: "MCPTool", context: RunContextWrapper[Any], input_json: str
-    ) -> str:
-        """Invoke an MCP tool and return the result as a string."""
+        cls,
+        server: MCPServer,
+        tool: MCPTool,
+        context: RunContextWrapper[Any],
+        input_json: str,
+        *,
+        meta: dict[str, Any] | None = None,
+    ) -> ToolOutput:
+        """Invoke an MCP tool and return the result as ToolOutput."""
         try:
             json_data: dict[str, Any] = json.loads(input_json) if input_json else {}
         except Exception as e:
@@ -200,10 +355,33 @@ class MCPUtil:
             logger.debug(f"Invoking MCP tool {tool.name} with input {input_json}")
 
         try:
-            result = await server.call_tool(tool.name, json_data)
+            resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
+            merged_meta = cls._merge_mcp_meta(resolved_meta, meta)
+            if merged_meta is None:
+                result = await server.call_tool(tool.name, json_data)
+            else:
+                result = await server.call_tool(tool.name, json_data, meta=merged_meta)
+        except UserError:
+            # Re-raise UserError as-is (it already has a good message)
+            raise
         except Exception as e:
-            logger.error(f"Error invoking MCP tool {tool.name}: {e}")
-            raise AgentsException(f"Error invoking MCP tool {tool.name}: {e}") from e
+            if _McpError is not None and isinstance(e, _McpError):
+                # An MCP-level error (e.g. upstream HTTP 4xx/5xx, tool not found, etc.)
+                # is not a programming error – re-raise so the FunctionTool failure
+                # pipeline (failure_error_function) can handle it.  The default handler
+                # will surface the message as a structured error result; callers who set
+                # failure_error_function=None will have the error raised as documented.
+                error_text = e.error.message if hasattr(e, "error") and e.error else str(e)
+                logger.warning(
+                    f"MCP tool {tool.name} on server '{server.name}' returned an error: "
+                    f"{error_text}"
+                )
+                raise
+
+            logger.error(f"Error invoking MCP tool {tool.name} on server '{server.name}': {e}")
+            raise AgentsException(
+                f"Error invoking MCP tool {tool.name} on server '{server.name}': {e}"
+            ) from e
 
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug(f"MCP tool {tool.name} completed.")
@@ -211,20 +389,29 @@ class MCPUtil:
             logger.debug(f"MCP tool {tool.name} returned {result}")
 
         # If structured content is requested and available, use it exclusively
+        tool_output: ToolOutput
         if server.use_structured_content and result.structuredContent:
             tool_output = json.dumps(result.structuredContent)
         else:
-            # Fall back to regular text content processing
-            # The MCP tool result is a list of content items, whereas OpenAI tool
-            # outputs are a single string. We'll try to convert.
-            if len(result.content) == 1:
-                tool_output = result.content[0].model_dump_json()
-            elif len(result.content) > 1:
-                tool_results = [item.model_dump(mode="json") for item in result.content]
-                tool_output = json.dumps(tool_results)
+            tool_output_list: list[ToolOutputItem] = []
+            for item in result.content:
+                if item.type == "text":
+                    tool_output_list.append(ToolOutputTextDict(type="text", text=item.text))
+                elif item.type == "image":
+                    tool_output_list.append(
+                        ToolOutputImageDict(
+                            type="image", image_url=f"data:{item.mimeType};base64,{item.data}"
+                        )
+                    )
+                else:
+                    # Fall back to regular text content
+                    tool_output_list.append(
+                        ToolOutputTextDict(type="text", text=str(item.model_dump(mode="json")))
+                    )
+            if len(tool_output_list) == 1:
+                tool_output = tool_output_list[0]
             else:
-                # Empty content is a valid result (e.g., "no results found")
-                tool_output = "[]"
+                tool_output = tool_output_list
 
         current_span = get_current_span()
         if current_span:

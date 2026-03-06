@@ -1,14 +1,17 @@
+import dataclasses
+import json
 import logging
 from typing import Any
 
 import pytest
 from inline_snapshot import snapshot
-from mcp.types import CallToolResult, TextContent, Tool as MCPTool
+from mcp.types import CallToolResult, ImageContent, TextContent, Tool as MCPTool
 from pydantic import BaseModel, TypeAdapter
 
-from agents import Agent, FunctionTool, RunContextWrapper
+from agents import Agent, FunctionTool, RunContextWrapper, default_tool_error_function
 from agents.exceptions import AgentsException, ModelBehaviorError
 from agents.mcp import MCPServer, MCPUtil
+from agents.tool_context import ToolContext
 
 from .helpers import FakeMCPServer
 
@@ -92,6 +95,60 @@ async def test_invoke_mcp_tool():
 
 
 @pytest.mark.asyncio
+async def test_mcp_meta_resolver_merges_and_passes():
+    captured: dict[str, Any] = {}
+
+    def resolve_meta(context):
+        captured["run_context"] = context.run_context
+        captured["server_name"] = context.server_name
+        captured["tool_name"] = context.tool_name
+        captured["arguments"] = context.arguments
+        return {"request_id": "req-123", "locale": "ja"}
+
+    server = FakeMCPServer(tool_meta_resolver=resolve_meta)
+    server.add_tool("test_tool_1", {})
+
+    ctx = RunContextWrapper(context={"request_id": "req-123"})
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    await MCPUtil.invoke_mcp_tool(
+        server,
+        tool,
+        ctx,
+        "{}",
+        meta={"locale": "en", "extra": "value"},
+    )
+
+    assert server.tool_metas[-1] == {"request_id": "req-123", "locale": "en", "extra": "value"}
+    assert captured["run_context"] is ctx
+    assert captured["server_name"] == server.name
+    assert captured["tool_name"] == "test_tool_1"
+    assert captured["arguments"] == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_meta_resolver_does_not_mutate_arguments():
+    def resolve_meta(context):
+        if context.arguments is not None:
+            context.arguments["mutated"] = "yes"
+        return {"meta": "ok"}
+
+    server = FakeMCPServer(tool_meta_resolver=resolve_meta)
+    server.add_tool("test_tool_1", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    await MCPUtil.invoke_mcp_tool(server, tool, ctx, '{"foo": "bar"}')
+
+    result = server.tool_results[-1]
+    prefix = f"result_{tool.name}_"
+    assert result.startswith(prefix)
+    args = json.loads(result[len(prefix) :])
+    assert args == {"foo": "bar"}
+
+
+@pytest.mark.asyncio
 async def test_mcp_invoke_bad_json_errors(caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.DEBUG)
 
@@ -109,7 +166,12 @@ async def test_mcp_invoke_bad_json_errors(caplog: pytest.LogCaptureFixture):
 
 
 class CrashingFakeMCPServer(FakeMCPServer):
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None):
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ):
         raise Exception("Crash!")
 
 
@@ -128,6 +190,341 @@ async def test_mcp_invocation_crash_causes_error(caplog: pytest.LogCaptureFixtur
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
 
     assert "Error invoking MCP tool test_tool_1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_invocation_mcp_error_reraises(caplog: pytest.LogCaptureFixture):
+    """Test that McpError from server.call_tool is re-raised so the FunctionTool failure
+    pipeline (failure_error_function) can handle it.
+
+    When an MCP server raises McpError (e.g. upstream HTTP 4xx/5xx), invoke_mcp_tool
+    re-raises so the configured failure_error_function shapes the model-visible error.
+    With the default failure_error_function the FunctionTool returns a string error
+    result; with failure_error_function=None the error is propagated to the caller.
+    """
+    caplog.set_level(logging.DEBUG)
+
+    from mcp.shared.exceptions import McpError
+    from mcp.types import ErrorData
+
+    class McpErrorFakeMCPServer(FakeMCPServer):
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None = None,
+        ):
+            raise McpError(ErrorData(code=-32000, message="upstream 422 Unprocessable Entity"))
+
+    server = McpErrorFakeMCPServer()
+    server.add_tool("search", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="search", inputSchema={})
+
+    # invoke_mcp_tool itself should re-raise McpError
+    with pytest.raises(McpError):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    # Warning (not error) should be logged before re-raising
+    assert "returned an error" in caplog.text
+
+    # Via FunctionTool with default failure_error_function: error becomes a string result
+    mcp_tool = MCPTool(name="search", inputSchema={})
+    agent = Agent(name="test-agent")
+    function_tool = MCPUtil.to_function_tool(
+        mcp_tool, server, convert_schemas_to_strict=False, agent=agent
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="search",
+        tool_call_id="test_call_mcp_error",
+        tool_arguments="{}",
+    )
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+    assert isinstance(result, str)
+    assert "upstream 422 Unprocessable Entity" in result or "error" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_graceful_error_handling(caplog: pytest.LogCaptureFixture):
+    """Test that MCP tool errors are handled gracefully when invoked via FunctionTool.
+
+    When an MCP tool is created via to_function_tool and then invoked, errors should be
+    caught and converted to error messages instead of raising exceptions. This allows
+    the agent to continue running after tool failures.
+    """
+    caplog.set_level(logging.DEBUG)
+
+    # Create a server that will crash when calling a tool
+    server = CrashingFakeMCPServer()
+    server.add_tool("crashing_tool", {})
+
+    # Convert MCP tool to FunctionTool (this wraps invoke_mcp_tool with error handling)
+    mcp_tool = MCPTool(name="crashing_tool", inputSchema={})
+    agent = Agent(name="test-agent")
+    function_tool = MCPUtil.to_function_tool(
+        mcp_tool, server, convert_schemas_to_strict=False, agent=agent
+    )
+
+    # Create tool context
+    tool_context = ToolContext(
+        context=None,
+        tool_name="crashing_tool",
+        tool_call_id="test_call_1",
+        tool_arguments="{}",
+    )
+
+    # Invoke the tool - should NOT raise an exception, but return an error message
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+
+    # Verify that the result is an error message (not an exception)
+    assert isinstance(result, str)
+    assert "error" in result.lower() or "occurred" in result.lower()
+
+    # Verify that the error message matches what default_tool_error_function would return
+    # The error gets wrapped in AgentsException by invoke_mcp_tool, so we check for that format
+    # The error message now includes the server name
+    wrapped_error = AgentsException(
+        "Error invoking MCP tool crashing_tool on server 'fake_mcp_server': Crash!"
+    )
+    expected_error_msg = default_tool_error_function(tool_context, wrapped_error)
+    assert result == expected_error_msg
+
+    # Verify that the error was logged
+    assert (
+        "MCP tool crashing_tool failed" in caplog.text or "Error invoking MCP tool" in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_timeout_handling():
+    """Test that MCP tool timeouts are handled gracefully.
+
+    This simulates a timeout scenario where the MCP server call_tool raises a timeout error.
+    The error should be caught and converted to an error message instead of halting the agent.
+    """
+
+    class TimeoutFakeMCPServer(FakeMCPServer):
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None = None,
+        ):
+            # Simulate a timeout error - this would normally be wrapped in AgentsException
+            # by invoke_mcp_tool
+            raise Exception(
+                "Timed out while waiting for response to ClientRequest. Waited 1.0 seconds."
+            )
+
+    server = TimeoutFakeMCPServer()
+    server.add_tool("timeout_tool", {})
+
+    # Convert MCP tool to FunctionTool
+    mcp_tool = MCPTool(name="timeout_tool", inputSchema={})
+    agent = Agent(name="test-agent")
+    function_tool = MCPUtil.to_function_tool(
+        mcp_tool, server, convert_schemas_to_strict=False, agent=agent
+    )
+
+    # Create tool context
+    tool_context = ToolContext(
+        context=None,
+        tool_name="timeout_tool",
+        tool_call_id="test_call_2",
+        tool_arguments="{}",
+    )
+
+    # Invoke the tool - should NOT raise an exception
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+
+    # Verify that the result is an error message
+    assert isinstance(result, str)
+    assert "error" in result.lower() or "occurred" in result.lower()
+    assert "Timed out" in result
+
+
+@pytest.mark.asyncio
+async def test_to_function_tool_legacy_call_without_agent_uses_server_policy():
+    """Legacy three-argument to_function_tool calls should honor server policy."""
+
+    server = FakeMCPServer(require_approval="always")
+    server.add_tool("legacy_tool", {})
+
+    # Backward compatibility: old call style omitted the `agent` argument.
+    function_tool = MCPUtil.to_function_tool(
+        MCPTool(name="legacy_tool", inputSchema={}),
+        server,
+        convert_schemas_to_strict=False,
+    )
+
+    # Legacy calls should still respect server-level approval settings.
+    assert function_tool.needs_approval is True
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="legacy_tool",
+        tool_call_id="legacy_call_1",
+        tool_arguments="{}",
+    )
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+    if isinstance(result, str):
+        assert "result_legacy_tool_" in result
+    elif isinstance(result, dict):
+        assert "result_legacy_tool_" in str(result.get("text", ""))
+    else:
+        pytest.fail(f"Unexpected tool result type: {type(result).__name__}")
+
+
+@pytest.mark.asyncio
+async def test_to_function_tool_legacy_call_callable_policy_requires_approval():
+    """Legacy to_function_tool calls should default to approval for callable policies."""
+
+    server = FakeMCPServer()
+    server.add_tool("legacy_callable_tool", {})
+
+    def require_approval(
+        _run_context: RunContextWrapper[Any],
+        _agent: Agent,
+        _tool: MCPTool,
+    ) -> bool:
+        return False
+
+    server._needs_approval_policy = require_approval  # type: ignore[assignment]
+
+    function_tool = MCPUtil.to_function_tool(
+        MCPTool(name="legacy_callable_tool", inputSchema={}),
+        server,
+        convert_schemas_to_strict=False,
+    )
+
+    assert function_tool.needs_approval is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_failure_error_function_agent_default():
+    """Agent-level failure_error_function should handle MCP tool failures."""
+
+    def custom_failure(_ctx: RunContextWrapper[Any], _exc: Exception) -> str:
+        return "custom_mcp_failure"
+
+    server = CrashingFakeMCPServer()
+    server.add_tool("crashing_tool", {})
+
+    agent = Agent(
+        name="test-agent",
+        mcp_servers=[server],
+        mcp_config={"failure_error_function": custom_failure},
+    )
+    run_context = RunContextWrapper(context=None)
+    tools = await agent.get_mcp_tools(run_context)
+    function_tool = next(tool for tool in tools if tool.name == "crashing_tool")
+    assert isinstance(function_tool, FunctionTool)
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="crashing_tool",
+        tool_call_id="test_call_custom_1",
+        tool_arguments="{}",
+    )
+
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+    assert result == "custom_mcp_failure"
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_failure_error_function_server_override():
+    """Server-level failure_error_function should override agent defaults."""
+
+    def agent_failure(_ctx: RunContextWrapper[Any], _exc: Exception) -> str:
+        return "agent_failure"
+
+    def server_failure(_ctx: RunContextWrapper[Any], _exc: Exception) -> str:
+        return "server_failure"
+
+    server = CrashingFakeMCPServer(failure_error_function=server_failure)
+    server.add_tool("crashing_tool", {})
+
+    agent = Agent(
+        name="test-agent",
+        mcp_servers=[server],
+        mcp_config={"failure_error_function": agent_failure},
+    )
+    run_context = RunContextWrapper(context=None)
+    tools = await agent.get_mcp_tools(run_context)
+    function_tool = next(tool for tool in tools if tool.name == "crashing_tool")
+    assert isinstance(function_tool, FunctionTool)
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="crashing_tool",
+        tool_call_id="test_call_custom_2",
+        tool_arguments="{}",
+    )
+
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+    assert result == "server_failure"
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_failure_error_function_server_none_raises():
+    """Server-level None should re-raise MCP tool failures."""
+
+    server = CrashingFakeMCPServer(failure_error_function=None)
+    server.add_tool("crashing_tool", {})
+
+    agent = Agent(
+        name="test-agent",
+        mcp_servers=[server],
+        mcp_config={"failure_error_function": default_tool_error_function},
+    )
+    run_context = RunContextWrapper(context=None)
+    tools = await agent.get_mcp_tools(run_context)
+    function_tool = next(tool for tool in tools if tool.name == "crashing_tool")
+    assert isinstance(function_tool, FunctionTool)
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="crashing_tool",
+        tool_call_id="test_call_custom_3",
+        tool_arguments="{}",
+    )
+
+    with pytest.raises(AgentsException):
+        await function_tool.on_invoke_tool(tool_context, "{}")
+
+
+@pytest.mark.asyncio
+async def test_replaced_mcp_tool_normal_failure_uses_replaced_policy():
+    server = CrashingFakeMCPServer()
+    server.add_tool("crashing_tool", {})
+
+    agent = Agent(
+        name="test-agent",
+        mcp_servers=[server],
+        mcp_config={"failure_error_function": default_tool_error_function},
+    )
+    run_context = RunContextWrapper(context=None)
+    function_tools = await agent.get_mcp_tools(run_context)
+    original_tool = next(tool for tool in function_tools if tool.name == "crashing_tool")
+    assert isinstance(original_tool, FunctionTool)
+
+    replaced_tool = dataclasses.replace(
+        original_tool,
+        _failure_error_function=None,
+        _use_default_failure_error_function=False,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name=replaced_tool.name,
+        tool_call_id="test_call_custom_4",
+        tool_arguments="{}",
+    )
+
+    with pytest.raises(AgentsException):
+        await replaced_tool.on_invoke_tool(tool_context, "{}")
 
 
 @pytest.mark.asyncio
@@ -254,38 +651,44 @@ async def test_mcp_fastmcp_behavior_verification():
     ctx = RunContextWrapper(context=None)
     tool = MCPTool(name="test_tool", inputSchema={})
 
-    # Case 1: None -> "[]".
+    # Case 1: None -> [].
     server._custom_content = []
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
-    assert result == "[]", f"None should return '[]', got {result}"
+    assert result == [], f"None should return [], got {result}"
 
-    # Case 2: [] -> "[]".
+    # Case 2: [] -> [].
     server._custom_content = []
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
-    assert result == "[]", f"[] should return '[]', got {result}"
+    assert result == [], f"[] should return [], got {result}"
 
-    # Case 3: {} -> {"type":"text","text":"{}","annotations":null,"meta":null}.
+    # Case 3: {} -> {"type": "text", "text": "{}"}.
     server._custom_content = [TextContent(text="{}", type="text")]
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
-    expected = '{"type":"text","text":"{}","annotations":null,"meta":null}'
+    expected = {"type": "text", "text": "{}"}
     assert result == expected, f"{{}} should return {expected}, got {result}"
 
-    # Case 4: [{}] -> {"type":"text","text":"{}","annotations":null,"meta":null}.
+    # Case 4: [{}] -> {"type": "text", "text": "{}"}.
     server._custom_content = [TextContent(text="{}", type="text")]
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
-    expected = '{"type":"text","text":"{}","annotations":null,"meta":null}'
+    expected = {"type": "text", "text": "{}"}
     assert result == expected, f"[{{}}] should return {expected}, got {result}"
 
-    # Case 5: [[]] -> "[]".
+    # Case 5: [[]] -> [].
     server._custom_content = []
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
-    assert result == "[]", f"[[]] should return '[]', got {result}"
+    assert result == [], f"[[]] should return [], got {result}"
 
     # Case 6: String values work normally.
     server._custom_content = [TextContent(text="hello", type="text")]
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
-    expected = '{"type":"text","text":"hello","annotations":null,"meta":null}'
+    expected = {"type": "text", "text": "hello"}
     assert result == expected, f"String should return {expected}, got {result}"
+
+    # Case 7: Image content works normally.
+    server._custom_content = [ImageContent(data="AAAA", mimeType="image/png", type="image")]
+    result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
+    expected = {"type": "image", "image_url": "data:image/png;base64,AAAA"}
+    assert result == expected, f"Image should return {expected}, got {result}"
 
 
 @pytest.mark.asyncio
@@ -367,7 +770,12 @@ class StructuredContentTestServer(FakeMCPServer):
         self._test_content = content
         self._test_structured_content = structured_content
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
         """Return test result with specified content and structured content."""
         self.tool_calls.append(tool_name)
 
@@ -393,7 +801,7 @@ class StructuredContentTestServer(FakeMCPServer):
             False,
             [TextContent(text="text content", type="text")],
             {"data": "structured_value", "type": "structured"},
-            '{"type":"text","text":"text content","annotations":null,"meta":null}',
+            {"type": "text", "text": "text content"},
         ),
         # Scenario 3: use_structured_content=True but no structured content
         # Should fall back to text content
@@ -401,7 +809,7 @@ class StructuredContentTestServer(FakeMCPServer):
             True,
             [TextContent(text="fallback text", type="text")],
             None,
-            '{"type":"text","text":"fallback text","annotations":null,"meta":null}',
+            {"type": "text", "text": "fallback text"},
         ),
         # Scenario 4: use_structured_content=True with empty structured content (falsy)
         # Should fall back to text content
@@ -409,7 +817,7 @@ class StructuredContentTestServer(FakeMCPServer):
             True,
             [TextContent(text="fallback text", type="text")],
             {},
-            '{"type":"text","text":"fallback text","annotations":null,"meta":null}',
+            {"type": "text", "text": "fallback text"},
         ),
         # Scenario 5: use_structured_content=True, structured content available, empty text content
         # Should return structured content
@@ -420,8 +828,7 @@ class StructuredContentTestServer(FakeMCPServer):
             False,
             [TextContent(text="first", type="text"), TextContent(text="second", type="text")],
             {"ignored": "structured"},
-            '[{"type": "text", "text": "first", "annotations": null, "meta": null}, '
-            '{"type": "text", "text": "second", "annotations": null, "meta": null}]',
+            [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}],
         ),
         # Scenario 7: use_structured_content=True, multiple text content, with structured content
         # Should return only structured content (text content ignored)
@@ -436,10 +843,10 @@ class StructuredContentTestServer(FakeMCPServer):
         ),
         # Scenario 8: use_structured_content=False, empty content
         # Should return empty array
-        (False, [], None, "[]"),
+        (False, [], None, []),
         # Scenario 9: use_structured_content=True, empty content, no structured content
         # Should return empty array
-        (True, [], None, "[]"),
+        (True, [], None, []),
     ],
 )
 @pytest.mark.asyncio
@@ -492,6 +899,7 @@ async def test_structured_content_priority_over_text():
     # Should return only structured content
     import json
 
+    assert isinstance(result, str)
     parsed_result = json.loads(result)
     assert parsed_result == structured_content
     assert "This should be ignored" not in result
@@ -518,11 +926,9 @@ async def test_structured_content_fallback_behavior():
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
     # Should fall back to text content
-    import json
-
-    parsed_result = json.loads(result)
-    assert parsed_result["text"] == "Fallback content"
-    assert parsed_result["type"] == "text"
+    assert isinstance(result, dict)
+    assert result["type"] == "text"
+    assert result["text"] == "Fallback content"
 
 
 @pytest.mark.asyncio
@@ -547,10 +953,9 @@ async def test_backwards_compatibility_unchanged():
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
     # Should return only text content (structured content ignored)
-    import json
-
-    parsed_result = json.loads(result)
-    assert parsed_result["text"] == "Traditional text output"
+    assert isinstance(result, dict)
+    assert result["type"] == "text"
+    assert result["text"] == "Traditional text output"
     assert "modern" not in result
 
 
@@ -576,11 +981,9 @@ async def test_empty_structured_content_fallback():
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
     # Should fall back to text content because empty dict is falsy
-    import json
-
-    parsed_result = json.loads(result)
-    assert parsed_result["text"] == "Should use this text"
-    assert parsed_result["type"] == "text"
+    assert isinstance(result, dict)
+    assert result["type"] == "text"
+    assert result["text"] == "Should use this text"
 
 
 @pytest.mark.asyncio
@@ -610,6 +1013,7 @@ async def test_complex_structured_content():
     # Should return the complex structured content as-is
     import json
 
+    assert isinstance(result, str)
     parsed_result = json.loads(result)
     assert parsed_result == complex_structured
     assert len(parsed_result["results"]) == 2
@@ -644,6 +1048,7 @@ async def test_multiple_content_items_with_structured():
     # Should return only structured content, ignoring all text items
     import json
 
+    assert isinstance(result, str)
     parsed_result = json.loads(result)
     assert parsed_result == structured_content
     assert "First text item" not in result
@@ -668,10 +1073,9 @@ async def test_multiple_content_items_without_structured():
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
     # Should return JSON array of text content items
-    import json
-
-    parsed_result = json.loads(result)
-    assert isinstance(parsed_result, list)
-    assert len(parsed_result) == 2
-    assert parsed_result[0]["text"] == "First"
-    assert parsed_result[1]["text"] == "Second"
+    assert isinstance(result, list)
+    assert len(result) == 2
+    assert result[0]["type"] == "text"
+    assert result[0]["text"] == "First"
+    assert result[1]["type"] == "text"
+    assert result[1]["text"] == "Second"

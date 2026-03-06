@@ -38,7 +38,7 @@ def create_custom_http_client() -> httpx.AsyncClient:
 async with MCPServerStreamableHttp(
     name="Custom Client Server",
     params={
-        "url": "http://localhost:8000/mcp",
+        "url": "http://localhost:<port>/mcp",
         "httpx_client_factory": create_custom_http_client,
     },
 ) as server:
@@ -60,3 +60,4 @@ async with MCPServerStreamableHttp(
 - **Performance**: Optimize timeouts and connection settings for your use case
 - **Compatibility**: Work with corporate proxies and network restrictions
 
+This example will auto-pick a free localhost port unless you set `STREAMABLE_HTTP_PORT`; use `STREAMABLE_HTTP_HOST` to change the bind address.

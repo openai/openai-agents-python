@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import deque
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -52,9 +53,9 @@ class StreamedAudioResult:
         self._turn_text_buffer = ""
         self._queue: asyncio.Queue[VoiceStreamEvent] = asyncio.Queue()
         self._tasks: list[asyncio.Task[Any]] = []
-        self._ordered_tasks: list[
-            asyncio.Queue[VoiceStreamEvent | None]
-        ] = []  # New: list to hold local queues for each text segment
+        self._ordered_tasks: deque[asyncio.Queue[VoiceStreamEvent | None]] = (
+            deque()
+        )  # New: deque to hold local queues for each text segment
         self._dispatcher_task: asyncio.Task[Any] | None = (
             None  # Task to dispatch audio chunks in order
         )
@@ -88,7 +89,12 @@ class StreamedAudioResult:
     def _transform_audio_buffer(
         self, buffer: list[bytes], output_dtype: npt.DTypeLike
     ) -> npt.NDArray[np.int16 | np.float32]:
-        np_array = np.frombuffer(b"".join(buffer), dtype=np.int16)
+        combined_buffer = b"".join(buffer)
+        if len(combined_buffer) % 2 != 0:
+            # np.int16 needs 2-byte alignment; pad odd-length chunks safely.
+            combined_buffer += b"\x00"
+
+        np_array = np.frombuffer(combined_buffer, dtype=np.int16)
 
         if output_dtype == np.int16:
             return np_array
@@ -118,6 +124,7 @@ class StreamedAudioResult:
                 first_byte_received = False
                 buffer: list[bytes] = []
                 full_audio_data: list[bytes] = []
+                pending_byte = b""
 
                 async for chunk in self.tts_model.run(text, self.tts_settings):
                     if not first_byte_received:
@@ -128,15 +135,33 @@ class StreamedAudioResult:
                         buffer.append(chunk)
                         full_audio_data.append(chunk)
                         if len(buffer) >= self._buffer_size:
-                            audio_np = self._transform_audio_buffer(buffer, self.tts_settings.dtype)
-                            if self.tts_settings.transform_data:
-                                audio_np = self.tts_settings.transform_data(audio_np)
-                            await local_queue.put(
-                                VoiceStreamEventAudio(data=audio_np)
-                            )  # Use local queue
+                            combined = pending_byte + b"".join(buffer)
+                            if len(combined) % 2 != 0:
+                                pending_byte = combined[-1:]
+                                combined = combined[:-1]
+                            else:
+                                pending_byte = b""
+
+                            if combined:
+                                audio_np = self._transform_audio_buffer(
+                                    [combined], self.tts_settings.dtype
+                                )
+                                if self.tts_settings.transform_data:
+                                    audio_np = self.tts_settings.transform_data(audio_np)
+                                await local_queue.put(
+                                    VoiceStreamEventAudio(data=audio_np)
+                                )  # Use local queue
                             buffer = []
                 if buffer:
-                    audio_np = self._transform_audio_buffer(buffer, self.tts_settings.dtype)
+                    combined = pending_byte + b"".join(buffer)
+                else:
+                    combined = pending_byte
+
+                if combined:
+                    # Final flush: pad the remaining half sample if needed.
+                    if len(combined) % 2 != 0:
+                        combined += b"\x00"
+                    audio_np = self._transform_audio_buffer([combined], self.tts_settings.dtype)
                     if self.tts_settings.transform_data:
                         audio_np = self.tts_settings.transform_data(audio_np)
                     await local_queue.put(VoiceStreamEventAudio(data=audio_np))  # Use local queue
@@ -224,7 +249,7 @@ class StreamedAudioResult:
                     break
                 await asyncio.sleep(0)
                 continue
-            local_queue = self._ordered_tasks.pop(0)
+            local_queue = self._ordered_tasks.popleft()
             while True:
                 chunk = await local_queue.get()
                 if chunk is None:
@@ -265,6 +290,7 @@ class StreamedAudioResult:
 
     async def stream(self) -> AsyncIterator[VoiceStreamEvent]:
         """Stream the events and audio data as they're generated."""
+        saw_session_end = False
         while True:
             try:
                 event = await self._queue.get()
@@ -278,7 +304,17 @@ class StreamedAudioResult:
                 break
             yield event
             if event.type == "voice_stream_event_lifecycle" and event.event == "session_ended":
+                saw_session_end = True
                 break
+
+        # On the normal completion path, let the producer task finish gracefully so any active
+        # trace context can emit `trace_end` before we run cleanup.
+        if (
+            saw_session_end
+            and self.text_generation_task is not None
+            and not self.text_generation_task.done()
+        ):
+            await asyncio.shield(self.text_generation_task)
 
         self._check_errors()
         self._cleanup_tasks()

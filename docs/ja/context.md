@@ -4,30 +4,47 @@ search:
 ---
 # コンテキスト管理
 
-コンテキストは多義的な用語です。考慮すべき主なコンテキストは 2 つあります。
+コンテキストは多義的な用語です。主に、関心を持つ可能性があるコンテキストには 2 つのクラスがあります。
 
-1. コードでローカルに利用できるコンテキスト: これはツール関数の実行時、`on_handoff` のようなコールバック、ライフサイクルフックなどで必要となるデータや依存関係です。
-2. LLM が利用できるコンテキスト: これは LLM が応答を生成するときに参照するデータです。
+1. コードでローカルに利用可能なコンテキスト: これは、関数ツールの実行時、`on_handoff` のようなコールバック時、ライフサイクルフック時などに必要になる可能性があるデータや依存関係です。
+2. LLM から利用可能なコンテキスト: これは、LLM がレスポンス生成時に参照するデータです。
 
 ## ローカルコンテキスト
 
-これは [`RunContextWrapper`][agents.run_context.RunContextWrapper] クラスと、その中の [`context`][agents.run_context.RunContextWrapper.context] プロパティで表現されます。仕組みは次のとおりです。
+これは [`RunContextWrapper`][agents.run_context.RunContextWrapper] クラスと、その内部の [`context`][agents.run_context.RunContextWrapper.context] プロパティで表現されます。仕組みは次のとおりです。
 
-1. 任意の Python オブジェクトを作成します。一般的には dataclass や Pydantic オブジェクトを使います。
-2. そのオブジェクトを各種の実行メソッドに渡します（例: `Runner.run(..., **context=whatever**)`）。
-3. すべてのツール呼び出しやライフサイクルフックなどに、ラッパーオブジェクト `RunContextWrapper[T]` が渡されます。ここで `T` はあなたのコンテキストオブジェクトの型で、`wrapper.context` からアクセスできます。
+1. 任意の Python オブジェクトを作成します。一般的なパターンは dataclass または Pydantic オブジェクトを使うことです。
+2. そのオブジェクトを各種 run メソッドに渡します（例: `Runner.run(..., context=whatever)`）。
+3. すべてのツール呼び出し、ライフサイクルフックなどには `RunContextWrapper[T]` というラッパーオブジェクトが渡されます。ここで `T` はコンテキストオブジェクトの型を表し、`wrapper.context` でアクセスできます。
 
-**最も重要** な注意点: 特定のエージェントの実行において、すべてのエージェント、ツール関数、ライフサイクルなどは同じ型のコンテキストを使用しなければなりません。
+認識しておくべき **最も重要** な点: あるエージェント実行に対するすべてのエージェント、関数ツール、ライフサイクルなどは、同じコンテキストの _型_ を使う必要があります。
 
 コンテキストは次のような用途に使えます。
 
--   実行時のコンテキストデータ（例: ユーザー名 / uid やその他の ユーザー 情報）
--   依存関係（例: ロガーオブジェクト、データフェッチャーなど）
+-   実行のためのコンテキストデータ（例: username / uid やユーザーに関するその他情報）
+-   依存関係（例: logger オブジェクト、データフェッチャーなど）
 -   ヘルパー関数
 
 !!! danger "注意"
 
-    コンテキストオブジェクトは LLM に **送信されません**。これは純粋にローカルのオブジェクトで、読み書きやメソッド呼び出しができます。
+    コンテキストオブジェクトは LLM に **送信されません**。これは純粋にローカルオブジェクトであり、読み取り、書き込み、メソッド呼び出しを行えます。
+
+単一の実行内では、派生ラッパーは同じ基盤の app context、承認状態、使用量トラッキングを共有します。ネストされた [`Agent.as_tool()`][agents.agent.Agent.as_tool] 実行では別の `tool_input` が付与される場合がありますが、デフォルトでは app 状態の分離コピーは取得しません。
+
+### `RunContextWrapper` の公開内容
+
+[`RunContextWrapper`][agents.run_context.RunContextWrapper] は、アプリで定義したコンテキストオブジェクトのラッパーです。実際には、最もよく使うのは次です。
+
+-   独自の可変 app 状態と依存関係のための [`wrapper.context`][agents.run_context.RunContextWrapper.context]。
+-   現在の実行全体で集計されたリクエストとトークン使用量のための [`wrapper.usage`][agents.run_context.RunContextWrapper.usage]。
+-   現在の実行が [`Agent.as_tool()`][agents.agent.Agent.as_tool] 内で動いているときの構造化入力のための [`wrapper.tool_input`][agents.run_context.RunContextWrapper.tool_input]。
+-   承認状態をプログラムで更新する必要があるときの [`wrapper.approve_tool(...)`][agents.run_context.RunContextWrapper.approve_tool] / [`wrapper.reject_tool(...)`][agents.run_context.RunContextWrapper.reject_tool]。
+
+`wrapper.context` だけがアプリ定義のオブジェクトです。他のフィールドは SDK が管理するランタイムメタデータです。
+
+後で human-in-the-loop や耐久ジョブワークフロー向けに [`RunState`][agents.run_state.RunState] をシリアライズする場合、そのランタイムメタデータは状態とともに保存されます。シリアライズ状態を永続化または送信する予定がある場合は、[`RunContextWrapper.context`][agents.run_context.RunContextWrapper.context] に秘密情報を入れないでください。
+
+会話状態は別の関心事項です。ターンをどう引き継ぐかに応じて、`result.to_input_list()`、`session`、`conversation_id`、`previous_response_id` を使い分けてください。この判断については [results](results.md)、[running agents](running_agents.md)、[sessions](sessions/index.md) を参照してください。
 
 ```python
 import asyncio
@@ -66,18 +83,18 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-1. これはコンテキストオブジェクトです。ここでは dataclass を使っていますが、任意の型を使用できます。
-2. これはツールです。`RunContextWrapper[UserInfo]` を受け取っていることがわかります。ツールの実装はコンテキストから読み取ります。
-3. エージェントにはジェネリクス `UserInfo` を付けます。これにより、型チェッカーがエラーを検出できます（たとえば、異なるコンテキスト型を受け取るツールを渡そうとした場合など）。
-4. `run` 関数にコンテキストを渡します。
-5. エージェントはツールを正しく呼び出し、年齢を取得します。
+1. これはコンテキストオブジェクトです。ここでは dataclass を使用していますが、任意の型を使用できます。
+2. これはツールです。`RunContextWrapper[UserInfo]` を受け取ることがわかります。ツール実装はコンテキストを読み取ります。
+3. 型チェッカーがエラーを検出できるように、エージェントにジェネリック `UserInfo` を付けます（たとえば、異なるコンテキスト型を受け取るツールを渡そうとした場合）。
+4. コンテキストは `run` 関数に渡されます。
+5. エージェントは正しくツールを呼び出し、年齢を取得します。
 
 ---
 
-### 応用: `ToolContext`
+### 発展: `ToolContext`
 
-場合によっては、実行中のツールに関する追加メタデータ（名前、呼び出し ID、raw の引数文字列など）にアクセスしたいことがあります。  
-そのためには、`RunContextWrapper` を拡張した [`ToolContext`][agents.tool_context.ToolContext] クラスを使用できます。
+場合によっては、実行中のツールに関する追加メタデータ（名前、call ID、raw 引数文字列など）にアクセスしたいことがあります。  
+そのために、`RunContextWrapper` を拡張した [`ToolContext`][agents.tool_context.ToolContext] クラスを使用できます。
 
 ```python
 from typing import Annotated
@@ -106,22 +123,22 @@ agent = Agent(
 ```
 
 `ToolContext` は `RunContextWrapper` と同じ `.context` プロパティに加えて、  
-現在のツール呼び出しに固有のフィールドを提供します。
+現在のツール呼び出しに固有の追加フィールドを提供します。
 
-- `tool_name` – 呼び出されているツールの名前  
-- `tool_call_id` – このツール呼び出しの一意な識別子  
-- `tool_arguments` – ツールに渡された raw の引数文字列  
+- `tool_name` – 呼び出されるツールの名前  
+- `tool_call_id` – このツール呼び出しの一意識別子  
+- `tool_arguments` – ツールに渡された raw 引数字符串  
 
-実行時にツールレベルのメタデータが必要な場合は `ToolContext` を使用してください。  
-エージェントとツール間で一般的にコンテキストを共有するだけであれば、`RunContextWrapper` で十分です。
+実行中にツールレベルのメタデータが必要な場合は `ToolContext` を使用してください。  
+エージェントとツール間の一般的なコンテキスト共有には、`RunContextWrapper` で十分です。`ToolContext` は `RunContextWrapper` を拡張しているため、ネストされた `Agent.as_tool()` 実行で構造化入力が渡された場合は `.tool_input` も公開できます。
 
 ---
 
-## エージェント / LLM のコンテキスト
+## Agent/LLM コンテキスト
 
-LLM が呼び出されるとき、LLM が参照できるのは会話履歴のデータ **のみ** です。つまり、LLM に新しいデータを利用させたい場合は、その履歴に含める形で提供する必要があります。いくつかの方法があります。
+LLM が呼び出されるとき、参照できるデータは会話履歴にあるもの **のみ** です。つまり、新しいデータを LLM で利用可能にしたい場合は、その履歴で利用可能になる形で渡す必要があります。方法はいくつかあります。
 
-1. エージェントの `instructions` に追加します。これは「システムプロンプト」または「開発者メッセージ」とも呼ばれます。システムプロンプトは静的な文字列でも、コンテキストを受け取って文字列を出力する動的な関数でもかまいません。常に有用な情報（例: ユーザー名や現在の日付）に適した手法です。
-2. `Runner.run` 関数を呼び出すときに `input` に追加します。これは `instructions` の手法に似ていますが、[指揮系統](https://cdn.openai.com/spec/model-spec-2024-05-08.html#follow-the-chain-of-command) の下位にメッセージを配置できます。
-3. 関数ツール 経由で公開します。これは _オンデマンド_ のコンテキストに有用です。LLM は必要なときにデータを要求し、ツールを呼び出してそのデータを取得できます。
-4. リトリーバルまたは Web 検索 を使用します。これらは、ファイルやデータベース（リトリーバル）や、Web（Web 検索）から関連データを取得できる特別なツールです。これは関連するコンテキストデータに基づいて応答を「グラウンディング」するのに有用です。
+1. Agent の `instructions` に追加します。これは "システムプロンプト" または "developer message" とも呼ばれます。システムプロンプトは静的な文字列にも、コンテキストを受け取って文字列を出力する動的関数にもできます。これは、常に有用な情報（たとえばユーザー名や現在日付）でよく使われる手法です。
+2. `Runner.run` 関数を呼ぶ際に `input` に追加します。これは `instructions` の手法に近いですが、[chain of command](https://cdn.openai.com/spec/model-spec-2024-05-08.html#follow-the-chain-of-command) の中でより下位のメッセージを持てます。
+3. 関数ツール経由で公開します。これは _オンデマンド_ なコンテキストに有用です。LLM がデータを必要とするタイミングを判断し、そのデータ取得のためにツールを呼び出せます。
+4. retrieval または Web 検索を使用します。これらは、ファイルやデータベース（retrieval）または Web（web search）から関連データを取得できる特別なツールです。これは、関連するコンテキストデータでレスポンスを「グラウンディング」するのに有用です。
