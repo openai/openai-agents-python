@@ -213,13 +213,13 @@ def test_max_parallel_tool_calls_true_raises() -> None:
     """True is a bool, not a valid concurrency integer — must be rejected."""
     import pytest
 
-    with pytest.raises(TypeError, match="must be an integer, not bool"):
-        ModelSettings(max_parallel_tool_calls=True)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="must be an integer, not bool"):
+        ModelSettings(max_parallel_tool_calls=True)
 
 
 def test_max_parallel_tool_calls_false_raises() -> None:
     """False is a bool — must be rejected before the < 1 range check."""
     import pytest
 
-    with pytest.raises(TypeError, match="must be an integer, not bool"):
-        ModelSettings(max_parallel_tool_calls=False)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="must be an integer, not bool"):
+        ModelSettings(max_parallel_tool_calls=False)

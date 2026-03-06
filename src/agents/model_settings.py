@@ -9,7 +9,7 @@ from openai import Omit as _Omit
 from openai._types import Body, Query
 from openai.types.responses import ResponseIncludable
 from openai.types.shared import Reasoning
-from pydantic import BaseModel, GetCoreSchemaHandler
+from pydantic import BaseModel, GetCoreSchemaHandler, field_validator
 from pydantic.dataclasses import dataclass
 from pydantic_core import core_schema
 from typing_extensions import TypeAlias
@@ -182,15 +182,21 @@ class ModelSettings:
         controls how many the SDK executes concurrently.
     """
 
+    @field_validator("max_parallel_tool_calls", mode="before")
+    @classmethod
+    def _validate_max_parallel_tool_calls(cls, v: object) -> object:
+        # Pydantic coerces bool→int before __post_init__ runs, so we must
+        # intercept booleans here (mode="before") while the raw value is intact.
+        if isinstance(v, bool):
+            raise ValueError("max_parallel_tool_calls must be an integer, not bool")
+        return v
+
     def __post_init__(self) -> None:
-        if self.max_parallel_tool_calls is not None:
-            if isinstance(self.max_parallel_tool_calls, bool):
-                raise TypeError("max_parallel_tool_calls must be an integer, not bool")
-            if self.max_parallel_tool_calls < 1:
-                raise ValueError(
-                    "max_parallel_tool_calls must be a positive integer, "
-                    f"got {self.max_parallel_tool_calls}"
-                )
+        if self.max_parallel_tool_calls is not None and self.max_parallel_tool_calls < 1:
+            raise ValueError(
+                "max_parallel_tool_calls must be a positive integer, "
+                f"got {self.max_parallel_tool_calls}"
+            )
 
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the
