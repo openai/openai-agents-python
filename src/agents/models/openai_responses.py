@@ -1430,18 +1430,11 @@ class Converter:
             return {
                 "type": "web_search_preview",
             }
-        elif tool_choice == "computer" and cls._has_computer_tool(tools):
-            return {
-                "type": "computer",
-            }
-        elif tool_choice == "computer_use" and cls._has_computer_tool(tools):
-            return cast(
-                response_create_params.ToolChoice,
-                {
-                    "type": "computer_use",
-                },
-            )
-        elif tool_choice == "computer_use_preview" and cls._has_computer_tool(tools):
+        elif tool_choice in {
+            "computer",
+            "computer_use",
+            "computer_use_preview",
+        } and cls._has_computer_tool(tools):
             return cls._convert_builtin_computer_tool_choice(
                 tool_choice=tool_choice,
                 model=model,
@@ -1607,6 +1600,15 @@ class Converter:
             return {
                 "type": "computer_use_preview",
             }
+        # Keep explicit GA selectors on the GA wire shape for prompt-managed calls, but force
+        # preview models back to the preview selector so tool_choice and tools stay compatible.
+        if tool_choice == "computer_use":
+            return cast(
+                response_create_params.ToolChoice,
+                {
+                    "type": "computer_use",
+                },
+            )
         return {
             "type": "computer",
         }

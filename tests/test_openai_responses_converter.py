@@ -130,10 +130,25 @@ def test_convert_tool_choice_computer_variants_follow_effective_model() -> None:
         model="computer-use-preview",
     ) == {"type": "computer_use_preview"}
     assert Converter.convert_tool_choice(
+        "computer",
+        tools=[comp_tool],
+        model="computer-use-preview",
+    ) == {"type": "computer_use_preview"}
+    assert Converter.convert_tool_choice(
+        "computer_use",
+        tools=[comp_tool],
+        model="computer-use-preview",
+    ) == {"type": "computer_use_preview"}
+    assert Converter.convert_tool_choice(
         "computer_use",
         tools=[comp_tool],
         model=None,
     ) == {"type": "computer_use"}
+    assert Converter.convert_tool_choice(
+        "computer",
+        tools=[comp_tool],
+        model=None,
+    ) == {"type": "computer"}
 
 
 def test_convert_tool_choice_allows_function_named_computer_without_computer_tool() -> None:
