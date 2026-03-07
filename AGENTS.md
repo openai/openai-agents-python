@@ -129,7 +129,7 @@ When `$code-change-verification` applies, run it to execute the required verific
   ```
 - Type checking:
   ```bash
-  make mypy
+  make typecheck
   ```
 
 #### Snapshot tests
@@ -155,7 +155,7 @@ Some tests rely on inline snapshots; see `tests/README.md` for details. Re-run `
 #### Formatting, linting, and type checking
 
 - Formatting and linting use `ruff`; run `make format` (applies fixes) and `make lint` (checks only).
-- Type hints must pass `make mypy`.
+- Type hints must pass `make typecheck`.
 - Write comments as full sentences ending with a period.
 - Imports are managed by Ruff and should stay sorted.
 
@@ -166,7 +166,7 @@ When `$code-change-verification` applies, run the full sequence in order (or use
 ```bash
 make format
 make lint
-make mypy
+make typecheck
 make tests
 ```
 
@@ -202,12 +202,12 @@ make tests
 
 - Use the template at `.github/PULL_REQUEST_TEMPLATE/pull_request_template.md`; include a summary, test plan, and issue number if applicable.
 - Add tests for new behavior when feasible and update documentation for user-facing changes.
-- Run `make format`, `make lint`, `make mypy`, and `make tests` before marking work ready.
+- Run `make format`, `make lint`, `make typecheck`, and `make tests` before marking work ready.
 - Commit messages should be concise and written in the imperative mood. Small, focused commits are preferred.
 
 ### Review Process & What Reviewers Look For
 
-- ✅ Checks pass (`make format`, `make lint`, `make mypy`, `make tests`).
+- ✅ Checks pass (`make format`, `make lint`, `make typecheck`, `make tests`).
 - ✅ Tests cover new behavior and edge cases.
 - ✅ Code is readable, maintainable, and consistent with existing style.
 - ✅ Public APIs and user-facing behavior changes are documented.

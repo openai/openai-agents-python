@@ -438,7 +438,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 self._logger.error(f"Failed to cleanup orphaned messages: {cleanup_error}")
             # Don't re-raise - structure metadata is supplementary
 
-    async def _cleanup_orphaned_messages(self) -> None:
+    async def _cleanup_orphaned_messages(self) -> int:
         """Remove messages that exist in agent_messages but not in message_structure.
 
         This can happen if _add_structure_metadata fails after super().add_items() succeeds.
