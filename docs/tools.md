@@ -69,7 +69,7 @@ csv_skill: ShellToolSkillReference = {
 
 agent = Agent(
     name="Container shell agent",
-    model="gpt-5.2",
+    model="gpt-5.4",
     instructions="Use the mounted skill when helpful.",
     tools=[
         ShellTool(
@@ -698,7 +698,7 @@ agent = Agent(
             sandbox_mode="workspace-write",
             working_directory="/path/to/repo",
             default_thread_options=ThreadOptions(
-                model="gpt-5.2-codex",
+                model="gpt-5.4",
                 model_reasoning_effort="low",
                 network_access_enabled=True,
                 web_search_mode="disabled",
