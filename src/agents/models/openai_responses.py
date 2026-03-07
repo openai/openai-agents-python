@@ -627,16 +627,19 @@ class OpenAIResponsesModel(Model):
         else:
             parallel_tool_calls = omit
 
+        should_omit_model = prompt is not None and not self._model_is_explicit
+        effective_request_model: str | ChatModel | None = None if should_omit_model else self.model
         tool_choice = Converter.convert_tool_choice(
             model_settings.tool_choice,
             tools=tools,
             handoffs=handoffs,
+            model=effective_request_model,
         )
         if prompt is None:
             converted_tools = Converter.convert_tools(
                 tools,
                 handoffs,
-                model=self.model,
+                model=effective_request_model,
                 tool_choice=model_settings.tool_choice,
             )
         else:
@@ -644,13 +647,14 @@ class OpenAIResponsesModel(Model):
                 tools,
                 handoffs,
                 allow_opaque_tool_search_surface=True,
-                model=self.model,
+                model=effective_request_model,
                 tool_choice=model_settings.tool_choice,
             )
         converted_tools_payload = _materialize_responses_tool_params(converted_tools.tools)
         response_format = Converter.get_response_format(output_schema)
-        should_omit_model = prompt is not None and not self._model_is_explicit
-        model_param: str | ChatModel | Omit = self.model if not should_omit_model else omit
+        model_param: str | ChatModel | Omit = (
+            effective_request_model if effective_request_model is not None else omit
+        )
         should_omit_tools = prompt is not None and len(converted_tools_payload) == 0
         # In prompt-managed tool flows without local tools payload, omit only named tool choices
         # that must match an explicit tool list. Keep control literals like "none"/"required".
@@ -1396,6 +1400,7 @@ class Converter:
         *,
         tools: Sequence[Tool] | None = None,
         handoffs: Sequence[Handoff[Any, Any]] | None = None,
+        model: str | ChatModel | None = None,
     ) -> response_create_params.ToolChoice | Omit:
         if tool_choice is None:
             return omit
@@ -1425,10 +1430,22 @@ class Converter:
             return {
                 "type": "web_search_preview",
             }
-        elif tool_choice == "computer":
+        elif tool_choice == "computer" and cls._has_computer_tool(tools):
             return {
                 "type": "computer",
             }
+        elif tool_choice == "computer_use" and cls._has_computer_tool(tools):
+            return cast(
+                response_create_params.ToolChoice,
+                {
+                    "type": "computer_use",
+                },
+            )
+        elif tool_choice == "computer_use_preview" and cls._has_computer_tool(tools):
+            return cls._convert_builtin_computer_tool_choice(
+                tool_choice=tool_choice,
+                model=model,
+            )
         elif tool_choice == "computer_use_preview":
             return {
                 "type": "computer_use_preview",
@@ -1554,19 +1571,45 @@ class Converter:
             )
 
     @classmethod
+    def _has_computer_tool(cls, tools: Sequence[Tool] | None) -> bool:
+        return any(isinstance(tool, ComputerTool) for tool in tools or ())
+
+    @classmethod
+    def _is_preview_computer_model(cls, model: str | ChatModel | None) -> bool:
+        return isinstance(model, str) and model.startswith("computer-use-preview")
+
+    @classmethod
     def _should_use_preview_computer_tool(
         cls,
         *,
         model: str | ChatModel | None,
         tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None,
     ) -> bool:
-        # Preserve the released preview wire shape for preview callers while allowing
-        # newer GA computer-tool flows to opt in via model or tool_choice.
-        if tool_choice == "computer_use_preview":
+        # Choose the computer tool wire shape from the effective request model when we know it.
+        # For prompt-managed calls that omit `model`, fall back to the released preview payload
+        # unless the caller explicitly opts into a GA computer-tool selector.
+        if cls._is_preview_computer_model(model):
             return True
-        if tool_choice == "computer":
+        if model is not None:
             return False
-        return isinstance(model, str) and model.startswith("computer-use-preview")
+        if tool_choice in {"computer", "computer_use"}:
+            return False
+        return True
+
+    @classmethod
+    def _convert_builtin_computer_tool_choice(
+        cls,
+        *,
+        tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None,
+        model: str | ChatModel | None,
+    ) -> response_create_params.ToolChoice:
+        if cls._should_use_preview_computer_tool(model=model, tool_choice=tool_choice):
+            return {
+                "type": "computer_use_preview",
+            }
+        return {
+            "type": "computer",
+        }
 
     @classmethod
     def get_response_format(

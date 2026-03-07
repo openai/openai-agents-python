@@ -99,12 +99,54 @@ def test_convert_tool_choice_standard_values():
     # Special tool types are represented as dicts of type only.
     assert Converter.convert_tool_choice("file_search") == {"type": "file_search"}
     assert Converter.convert_tool_choice("web_search_preview") == {"type": "web_search_preview"}
-    assert Converter.convert_tool_choice("computer") == {"type": "computer"}
-    assert Converter.convert_tool_choice("computer_use_preview") == {"type": "computer_use_preview"}
     # Arbitrary string should be interpreted as a function name.
     assert Converter.convert_tool_choice("my_function") == {
         "type": "function",
         "name": "my_function",
+    }
+
+
+def test_convert_tool_choice_computer_variants_follow_effective_model() -> None:
+    comp_tool = ComputerTool(computer=DummyComputer())
+
+    assert Converter.convert_tool_choice(
+        "computer",
+        tools=[comp_tool],
+        model="gpt-5.4",
+    ) == {"type": "computer"}
+    assert Converter.convert_tool_choice(
+        "computer_use",
+        tools=[comp_tool],
+        model="gpt-5.4",
+    ) == {"type": "computer_use"}
+    assert Converter.convert_tool_choice(
+        "computer_use_preview",
+        tools=[comp_tool],
+        model="gpt-5.4",
+    ) == {"type": "computer"}
+    assert Converter.convert_tool_choice(
+        "computer_use_preview",
+        tools=[comp_tool],
+        model="computer-use-preview",
+    ) == {"type": "computer_use_preview"}
+    assert Converter.convert_tool_choice(
+        "computer_use",
+        tools=[comp_tool],
+        model=None,
+    ) == {"type": "computer_use"}
+
+
+def test_convert_tool_choice_allows_function_named_computer_without_computer_tool() -> None:
+    computer_function = function_tool(lambda: "ok", name_override="computer")
+    computer_use_function = function_tool(lambda: "ok", name_override="computer_use")
+
+    assert Converter.convert_tool_choice("computer", tools=[computer_function]) == {
+        "type": "function",
+        "name": "computer",
+    }
+    assert Converter.convert_tool_choice("computer_use", tools=[computer_use_function]) == {
+        "type": "function",
+        "name": "computer_use",
     }
 
 
@@ -399,6 +441,25 @@ def test_convert_tools_uses_preview_computer_payload_for_preview_model() -> None
         tools=[comp_tool],
         handoffs=[],
         model="computer-use-preview",
+    )
+
+    assert converted.tools == [
+        {
+            "type": "computer_use_preview",
+            "environment": "mac",
+            "display_width": 800,
+            "display_height": 600,
+        }
+    ]
+
+
+def test_convert_tools_prompt_managed_computer_defaults_to_preview_payload() -> None:
+    comp_tool = ComputerTool(computer=DummyComputer())
+
+    converted = Converter.convert_tools(
+        tools=[comp_tool],
+        handoffs=[],
+        model=None,
     )
 
     assert converted.tools == [
@@ -936,13 +997,27 @@ def test_convert_tools_accepts_unresolved_computer_initializer():
     assert converted.tools == [{"type": "computer"}]
 
 
-def test_convert_tools_preview_tool_choice_requires_initialized_computer() -> None:
+def test_convert_tools_preview_tool_choice_uses_ga_payload_for_ga_model() -> None:
     comp_tool = ComputerTool(computer=lambda **_: DummyComputer())
 
-    with pytest.raises(UserError, match="resolve_computer"):
-        Converter.convert_tools(
-            tools=[comp_tool],
-            handoffs=[],
-            model="gpt-5.4",
-            tool_choice="computer_use_preview",
-        )
+    converted = Converter.convert_tools(
+        tools=[comp_tool],
+        handoffs=[],
+        model="gpt-5.4",
+        tool_choice="computer_use_preview",
+    )
+
+    assert converted.tools == [{"type": "computer"}]
+
+
+def test_convert_tools_prompt_managed_computer_respects_explicit_ga_tool_choice() -> None:
+    comp_tool = ComputerTool(computer=lambda **_: DummyComputer())
+
+    converted = Converter.convert_tools(
+        tools=[comp_tool],
+        handoffs=[],
+        model=None,
+        tool_choice="computer_use",
+    )
+
+    assert converted.tools == [{"type": "computer"}]
