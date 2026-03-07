@@ -65,6 +65,8 @@ For a full pause/resume walkthrough, see the [human-in-the-loop guide](human_in_
 -   `handoff_requested`
 -   `handoff_occured`
 -   `tool_called`
+-   `tool_search_called`
+-   `tool_search_output_created`
 -   `tool_output`
 -   `reasoning_item_created`
 -   `mcp_approval_requested`
@@ -72,6 +74,8 @@ For a full pause/resume walkthrough, see the [human-in-the-loop guide](human_in_
 -   `mcp_list_tools`
 
 `handoff_occured` is intentionally misspelled for backward compatibility.
+
+When you use hosted tool search, `tool_search_called` is emitted when the model issues a tool-search request and `tool_search_output_created` is emitted when the Responses API returns the loaded subset.
 
 For example, this will ignore raw events and stream updates to the user.
 

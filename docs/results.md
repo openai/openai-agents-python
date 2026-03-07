@@ -63,11 +63,14 @@ Unlike the JavaScript SDK, Python does not expose a separate `output` property f
 
 -   [`MessageOutputItem`][agents.items.MessageOutputItem] for assistant messages
 -   [`ReasoningItem`][agents.items.ReasoningItem] for reasoning items
+-   [`ToolSearchCallItem`][agents.items.ToolSearchCallItem] and [`ToolSearchOutputItem`][agents.items.ToolSearchOutputItem] for Responses tool search requests and loaded tool-search results
 -   [`ToolCallItem`][agents.items.ToolCallItem] and [`ToolCallOutputItem`][agents.items.ToolCallOutputItem] for tool calls and their results
 -   [`ToolApprovalItem`][agents.items.ToolApprovalItem] for tool calls that paused for approval
 -   [`HandoffCallItem`][agents.items.HandoffCallItem] and [`HandoffOutputItem`][agents.items.HandoffOutputItem] for handoff requests and completed transfers
 
 Choose `new_items` over `to_input_list()` whenever you need agent associations, tool outputs, handoff boundaries, or approval boundaries.
+
+When you use hosted tool search, inspect `ToolSearchCallItem.raw_item` to see the search request the model emitted, and `ToolSearchOutputItem.raw_item` to see which namespaces, functions, or hosted MCP servers were loaded for that turn.
 
 ## Continue or resume the conversation
 

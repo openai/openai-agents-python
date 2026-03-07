@@ -73,6 +73,16 @@ For lower latency, using `reasoning.effort="none"` with `gpt-5.4` is recommended
 
 If you pass a non–GPT-5 model name without custom `model_settings`, the SDK reverts to generic `ModelSettings` compatible with any model.
 
+### Responses-only tool search features
+
+The following tool features are supported only with OpenAI Responses models:
+
+-   [`ToolSearchTool`][agents.tool.ToolSearchTool]
+-   [`tool_namespace()`][agents.tool.tool_namespace]
+-   `@function_tool(defer_loading=True)` and other deferred-loading Responses tool surfaces
+
+These features are rejected on Chat Completions models and on non-Responses backends. When you use deferred-loading tools, add `ToolSearchTool()` to the agent and let the model load tools through `auto` or `required` tool choice instead of forcing bare namespace names or deferred-only function names. See [Tools](../tools.md#hosted-tool-search) for the setup details and current constraints.
+
 ### Responses WebSocket transport
 
 By default, OpenAI Responses API requests use HTTP transport. You can opt in to websocket transport when using OpenAI-backed models.

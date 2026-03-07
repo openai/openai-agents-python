@@ -15,6 +15,7 @@ Use this page as a catalog, then jump to the section that matches the runtime yo
 | If you want to... | Start here |
 | --- | --- |
 | Use OpenAI-managed tools (web search, file search, code interpreter, hosted MCP, image generation) | [Hosted tools](#hosted-tools) |
+| Defer large tool surfaces until runtime with tool search | [Hosted tool search](#hosted-tool-search) |
 | Run tools in your own process or environment | [Local runtime tools](#local-runtime-tools) |
 | Wrap Python functions as tools | [Function tools](#function-tools) |
 | Let one agent call another without a handoff | [Agents as tools](#agents-as-tools) |
@@ -29,6 +30,7 @@ OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agent
 -   The [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] lets the LLM execute code in a sandboxed environment.
 -   The [`HostedMCPTool`][agents.tool.HostedMCPTool] exposes a remote MCP server's tools to the model.
 -   The [`ImageGenerationTool`][agents.tool.ImageGenerationTool] generates images from a prompt.
+-   The [`ToolSearchTool`][agents.tool.ToolSearchTool] lets the model load deferred tools, namespaces, or hosted MCP servers on demand.
 
 Advanced hosted search options:
 
@@ -53,6 +55,65 @@ async def main():
     result = await Runner.run(agent, "Which coffee shop should I go to, taking into account my preferences and the weather today in SF?")
     print(result.final_output)
 ```
+
+### Hosted tool search
+
+Tool search lets OpenAI Responses models defer large tool surfaces until runtime, so the model loads only the subset it needs for the current turn. This is useful when you have many function tools, namespace groups, or hosted MCP servers and want to reduce tool-schema tokens without exposing every tool up front.
+
+Start with hosted tool search when the candidate tools are already known when you build the agent. If your application needs to decide what to load dynamically, the Responses API also supports client-executed tool search, but the standard `Runner` does not auto-execute that mode.
+
+```python
+from typing import Annotated
+
+from agents import Agent, Runner, ToolSearchTool, function_tool, tool_namespace
+
+
+@function_tool(defer_loading=True)
+def get_customer_profile(
+    customer_id: Annotated[str, "The customer ID to look up."],
+) -> str:
+    """Fetch a CRM customer profile."""
+    return f"profile for {customer_id}"
+
+
+@function_tool(defer_loading=True)
+def list_open_orders(
+    customer_id: Annotated[str, "The customer ID to look up."],
+) -> str:
+    """List open orders for a customer."""
+    return f"open orders for {customer_id}"
+
+
+crm_tools = tool_namespace(
+    name="crm",
+    description="CRM tools for customer lookups.",
+    tools=[get_customer_profile, list_open_orders],
+)
+
+
+agent = Agent(
+    name="Operations assistant",
+    model="gpt-5.4",
+    instructions="Load the crm namespace before using CRM tools.",
+    tools=[*crm_tools, ToolSearchTool()],
+)
+
+result = await Runner.run(agent, "Look up customer_42 and list their open orders.")
+print(result.final_output)
+```
+
+What to know:
+
+-   Hosted tool search is available only with OpenAI Responses models. The current Python SDK support depends on `openai>=2.25.0`.
+-   Add exactly one `ToolSearchTool()` when you configure deferred-loading surfaces on an agent.
+-   Searchable surfaces include `@function_tool(defer_loading=True)`, `tool_namespace(name=..., description=..., tools=[...])`, and `HostedMCPTool(tool_config={..., "defer_loading": True})`.
+-   Deferred-loading function tools must be paired with `ToolSearchTool()`. Namespace-only setups may also use `ToolSearchTool()` to let the model load the right group on demand.
+-   `tool_namespace()` groups `FunctionTool` instances under a shared namespace name and description. This is usually the best fit when you have many related tools, such as `crm`, `billing`, or `shipping`.
+-   Named `tool_choice` cannot target bare namespace names or deferred-only tools. Prefer `auto`, `required`, or a real top-level callable tool name.
+-   `ToolSearchTool(execution="client")` is for manual Responses orchestration. If the model emits a client-executed `tool_search_call`, the standard `Runner` raises instead of executing it for you.
+-   Tool search activity appears in [`RunResult.new_items`](results.md#new-items) and in [`RunItemStreamEvent`](streaming.md#run-item-event-names) with dedicated item and event types.
+-   See `examples/tools/tool_search.py` for complete runnable examples covering both namespaced loading and top-level deferred tools.
+-   Official platform guide: [Tool search](https://developers.openai.com/api/docs/guides/tools-tool-search).
 
 ### Hosted container shell + skills
 
@@ -167,6 +228,8 @@ You can use any Python function as a tool. The Agents SDK will setup the tool au
 -   Descriptions for each input are taken from the docstring of the function, unless disabled
 
 We use Python's `inspect` module to extract the function signature, along with [`griffe`](https://mkdocstrings.github.io/griffe/) to parse docstrings and `pydantic` for schema creation.
+
+When you are using OpenAI Responses models, `@function_tool(defer_loading=True)` hides a function tool until `ToolSearchTool()` loads it. You can also group related function tools with [`tool_namespace()`][agents.tool.tool_namespace]. See [Hosted tool search](#hosted-tool-search) for the full setup and constraints.
 
 ```python
 import json
