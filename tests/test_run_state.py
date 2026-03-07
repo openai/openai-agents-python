@@ -1211,7 +1211,12 @@ class TestSerializationRoundTrip:
             arguments='{"arg": "val"}',
         )
         state._generated_items.append(
-            ToolCallItem(agent=agent, raw_item=tool_call, description="My tool description")
+            ToolCallItem(
+                agent=agent,
+                raw_item=tool_call,
+                description="My tool description",
+                title="My tool title",
+            )
         )
 
         # 3. Tool call item without description
@@ -1245,9 +1250,11 @@ class TestSerializationRoundTrip:
         assert isinstance(new_state._generated_items[2], ToolCallItem)
         assert isinstance(new_state._generated_items[3], ToolCallOutputItem)
 
-        # Verify description field is preserved
+        # Verify display metadata is preserved
         assert new_state._generated_items[1].description == "My tool description"
+        assert new_state._generated_items[1].title == "My tool title"
         assert new_state._generated_items[2].description is None
+        assert new_state._generated_items[2].title is None
 
     async def test_serializes_original_input_with_function_call_output(self):
         """Test that original_input with function_call_output items is preserved."""

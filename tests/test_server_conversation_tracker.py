@@ -1,9 +1,10 @@
 from typing import Any, cast
 
 import pytest
+from openai.types.responses.response_output_item import McpCall, McpListTools, McpListToolsTool
 
-from agents import Agent
-from agents.items import ModelResponse, RunItem, TResponseInputItem
+from agents import Agent, HostedMCPTool
+from agents.items import MCPListToolsItem, ModelResponse, RunItem, ToolCallItem, TResponseInputItem
 from agents.lifecycle import RunHooks
 from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.result import RunResultStreaming
@@ -12,6 +13,7 @@ from agents.run_context import RunContextWrapper
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
 from agents.run_internal.run_loop import get_new_response, run_single_turn_streamed
 from agents.run_internal.tool_use_tracker import AgentToolUseTracker
+from agents.stream_events import RunItemStreamEvent
 from agents.usage import Usage
 
 from .fake_model import FakeModel
@@ -24,6 +26,22 @@ class DummyRunItem:
     def __init__(self, raw_item: dict[str, Any], type: str = "message") -> None:
         self.raw_item = raw_item
         self.type = type
+
+
+def _make_hosted_mcp_list_tools(server_label: str, tool_name: str) -> McpListTools:
+    return McpListTools(
+        id=f"list_{server_label}",
+        server_label=server_label,
+        tools=[
+            McpListToolsTool(
+                name=tool_name,
+                input_schema={},
+                description="Search the docs.",
+                annotations={"title": "Search Docs"},
+            )
+        ],
+        type="mcp_list_tools",
+    )
 
 
 def test_prepare_input_filters_items_seen_by_server_and_tool_calls() -> None:
@@ -699,3 +717,91 @@ async def test_run_single_turn_streamed_marks_filtered_input_as_sent() -> None:
 
     assert model.last_turn_args["input"] == [item_1]
     assert tracker.remaining_initial_input == [item_2]
+
+
+@pytest.mark.asyncio
+async def test_run_single_turn_streamed_seeds_hosted_mcp_metadata_from_pre_step_items() -> None:
+    model = FakeModel()
+    mcp_call = McpCall(
+        id="mcp_call_1",
+        arguments="{}",
+        name="search_docs",
+        server_label="docs_server",
+        type="mcp_call",
+        status="completed",
+    )
+    model.set_next_output([mcp_call])
+    agent = Agent(name="test", model=model)
+    hosted_tool = HostedMCPTool(
+        tool_config=cast(
+            Any,
+            {
+                "type": "mcp",
+                "server_label": "docs_server",
+                "server_url": "https://example.com/mcp",
+            },
+        )
+    )
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    tool_use_tracker = AgentToolUseTracker()
+
+    item_1: TResponseInputItem = cast(TResponseInputItem, {"role": "user", "content": "first"})
+    pre_step_item = MCPListToolsItem(
+        agent=agent,
+        raw_item=_make_hosted_mcp_list_tools("docs_server", "search_docs"),
+    )
+
+    def _filter_input(payload: Any) -> ModelInputData:
+        return ModelInputData(
+            input=[payload.model_data.input[0]],
+            instructions=payload.model_data.instructions,
+        )
+
+    run_config = RunConfig(call_model_input_filter=_filter_input)
+
+    streamed_result = RunResultStreaming(
+        input=[item_1],
+        new_items=[],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=context_wrapper,
+        current_agent=agent,
+        current_turn=1,
+        max_turns=2,
+        _current_agent_output_schema=None,
+        trace=None,
+        interruptions=[],
+    )
+    streamed_result._model_input_items = [pre_step_item]
+
+    await run_single_turn_streamed(
+        streamed_result,
+        agent,
+        RunHooks(),
+        context_wrapper,
+        run_config,
+        should_run_agent_start_hooks=False,
+        tool_use_tracker=tool_use_tracker,
+        all_tools=[hosted_tool],
+    )
+
+    assert model.last_turn_args["input"] == [item_1]
+
+    tool_call_events: list[ToolCallItem] = []
+    while not streamed_result._event_queue.empty():
+        queued_event = streamed_result._event_queue.get_nowait()
+        streamed_result._event_queue.task_done()
+        if (
+            isinstance(queued_event, RunItemStreamEvent)
+            and queued_event.name == "tool_called"
+            and isinstance(queued_event.item, ToolCallItem)
+        ):
+            tool_call_events.append(queued_event.item)
+
+    assert len(tool_call_events) == 1
+    assert tool_call_events[0].description == "Search the docs."
+    assert tool_call_events[0].title == "Search Docs"

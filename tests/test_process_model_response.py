@@ -1,22 +1,26 @@
 from typing import Any, cast
 
 import pytest
+from mcp import Tool as MCPTool
 from openai._models import construct_type
 from openai.types.responses import (
     ResponseApplyPatchToolCall,
     ResponseCompactionItem,
     ResponseFunctionShellToolCall,
     ResponseFunctionShellToolCallOutput,
+    ResponseFunctionToolCall,
     ResponseOutputItem,
     ResponseToolSearchCall,
     ResponseToolSearchOutputItem,
 )
+from openai.types.responses.response_output_item import McpCall, McpListTools, McpListToolsTool
 
 from agents import (
     Agent,
     ApplyPatchTool,
     CompactionItem,
     Handoff,
+    HostedMCPTool,
     ShellTool,
     Tool,
     function_tool,
@@ -26,15 +30,18 @@ from agents import (
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.items import (
     HandoffCallItem,
+    MCPListToolsItem,
     ModelResponse,
     ToolCallItem,
     ToolCallOutputItem,
     ToolSearchCallItem,
     ToolSearchOutputItem,
 )
+from agents.mcp.util import MCPUtil
 from agents.run_internal import run_loop
 from agents.usage import Usage
 from tests.fake_model import FakeModel
+from tests.mcp.helpers import FakeMCPServer
 from tests.test_responses import get_function_tool_call
 from tests.utils.hitl import (
     RecordingEditor,
@@ -50,6 +57,22 @@ def _response(output: list[object]) -> ModelResponse:
     return response
 
 
+def _make_hosted_mcp_list_tools(server_label: str, tool_name: str) -> McpListTools:
+    return McpListTools(
+        id=f"list_{server_label}",
+        server_label=server_label,
+        tools=[
+            McpListToolsTool(
+                name=tool_name,
+                input_schema={},
+                description="Search the docs.",
+                annotations={"title": "Search Docs"},
+            )
+        ],
+        type="mcp_list_tools",
+    )
+
+
 def test_process_model_response_shell_call_without_tool_raises() -> None:
     agent = Agent(name="no-shell", model=FakeModel())
     shell_call = make_shell_call("shell-1")
@@ -62,6 +85,80 @@ def test_process_model_response_shell_call_without_tool_raises() -> None:
             output_schema=None,
             handoffs=[],
         )
+
+
+def test_process_model_response_sets_title_for_local_mcp_function_tool() -> None:
+    agent = Agent(name="local-mcp", model=FakeModel())
+    mcp_tool = MCPTool(name="search_docs", inputSchema={}, description=None, title="Search Docs")
+    function_tool = MCPUtil.to_function_tool(
+        mcp_tool,
+        FakeMCPServer(),
+        convert_schemas_to_strict=False,
+    )
+    tool_call = ResponseFunctionToolCall(
+        type="function_call",
+        name="search_docs",
+        call_id="call_search_docs",
+        status="completed",
+        arguments="{}",
+    )
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=[function_tool],
+        response=_response([tool_call]),
+        output_schema=None,
+        handoffs=[],
+    )
+
+    assert len(processed.new_items) == 1
+    item = processed.new_items[0]
+    assert isinstance(item, ToolCallItem)
+    assert item.description == "Search Docs"
+    assert item.title == "Search Docs"
+
+
+def test_process_model_response_uses_mcp_list_tools_metadata_for_hosted_mcp_calls() -> None:
+    agent = Agent(name="hosted-mcp", model=FakeModel())
+    hosted_tool = HostedMCPTool(
+        tool_config=cast(
+            Any,
+            {
+                "type": "mcp",
+                "server_label": "docs_server",
+                "server_url": "https://example.com/mcp",
+            },
+        )
+    )
+    existing_items = [
+        MCPListToolsItem(
+            agent=agent,
+            raw_item=_make_hosted_mcp_list_tools("docs_server", "search_docs"),
+        )
+    ]
+    mcp_call = McpCall(
+        id="mcp_call_1",
+        arguments="{}",
+        name="search_docs",
+        server_label="docs_server",
+        type="mcp_call",
+        status="completed",
+    )
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=[hosted_tool],
+        response=_response([mcp_call]),
+        output_schema=None,
+        handoffs=[],
+        existing_items=existing_items,
+    )
+
+    assert len(processed.new_items) == 1
+    item = processed.new_items[0]
+    assert isinstance(item, ToolCallItem)
+    assert item.description == "Search the docs."
+    assert item.title == "Search Docs"
 
 
 def test_process_model_response_skips_local_shell_execution_for_hosted_environment() -> None:

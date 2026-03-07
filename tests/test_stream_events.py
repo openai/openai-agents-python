@@ -3,6 +3,7 @@ import time
 from typing import cast
 
 import pytest
+from mcp import Tool as MCPTool
 from openai._models import construct_type
 from openai.types.responses import (
     ResponseCompletedEvent,
@@ -37,6 +38,7 @@ from agents.items import (
 )
 
 from .fake_model import FakeModel
+from .mcp.helpers import FakeMCPServer
 from .test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
 
 
@@ -89,6 +91,43 @@ async def test_stream_events_main():
     assert tool_call_start_time > 0, "tool_call_item was not observed"
     assert tool_call_end_time > 0, "tool_call_output_item was not observed"
     assert tool_call_start_time < tool_call_end_time, "Tool call ended before or equals it started?"
+
+
+@pytest.mark.asyncio
+async def test_stream_events_tool_called_includes_local_mcp_title() -> None:
+    model = FakeModel()
+    server = FakeMCPServer(
+        tools=[
+            MCPTool(
+                name="search_docs",
+                inputSchema={},
+                description=None,
+                title="Search Docs",
+            )
+        ]
+    )
+    agent = Agent(name="MCPAgent", model=model, mcp_servers=[server])
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("search_docs", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="Hello")
+    seen_tool_item: ToolCallItem | None = None
+    async for event in result.stream_events():
+        if (
+            event.type == "run_item_stream_event"
+            and isinstance(event.item, ToolCallItem)
+            and seen_tool_item is None
+        ):
+            seen_tool_item = event.item
+
+    assert seen_tool_item is not None
+    assert seen_tool_item.description == "Search Docs"
+    assert seen_tool_item.title == "Search Docs"
 
 
 @pytest.mark.asyncio

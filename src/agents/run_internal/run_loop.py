@@ -12,9 +12,11 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar, cast
 
 from openai.types.responses import Response, ResponseCompletedEvent, ResponseOutputItemDoneEvent
+from openai.types.responses.response_output_item import McpCall, McpListTools
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
+from .._mcp_tool_metadata import collect_mcp_list_tools_metadata
 from .._tool_identity import (
     NamedToolLookupKey,
     build_function_tool_lookup_map,
@@ -1171,6 +1173,9 @@ async def run_single_turn_streamed(
     )
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
+    hosted_mcp_tool_metadata = collect_mcp_list_tools_metadata(streamed_result._model_input_items)
+    if isinstance(filtered.input, list):
+        hosted_mcp_tool_metadata.update(collect_mcp_list_tools_metadata(filtered.input))
     if server_conversation_tracker is not None:
         logger.debug(
             "filtered.input has %s items; ids=%s",
@@ -1295,6 +1300,9 @@ async def run_single_turn_streamed(
                     )
                 )
 
+            elif isinstance(output_item, McpListTools):
+                hosted_mcp_tool_metadata.update(collect_mcp_list_tools_metadata([output_item]))
+
             elif isinstance(output_item, TOOL_CALL_TYPES):
                 output_call_id: str | None = getattr(
                     output_item, "call_id", getattr(output_item, "id", None)
@@ -1314,13 +1322,23 @@ async def run_single_turn_streamed(
                         tool_map.get(tool_lookup_key) if tool_lookup_key is not None else None
                     )
                     tool_description: str | None = None
-                    if matched_tool is not None:
+                    tool_title: str | None = None
+                    if isinstance(output_item, McpCall):
+                        metadata = hosted_mcp_tool_metadata.get(
+                            (output_item.server_label, output_item.name)
+                        )
+                        if metadata is not None:
+                            tool_description = metadata.description
+                            tool_title = metadata.title
+                    elif matched_tool is not None:
                         tool_description = getattr(matched_tool, "description", None)
+                        tool_title = getattr(matched_tool, "_mcp_title", None)
 
                     tool_item = ToolCallItem(
                         raw_item=cast(ToolCallItemTypes, output_item),
                         agent=agent,
                         description=tool_description,
+                        title=tool_title,
                     )
                     streamed_result._event_queue.put_nowait(
                         RunItemStreamEvent(item=tool_item, name="tool_called")
