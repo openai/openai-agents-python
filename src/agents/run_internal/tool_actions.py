@@ -89,8 +89,8 @@ def _serialize_trace_payload(payload: Any) -> str:
 class ComputerAction:
     """Execute computer tool actions and emit screenshot outputs with hooks fired."""
 
-    TRACE_TOOL_NAME = "computer"
-    """Display name for computer-tool tracing while keeping runtime metadata stable."""
+    TRACE_TOOL_NAME = "computer_use_preview"
+    """Keep tracing aligned with the released computer tool name used by hooks and RunState."""
 
     @classmethod
     async def execute(

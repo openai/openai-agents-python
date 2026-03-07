@@ -403,6 +403,7 @@ async def test_execute_emits_function_span() -> None:
         )
 
     assert isinstance(result, ToolCallOutputItem)
+    assert ComputerAction.TRACE_TOOL_NAME == "computer_use_preview"
     function_span = _get_function_span(ComputerAction.TRACE_TOOL_NAME)
     span_data = cast(dict[str, Any], function_span["span_data"])
     assert span_data.get("input") is not None
