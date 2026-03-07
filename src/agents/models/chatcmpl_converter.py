@@ -317,6 +317,8 @@ class Converter:
         for c in all_content:
             if c.get("type") == "text":
                 out.append(cast(ChatCompletionContentPartTextParam, c))
+            elif c.get("type") == "video_url":
+                raise UserError(f"Only text content is supported here, got: {c}")
         return out
 
     @classmethod
