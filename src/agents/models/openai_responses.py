@@ -1606,8 +1606,6 @@ class Converter:
             fallback_model
         ):
             return fallback_model
-        if cls._has_unresolved_computer_tool(tools) and fallback_model is not None:
-            return fallback_model
         return None
 
     @classmethod
