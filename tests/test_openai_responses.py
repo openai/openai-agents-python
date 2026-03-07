@@ -934,7 +934,32 @@ async def test_prompt_id_keeps_explicit_tool_search_without_local_surface() -> N
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_prompt_id_uses_preview_computer_payload_when_model_is_omitted() -> None:
+@pytest.mark.parametrize(
+    ("model_name", "tool_choice", "expected_tool_choice", "expected_tools"),
+    [
+        ("gpt-5.4", None, omit, [{"type": "computer"}]),
+        ("gpt-5.4", "computer_use_preview", {"type": "computer"}, [{"type": "computer"}]),
+        (
+            "computer-use-preview",
+            "computer",
+            {"type": "computer_use_preview"},
+            [
+                {
+                    "type": "computer_use_preview",
+                    "environment": "mac",
+                    "display_width": 800,
+                    "display_height": 600,
+                }
+            ],
+        ),
+    ],
+)
+async def test_prompt_id_computer_payload_uses_configured_model_when_wire_model_is_omitted(
+    model_name: str,
+    tool_choice: str | None,
+    expected_tool_choice: Any,
+    expected_tools: list[dict[str, Any]],
+) -> None:
     called_kwargs: dict[str, Any] = {}
 
     class DummyComputer(Computer):
@@ -984,7 +1009,7 @@ async def test_prompt_id_uses_preview_computer_payload_when_model_is_omitted() -
             self.responses = DummyResponses()
 
     model = OpenAIResponsesModel(
-        model="gpt-5.4",
+        model=model_name,
         openai_client=DummyResponsesClient(),  # type: ignore[arg-type]
         model_is_explicit=False,
     )
@@ -992,7 +1017,7 @@ async def test_prompt_id_uses_preview_computer_payload_when_model_is_omitted() -
     await model.get_response(
         system_instructions=None,
         input="hi",
-        model_settings=ModelSettings(),
+        model_settings=ModelSettings(tool_choice=tool_choice),
         tools=[ComputerTool(computer=DummyComputer())],
         output_schema=None,
         handoffs=[],
@@ -1001,6 +1026,81 @@ async def test_prompt_id_uses_preview_computer_payload_when_model_is_omitted() -
     )
 
     assert called_kwargs["model"] is omit
+    assert called_kwargs["tool_choice"] == expected_tool_choice
+    assert called_kwargs["tools"] == expected_tools
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_choice", ["computer", "computer_use"])
+async def test_preview_model_forced_computer_tool_choice_uses_preview_selector(
+    tool_choice: str,
+) -> None:
+    called_kwargs: dict[str, Any] = {}
+
+    class DummyComputer(Computer):
+        @property
+        def environment(self) -> str:  # type: ignore[override]
+            return "mac"
+
+        @property
+        def dimensions(self) -> tuple[int, int]:
+            return (800, 600)
+
+        def screenshot(self) -> str:
+            return "screenshot"
+
+        def click(self, x: int, y: int, button: str) -> None:
+            pass
+
+        def double_click(self, x: int, y: int) -> None:
+            pass
+
+        def drag(self, path: list[tuple[int, int]]) -> None:
+            pass
+
+        def keypress(self, keys: list[str]) -> None:
+            pass
+
+        def move(self, x: int, y: int) -> None:
+            pass
+
+        def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+            pass
+
+        def type(self, text: str) -> None:
+            pass
+
+        def wait(self) -> None:
+            pass
+
+    class DummyResponses:
+        async def create(self, **kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return get_response_obj([])
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(
+        model="computer-use-preview",
+        openai_client=DummyResponsesClient(),  # type: ignore[arg-type]
+    )
+
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(tool_choice=tool_choice),
+        tools=[ComputerTool(computer=DummyComputer())],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+
+    assert called_kwargs["model"] == "computer-use-preview"
+    assert called_kwargs["tool_choice"] == {"type": "computer_use_preview"}
     assert called_kwargs["tools"] == [
         {
             "type": "computer_use_preview",

@@ -629,17 +629,21 @@ class OpenAIResponsesModel(Model):
 
         should_omit_model = prompt is not None and not self._model_is_explicit
         effective_request_model: str | ChatModel | None = None if should_omit_model else self.model
+        # Prompt-managed Responses requests can omit the wire `model`, but local built-in tool
+        # serialization still needs the resolved model so prompt-backed GPT-5.4 runs default to
+        # the GA computer tool instead of falling back to preview-era payloads.
+        tool_serialization_model: str | ChatModel | None = self.model
         tool_choice = Converter.convert_tool_choice(
             model_settings.tool_choice,
             tools=tools,
             handoffs=handoffs,
-            model=effective_request_model,
+            model=tool_serialization_model,
         )
         if prompt is None:
             converted_tools = Converter.convert_tools(
                 tools,
                 handoffs,
-                model=effective_request_model,
+                model=tool_serialization_model,
                 tool_choice=model_settings.tool_choice,
             )
         else:
@@ -647,7 +651,7 @@ class OpenAIResponsesModel(Model):
                 tools,
                 handoffs,
                 allow_opaque_tool_search_surface=True,
-                model=effective_request_model,
+                model=tool_serialization_model,
                 tool_choice=model_settings.tool_choice,
             )
         converted_tools_payload = _materialize_responses_tool_params(converted_tools.tools)
@@ -1596,12 +1600,18 @@ class Converter:
         tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None,
         model: str | ChatModel | None,
     ) -> response_create_params.ToolChoice:
+        # Preview models only support the preview computer tool selector, even if callers force
+        # a GA-era alias such as "computer" or "computer_use".
+        if cls._is_preview_computer_model(model):
+            return {
+                "type": "computer_use_preview",
+            }
         if cls._should_use_preview_computer_tool(model=model, tool_choice=tool_choice):
             return {
                 "type": "computer_use_preview",
             }
-        # Keep explicit GA selectors on the GA wire shape for prompt-managed calls, but force
-        # preview models back to the preview selector so tool_choice and tools stay compatible.
+        # Keep explicit GA selectors on the GA wire shape for prompt-managed calls that omit the
+        # effective model, since those requests can still target GA computer-capable prompts.
         if tool_choice == "computer_use":
             return cast(
                 response_create_params.ToolChoice,

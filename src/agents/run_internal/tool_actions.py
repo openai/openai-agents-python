@@ -191,8 +191,11 @@ class ComputerAction:
             result = method(*args)
             return await result if inspect.isawaitable(result) else result
 
+        last_action_was_screenshot = False
+        last_screenshot_result: Any = None
         for action in cls._iter_actions(tool_call):
             action_type = get_mapping_or_attr(action, "type")
+            last_action_was_screenshot = False
             if action_type == "click":
                 await maybe_call(
                     "click",
@@ -227,7 +230,8 @@ class ComputerAction:
                     get_mapping_or_attr(action, "y"),
                 )
             elif action_type == "screenshot":
-                await maybe_call("screenshot")
+                last_screenshot_result = await maybe_call("screenshot")
+                last_action_was_screenshot = True
             elif action_type == "scroll":
                 await maybe_call(
                     "scroll",
@@ -245,6 +249,9 @@ class ComputerAction:
                     f"Computer tool returned unknown action type {action_type!r}"
                 )
 
+        # Reuse the last screenshot action result when the batch already ended in a capture.
+        if last_action_was_screenshot:
+            return cast(str, last_screenshot_result)
         screenshot_result = await maybe_call("screenshot")
         return cast(str, screenshot_result)
 

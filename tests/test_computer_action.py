@@ -8,7 +8,11 @@ import json
 from typing import Any, cast
 
 import pytest
-from openai.types.responses.computer_action import Click as BatchedClick, Type as BatchedType
+from openai.types.responses.computer_action import (
+    Click as BatchedClick,
+    Screenshot as BatchedScreenshot,
+    Type as BatchedType,
+)
 from openai.types.responses.response_computer_tool_call import (
     ActionClick,
     ActionDoubleClick,
@@ -181,10 +185,8 @@ async def test_get_screenshot_sync_executes_action_and_takes_screenshot(
         status="completed",
     )
     screenshot_output = await ComputerAction._execute_action_and_capture(computer, tool_call)
-    # The last call is always to screenshot()
     if isinstance(action, ActionScreenshot):
-        # Screenshot is taken twice: initial explicit call plus final capture.
-        assert computer.calls == [("screenshot", ()), ("screenshot", ())]
+        assert computer.calls == [("screenshot", ())]
     else:
         assert computer.calls == [expected_call, ("screenshot", ())]
     assert screenshot_output == "synthetic"
@@ -229,7 +231,7 @@ async def test_get_screenshot_async_executes_action_and_takes_screenshot(
     )
     screenshot_output = await ComputerAction._execute_action_and_capture(computer, tool_call)
     if isinstance(action, ActionScreenshot):
-        assert computer.calls == [("screenshot", ()), ("screenshot", ())]
+        assert computer.calls == [("screenshot", ())]
     else:
         assert computer.calls == [expected_call, ("screenshot", ())]
     assert screenshot_output == "async_return"
@@ -258,6 +260,24 @@ async def test_get_screenshot_executes_batched_actions_in_order() -> None:
         ("screenshot", ()),
     ]
     assert screenshot_output == "batched"
+
+
+@pytest.mark.asyncio
+async def test_get_screenshot_reuses_terminal_batched_screenshot() -> None:
+    computer = LoggingComputer(screenshot_return="captured")
+    tool_call = ResponseComputerToolCall(
+        id="c4",
+        type="computer_call",
+        actions=[BatchedScreenshot(type="screenshot")],
+        call_id="c4",
+        pending_safety_checks=[],
+        status="completed",
+    )
+
+    screenshot_output = await ComputerAction._execute_action_and_capture(computer, tool_call)
+
+    assert computer.calls == [("screenshot", ())]
+    assert screenshot_output == "captured"
 
 
 class LoggingRunHooks(RunHooks[Any]):
