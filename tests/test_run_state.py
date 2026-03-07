@@ -2741,6 +2741,7 @@ class TestRunStateSerializationEdgeCases:
         # The computer action should have a computer field with description
         assert "computer" in computer_actions[0]
         computer_dict = computer_actions[0]["computer"]
+        assert computer_dict["name"] == "computer_use_preview"
         assert "description" in computer_dict
         assert computer_dict["description"] == "Computer tool description"
 
@@ -3531,7 +3532,7 @@ class TestRunStateSerializationEdgeCases:
                         "pendingSafetyChecks": [],
                         "pending_safety_checks": [],
                     },
-                    "computer": {"name": computer_tool.name},
+                    "computer": {"name": "computer"},
                 }
             ],
             "local_shell_actions": [],
@@ -3546,6 +3547,78 @@ class TestRunStateSerializationEdgeCases:
         )
         assert result is not None
         assert len(result.computer_actions) == 1
+
+    async def test_deserialize_processed_response_computer_action_accepts_preview_name(self):
+        """Released preview-era computer tool names should still restore."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        class MockComputer(Computer):
+            @property
+            def environment(self) -> str:  # type: ignore[override]
+                return "mac"
+
+            @property
+            def dimensions(self) -> tuple[int, int]:
+                return (1920, 1080)
+
+            def screenshot(self) -> str:
+                return "screenshot"
+
+            def click(self, x: int, y: int, button: str) -> None:
+                pass
+
+            def double_click(self, x: int, y: int) -> None:
+                pass
+
+            def drag(self, path: list[tuple[int, int]]) -> None:
+                pass
+
+            def keypress(self, keys: list[str]) -> None:
+                pass
+
+            def move(self, x: int, y: int) -> None:
+                pass
+
+            def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+                pass
+
+            def type(self, text: str) -> None:
+                pass
+
+            def wait(self) -> None:
+                pass
+
+        agent.tools = [ComputerTool(computer=MockComputer())]
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [],
+            "computer_actions": [
+                {
+                    "tool_call": {
+                        "type": "computer_call",
+                        "id": "1",
+                        "call_id": "call123",
+                        "status": "completed",
+                        "action": {"type": "screenshot"},
+                        "pending_safety_checks": [],
+                    },
+                    "computer": {"name": "computer_use_preview"},
+                }
+            ],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}
+        )
+        assert len(result.computer_actions) == 1
+        assert result.computer_actions[0].computer_tool.name == "computer_use_preview"
 
     async def test_deserialize_processed_response_shell_action_with_validation_error(self):
         """Test deserialization of ProcessedResponse with shell action ValidationError."""

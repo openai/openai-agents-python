@@ -16,7 +16,6 @@ from openai import AsyncOpenAI, NotGiven, Omit, omit
 from openai.types import ChatModel
 from openai.types.responses import (
     ApplyPatchToolParam,
-    ComputerToolParam,
     FileSearchToolParam,
     FunctionToolParam,
     Response,
@@ -634,12 +633,19 @@ class OpenAIResponsesModel(Model):
             handoffs=handoffs,
         )
         if prompt is None:
-            converted_tools = Converter.convert_tools(tools, handoffs)
+            converted_tools = Converter.convert_tools(
+                tools,
+                handoffs,
+                model=self.model,
+                tool_choice=model_settings.tool_choice,
+            )
         else:
             converted_tools = Converter.convert_tools(
                 tools,
                 handoffs,
                 allow_opaque_tool_search_surface=True,
+                model=self.model,
+                tool_choice=model_settings.tool_choice,
             )
         converted_tools_payload = _materialize_responses_tool_params(converted_tools.tools)
         response_format = Converter.get_response_format(output_schema)
@@ -1419,6 +1425,10 @@ class Converter:
             return {
                 "type": "web_search_preview",
             }
+        elif tool_choice == "computer":
+            return {
+                "type": "computer",
+            }
         elif tool_choice == "computer_use_preview":
             return {
                 "type": "computer_use_preview",
@@ -1544,6 +1554,21 @@ class Converter:
             )
 
     @classmethod
+    def _should_use_preview_computer_tool(
+        cls,
+        *,
+        model: str | ChatModel | None,
+        tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None,
+    ) -> bool:
+        # Preserve the released preview wire shape for preview callers while allowing
+        # newer GA computer-tool flows to opt in via model or tool_choice.
+        if tool_choice == "computer_use_preview":
+            return True
+        if tool_choice == "computer":
+            return False
+        return isinstance(model, str) and model.startswith("computer-use-preview")
+
+    @classmethod
     def get_response_format(
         cls, output_schema: AgentOutputSchemaBase | None
     ) -> ResponseTextConfigParam | Omit:
@@ -1566,12 +1591,18 @@ class Converter:
         handoffs: list[Handoff[Any, Any]],
         *,
         allow_opaque_tool_search_surface: bool = False,
+        model: str | ChatModel | None = None,
+        tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None = None,
     ) -> ConvertedTools:
         converted_tools: list[ResponsesToolParam | None] = []
         includes: list[ResponseIncludable] = []
         namespace_index_by_name: dict[str, int] = {}
         namespace_tools_by_name: dict[str, list[FunctionToolParam]] = {}
         namespace_descriptions: dict[str, str] = {}
+        use_preview_computer_tool = cls._should_use_preview_computer_tool(
+            model=model,
+            tool_choice=tool_choice,
+        )
         validate_responses_tool_search_configuration(
             tools,
             allow_opaque_search_surface=allow_opaque_tool_search_surface,
@@ -1613,7 +1644,10 @@ class Converter:
                     includes.append(include)
                 continue
 
-            converted_non_namespace_tool, include = cls._convert_tool(tool)
+            converted_non_namespace_tool, include = cls._convert_tool(
+                tool,
+                use_preview_computer_tool=use_preview_computer_tool,
+            )
             converted_tools.append(converted_non_namespace_tool)
             if include:
                 includes.append(include)
@@ -1654,7 +1688,30 @@ class Converter:
         return function_tool_param, None
 
     @classmethod
-    def _convert_tool(cls, tool: Tool) -> tuple[ResponsesToolParam, ResponseIncludable | None]:
+    def _convert_preview_computer_tool(cls, tool: ComputerTool[Any]) -> ResponsesToolParam:
+        computer = tool.computer
+        if not isinstance(computer, (Computer, AsyncComputer)):
+            raise UserError(
+                "Computer tool is not initialized for serialization. Call "
+                "resolve_computer({ tool, run_context }) with a run context first "
+                "when building payloads manually."
+            )
+        return _require_responses_tool_param(
+            {
+                "type": "computer_use_preview",
+                "environment": computer.environment,
+                "display_width": computer.dimensions[0],
+                "display_height": computer.dimensions[1],
+            }
+        )
+
+    @classmethod
+    def _convert_tool(
+        cls,
+        tool: Tool,
+        *,
+        use_preview_computer_tool: bool = False,
+    ) -> tuple[ResponsesToolParam, ResponseIncludable | None]:
         """Returns converted tool and includes"""
 
         if isinstance(tool, FunctionTool):
@@ -1688,20 +1745,10 @@ class Converter:
             )
             return file_search_tool_param, include
         elif isinstance(tool, ComputerTool):
-            computer = tool.computer
-            if not isinstance(computer, (Computer, AsyncComputer)):
-                raise UserError(
-                    "Computer tool is not initialized for serialization. Call "
-                    "resolve_computer({ tool, run_context }) with a run context first "
-                    "when building payloads manually."
-                )
             return (
-                ComputerToolParam(
-                    type="computer_use_preview",
-                    environment=computer.environment,
-                    display_width=computer.dimensions[0],
-                    display_height=computer.dimensions[1],
-                ),
+                cls._convert_preview_computer_tool(tool)
+                if use_preview_computer_tool
+                else _require_responses_tool_param({"type": "computer"}),
                 None,
             )
         elif isinstance(tool, HostedMCPTool):

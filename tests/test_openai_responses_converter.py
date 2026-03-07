@@ -99,6 +99,7 @@ def test_convert_tool_choice_standard_values():
     # Special tool types are represented as dicts of type only.
     assert Converter.convert_tool_choice("file_search") == {"type": "file_search"}
     assert Converter.convert_tool_choice("web_search_preview") == {"type": "web_search_preview"}
+    assert Converter.convert_tool_choice("computer") == {"type": "computer"}
     assert Converter.convert_tool_choice("computer_use_preview") == {"type": "computer_use_preview"}
     # Arbitrary string should be interpreted as a function name.
     assert Converter.convert_tool_choice("my_function") == {
@@ -356,7 +357,7 @@ def test_convert_tools_basic_types_and_includes():
     # Wrap our concrete computer in a ComputerTool for conversion.
     comp_tool = ComputerTool(computer=DummyComputer())
     tools: list[Tool] = [tool_fn, file_tool, web_tool, comp_tool]
-    converted = Converter.convert_tools(tools, handoffs=[])
+    converted = Converter.convert_tools(tools, handoffs=[], model="gpt-5.4")
     assert isinstance(converted.tools, list)
     assert isinstance(converted.includes, list)
     # The includes list should have exactly the include for file search when include_search_results
@@ -369,7 +370,7 @@ def test_convert_tools_basic_types_and_includes():
     assert "function" in types
     assert "file_search" in types
     assert "web_search" in types
-    assert "computer_use_preview" in types
+    assert "computer" in types
     # Verify file search tool contains max_num_results and vector_store_ids
     file_params = next(ct for ct in converted.tools if ct["type"] == "file_search")
     assert file_params.get("max_num_results") == file_tool.max_num_results
@@ -378,11 +379,9 @@ def test_convert_tools_basic_types_and_includes():
     web_params = next(ct for ct in converted.tools if ct["type"] == "web_search")
     assert web_params.get("user_location") == web_tool.user_location
     assert web_params.get("search_context_size") == web_tool.search_context_size
-    # Verify computer tool contains environment and computed dimensions
-    comp_params = next(ct for ct in converted.tools if ct["type"] == "computer_use_preview")
-    assert comp_params.get("environment") == "mac"
-    assert comp_params.get("display_width") == 800
-    assert comp_params.get("display_height") == 600
+    # Verify computer tool uses the GA built-in tool payload.
+    comp_params = next(ct for ct in converted.tools if ct["type"] == "computer")
+    assert comp_params == {"type": "computer"}
     # The function tool dict should have name and description fields.
     fn_params = next(ct for ct in converted.tools if ct["type"] == "function")
     assert fn_params.get("name") == tool_fn.name
@@ -391,6 +390,25 @@ def test_convert_tools_basic_types_and_includes():
     # Only one computer tool should be allowed.
     with pytest.raises(UserError):
         Converter.convert_tools(tools=[comp_tool, comp_tool], handoffs=[])
+
+
+def test_convert_tools_uses_preview_computer_payload_for_preview_model() -> None:
+    comp_tool = ComputerTool(computer=DummyComputer())
+
+    converted = Converter.convert_tools(
+        tools=[comp_tool],
+        handoffs=[],
+        model="computer-use-preview",
+    )
+
+    assert converted.tools == [
+        {
+            "type": "computer_use_preview",
+            "environment": "mac",
+            "display_width": 800,
+            "display_height": 600,
+        }
+    ]
 
 
 def test_convert_tools_shell_local_environment() -> None:
@@ -912,7 +930,19 @@ def test_convert_tools_includes_handoffs():
     assert converted.includes == []
 
 
-def test_convert_tools_requires_initialized_computer():
+def test_convert_tools_accepts_unresolved_computer_initializer():
     comp_tool = ComputerTool(computer=lambda **_: DummyComputer())
+    converted = Converter.convert_tools(tools=[comp_tool], handoffs=[], model="gpt-5.4")
+    assert converted.tools == [{"type": "computer"}]
+
+
+def test_convert_tools_preview_tool_choice_requires_initialized_computer() -> None:
+    comp_tool = ComputerTool(computer=lambda **_: DummyComputer())
+
     with pytest.raises(UserError, match="resolve_computer"):
-        Converter.convert_tools(tools=[comp_tool], handoffs=[])
+        Converter.convert_tools(
+            tools=[comp_tool],
+            handoffs=[],
+            model="gpt-5.4",
+            tool_choice="computer_use_preview",
+        )

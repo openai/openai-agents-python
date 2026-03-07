@@ -149,7 +149,7 @@ async def test_responses_materializes_iterator_payload(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         responses_converter,
         "convert_tools",
-        classmethod(lambda _cls, _tools, _handoffs: converted_tools),
+        classmethod(lambda _cls, _tools, _handoffs, **_kwargs: converted_tools),
     )
 
     captured_kwargs: dict[str, Any] = {}
