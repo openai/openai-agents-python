@@ -1013,14 +1013,12 @@ def test_convert_tools_accepts_unresolved_computer_initializer():
     assert converted.tools == [{"type": "computer"}]
 
 
-def test_resolve_computer_tool_model_does_not_promote_unknown_fallback_for_unresolved_tool():
+def test_resolve_computer_tool_model_returns_none_when_request_model_is_omitted():
     comp_tool = ComputerTool(computer=lambda **_: DummyComputer())
 
     resolved = Converter.resolve_computer_tool_model(
         request_model=None,
-        fallback_model="gpt-4.1",
         tools=[comp_tool],
-        tool_choice=None,
     )
 
     assert resolved is None

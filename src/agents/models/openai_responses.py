@@ -631,9 +631,7 @@ class OpenAIResponsesModel(Model):
         effective_request_model: str | ChatModel | None = None if should_omit_model else self.model
         effective_computer_tool_model = Converter.resolve_computer_tool_model(
             request_model=effective_request_model,
-            fallback_model=self.model if should_omit_model else None,
             tools=tools,
-            tool_choice=model_settings.tool_choice,
         )
         tool_choice = Converter.convert_tool_choice(
             model_settings.tool_choice,
@@ -1594,19 +1592,11 @@ class Converter:
         cls,
         *,
         request_model: str | ChatModel | None,
-        fallback_model: str | ChatModel | None,
         tools: Sequence[Tool] | None,
-        tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None,
     ) -> str | ChatModel | None:
-        if request_model is not None:
-            return request_model
         if not cls._has_computer_tool(tools):
             return None
-        if cls._is_preview_computer_model(fallback_model) or cls._is_ga_computer_model(
-            fallback_model
-        ):
-            return fallback_model
-        return None
+        return request_model
 
     @classmethod
     def _should_use_preview_computer_tool(
@@ -1616,9 +1606,10 @@ class Converter:
         tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None,
     ) -> bool:
         # Choose the computer tool wire shape from the effective request model when we know it.
-        # For prompt-managed calls that omit `model`, fall back to the released preview payload
-        # unless the request builder resolved a local computer-capable fallback model or the caller
-        # explicitly opts into a GA computer-tool selector.
+        # For prompt-managed calls that omit `model`, default to the released preview payload
+        # unless the caller explicitly opts into a GA computer-tool selector. The prompt may pin
+        # a different model than the local default, so we must not infer the wire shape from
+        # `self.model` when the request payload itself omits `model`.
         if cls._is_preview_computer_model(model):
             return True
         if model is not None:
