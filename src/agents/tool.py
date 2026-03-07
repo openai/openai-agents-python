@@ -500,7 +500,7 @@ class WebSearchTool:
 
 @dataclass(eq=False)
 class ComputerTool(Generic[ComputerT]):
-    """A hosted tool that lets the LLM control a computer."""
+    """A local computer harness exposed through the Responses API computer tool."""
 
     computer: ComputerConfig[ComputerT]
     """The computer implementation, or a factory that produces a computer per run."""
@@ -513,6 +513,9 @@ class ComputerTool(Generic[ComputerT]):
 
     @property
     def name(self):
+        # Keep the released preview-era runtime name for hooks, tracing, and
+        # persisted RunState compatibility. The Responses serializer selects
+        # the actual wire tool type separately.
         return "computer_use_preview"
 
 

@@ -5,6 +5,7 @@ import json
 import weakref
 from typing import cast
 
+from openai.types.responses.computer_action import Click as BatchedClick, Type as BatchedType
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
     ResponseComputerToolCall,
@@ -416,6 +417,35 @@ def test_to_input_items_for_computer_call_click() -> None:
         "status": "completed",
     }
     assert converted_dict == expected
+
+
+def test_to_input_items_for_computer_call_batched_actions() -> None:
+    """A batched computer call should preserve its actions list when replayed as input."""
+    comp_call = ResponseComputerToolCall(
+        id="comp2",
+        actions=[
+            BatchedClick(type="click", x=3, y=4, button="left"),
+            BatchedType(type="type", text="hello"),
+        ],
+        type="computer_call",
+        call_id="comp2",
+        pending_safety_checks=[],
+        status="completed",
+    )
+    resp = ModelResponse(output=[comp_call], usage=Usage(), response_id=None)
+    input_items = resp.to_input_items()
+    assert isinstance(input_items, list) and len(input_items) == 1
+    assert input_items[0] == {
+        "id": "comp2",
+        "type": "computer_call",
+        "actions": [
+            {"type": "click", "x": 3, "y": 4, "button": "left"},
+            {"type": "type", "text": "hello"},
+        ],
+        "call_id": "comp2",
+        "pending_safety_checks": [],
+        "status": "completed",
+    }
 
 
 def test_to_input_items_for_reasoning() -> None:

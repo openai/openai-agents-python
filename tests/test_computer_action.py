@@ -8,6 +8,11 @@ import json
 from typing import Any, cast
 
 import pytest
+from openai.types.responses.computer_action import (
+    Click as BatchedClick,
+    Screenshot as BatchedScreenshot,
+    Type as BatchedType,
+)
 from openai.types.responses.response_computer_tool_call import (
     ActionClick,
     ActionDoubleClick,
@@ -180,10 +185,8 @@ async def test_get_screenshot_sync_executes_action_and_takes_screenshot(
         status="completed",
     )
     screenshot_output = await ComputerAction._execute_action_and_capture(computer, tool_call)
-    # The last call is always to screenshot()
     if isinstance(action, ActionScreenshot):
-        # Screenshot is taken twice: initial explicit call plus final capture.
-        assert computer.calls == [("screenshot", ()), ("screenshot", ())]
+        assert computer.calls == [("screenshot", ())]
     else:
         assert computer.calls == [expected_call, ("screenshot", ())]
     assert screenshot_output == "synthetic"
@@ -228,10 +231,53 @@ async def test_get_screenshot_async_executes_action_and_takes_screenshot(
     )
     screenshot_output = await ComputerAction._execute_action_and_capture(computer, tool_call)
     if isinstance(action, ActionScreenshot):
-        assert computer.calls == [("screenshot", ()), ("screenshot", ())]
+        assert computer.calls == [("screenshot", ())]
     else:
         assert computer.calls == [expected_call, ("screenshot", ())]
     assert screenshot_output == "async_return"
+
+
+@pytest.mark.asyncio
+async def test_get_screenshot_executes_batched_actions_in_order() -> None:
+    computer = LoggingComputer(screenshot_return="batched")
+    tool_call = ResponseComputerToolCall(
+        id="c3",
+        type="computer_call",
+        actions=[
+            BatchedClick(type="click", x=11, y=12, button="left"),
+            BatchedType(type="type", text="hello"),
+        ],
+        call_id="c3",
+        pending_safety_checks=[],
+        status="completed",
+    )
+
+    screenshot_output = await ComputerAction._execute_action_and_capture(computer, tool_call)
+
+    assert computer.calls == [
+        ("click", (11, 12, "left")),
+        ("type", ("hello",)),
+        ("screenshot", ()),
+    ]
+    assert screenshot_output == "batched"
+
+
+@pytest.mark.asyncio
+async def test_get_screenshot_reuses_terminal_batched_screenshot() -> None:
+    computer = LoggingComputer(screenshot_return="captured")
+    tool_call = ResponseComputerToolCall(
+        id="c4",
+        type="computer_call",
+        actions=[BatchedScreenshot(type="screenshot")],
+        call_id="c4",
+        pending_safety_checks=[],
+        status="completed",
+    )
+
+    screenshot_output = await ComputerAction._execute_action_and_capture(computer, tool_call)
+
+    assert computer.calls == [("screenshot", ())]
+    assert screenshot_output == "captured"
 
 
 class LoggingRunHooks(RunHooks[Any]):
@@ -357,10 +403,48 @@ async def test_execute_emits_function_span() -> None:
         )
 
     assert isinstance(result, ToolCallOutputItem)
-    function_span = _get_function_span(comptool.name)
+    assert ComputerAction.TRACE_TOOL_NAME == "computer_use_preview"
+    function_span = _get_function_span(ComputerAction.TRACE_TOOL_NAME)
     span_data = cast(dict[str, Any], function_span["span_data"])
     assert span_data.get("input") is not None
     assert cast(str, span_data.get("output", "")).startswith("data:image/png;base64,")
+
+
+@pytest.mark.asyncio
+async def test_execute_emits_batched_actions_in_function_span() -> None:
+    computer = LoggingComputer(screenshot_return="trace_img")
+    comptool = ComputerTool(computer=computer)
+    tool_call = ResponseComputerToolCall(
+        id="tool_trace_batch",
+        type="computer_call",
+        actions=[
+            BatchedClick(type="click", x=5, y=6, button="left"),
+            BatchedType(type="type", text="batched"),
+        ],
+        call_id="tool_trace_batch",
+        pending_safety_checks=[],
+        status="completed",
+    )
+    tool_run = ToolRunComputerAction(tool_call=tool_call, computer_tool=comptool)
+    agent = Agent(name="test_agent_trace_batch", tools=[comptool])
+
+    set_tracing_disabled(False)
+    with trace("computer-batch-span-test"):
+        result = await ComputerAction.execute(
+            agent=agent,
+            action=tool_run,
+            hooks=RunHooks[Any](),
+            context_wrapper=RunContextWrapper(context=None),
+            config=RunConfig(),
+        )
+
+    assert isinstance(result, ToolCallOutputItem)
+    function_span = _get_function_span(ComputerAction.TRACE_TOOL_NAME)
+    span_data = cast(dict[str, Any], function_span["span_data"])
+    assert json.loads(cast(str, span_data["input"])) == [
+        {"type": "click", "x": 5, "y": 6, "button": "left"},
+        {"type": "type", "text": "batched"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -395,11 +479,11 @@ async def test_execute_redacts_span_error_when_sensitive_data_disabled() -> None
                 config=RunConfig(trace_include_sensitive_data=False),
             )
 
-    function_span = _get_function_span(comptool.name)
+    function_span = _get_function_span(ComputerAction.TRACE_TOOL_NAME)
     assert function_span.get("error") == {
         "message": "Error running tool",
         "data": {
-            "tool_name": comptool.name,
+            "tool_name": ComputerAction.TRACE_TOOL_NAME,
             "error": "Tool execution failed. Error details are redacted.",
         },
     }

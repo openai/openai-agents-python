@@ -1438,6 +1438,13 @@ def _build_named_tool_map(
         if not isinstance(tool_name, str) or not tool_name:
             continue
         tool_map[tool_name] = tool
+        if tool_type is ComputerTool:
+            # Persisted runs may contain either the released preview name or the GA alias from
+            # newer branches. Mirror both so either payload restores against the local tool.
+            if tool_name == "computer":
+                tool_map["computer_use_preview"] = tool
+            elif tool_name == "computer_use_preview":
+                tool_map["computer"] = tool
     return tool_map
 
 

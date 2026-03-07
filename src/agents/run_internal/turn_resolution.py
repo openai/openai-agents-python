@@ -1472,8 +1472,8 @@ def process_model_response(
             items.append(ReasoningItem(raw_item=output, agent=agent))
         elif isinstance(output, ResponseComputerToolCall):
             items.append(ToolCallItem(raw_item=output, agent=agent))
-            tools_used.append("computer_use")
             if not computer_tool:
+                tools_used.append("computer")
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Computer tool not found",
@@ -1481,6 +1481,7 @@ def process_model_response(
                     )
                 )
                 raise ModelBehaviorError("Model produced computer action without a computer tool.")
+            tools_used.append(computer_tool.name)
             computer_actions.append(
                 ToolRunComputerAction(tool_call=output, computer_tool=computer_tool)
             )

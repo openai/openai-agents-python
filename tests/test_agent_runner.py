@@ -3259,8 +3259,8 @@ async def test_execute_approved_tools_with_non_function_tool():
     agent = Agent(name="TestAgent", model=model, tools=[computer_tool])
 
     # Create an approved tool call for the computer tool
-    # ComputerTool has name "computer_use_preview"
-    tool_call = get_function_tool_call("computer_use_preview", "{}")
+    # ComputerTool is not a function tool and should still fail approval execution cleanly.
+    tool_call = get_function_tool_call(computer_tool.name, "{}")
     assert isinstance(tool_call, ResponseFunctionToolCall)
 
     approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
