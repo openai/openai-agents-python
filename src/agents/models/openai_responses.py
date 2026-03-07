@@ -629,17 +629,23 @@ class OpenAIResponsesModel(Model):
 
         should_omit_model = prompt is not None and not self._model_is_explicit
         effective_request_model: str | ChatModel | None = None if should_omit_model else self.model
+        effective_computer_tool_model = Converter.resolve_computer_tool_model(
+            request_model=effective_request_model,
+            fallback_model=self.model if should_omit_model else None,
+            tools=tools,
+            tool_choice=model_settings.tool_choice,
+        )
         tool_choice = Converter.convert_tool_choice(
             model_settings.tool_choice,
             tools=tools,
             handoffs=handoffs,
-            model=effective_request_model,
+            model=effective_computer_tool_model,
         )
         if prompt is None:
             converted_tools = Converter.convert_tools(
                 tools,
                 handoffs,
-                model=effective_request_model,
+                model=effective_computer_tool_model,
                 tool_choice=model_settings.tool_choice,
             )
         else:
@@ -647,7 +653,7 @@ class OpenAIResponsesModel(Model):
                 tools,
                 handoffs,
                 allow_opaque_tool_search_surface=True,
-                model=effective_request_model,
+                model=effective_computer_tool_model,
                 tool_choice=model_settings.tool_choice,
             )
         converted_tools_payload = _materialize_responses_tool_params(converted_tools.tools)
@@ -1568,8 +1574,41 @@ class Converter:
         return any(isinstance(tool, ComputerTool) for tool in tools or ())
 
     @classmethod
+    def _has_unresolved_computer_tool(cls, tools: Sequence[Tool] | None) -> bool:
+        return any(
+            isinstance(tool, ComputerTool)
+            and not isinstance(tool.computer, (Computer, AsyncComputer))
+            for tool in tools or ()
+        )
+
+    @classmethod
     def _is_preview_computer_model(cls, model: str | ChatModel | None) -> bool:
         return isinstance(model, str) and model.startswith("computer-use-preview")
+
+    @classmethod
+    def _is_ga_computer_model(cls, model: str | ChatModel | None) -> bool:
+        return isinstance(model, str) and model.startswith("gpt-5.4")
+
+    @classmethod
+    def resolve_computer_tool_model(
+        cls,
+        *,
+        request_model: str | ChatModel | None,
+        fallback_model: str | ChatModel | None,
+        tools: Sequence[Tool] | None,
+        tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None,
+    ) -> str | ChatModel | None:
+        if request_model is not None:
+            return request_model
+        if not cls._has_computer_tool(tools):
+            return None
+        if cls._is_preview_computer_model(fallback_model) or cls._is_ga_computer_model(
+            fallback_model
+        ):
+            return fallback_model
+        if cls._has_unresolved_computer_tool(tools) and fallback_model is not None:
+            return fallback_model
+        return None
 
     @classmethod
     def _should_use_preview_computer_tool(
@@ -1580,7 +1619,8 @@ class Converter:
     ) -> bool:
         # Choose the computer tool wire shape from the effective request model when we know it.
         # For prompt-managed calls that omit `model`, fall back to the released preview payload
-        # unless the caller explicitly opts into a GA computer-tool selector.
+        # unless the request builder resolved a local computer-capable fallback model or the caller
+        # explicitly opts into a GA computer-tool selector.
         if cls._is_preview_computer_model(model):
             return True
         if model is not None:
