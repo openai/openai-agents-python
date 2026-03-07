@@ -71,6 +71,19 @@ if TYPE_CHECKING:
     from ..agent import AgentBase
 
 
+MCPStreamTransport = (
+    tuple[
+        MemoryObjectReceiveStream[SessionMessage | Exception],
+        MemoryObjectSendStream[SessionMessage],
+    ]
+    | tuple[
+        MemoryObjectReceiveStream[SessionMessage | Exception],
+        MemoryObjectSendStream[SessionMessage],
+        GetSessionIdCallback | None,
+    ]
+)
+
+
 class MCPServer(abc.ABC):
     """Base class for Model Context Protocol servers."""
 
@@ -420,13 +433,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     @abc.abstractmethod
     def create_streams(
         self,
-    ) -> AbstractAsyncContextManager[
-        tuple[
-            MemoryObjectReceiveStream[SessionMessage | Exception],
-            MemoryObjectSendStream[SessionMessage],
-            GetSessionIdCallback | None,
-        ]
-    ]:
+    ) -> AbstractAsyncContextManager[MCPStreamTransport]:
         """Create the streams for the server."""
         pass
 
@@ -860,13 +867,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
 
     def create_streams(
         self,
-    ) -> AbstractAsyncContextManager[
-        tuple[
-            MemoryObjectReceiveStream[SessionMessage | Exception],
-            MemoryObjectSendStream[SessionMessage],
-            GetSessionIdCallback | None,
-        ]
-    ]:
+    ) -> AbstractAsyncContextManager[MCPStreamTransport]:
         """Create the streams for the server."""
         return stdio_client(self.params)
 
@@ -970,13 +971,7 @@ class MCPServerSse(_MCPServerWithClientSession):
 
     def create_streams(
         self,
-    ) -> AbstractAsyncContextManager[
-        tuple[
-            MemoryObjectReceiveStream[SessionMessage | Exception],
-            MemoryObjectSendStream[SessionMessage],
-            GetSessionIdCallback | None,
-        ]
-    ]:
+    ) -> AbstractAsyncContextManager[MCPStreamTransport]:
         """Create the streams for the server."""
         return sse_client(
             url=self.params["url"],
@@ -1092,13 +1087,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
 
     def create_streams(
         self,
-    ) -> AbstractAsyncContextManager[
-        tuple[
-            MemoryObjectReceiveStream[SessionMessage | Exception],
-            MemoryObjectSendStream[SessionMessage],
-            GetSessionIdCallback | None,
-        ]
-    ]:
+    ) -> AbstractAsyncContextManager[MCPStreamTransport]:
         """Create the streams for the server."""
         # Only pass httpx_client_factory if it's provided
         if "httpx_client_factory" in self.params:

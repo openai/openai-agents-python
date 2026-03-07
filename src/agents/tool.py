@@ -317,6 +317,9 @@ class FunctionTool:
     _tool_namespace_description: str | None = field(default=None, kw_only=True, repr=False)
     """Internal namespace description used when serializing grouped function tools."""
 
+    _mcp_title: str | None = field(default=None, kw_only=True, repr=False)
+    """Internal MCP display title used for ToolCallItem metadata."""
+
     @property
     def qualified_name(self) -> str:
         """Return the public qualified name used to identify this function tool."""
@@ -418,6 +421,7 @@ def _build_wrapped_function_tool(
     timeout_error_function: ToolErrorFunction | None = None,
     defer_loading: bool = False,
     sync_invoker: bool = False,
+    mcp_title: str | None = None,
 ) -> FunctionTool:
     """Create a FunctionTool with copied-tool-aware failure handling bound in one place."""
     on_invoke_tool = with_function_tool_failure_error_handler(
@@ -442,6 +446,7 @@ def _build_wrapped_function_tool(
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
             defer_loading=defer_loading,
+            _mcp_title=mcp_title,
         ),
         failure_error_function,
     )

@@ -14,10 +14,13 @@ from typing import Any
 from uuid import uuid4
 
 from agents.memory.session import Session
+from agents.memory.session_settings import SessionSettings
 
 
 class FileSession(Session):
     """Persist session items to a JSON file on disk."""
+
+    session_settings: SessionSettings | None = None
 
     def __init__(self, *, dir: str | Path | None = None, session_id: str | None = None) -> None:
         self._dir = Path(dir) if dir is not None else Path.cwd() / ".agents-sessions"

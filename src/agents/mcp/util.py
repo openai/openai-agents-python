@@ -12,6 +12,7 @@ import httpx
 from typing_extensions import NotRequired, TypedDict
 
 from .. import _debug
+from .._mcp_tool_metadata import resolve_mcp_tool_description_for_model, resolve_mcp_tool_title
 from ..exceptions import AgentsException, ModelBehaviorError, UserError
 
 try:
@@ -272,7 +273,7 @@ class MCPUtil:
 
         function_tool = _build_wrapped_function_tool(
             name=tool.name,
-            description=tool.description or "",
+            description=resolve_mcp_tool_description_for_model(tool),
             params_json_schema=schema,
             invoke_tool_impl=invoke_func_impl,
             on_handled_error=_build_handled_function_tool_error_handler(
@@ -282,6 +283,7 @@ class MCPUtil:
             failure_error_function=effective_failure_error_function,
             strict_json_schema=is_strict,
             needs_approval=needs_approval,
+            mcp_title=resolve_mcp_tool_title(tool),
         )
         return function_tool
 
