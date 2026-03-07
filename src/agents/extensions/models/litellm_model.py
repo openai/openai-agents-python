@@ -186,7 +186,7 @@ class LitellmModel(Model):
                 choice = response.choices[0]
                 if isinstance(choice, litellm.types.utils.Choices):
                     first_choice = choice
-                    message = first_choice.message
+                    message = choice.message
 
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.debug("Received model response")

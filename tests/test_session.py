@@ -526,7 +526,12 @@ async def test_sqlite_session_concurrent_access():
 
         # Retrieve all items and verify all are present
         retrieved = await session.get_items()
-        contents = {item.get("content") for item in retrieved}
+        contents = {
+            content
+            for item in retrieved
+            for content in [item.get("content")]
+            if isinstance(content, str)
+        }
         expected = {f"Message {i}" for i in range(10)}
         assert contents == expected
         session.close()

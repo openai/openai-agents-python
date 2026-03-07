@@ -85,6 +85,7 @@ from ..tool_guardrails import (
 from ..tracing import Span, SpanError, function_span, get_current_trace
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
+from ..util._types import MaybeAwaitable
 from ._asyncio_progress import get_function_tool_task_progress_deadline
 from .approvals import append_approval_error_output
 from .items import (
@@ -945,16 +946,22 @@ async def with_tool_function_span(
     *,
     config: RunConfig,
     tool_name: str,
-    fn: Callable[[Span[Any] | None], Any],
+    fn: Callable[[Span[Any] | None], MaybeAwaitable[TToolSpanResult]],
 ) -> TToolSpanResult:
     """Execute a tool callback in a function span when tracing is active."""
     if config.tracing_disabled or get_current_trace() is None:
         result = fn(None)
-        return await result if inspect.isawaitable(result) else cast(TToolSpanResult, result)
+        if inspect.isawaitable(result):
+            return await result
+        direct_result: object = result
+        return cast(TToolSpanResult, direct_result)
 
     with function_span(tool_name) as span:
         result = fn(span)
-        return await result if inspect.isawaitable(result) else cast(TToolSpanResult, result)
+        if inspect.isawaitable(result):
+            return await result
+        span_result: object = result
+        return cast(TToolSpanResult, span_result)
 
 
 def build_litellm_json_tool_call(output: ResponseFunctionToolCall) -> FunctionTool:

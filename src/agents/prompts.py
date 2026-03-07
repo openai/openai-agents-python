@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 from openai.types.responses.response_prompt_param import (
     ResponsePromptParam,
@@ -47,6 +47,11 @@ DynamicPromptFunction = Callable[[GenerateDynamicPromptData], MaybeAwaitable[Pro
 """A function that dynamically generates a prompt."""
 
 
+def _coerce_prompt_dict(prompt: Prompt | dict[object, object]) -> Prompt:
+    """Convert a runtime-validated prompt dict into the Prompt TypedDict view."""
+    return cast(Prompt, prompt)
+
+
 class PromptUtil:
     @staticmethod
     async def to_model_input(
@@ -59,7 +64,7 @@ class PromptUtil:
 
         resolved_prompt: Prompt
         if isinstance(prompt, dict):
-            resolved_prompt = prompt
+            resolved_prompt = _coerce_prompt_dict(prompt)
         else:
             func_result = prompt(GenerateDynamicPromptData(context=context, agent=agent))
             if inspect.isawaitable(func_result):

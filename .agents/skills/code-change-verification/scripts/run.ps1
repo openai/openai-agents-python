@@ -32,7 +32,7 @@ function Invoke-MakeStep {
 
 Invoke-MakeStep -Step "format"
 Invoke-MakeStep -Step "lint"
-Invoke-MakeStep -Step "mypy"
+Invoke-MakeStep -Step "typecheck"
 Invoke-MakeStep -Step "tests"
 
 Write-Host "code-change-verification: all commands passed."
