@@ -1585,7 +1585,7 @@ class Converter:
             return True
         if model is not None:
             return False
-        if tool_choice in {"computer", "computer_use"}:
+        if isinstance(tool_choice, str) and tool_choice in {"computer", "computer_use"}:
             return False
         return True
 

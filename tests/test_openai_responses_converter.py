@@ -46,6 +46,7 @@ from agents import (
     handoff,
     tool_namespace,
 )
+from agents.model_settings import MCPToolChoice
 from agents.models.openai_responses import Converter
 
 
@@ -1036,3 +1037,23 @@ def test_convert_tools_prompt_managed_computer_respects_explicit_ga_tool_choice(
     )
 
     assert converted.tools == [{"type": "computer"}]
+
+
+def test_convert_tools_prompt_managed_computer_accepts_mcp_tool_choice() -> None:
+    comp_tool = ComputerTool(computer=DummyComputer())
+
+    converted = Converter.convert_tools(
+        tools=[comp_tool],
+        handoffs=[],
+        model=None,
+        tool_choice=MCPToolChoice(server_label="remote", name="lookup_account"),
+    )
+
+    assert converted.tools == [
+        {
+            "type": "computer_use_preview",
+            "environment": "mac",
+            "display_width": 800,
+            "display_height": 600,
+        }
+    ]
