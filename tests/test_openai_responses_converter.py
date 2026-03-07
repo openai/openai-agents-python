@@ -118,7 +118,7 @@ def test_convert_tool_choice_computer_variants_follow_effective_model() -> None:
         "computer_use",
         tools=[comp_tool],
         model="gpt-5.4",
-    ) == {"type": "computer_use"}
+    ) == {"type": "computer"}
     assert Converter.convert_tool_choice(
         "computer_use_preview",
         tools=[comp_tool],
@@ -143,7 +143,7 @@ def test_convert_tool_choice_computer_variants_follow_effective_model() -> None:
         "computer_use",
         tools=[comp_tool],
         model=None,
-    ) == {"type": "computer_use"}
+    ) == {"type": "computer"}
     assert Converter.convert_tool_choice(
         "computer",
         tools=[comp_tool],

@@ -629,21 +629,17 @@ class OpenAIResponsesModel(Model):
 
         should_omit_model = prompt is not None and not self._model_is_explicit
         effective_request_model: str | ChatModel | None = None if should_omit_model else self.model
-        # Prompt-managed Responses requests can omit the wire `model`, but local built-in tool
-        # serialization still needs the resolved model so prompt-backed GPT-5.4 runs default to
-        # the GA computer tool instead of falling back to preview-era payloads.
-        tool_serialization_model: str | ChatModel | None = self.model
         tool_choice = Converter.convert_tool_choice(
             model_settings.tool_choice,
             tools=tools,
             handoffs=handoffs,
-            model=tool_serialization_model,
+            model=effective_request_model,
         )
         if prompt is None:
             converted_tools = Converter.convert_tools(
                 tools,
                 handoffs,
-                model=tool_serialization_model,
+                model=effective_request_model,
                 tool_choice=model_settings.tool_choice,
             )
         else:
@@ -651,7 +647,7 @@ class OpenAIResponsesModel(Model):
                 tools,
                 handoffs,
                 allow_opaque_tool_search_surface=True,
-                model=tool_serialization_model,
+                model=effective_request_model,
                 tool_choice=model_settings.tool_choice,
             )
         converted_tools_payload = _materialize_responses_tool_params(converted_tools.tools)
@@ -1610,15 +1606,7 @@ class Converter:
             return {
                 "type": "computer_use_preview",
             }
-        # Keep explicit GA selectors on the GA wire shape for prompt-managed calls that omit the
-        # effective model, since those requests can still target GA computer-capable prompts.
-        if tool_choice == "computer_use":
-            return cast(
-                response_create_params.ToolChoice,
-                {
-                    "type": "computer_use",
-                },
-            )
+        # `computer_use` is a compatibility alias, but the GA built-in tool surface is `computer`.
         return {
             "type": "computer",
         }
