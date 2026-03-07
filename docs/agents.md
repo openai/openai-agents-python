@@ -311,6 +311,8 @@ Supplying a list of tools doesn't always mean the LLM will use a tool. You can f
 3. `none`, which requires the LLM to _not_ use a tool.
 4. Setting a specific string e.g. `my_tool`, which requires the LLM to use that specific tool.
 
+When you are using OpenAI Responses tool search, named tool choices are more limited: you cannot target bare namespace names or deferred-only tools with `tool_choice`, and `tool_choice="tool_search"` does not target [`ToolSearchTool`][agents.tool.ToolSearchTool]. In those cases, prefer `auto` or `required`. See [Hosted tool search](tools.md#hosted-tool-search) for the Responses-specific constraints.
+
 ```python
 from agents import Agent, Runner, function_tool, ModelSettings
 

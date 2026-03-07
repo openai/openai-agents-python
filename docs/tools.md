@@ -109,6 +109,10 @@ What to know:
 -   Searchable surfaces include `@function_tool(defer_loading=True)`, `tool_namespace(name=..., description=..., tools=[...])`, and `HostedMCPTool(tool_config={..., "defer_loading": True})`.
 -   Deferred-loading function tools must be paired with `ToolSearchTool()`. Namespace-only setups may also use `ToolSearchTool()` to let the model load the right group on demand.
 -   `tool_namespace()` groups `FunctionTool` instances under a shared namespace name and description. This is usually the best fit when you have many related tools, such as `crm`, `billing`, or `shipping`.
+-   OpenAI's official best-practice guidance is [Use namespaces where possible](https://developers.openai.com/api/docs/guides/tools-tool-search#use-namespaces-where-possible).
+-   Prefer namespaces or hosted MCP servers over many individually deferred functions when possible. They usually give the model a better high-level search surface and better token savings.
+-   Namespaces can mix immediate and deferred tools. Tools without `defer_loading=True` remain callable immediately, while deferred tools in the same namespace are loaded through tool search.
+-   As a rule of thumb, keep each namespace fairly small, ideally fewer than 10 functions.
 -   Named `tool_choice` cannot target bare namespace names or deferred-only tools. Prefer `auto`, `required`, or a real top-level callable tool name.
 -   `ToolSearchTool(execution="client")` is for manual Responses orchestration. If the model emits a client-executed `tool_search_call`, the standard `Runner` raises instead of executing it for you.
 -   Tool search activity appears in [`RunResult.new_items`](results.md#new-items) and in [`RunItemStreamEvent`](streaming.md#run-item-event-names) with dedicated item and event types.
