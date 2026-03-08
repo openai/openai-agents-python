@@ -62,9 +62,11 @@ from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
 from agents.run_internal.run_loop import get_new_response
 from agents.run_internal.run_steps import NextStepFinalOutput, SingleStepResult
 from agents.run_internal.session_persistence import (
+    persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     rewind_session_items,
     save_result_to_session,
+    wait_for_session_cleanup,
 )
 from agents.run_internal.tool_execution import execute_approved_tools
 from agents.run_internal.tool_use_tracker import AgentToolUseTracker
@@ -1887,6 +1889,107 @@ async def test_prepare_input_with_session_rejects_non_list_callback_result():
 
     with pytest.raises(UserError, match="Session input callback must return a list"):
         await prepare_input_with_session("hello", session, cast(Any, callback))
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_matches_copied_items_by_content() -> None:
+    history_item = cast(TResponseInputItem, {"role": "user", "content": "history"})
+    session = SimpleListSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        return [
+            cast(TResponseInputItem, dict(cast(dict[str, Any], history[0]))),
+            cast(TResponseInputItem, dict(cast(dict[str, Any], new_input[0]))),
+        ]
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "history",
+        "new",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_persist_session_items_for_guardrail_trip_uses_original_input_when_missing() -> None:
+    session = SimpleListSession()
+    agent = Agent(name="agent", model=FakeModel())
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+
+    persisted = await persist_session_items_for_guardrail_trip(
+        session,
+        None,
+        None,
+        "guardrail input",
+        run_state,
+    )
+
+    assert persisted == [{"role": "user", "content": "guardrail input"}]
+    assert await session.get_items() == persisted
+
+
+@pytest.mark.asyncio
+async def test_wait_for_session_cleanup_retries_after_get_items_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = cast(TResponseInputItem, {"id": "msg-1", "type": "message", "content": "hello"})
+    serialized_target = fingerprint_input_item(target)
+
+    class FlakyCleanupSession(SimpleListSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.get_items_calls = 0
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            self.get_items_calls += 1
+            if self.get_items_calls == 1:
+                raise RuntimeError("temporary failure")
+            return []
+
+    session = FlakyCleanupSession()
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    assert serialized_target is not None
+    await wait_for_session_cleanup(session, [serialized_target])
+
+    assert session.get_items_calls == 2
+    assert sleeps == [0.1]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_session_cleanup_logs_when_targets_linger(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    target = cast(TResponseInputItem, {"id": "msg-1", "type": "message", "content": "hello"})
+    session = SimpleListSession(history=[target])
+    serialized_target = fingerprint_input_item(target)
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    assert serialized_target is not None
+    with caplog.at_level("DEBUG", logger="openai.agents"):
+        await wait_for_session_cleanup(session, [serialized_target], max_attempts=2)
+
+    assert sleeps == [0.1, 0.2]
+    assert "Session cleanup verification exhausted attempts" in caplog.text
 
 
 @pytest.mark.asyncio
