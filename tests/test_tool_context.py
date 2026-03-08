@@ -4,7 +4,9 @@ from openai.types.responses import ResponseFunctionToolCall
 from agents import Agent
 from agents.run_config import RunConfig
 from agents.run_context import RunContextWrapper
+from agents.tool import FunctionTool, invoke_function_tool
 from agents.tool_context import ToolContext
+from agents.usage import Usage
 from tests.utils.hitl import make_context_wrapper
 
 
@@ -198,3 +200,78 @@ def test_tool_context_from_agent_context_prefers_explicit_run_config() -> None:
     )
 
     assert tool_ctx.run_config is explicit_run_config
+
+
+@pytest.mark.asyncio
+async def test_invoke_function_tool_passes_plain_run_context_when_requested() -> None:
+    captured_context: RunContextWrapper[str] | None = None
+
+    async def on_invoke_tool(ctx: RunContextWrapper[str], _input: str) -> str:
+        nonlocal captured_context
+        captured_context = ctx
+        return ctx.context
+
+    function_tool = FunctionTool(
+        name="plain_context_tool",
+        description="test",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=on_invoke_tool,
+    )
+    tool_context = ToolContext(
+        context="Stormy",
+        usage=Usage(),
+        tool_name="plain_context_tool",
+        tool_call_id="call-1",
+        tool_arguments="{}",
+        agent=Agent(name="agent"),
+        run_config=RunConfig(model="gpt-4.1-mini"),
+        tool_input={"city": "Tokyo"},
+    )
+
+    result = await invoke_function_tool(
+        function_tool=function_tool,
+        context=tool_context,
+        arguments="{}",
+    )
+
+    assert result == "Stormy"
+    assert captured_context is not None
+    assert not isinstance(captured_context, ToolContext)
+    assert captured_context.context == "Stormy"
+    assert captured_context.usage is tool_context.usage
+    assert captured_context.tool_input == {"city": "Tokyo"}
+
+
+@pytest.mark.asyncio
+async def test_invoke_function_tool_preserves_tool_context_when_requested() -> None:
+    captured_context: ToolContext[str] | None = None
+
+    async def on_invoke_tool(ctx: ToolContext[str], _input: str) -> str:
+        nonlocal captured_context
+        captured_context = ctx
+        return ctx.tool_name
+
+    function_tool = FunctionTool(
+        name="tool_context_tool",
+        description="test",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=on_invoke_tool,
+    )
+    tool_context = ToolContext(
+        context="Stormy",
+        usage=Usage(),
+        tool_name="tool_context_tool",
+        tool_call_id="call-2",
+        tool_arguments="{}",
+        agent=Agent(name="agent"),
+        run_config=RunConfig(model="gpt-4.1-mini"),
+    )
+
+    result = await invoke_function_tool(
+        function_tool=function_tool,
+        context=tool_context,
+        arguments="{}",
+    )
+
+    assert result == "tool_context_tool"
+    assert captured_context is tool_context

@@ -19,6 +19,8 @@ from typing import (
     TypeVar,
     Union,
     cast,
+    get_args,
+    get_origin,
     overload,
 )
 
@@ -1373,6 +1375,56 @@ async def maybe_invoke_function_tool_failure_error_function(
     return result
 
 
+def _annotation_mentions_context_type(annotation: Any, *, type_name: str) -> bool:
+    """Return True when an annotation references the given context type name."""
+    if annotation is inspect.Signature.empty:
+        return False
+
+    if isinstance(annotation, str):
+        return type_name in annotation
+
+    origin = get_origin(annotation)
+    if origin is not None:
+        if _annotation_mentions_context_type(origin, type_name=type_name):
+            return True
+        return any(
+            _annotation_mentions_context_type(arg, type_name=type_name)
+            for arg in get_args(annotation)
+        )
+
+    candidate_name = getattr(annotation, "__qualname__", None) or getattr(
+        annotation, "__name__", None
+    )
+    return candidate_name == type_name
+
+
+def _get_function_tool_invoke_context(
+    function_tool: FunctionTool,
+    context: ToolContext[Any],
+) -> ToolContext[Any] | RunContextWrapper[Any]:
+    """Choose the runtime context object to pass into a function tool wrapper.
+
+    Third-party wrappers may declare a narrower `RunContextWrapper` contract and then serialize
+    that object downstream. In those cases, passing the richer `ToolContext` can leak runtime-only
+    metadata such as agents or run config into incompatible serializers. When the wrapper
+    explicitly declares `RunContextWrapper`, preserve only the base context state.
+    """
+    try:
+        parameters = tuple(inspect.signature(function_tool.on_invoke_tool).parameters.values())
+    except (TypeError, ValueError):
+        return context
+
+    if not parameters:
+        return context
+
+    context_annotation = parameters[0].annotation
+    if _annotation_mentions_context_type(context_annotation, type_name="ToolContext"):
+        return context
+    if _annotation_mentions_context_type(context_annotation, type_name="RunContextWrapper"):
+        return context._fork_with_tool_input(context.tool_input)
+    return context
+
+
 async def invoke_function_tool(
     *,
     function_tool: FunctionTool,
@@ -1380,12 +1432,13 @@ async def invoke_function_tool(
     arguments: str,
 ) -> Any:
     """Invoke a function tool, enforcing timeout configuration when provided."""
+    invoke_context = _get_function_tool_invoke_context(function_tool, context)
     timeout_seconds = function_tool.timeout_seconds
     if timeout_seconds is None:
-        return await function_tool.on_invoke_tool(context, arguments)
+        return await function_tool.on_invoke_tool(cast(Any, invoke_context), arguments)
 
     tool_task: asyncio.Future[Any] = asyncio.ensure_future(
-        function_tool.on_invoke_tool(context, arguments)
+        function_tool.on_invoke_tool(cast(Any, invoke_context), arguments)
     )
     try:
         return await asyncio.wait_for(tool_task, timeout=timeout_seconds)
