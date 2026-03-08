@@ -67,7 +67,10 @@ from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData
 from ..usage import Usage
 from ..util import _coro, _error_tracing
-from .agent_runner_helpers import apply_resumed_conversation_settings
+from .agent_runner_helpers import (
+    apply_resumed_conversation_settings,
+    validate_server_conversation_handoff_settings,
+)
 from .approvals import (
     append_input_items_excluding_approvals,
     approvals_from_step,
@@ -418,6 +421,14 @@ async def start_streaming(
             previous_response_id=previous_response_id,
             auto_previous_response_id=auto_previous_response_id,
         )
+
+    validate_server_conversation_handoff_settings(
+        starting_agent,
+        run_config,
+        conversation_id=conversation_id,
+        previous_response_id=previous_response_id,
+        auto_previous_response_id=auto_previous_response_id,
+    )
 
     resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
         run_config.reasoning_item_id_policy

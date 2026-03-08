@@ -39,6 +39,7 @@ __all__ = [
     "ensure_context_wrapper",
     "finalize_conversation_tracking",
     "input_guardrails_triggered",
+    "validate_server_conversation_handoff_settings",
     "validate_session_conversation_settings",
     "resolve_trace_settings",
     "resolve_processed_response",
@@ -101,6 +102,74 @@ def validate_session_conversation_settings(
     raise UserError(
         "Session persistence cannot be combined with conversation_id, "
         "previous_response_id, or auto_previous_response_id."
+    )
+
+
+def validate_server_conversation_handoff_settings(
+    starting_agent: Agent[Any],
+    run_config: RunConfig,
+    *,
+    conversation_id: str | None,
+    previous_response_id: str | None,
+    auto_previous_response_id: bool,
+) -> None:
+    """Fail fast when server conversation is combined with handoff history mutations."""
+    if conversation_id is None and previous_response_id is None and not auto_previous_response_id:
+        return
+
+    conflicts: list[str] = []
+    visited_agents: set[int] = set()
+    queue: list[Agent[Any]] = [starting_agent]
+
+    while queue:
+        agent = queue.pop(0)
+        agent_id = id(agent)
+        if agent_id in visited_agents:
+            continue
+        visited_agents.add(agent_id)
+
+        for handoff_item in agent.handoffs:
+            if isinstance(handoff_item, Agent):
+                target_name = handoff_item.name
+                effective_input_filter = run_config.handoff_input_filter
+                effective_nest_handoff_history = run_config.nest_handoff_history
+                target_agent: Agent[Any] | None = handoff_item
+            else:
+                target_name = handoff_item.agent_name
+                effective_input_filter = (
+                    handoff_item.input_filter or run_config.handoff_input_filter
+                )
+                effective_nest_handoff_history = (
+                    handoff_item.nest_handoff_history
+                    if handoff_item.nest_handoff_history is not None
+                    else run_config.nest_handoff_history
+                )
+                target_agent_ref = handoff_item._agent_ref() if handoff_item._agent_ref else None
+                target_agent = target_agent_ref if isinstance(target_agent_ref, Agent) else None
+
+            if effective_input_filter or effective_nest_handoff_history:
+                conflict_kinds: list[str] = []
+                if effective_input_filter:
+                    conflict_kinds.append("input_filter")
+                if effective_nest_handoff_history:
+                    conflict_kinds.append("nest_handoff_history")
+                conflicts.append(f"{agent.name} -> {target_name} ({', '.join(conflict_kinds)})")
+
+            if target_agent is not None:
+                queue.append(target_agent)
+
+    if not conflicts:
+        return
+
+    preview = "; ".join(conflicts[:3])
+    if len(conflicts) > 3:
+        preview = f"{preview}; ..."
+
+    raise UserError(
+        "Server-managed conversation "
+        "(conversation_id/previous_response_id/auto_previous_response_id) "
+        "cannot be combined with handoff input filtering or nested handoff history. "
+        f"Conflicts: {preview}."
     )
 
 

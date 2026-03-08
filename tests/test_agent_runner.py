@@ -2611,6 +2611,41 @@ async def test_run_streamed_rejects_session_with_resumed_conversation_state():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "run_config",
+    [
+        RunConfig(),
+        RunConfig(nest_handoff_history=True),
+    ],
+)
+async def test_run_rejects_server_conversation_with_history_mutating_handoffs(
+    run_config: RunConfig,
+):
+    model = FakeModel()
+    refund_agent = Agent(name="refund", model=model)
+    triage_agent = Agent(
+        name="triage",
+        model=model,
+        handoffs=[
+            handoff(
+                refund_agent,
+                input_filter=(lambda data: data)
+                if run_config.nest_handoff_history is False
+                else None,
+            )
+        ],
+    )
+
+    with pytest.raises(UserError, match="cannot be combined with handoff"):
+        await Runner.run(
+            triage_agent,
+            input="test",
+            conversation_id="conv-test",
+            run_config=run_config,
+        )
+
+
+@pytest.mark.asyncio
 async def test_multi_turn_previous_response_id_passed_between_runs():
     """Test that previous_response_id is passed to the model on subsequent runs."""
 
