@@ -3,6 +3,7 @@ from typing import Literal
 
 Environment = Literal["mac", "windows", "ubuntu", "browser"]
 Button = Literal["left", "right", "wheel", "back", "forward"]
+Dimensions = tuple[int, int]
 
 
 class Computer(abc.ABC):
@@ -10,14 +11,12 @@ class Computer(abc.ABC):
     operations needed to control a computer or browser."""
 
     @property
-    @abc.abstractmethod
-    def environment(self) -> Environment:
-        pass
+    def environment(self) -> Environment | None:
+        return None
 
     @property
-    @abc.abstractmethod
-    def dimensions(self) -> tuple[int, int]:
-        pass
+    def dimensions(self) -> Dimensions | None:
+        return None
 
     @abc.abstractmethod
     def screenshot(self) -> str:
@@ -61,14 +60,12 @@ class AsyncComputer(abc.ABC):
     operations needed to control a computer or browser."""
 
     @property
-    @abc.abstractmethod
-    def environment(self) -> Environment:
-        pass
+    def environment(self) -> Environment | None:
+        return None
 
     @property
-    @abc.abstractmethod
-    def dimensions(self) -> tuple[int, int]:
-        pass
+    def dimensions(self) -> Dimensions | None:
+        return None
 
     @abc.abstractmethod
     async def screenshot(self) -> str:

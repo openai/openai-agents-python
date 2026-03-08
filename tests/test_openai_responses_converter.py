@@ -83,6 +83,35 @@ class DummyComputer(Computer):
         raise NotImplementedError
 
 
+class MinimalComputer(Computer):
+    def screenshot(self) -> str:
+        raise NotImplementedError
+
+    def click(self, x: int, y: int, button: str) -> None:
+        raise NotImplementedError
+
+    def double_click(self, x: int, y: int) -> None:
+        raise NotImplementedError
+
+    def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+        raise NotImplementedError
+
+    def type(self, text: str) -> None:
+        raise NotImplementedError
+
+    def wait(self) -> None:
+        raise NotImplementedError
+
+    def move(self, x: int, y: int) -> None:
+        raise NotImplementedError
+
+    def keypress(self, keys: list[str]) -> None:
+        raise NotImplementedError
+
+    def drag(self, path: list[tuple[int, int]]) -> None:
+        raise NotImplementedError
+
+
 def test_convert_tool_choice_standard_values():
     """
     Make sure that the standard tool_choice values map to themselves or
@@ -188,6 +217,15 @@ def test_convert_tools_basic_types_and_includes():
     # Only one computer tool should be allowed.
     with pytest.raises(UserError):
         Converter.convert_tools(tools=[comp_tool, comp_tool], handoffs=[])
+
+
+def test_convert_tools_computer_omits_environment_and_dimensions_when_not_provided() -> None:
+    converted = Converter.convert_tools(
+        tools=[ComputerTool(computer=MinimalComputer())], handoffs=[]
+    )
+
+    assert converted.tools == [{"type": "computer_use_preview"}]
+    assert converted.includes == []
 
 
 def test_convert_tools_shell_local_environment() -> None:

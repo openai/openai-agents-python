@@ -1446,12 +1446,15 @@ class Converter:
                     "resolve_computer({ tool, run_context }) with a run context first "
                     "when building payloads manually."
                 )
-            converted_tool = {
+            computer_payload: dict[str, Any] = {
                 "type": "computer_use_preview",
-                "environment": computer.environment,
-                "display_width": computer.dimensions[0],
-                "display_height": computer.dimensions[1],
             }
+            if computer.environment is not None:
+                computer_payload["environment"] = computer.environment
+            if computer.dimensions is not None:
+                computer_payload["display_width"] = computer.dimensions[0]
+                computer_payload["display_height"] = computer.dimensions[1]
+            converted_tool = cast(ToolParam, computer_payload)
             includes = None
         elif isinstance(tool, HostedMCPTool):
             converted_tool = tool.tool_config
