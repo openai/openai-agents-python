@@ -3849,11 +3849,12 @@ class TestRunStateSerializationEdgeCases:
             await RunState.from_json(agent, state_json)
 
     @pytest.mark.asyncio
-    async def test_from_json_unsupported_schema_version(self):
+    @pytest.mark.parametrize("schema_version", ["1.6", "1.7", "2.0"])
+    async def test_from_json_unsupported_schema_version(self, schema_version: str):
         """Test that from_json raises error when schema version is unsupported."""
         agent = Agent(name="TestAgent")
         state_json = {
-            "$schemaVersion": "2.0",
+            "$schemaVersion": schema_version,
             "original_input": "test",
             "current_agent": {"name": "TestAgent"},
             "context": {
@@ -3867,7 +3868,9 @@ class TestRunStateSerializationEdgeCases:
             "generated_items": [],
         }
 
-        with pytest.raises(UserError, match="Run state schema version 2.0 is not supported"):
+        with pytest.raises(
+            UserError, match=f"Run state schema version {schema_version} is not supported"
+        ):
             await RunState.from_json(agent, state_json)
 
     @pytest.mark.asyncio
@@ -3894,6 +3897,12 @@ class TestRunStateSerializationEdgeCases:
         assert restored._current_agent.name == "TestAgent"
         assert restored._context is not None
         assert restored._context.context == {"foo": "bar"}
+
+    def test_supported_schema_versions_match_released_boundary(self):
+        """The support set should include released versions plus the current unreleased writer."""
+        assert SUPPORTED_SCHEMA_VERSIONS == frozenset(
+            {"1.0", "1.1", "1.2", "1.3", "1.4", CURRENT_SCHEMA_VERSION}
+        )
 
     @pytest.mark.asyncio
     async def test_from_json_agent_not_found(self):

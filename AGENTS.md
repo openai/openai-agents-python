@@ -32,13 +32,13 @@ When working on OpenAI API or OpenAI platform integrations in this repo (Respons
 
 #### `$implementation-strategy`
 
-Before changing runtime code, exported APIs, external configuration, persisted schemas, wire protocols, or other user-facing behavior, use `$implementation-strategy` to decide the compatibility boundary and implementation shape. Judge breaking changes against the latest release tag, not unreleased branch-local churn. Interfaces introduced or changed after the latest release tag may be rewritten without compatibility shims unless they define durable external state or the user explicitly asks for a migration path.
+Before changing runtime code, exported APIs, external configuration, persisted schemas, wire protocols, or other user-facing behavior, use `$implementation-strategy` to decide the compatibility boundary and implementation shape. Judge breaking changes against the latest release tag, not unreleased branch-local churn. Interfaces introduced or changed after the latest release tag may be rewritten without compatibility shims unless they define a released or explicitly supported durable external state boundary, or the user explicitly asks for a migration path. Unreleased persisted formats on `main` may be renumbered or squashed before release when intermediate snapshots are intentionally unsupported.
 
 ### ExecPlans
 
-Call out compatibility risk early in your plan only when the change affects behavior shipped in the latest release tag or durable external state, and confirm the approach before implementing changes that could impact users.
+Call out compatibility risk early in your plan only when the change affects behavior shipped in the latest release tag or a released or explicitly supported durable external state boundary, and confirm the approach before implementing changes that could impact users.
 
-Use an ExecPlan when work is multi-step, spans several files, involves new features or refactors, or is likely to take more than about an hour. Start with the template and rules in `PLANS.md`, keep milestones and living sections (Progress, Surprises & Discoveries, Decision Log, Outcomes & Retrospective) up to date as you execute, and rewrite the plan if scope shifts. Call out compatibility risk only when the plan changes behavior shipped in the latest release tag or durable external state. Do not treat branch-local interface churn or unreleased post-tag changes on `main` as breaking by default; prefer direct replacement over compatibility layers in those cases. If you intentionally skip an ExecPlan for a complex task, note why in your response so reviewers understand the choice.
+Use an ExecPlan when work is multi-step, spans several files, involves new features or refactors, or is likely to take more than about an hour. Start with the template and rules in `PLANS.md`, keep milestones and living sections (Progress, Surprises & Discoveries, Decision Log, Outcomes & Retrospective) up to date as you execute, and rewrite the plan if scope shifts. Call out compatibility risk only when the plan changes behavior shipped in the latest release tag or a released or explicitly supported durable external state boundary. Do not treat branch-local interface churn or unreleased post-tag changes on `main` as breaking by default; prefer direct replacement over compatibility layers in those cases, and renumber or squash unreleased persisted schemas before release when the intermediate snapshots are intentionally unsupported. If you intentionally skip an ExecPlan for a complex task, note why in your response so reviewers understand the choice.
 
 ### Public API Positional Compatibility
 
@@ -84,7 +84,7 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
   - `src/agents/stream_events.py` (stream event names)
   - `src/agents/run_state.py` (RunState serialization/deserialization)
   - `src/agents/run_internal/session_persistence.py` (session save/rewind)
-- If the serialized RunState shape changes, bump `CURRENT_SCHEMA_VERSION` in `src/agents/run_state.py` and update serialization/deserialization accordingly.
+- If the serialized RunState shape changes, update `CURRENT_SCHEMA_VERSION` in `src/agents/run_state.py` and the related serialization/deserialization logic. Keep released schema versions readable, and feel free to renumber or squash unreleased schema versions before release when those intermediate snapshots are intentionally unsupported.
 
 ## Operation Guide
 
@@ -102,7 +102,7 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
    ```
 2. If dependencies changed or you are setting up the repo, run `make sync`.
 3. Implement changes and add or update tests alongside code updates.
-4. Highlight compatibility or API risks in your plan before implementing changes that alter the latest released behavior or durable external state.
+4. Highlight compatibility or API risks in your plan before implementing changes that alter the latest released behavior or a released or explicitly supported durable external state boundary.
 5. Build docs when you touch documentation:
    ```bash
    make build-docs

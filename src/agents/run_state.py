@@ -112,14 +112,14 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 
 
 # RunState schema policy.
-# 1. Bump CURRENT_SCHEMA_VERSION when serialized shape/semantics change.
-# 2. Keep older readable versions in SUPPORTED_SCHEMA_VERSIONS for backward reads.
+# 1. Keep schema versions shipped in releases readable.
+# 2. Unreleased schema versions may be renumbered or squashed before release when their
+#    intermediate snapshots are intentionally unsupported.
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
-# 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer versions).
-CURRENT_SCHEMA_VERSION = "1.7"
-SUPPORTED_SCHEMA_VERSIONS = frozenset(
-    {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", CURRENT_SCHEMA_VERSION}
-)
+# 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
+#    versions).
+CURRENT_SCHEMA_VERSION = "1.5"
+SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2", "1.3", "1.4", CURRENT_SCHEMA_VERSION})
 
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
 _COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(ComputerCallOutput)
