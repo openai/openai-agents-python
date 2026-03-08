@@ -1,3 +1,5 @@
+from typing import Annotated, Any, cast
+
 import pytest
 from openai.types.responses import ResponseFunctionToolCall
 
@@ -275,3 +277,79 @@ async def test_invoke_function_tool_preserves_tool_context_when_requested() -> N
 
     assert result == "tool_context_tool"
     assert captured_context is tool_context
+
+
+@pytest.mark.asyncio
+async def test_invoke_function_tool_ignores_context_name_substrings_in_string_annotations() -> None:
+    captured_context: object | None = None
+
+    class MyRunContextWrapper:
+        pass
+
+    async def on_invoke_tool(ctx: "MyRunContextWrapper", _input: str) -> str:
+        nonlocal captured_context
+        captured_context = ctx
+        return "ok"
+
+    function_tool = FunctionTool(
+        name="substring_context_tool",
+        description="test",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=cast(Any, on_invoke_tool),
+    )
+    tool_context = ToolContext(
+        context="Stormy",
+        usage=Usage(),
+        tool_name="substring_context_tool",
+        tool_call_id="call-3",
+        tool_arguments="{}",
+    )
+
+    result = await invoke_function_tool(
+        function_tool=function_tool,
+        context=tool_context,
+        arguments="{}",
+    )
+
+    assert result == "ok"
+    assert captured_context is tool_context
+
+
+@pytest.mark.asyncio
+async def test_invoke_function_tool_ignores_annotated_string_metadata_when_matching_context() -> (
+    None
+):
+    captured_context: ToolContext[str] | RunContextWrapper[str] | None = None
+
+    async def on_invoke_tool(
+        ctx: Annotated[RunContextWrapper[str], "ToolContext note"], _input: str
+    ) -> str:
+        nonlocal captured_context
+        captured_context = ctx
+        return ctx.context
+
+    function_tool = FunctionTool(
+        name="annotated_string_context_tool",
+        description="test",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=on_invoke_tool,
+    )
+    tool_context = ToolContext(
+        context="Stormy",
+        usage=Usage(),
+        tool_name="annotated_string_context_tool",
+        tool_call_id="call-4",
+        tool_arguments="{}",
+        tool_input={"city": "Tokyo"},
+    )
+
+    result = await invoke_function_tool(
+        function_tool=function_tool,
+        context=tool_context,
+        arguments="{}",
+    )
+
+    assert result == "Stormy"
+    assert captured_context is not None
+    assert not isinstance(captured_context, ToolContext)
+    assert captured_context.tool_input == {"city": "Tokyo"}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import copy
 import dataclasses
@@ -9,8 +10,10 @@ import math
 import weakref
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
+from types import UnionType
 from typing import (
     TYPE_CHECKING,
+    Annotated,
     Any,
     Callable,
     Generic,
@@ -21,6 +24,7 @@ from typing import (
     cast,
     get_args,
     get_origin,
+    get_type_hints,
     overload,
 )
 
@@ -1375,27 +1379,81 @@ async def maybe_invoke_function_tool_failure_error_function(
     return result
 
 
-def _annotation_mentions_context_type(annotation: Any, *, type_name: str) -> bool:
-    """Return True when an annotation references the given context type name."""
+def _annotation_expr_name(expr: ast.expr) -> str | None:
+    """Return the unqualified type name for a string annotation expression node."""
+    if isinstance(expr, ast.Name):
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        return expr.attr
+    return None
+
+
+def _string_annotation_mentions_context_type(annotation: str, *, type_name: str) -> bool:
+    """Return True when a string annotation structurally references the given context type."""
+    try:
+        expression = ast.parse(annotation, mode="eval").body
+    except SyntaxError:
+        return False
+
+    return _annotation_expr_mentions_context_type(expression, type_name=type_name)
+
+
+def _annotation_expr_mentions_context_type(expr: ast.expr, *, type_name: str) -> bool:
+    """Return True when an annotation expression structurally references the given context type."""
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+        return _string_annotation_mentions_context_type(expr.value, type_name=type_name)
+
+    if _annotation_expr_name(expr) == type_name:
+        return True
+
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.BitOr):
+        return _annotation_expr_mentions_context_type(
+            expr.left, type_name=type_name
+        ) or _annotation_expr_mentions_context_type(expr.right, type_name=type_name)
+
+    if isinstance(expr, ast.Subscript):
+        wrapper_name = _annotation_expr_name(expr.value)
+        args = expr.slice.elts if isinstance(expr.slice, ast.Tuple) else (expr.slice,)
+
+        if wrapper_name == "Annotated":
+            return bool(args) and _annotation_expr_mentions_context_type(
+                args[0], type_name=type_name
+            )
+
+        if wrapper_name in {"Optional", "Union"}:
+            return any(
+                _annotation_expr_mentions_context_type(arg, type_name=type_name) for arg in args
+            )
+
+        return _annotation_expr_mentions_context_type(expr.value, type_name=type_name)
+
+    return False
+
+
+def _annotation_mentions_context_type(annotation: Any, *, context_type: type[Any]) -> bool:
+    """Return True when an annotation structurally references the given context type."""
     if annotation is inspect.Signature.empty:
         return False
 
     if isinstance(annotation, str):
-        return type_name in annotation
+        return _string_annotation_mentions_context_type(annotation, type_name=context_type.__name__)
 
     origin = get_origin(annotation)
-    if origin is not None:
-        if _annotation_mentions_context_type(origin, type_name=type_name):
-            return True
+
+    if annotation is context_type or origin is context_type:
+        return True
+
+    if origin is Annotated:
+        args = get_args(annotation)
+        return bool(args) and _annotation_mentions_context_type(args[0], context_type=context_type)
+
+    if origin in (Union, UnionType):
         return any(
-            _annotation_mentions_context_type(arg, type_name=type_name)
+            _annotation_mentions_context_type(arg, context_type=context_type)
             for arg in get_args(annotation)
         )
 
-    candidate_name = getattr(annotation, "__qualname__", None) or getattr(
-        annotation, "__name__", None
-    )
-    return candidate_name == type_name
+    return False
 
 
 def _get_function_tool_invoke_context(
@@ -1418,9 +1476,16 @@ def _get_function_tool_invoke_context(
         return context
 
     context_annotation = parameters[0].annotation
-    if _annotation_mentions_context_type(context_annotation, type_name="ToolContext"):
+    try:
+        resolved_annotations = get_type_hints(function_tool.on_invoke_tool, include_extras=True)
+    except Exception:
+        pass
+    else:
+        context_annotation = resolved_annotations.get(parameters[0].name, context_annotation)
+
+    if _annotation_mentions_context_type(context_annotation, context_type=ToolContext):
         return context
-    if _annotation_mentions_context_type(context_annotation, type_name="RunContextWrapper"):
+    if _annotation_mentions_context_type(context_annotation, context_type=RunContextWrapper):
         return context._fork_with_tool_input(context.tool_input)
     return context
 
