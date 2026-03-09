@@ -1,0 +1,9 @@
+# OpenAI Agents SDK
+openai-agents>=0.11.0
+
+# Required dependencies (installed automatically with openai-agents)
+# openai>=1.76.0
+# pydantic>=2.0
+
+# Optional: for async HTTP examples
+aiohttp>=3.9.0
