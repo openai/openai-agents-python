@@ -21,6 +21,7 @@ from .._tool_identity import (
     NamedToolLookupKey,
     build_function_tool_lookup_map,
     get_function_tool_lookup_key_for_call,
+    get_tool_trace_name_for_tool,
 )
 from ..agent import Agent
 from ..agent_output import AgentOutputSchemaBase
@@ -708,7 +709,11 @@ async def start_streaming(
                     output_type=output_type_name,
                 )
                 current_span.start(mark_as_current=True)
-                tool_names = [t.name for t in all_tools]
+                tool_names = [
+                    tool_name
+                    for tool in all_tools
+                    if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
+                ]
                 current_span.span_data.tools = tool_names
 
             current_turn += 1

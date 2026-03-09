@@ -519,10 +519,15 @@ class ComputerTool(Generic[ComputerT]):
 
     @property
     def name(self):
-        # Keep the released preview-era runtime name for hooks, tracing, and
-        # persisted RunState compatibility. The Responses serializer selects
-        # the actual wire tool type separately.
+        # Keep the released preview-era runtime name for hooks and persisted
+        # RunState compatibility. The Responses serializer selects the actual
+        # wire tool type separately.
         return "computer_use_preview"
+
+    @property
+    def trace_name(self):
+        # Tracing should display the GA tool alias even while runtime names preserve compatibility.
+        return "computer"
 
 
 @dataclass

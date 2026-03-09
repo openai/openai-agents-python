@@ -17,7 +17,7 @@ from openai.types.responses.response_input_item_param import (
 )
 from openai.types.responses.response_input_param import ComputerCallOutput
 
-from .._tool_identity import get_mapping_or_attr
+from .._tool_identity import get_mapping_or_attr, get_tool_trace_name_for_tool
 from ..agent import Agent
 from ..exceptions import ModelBehaviorError
 from ..items import RunItem, ToolCallOutputItem
@@ -89,8 +89,8 @@ def _serialize_trace_payload(payload: Any) -> str:
 class ComputerAction:
     """Execute computer tool actions and emit screenshot outputs with hooks fired."""
 
-    TRACE_TOOL_NAME = "computer_use_preview"
-    """Keep tracing aligned with the released computer tool name used by hooks and RunState."""
+    TRACE_TOOL_NAME = "computer"
+    """Tracing should expose the GA computer tool alias."""
 
     @classmethod
     async def execute(
@@ -104,6 +104,7 @@ class ComputerAction:
         acknowledged_safety_checks: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None,
     ) -> RunItem:
         """Run a computer action, capturing a screenshot and notifying hooks."""
+        trace_tool_name = get_tool_trace_name_for_tool(action.computer_tool) or cls.TRACE_TOOL_NAME
 
         async def _run_action(span: Any | None) -> RunItem:
             if span and config.trace_include_sensitive_data:
@@ -137,7 +138,7 @@ class ComputerAction:
                         SpanError(
                             message="Error running tool",
                             data={
-                                "tool_name": cls.TRACE_TOOL_NAME,
+                                "tool_name": trace_tool_name,
                                 "error": trace_error,
                             },
                         )
@@ -174,7 +175,7 @@ class ComputerAction:
 
         return await with_tool_function_span(
             config=config,
-            tool_name=cls.TRACE_TOOL_NAME,
+            tool_name=trace_tool_name,
             fn=_run_action,
         )
 

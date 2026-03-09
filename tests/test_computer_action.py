@@ -37,6 +37,7 @@ from agents import (
     RunConfig,
     RunContextWrapper,
     RunHooks,
+    Runner,
     set_tracing_disabled,
     trace,
 )
@@ -45,6 +46,8 @@ from agents.run_internal import run_loop
 from agents.run_internal.run_loop import ComputerAction, ToolRunComputerAction
 from agents.tool import ComputerToolSafetyCheckData
 
+from .fake_model import FakeModel
+from .test_responses import get_text_message
 from .testing_processor import SPAN_PROCESSOR_TESTING
 
 
@@ -59,6 +62,19 @@ def _get_function_span(tool_name: str) -> dict[str, Any]:
         if span_data.get("type") == "function" and span_data.get("name") == tool_name:
             return exported
     raise AssertionError(f"Function span for tool '{tool_name}' not found")
+
+
+def _get_agent_span(agent_name: str) -> dict[str, Any]:
+    for span in SPAN_PROCESSOR_TESTING.get_ordered_spans(including_empty=True):
+        exported = span.export()
+        if not exported:
+            continue
+        span_data = exported.get("span_data")
+        if not isinstance(span_data, dict):
+            continue
+        if span_data.get("type") == "agent" and span_data.get("name") == agent_name:
+            return exported
+    raise AssertionError(f"Agent span for '{agent_name}' not found")
 
 
 class LoggingComputer(Computer):
@@ -403,11 +419,47 @@ async def test_execute_emits_function_span() -> None:
         )
 
     assert isinstance(result, ToolCallOutputItem)
-    assert ComputerAction.TRACE_TOOL_NAME == "computer_use_preview"
+    assert ComputerAction.TRACE_TOOL_NAME == "computer"
     function_span = _get_function_span(ComputerAction.TRACE_TOOL_NAME)
     span_data = cast(dict[str, Any], function_span["span_data"])
     assert span_data.get("input") is not None
     assert cast(str, span_data.get("output", "")).startswith("data:image/png;base64,")
+
+
+@pytest.mark.asyncio
+async def test_runner_trace_lists_ga_computer_tool_name() -> None:
+    SPAN_PROCESSOR_TESTING.clear()
+
+    computer = LoggingComputer(screenshot_return="trace_img")
+    tool_call = ResponseComputerToolCall(
+        id="tool_trace_agent_tools",
+        type="computer_call",
+        action=ActionScreenshot(type="screenshot"),
+        call_id="tool_trace_agent_tools",
+        pending_safety_checks=[],
+        status="completed",
+    )
+    model = FakeModel(tracing_enabled=True)
+    model.add_multiple_turn_outputs(
+        [
+            [tool_call],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test_agent_trace_tools",
+        model=model,
+        tools=[ComputerTool(computer=computer)],
+    )
+
+    set_tracing_disabled(False)
+    with trace("computer-agent-span-test"):
+        result = await Runner.run(agent, input="take a screenshot")
+
+    assert result.final_output == "done"
+    agent_span = _get_agent_span(agent.name)
+    span_data = cast(dict[str, Any], agent_span["span_data"])
+    assert span_data["tools"] == ["computer"]
 
 
 @pytest.mark.asyncio

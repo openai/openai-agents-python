@@ -15,7 +15,6 @@ from agents import (
     Button,
     ComputerProvider,
     ComputerTool,
-    Environment,
     RunContextWrapper,
     Runner,
     trace,
@@ -109,10 +108,6 @@ class LocalPlaywrightComputer(AsyncComputer):
     def page(self) -> Page:
         assert self._page is not None
         return self._page
-
-    @property
-    def environment(self) -> Environment:
-        return "browser"
 
     @property
     def dimensions(self) -> tuple[int, int]:
