@@ -114,71 +114,180 @@ if _enable_litellm_patch.lower() in ("1", "true"):
     _patch_litellm_serializer_warnings()
 
 
-def _add_cache_control_to_content(msg: dict[str, Any]) -> None:
-    """Add cache_control to a message's content (mutates in place).
-
-    Handles both string and list content without changing the content format.
-    For string content, converts to list format with cache_control.
-    For list content, adds cache_control to the last text block.
-    """
+def _has_cacheable_content(msg: dict[str, Any]) -> bool:
+    """Return True if the message contains at least one text or tool_result block."""
     content = msg.get("content")
     if isinstance(content, str):
-        msg["content"] = [
-            {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
-        ]
-    elif isinstance(content, list):
-        for j in range(len(content) - 1, -1, -1):
-            if isinstance(content[j], dict) and content[j].get("type") == "text":
-                content[j]["cache_control"] = {"type": "ephemeral"}
-                break
+        return bool(content)
+    if isinstance(content, list):
+        return any(
+            isinstance(b, dict) and b.get("type") in ("text", "tool_result")
+            for b in content
+        )
+    return False
 
 
-def normalize_message_content_to_list(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Normalize all string content to list format for consistent caching (mutates in place).
+def normalize_message_content_to_list(msg: dict[str, Any]) -> None:
+    """Convert string content to list format so cache_control can be attached."""
+    content = msg.get("content")
+    if isinstance(content, str):
+        msg["content"] = [{"type": "text", "text": content}]
 
-    This ensures the Anthropic API receives the same token sequence regardless of whether
-    messages come from in-memory (possibly mutated) or from database (original string format).
-    Messages with None content (e.g., assistant tool_call messages) are left unchanged.
+
+def _stamp_cache_control_on_last_block(msg: dict[str, Any]) -> bool:
+    """Add cache_control to the last text/tool_result block of a message.
+
+    Returns True if a block was stamped, False otherwise.
+    Normalises string content to list format first so the marker can attach.
+    """
+    normalize_message_content_to_list(msg)
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    for j in range(len(content) - 1, -1, -1):
+        if isinstance(content[j], dict) and content[j].get("type") in ("text", "tool_result"):
+            content[j]["cache_control"] = {"type": "ephemeral"}
+            return True
+    return False
+
+
+def _strip_all_cache_control(messages: list[dict[str, Any]]) -> None:
+    """Remove ALL cache_control markers from every message.
+
+    Messages may carry leftover cache_control from previous turns when
+    the SDK reuses message objects across calls (e.g. with
+    preserve_thinking_blocks=True).  Leftover markers waste breakpoint
+    slots (Anthropic allows max 4) and can prevent the intended "system +
+    last" strategy from working correctly.  Stripping first ensures we
+    always start with a clean slate.
     """
     for msg in messages:
         content = msg.get("content")
-        if isinstance(content, str):
-            msg["content"] = [{"type": "text", "text": content}]
-    return messages
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
+                    # Also strip from nested content (e.g. tool_result inner blocks)
+                    nested = block.get("content")
+                    if isinstance(nested, list):
+                        for nb in nested:
+                            if isinstance(nb, dict):
+                                nb.pop("cache_control", None)
+        # Strip message-level cache_control (used by some litellm paths)
+        if isinstance(msg, dict):
+            msg.pop("cache_control", None)
 
 
-def add_cache_control_to_last_message(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Add cache_control to the last message in the conversation (mutates in place)."""
-    if not messages:
-        return messages
-    _add_cache_control_to_content(messages[-1])
-    return messages
+def _strip_thinking_blocks_from_history(messages: list[dict[str, Any]]) -> None:
+    """Remove thinking/redacted_thinking blocks from historical assistant messages.
 
+    When extended thinking is enabled and a non-tool-result user message is
+    added (i.e., a new user question in a cross-workflow turn), Anthropic's
+    API server-side strips all previous thinking blocks from context before
+    computing the cache prefix.  This means:
 
-def add_cache_control_to_last_user_message(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Add cache_control to the last user message in the conversation (mutates in place)."""
-    if not messages:
-        return messages
+      Turn 2 prefix (tool-result turn): includes thinking blocks -> WRITE
+      Turn 3 prefix (new question turn): thinking blocks stripped -> MISS
 
-    for i in range(len(messages) - 1, -1, -1):
-        if isinstance(messages[i], dict) and messages[i].get("role") == "user":
-            _add_cache_control_to_content(messages[i])
-            break
+    By proactively stripping thinking blocks client-side, we ensure the
+    prefix is identical between Turn 2 and Turn 3, enabling cache hits.
 
-    return messages
-
-
-def add_cache_control_to_system_message(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Add cache_control to the system message (mutates in place).
-
-    The system prompt is typically the most stable part of the input, making it
-    an ideal cache anchor point. This creates a separate cache breakpoint that
-    survives even when messages change between turns.
+    The model still generates NEW thinking via the ``thinking`` parameter;
+    only HISTORICAL thinking blocks (from previous assistant responses)
+    are removed.
     """
     for msg in messages:
-        if isinstance(msg, dict) and msg.get("role") == "system":
-            _add_cache_control_to_content(msg)
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        # Remove thinking and redacted_thinking blocks
+        msg["content"] = [
+            block for block in content
+            if not (
+                isinstance(block, dict)
+                and block.get("type") in ("thinking", "redacted_thinking")
+            )
+        ]
+        # If content is now empty, set a minimal text block to keep valid format
+        if not msg["content"]:
+            msg["content"] = [{"type": "text", "text": ""}]
+
+
+def add_cache_control_for_incremental_caching(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Place cache_control breakpoints for incremental prefix caching.
+
+    Strategy  (uses only 2 of the 4 allowed breakpoints):
+
+    1. **System message** -- mark the system prompt so that the tools +
+       system prefix is cached at level-1.  This portion is identical on
+       every call and should always be a cache READ after the first.
+
+    2. **Last message** -- mark the very last content-bearing message in
+       the array so that the *entire* conversation up to that point is
+       cached at level-2.
+
+    How it produces incremental reads:
+        Call N  : breakpoint at end  -> WRITE everything
+        Call N+1: Anthropic checks backwards from the new end-breakpoint,
+                  finds Call N's cached prefix  -> READ (old) + WRITE (delta)
+
+    cache_control markers are NOT part of the cache-key comparison (only
+    content is hashed), so we can freely move the end-breakpoint forward
+    each turn without invalidating the prefix.
+
+    CRITICAL: All tool messages must be normalised to list format on every
+    call, not just the stamped one.  Otherwise a tool_result that was the
+    last message on Call N (normalised to array) reverts to string format
+    on Call N+1 (no longer last), changing the serialised prefix bytes and
+    causing a cache miss.
+
+    CRITICAL: Historical thinking blocks must be stripped before caching
+    because Anthropic strips them server-side on non-tool-result turns,
+    causing prefix mismatches between within-workflow and cross-workflow
+    calls.
+    """
+    if not messages:
+        return messages
+
+    # 0a. Strip ALL leftover cache_control from previous turns.
+    #     Messages may carry stale markers when the SDK reuses objects
+    #     across calls (e.g. preserve_thinking_blocks=True).
+    _strip_all_cache_control(messages)
+
+    # 0b. Strip thinking blocks from historical assistant messages.
+    #     Anthropic strips them server-side on new assistant loops (when
+    #     non-tool-result user content appears), which changes the prefix
+    #     and breaks cross-workflow caching.  By stripping client-side we
+    #     keep the prefix consistent across all call patterns.
+    _strip_thinking_blocks_from_history(messages)
+
+    # 0c. Normalise ALL tool-message content to list format so the
+    #     Anthropic-native payload uses a consistent content structure
+    #     (array of blocks) across calls -- even for messages that are
+    #     not being stamped with cache_control this turn.
+    for msg in messages:
+        if msg.get("role") == "tool":
+            normalize_message_content_to_list(msg)
+
+    # 1. Mark the system message (first message with role=system).
+    for msg in messages:
+        if msg.get("role") == "system":
+            _stamp_cache_control_on_last_block(msg)
             break
+
+    # 2. Mark the LAST content-bearing message (any role except system).
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if msg.get("role") == "system":
+            continue  # already handled above
+        if _has_cacheable_content(msg):
+            _stamp_cache_control_on_last_block(msg)
+            break
+
     return messages
 
 
@@ -550,20 +659,6 @@ class LitellmModel(Model):
 
         converted_tools = _to_dump_compatible(converted_tools)
 
-        # Sort tools by name for deterministic ordering.
-        # Anthropic cache hierarchy: tools -> system -> messages.
-        # Any change in the tools array (including order) invalidates the
-        # system and messages cache.  Sorting ensures stable tool ordering
-        # regardless of how tools are registered or initialized.
-        if self._is_anthropic_model() and converted_tools:
-            converted_tools.sort(
-                key=lambda t: (
-                    t.get("function", {}).get("name", "")
-                    if "function" in t
-                    else t.get("name", "")
-                )
-            )
-
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
@@ -715,20 +810,9 @@ class LitellmModel(Model):
             # Apply Anthropic-specific message transformations.
             final_messages = cast(list[dict[str, Any]], converted_messages)
 
-            # Apply cache control with up to 4 strategic breakpoints.
-            # Anthropic cache hierarchy: tools -> system -> messages
-            # Breakpoints: (1) system prompt, (2) last user msg, (3) last msg overall
+            # Apply cache control: system + last message for incremental prefix caching.
             if self.enable_cache_control:
-                # Normalize all string content to list format for consistent caching.
-                # This prevents cache misses caused by format differences between
-                # in-memory messages (mutated to list) and DB-loaded messages (string).
-                normalize_message_content_to_list(final_messages)
-                # Breakpoint 1: System prompt (most stable, rarely changes)
-                add_cache_control_to_system_message(final_messages)
-                # Breakpoint 2: Last user message (conversation history anchor)
-                add_cache_control_to_last_user_message(final_messages)
-                # Breakpoint 3: Last message overall (incremental turn cache)
-                add_cache_control_to_last_message(final_messages)
+                final_messages = add_cache_control_for_incremental_caching(final_messages)
 
             # Append mock tool use message if deferred tools are enabled.
             if mock_tool_use_msg:
