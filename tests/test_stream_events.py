@@ -1,7 +1,10 @@
 import asyncio
 import time
+from typing import Any, cast
 
 import pytest
+from mcp import Tool as MCPTool
+from openai._models import construct_type
 from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseContentPartAddedEvent,
@@ -10,6 +13,7 @@ from openai.types.responses import (
     ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseInProgressEvent,
+    ResponseOutputItem,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponseReasoningSummaryPartAddedEvent,
@@ -18,21 +22,58 @@ from openai.types.responses import (
     ResponseReasoningSummaryTextDoneEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
+    ResponseToolSearchCall,
+    ResponseToolSearchOutputItem,
+)
+from openai.types.responses.response_output_item import (
+    McpApprovalRequest,
+    McpListTools,
+    McpListToolsTool,
 )
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 
 from agents import Agent, HandoffCallItem, Runner, function_tool
 from agents.extensions.handoff_filters import remove_all_tools
 from agents.handoffs import handoff
-from agents.items import MessageOutputItem, ReasoningItem, ToolCallItem, ToolCallOutputItem
+from agents.items import (
+    MCPApprovalRequestItem,
+    MCPApprovalResponseItem,
+    MCPListToolsItem,
+    MessageOutputItem,
+    ReasoningItem,
+    RunItem,
+    ToolApprovalItem,
+    ToolCallItem,
+    ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
+)
+from agents.run_internal.streaming import stream_step_items_to_queue, stream_step_result_to_queue
 
 from .fake_model import FakeModel
+from .mcp.helpers import FakeMCPServer
 from .test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
 
 
 def get_reasoning_item() -> ResponseReasoningItem:
     return ResponseReasoningItem(
         id="rid", type="reasoning", summary=[Summary(text="thinking", type="summary_text")]
+    )
+
+
+def _make_hosted_mcp_list_tools(server_label: str, tool_name: str) -> McpListTools:
+    return McpListTools(
+        id=f"list_{server_label}",
+        server_label=server_label,
+        tools=[
+            McpListToolsTool(
+                name=tool_name,
+                input_schema={},
+                description="Search the docs.",
+                annotations={"title": "Search Docs"},
+            )
+        ],
+        type="mcp_list_tools",
     )
 
 
@@ -79,6 +120,137 @@ async def test_stream_events_main():
     assert tool_call_start_time > 0, "tool_call_item was not observed"
     assert tool_call_end_time > 0, "tool_call_output_item was not observed"
     assert tool_call_start_time < tool_call_end_time, "Tool call ended before or equals it started?"
+
+
+@pytest.mark.asyncio
+async def test_stream_events_tool_called_includes_local_mcp_title() -> None:
+    model = FakeModel()
+    server = FakeMCPServer(
+        tools=[
+            MCPTool(
+                name="search_docs",
+                inputSchema={},
+                description=None,
+                title="Search Docs",
+            )
+        ]
+    )
+    agent = Agent(name="MCPAgent", model=model, mcp_servers=[server])
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("search_docs", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="Hello")
+    seen_tool_item: ToolCallItem | None = None
+    async for event in result.stream_events():
+        if (
+            event.type == "run_item_stream_event"
+            and isinstance(event.item, ToolCallItem)
+            and seen_tool_item is None
+        ):
+            seen_tool_item = event.item
+
+    assert seen_tool_item is not None
+    assert seen_tool_item.description == "Search Docs"
+    assert seen_tool_item.title == "Search Docs"
+
+
+def test_stream_step_items_to_queue_emits_helper_events_and_skips_approvals(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    agent = Agent(name="StreamHelper")
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    request_item = McpApprovalRequest(
+        id="mcp-approval-1",
+        type="mcp_approval_request",
+        server_label="test-mcp-server",
+        arguments="{}",
+        name="search_docs",
+    )
+
+    items: list[RunItem] = [
+        ToolSearchCallItem(
+            agent=agent,
+            raw_item=ResponseToolSearchCall(
+                id="tsc_123",
+                type="tool_search_call",
+                arguments={"query": "docs"},
+                execution="client",
+                status="completed",
+            ),
+        ),
+        ToolSearchOutputItem(
+            agent=agent,
+            raw_item=ResponseToolSearchOutputItem(
+                id="tso_123",
+                type="tool_search_output",
+                execution="client",
+                status="completed",
+                tools=[],
+            ),
+        ),
+        MCPApprovalRequestItem(agent=agent, raw_item=request_item),
+        MCPApprovalResponseItem(
+            agent=agent,
+            raw_item=cast(
+                Any,
+                {
+                    "type": "mcp_approval_response",
+                    "approval_request_id": "mcp-approval-1",
+                    "approve": True,
+                },
+            ),
+        ),
+        MCPListToolsItem(
+            agent=agent,
+            raw_item=_make_hosted_mcp_list_tools("test-mcp-server", "search_docs"),
+        ),
+        ToolApprovalItem(
+            agent=agent,
+            raw_item={"type": "function_call", "call_id": "call-1", "name": "tool"},
+        ),
+        cast(Any, object()),
+    ]
+
+    with caplog.at_level("WARNING", logger="openai.agents"):
+        stream_step_items_to_queue(items, queue)
+
+    names = []
+    while not queue.empty():
+        event = queue.get_nowait()
+        names.append(event.name)
+
+    assert names == [
+        "tool_search_called",
+        "tool_search_output_created",
+        "mcp_approval_requested",
+        "mcp_approval_response",
+        "mcp_list_tools",
+    ]
+    assert "Unexpected item type" in caplog.text
+
+
+def test_stream_step_result_to_queue_uses_new_step_items() -> None:
+    agent = Agent(name="StreamHelper")
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+
+    tool_search_item = ToolSearchCallItem(
+        agent=agent,
+        raw_item={
+            "type": "tool_search_call",
+            "queries": [{"search_term": "docs"}],
+        },
+    )
+    step_result = cast(Any, type("StepResult", (), {"new_step_items": [tool_search_item]})())
+
+    stream_step_result_to_queue(step_result, queue)
+
+    event = queue.get_nowait()
+    assert event.name == "tool_search_called"
 
 
 @pytest.mark.asyncio
@@ -280,3 +452,71 @@ async def test_complete_streaming_events():
     assert events[26].type == "run_item_stream_event"
     assert events[26].name == "message_output_created"
     assert isinstance(events[26].item, MessageOutputItem)
+
+
+@pytest.mark.asyncio
+async def test_stream_events_emit_tool_search_items() -> None:
+    model = FakeModel()
+    agent = Agent(name="ToolSearchAgent", model=model)
+    tool_search_call = cast(
+        ResponseOutputItem,
+        construct_type(
+            type_=ResponseOutputItem,
+            value={
+                "id": "tsc_stream",
+                "type": "tool_search_call",
+                "arguments": {"paths": ["crm"], "query": "orders"},
+                "execution": "server",
+                "status": "completed",
+            },
+        ),
+    )
+    tool_search_output = cast(
+        ResponseOutputItem,
+        construct_type(
+            type_=ResponseOutputItem,
+            value={
+                "id": "tso_stream",
+                "type": "tool_search_output",
+                "execution": "server",
+                "status": "completed",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "list_open_orders",
+                        "description": "List open orders for a customer.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "customer_id": {
+                                    "type": "string",
+                                }
+                            },
+                            "required": ["customer_id"],
+                        },
+                        "defer_loading": True,
+                    }
+                ],
+            },
+        ),
+    )
+    model.add_multiple_turn_outputs(
+        [[tool_search_call, tool_search_output, get_text_message("Done")]]
+    )
+
+    result = Runner.run_streamed(agent, input="Search for CRM order tools")
+
+    seen_events: list[tuple[str, object]] = []
+    async for event in result.stream_events():
+        if event.type != "run_item_stream_event":
+            continue
+        seen_events.append((event.name, event.item))
+
+    assert any(
+        name == "tool_search_called" and isinstance(item, ToolSearchCallItem)
+        for name, item in seen_events
+    )
+    assert any(
+        name == "tool_search_output_created" and isinstance(item, ToolSearchOutputItem)
+        for name, item in seen_events
+    )

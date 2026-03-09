@@ -4,96 +4,100 @@ search:
 ---
 # コード例
 
-[repo](https://github.com/openai/openai-agents-python/tree/main/examples) の examples セクションで、 SDK のさまざまなサンプル実装をご覧ください。 examples は、異なるパターンと機能を示すいくつかのカテゴリーに整理されています。
+[repo](https://github.com/openai/openai-agents-python/tree/main/examples) の examples セクションで、 SDK のさまざまなサンプル実装を確認できます。examples は、異なるパターンと機能を示す複数のカテゴリーに整理されています。
 
 ## カテゴリー
 
 -   **[agent_patterns](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns):**
-    このカテゴリーの例は、次のような一般的な エージェント 設計パターンを示します。
+    このカテゴリーのコード例では、次のような一般的なエージェント設計パターンを紹介しています。
 
-    -   決定的なワークフロー
+    -   決定論的ワークフロー
     -   Agents as tools
-    -   並列 エージェント 実行
+    -   エージェントの並列実行
     -   条件付きツール使用
-    -   入出力 ガードレール
-    -   判定者としての LLM
+    -   入出力ガードレール
+    -   審判としての LLM
     -   ルーティング
-    -   ストリーミング ガードレール
+    -   ストリーミングガードレール
 
 -   **[basic](https://github.com/openai/openai-agents-python/tree/main/examples/basic):**
-    これらの例は、次のような SDK の基礎的な機能を紹介します。
+    これらのコード例では、次のような SDK の基本機能を紹介しています。
 
-    -   Hello World の例 (Default model、 GPT-5、 open-weight model)
-    -   エージェント のライフサイクル管理
-    -   動的な システムプロンプト
-    -   ストリーミング 出力 (text、 items、 function call args)
-    -   ターンをまたいで共有セッションヘルパーを使う Responses websocket transport (`examples/basic/stream_ws.py`)
+    -   Hello world のコード例 ( デフォルトモデル、 GPT-5、 open-weight モデル )
+    -   エージェントライフサイクル管理
+    -   動的システムプロンプト
+    -   ストリーミング出力 ( テキスト、項目、関数呼び出し引数 )
+    -   ターン間で共有セッションヘルパーを使用する Responses websocket transport (`examples/basic/stream_ws.py`)
     -   プロンプトテンプレート
-    -   ファイル処理 (ローカルとリモート、画像と PDF)
+    -   ファイル処理 ( ローカルおよびリモート、画像および PDF )
     -   使用状況トラッキング
     -   非 strict な出力型
     -   以前の response ID の使用
 
 -   **[customer_service](https://github.com/openai/openai-agents-python/tree/main/examples/customer_service):**
-    航空会社向けのカスタマーサービスシステム例です。
+    航空会社向けのカスタマーサービスシステムのコード例です。
 
 -   **[financial_research_agent](https://github.com/openai/openai-agents-python/tree/main/examples/financial_research_agent):**
-    金融データ分析のための エージェント とツールを用いた、構造化されたリサーチワークフローを示す金融リサーチ エージェント です。
+    金融データ分析向けのエージェントとツールを使った構造化リサーチワークフローを示す、金融リサーチエージェントです。
 
 -   **[handoffs](https://github.com/openai/openai-agents-python/tree/main/examples/handoffs):**
-    メッセージフィルタリングを伴う エージェント の ハンドオフ の実践例をご覧ください。
+    メッセージフィルタリングを伴うエージェントハンドオフの実践的なコード例をご覧ください。
 
 -   **[hosted_mcp](https://github.com/openai/openai-agents-python/tree/main/examples/hosted_mcp):**
-    hosted MCP (Model context protocol) コネクターと承認の使い方を示す例です。
+    hosted MCP (Model Context Protocol) コネクターと承認の使用方法を示すコード例です。
 
 -   **[mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp):**
-    次を含め、 MCP (Model context protocol) を用いた エージェント の構築方法を学びます。
+    MCP (Model Context Protocol) を用いたエージェントの構築方法を学べます。内容は次のとおりです。
 
-    -   ファイルシステムの例
-    -   Git の例
-    -   MCP プロンプトサーバーの例
-    -   SSE (Server-Sent Events) の例
-    -   ストリーム可能な HTTP の例
+    -   ファイルシステムのコード例
+    -   Git のコード例
+    -   MCP prompt server のコード例
+    -   SSE (Server-Sent Events) のコード例
+    -   Streamable HTTP のコード例
 
 -   **[memory](https://github.com/openai/openai-agents-python/tree/main/examples/memory):**
-    次を含む、 エージェント 向けのさまざまなメモリ実装の例です。
+    エージェント向けのさまざまなメモリ実装のコード例です。内容は次のとおりです。
 
     -   SQLite セッションストレージ
     -   高度な SQLite セッションストレージ
     -   Redis セッションストレージ
     -   SQLAlchemy セッションストレージ
-    -   暗号化されたセッションストレージ
-    -   OpenAI セッションストレージ
+    -   Dapr state store セッションストレージ
+    -   暗号化セッションストレージ
+    -   OpenAI Conversations セッションストレージ
+    -   Responses compaction セッションストレージ
 
 -   **[model_providers](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers):**
-    カスタムプロバイダーや LiteLLM 連携を含め、 SDK で非 OpenAI モデルを使用する方法を確認します。
+    カスタムプロバイダーや LiteLLM 連携を含め、 SDK で OpenAI 以外のモデルを使う方法を確認できます。
 
 -   **[realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime):**
-    次を含め、 SDK を使ってリアルタイム体験を構築する方法を示す例です。
+    SDK を使ってリアルタイム体験を構築する方法を示すコード例です。内容は次のとおりです。
 
-    -   Web アプリケーション
-    -   コマンドラインインターフェース
-    -   Twilio 連携
-    -   Twilio SIP 連携
+    -   構造化テキストおよび画像メッセージを使った Web アプリケーションパターン
+    -   コマンドラインの音声ループと再生処理
+    -   WebSocket 経由の Twilio Media Streams 連携
+    -   Realtime Calls API attach フローを使用した Twilio SIP 連携
 
 -   **[reasoning_content](https://github.com/openai/openai-agents-python/tree/main/examples/reasoning_content):**
-    reasoning content と structured outputs の扱い方を示す例です。
+    reasoning content と structured outputs の扱い方を示すコード例です。
 
 -   **[research_bot](https://github.com/openai/openai-agents-python/tree/main/examples/research_bot):**
-    複雑なマルチ エージェント のリサーチワークフローを示す、シンプルな ディープリサーチ クローンです。
+    複雑なマルチエージェントリサーチワークフローを示す、シンプルな ディープリサーチ クローンです。
 
 -   **[tools](https://github.com/openai/openai-agents-python/tree/main/examples/tools):**
-    次を含む OpenAI がホストするツール と、実験的な Codex ツール機能の実装方法を学びます。
+    OAI hosted tools と、次のような実験的な Codex ツール機能の実装方法を学べます。
 
     -   Web 検索 とフィルター付き Web 検索
     -   ファイル検索
-    -   Code Interpreter
+    -   Code interpreter
     -   インラインスキル付き hosted container shell (`examples/tools/container_shell_inline_skill.py`)
     -   スキル参照付き hosted container shell (`examples/tools/container_shell_skill_reference.py`)
+    -   ローカルスキル付き local shell (`examples/tools/local_shell_skill.py`)
+    -   namespace と遅延ツールを使う tool search (`examples/tools/tool_search.py`)
     -   コンピュータ操作
     -   画像生成
-    -   実験的な Codex ツールのワークフロー (`examples/tools/codex.py`)
-    -   実験的な Codex の同一スレッドワークフロー (`examples/tools/codex_same_thread.py`)
+    -   実験的な Codex ツールワークフロー (`examples/tools/codex.py`)
+    -   実験的な Codex 同一スレッドワークフロー (`examples/tools/codex_same_thread.py`)
 
 -   **[voice](https://github.com/openai/openai-agents-python/tree/main/examples/voice):**
-    ストリーミング音声の例を含め、当社の TTS および STT モデルを使用する音声 エージェント の例をご覧ください。
+    ストリーミング音声のコード例を含む、 TTS と STT モデルを使用した音声エージェントのコード例をご覧ください。

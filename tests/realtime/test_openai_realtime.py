@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 import websockets
 
-from agents import Agent
+from agents import Agent, function_tool
 from agents.exceptions import UserError
 from agents.handoffs import handoff
 from agents.realtime.model import RealtimeModelConfig
@@ -795,6 +795,15 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert cfg.audio.output is not None
         assert cfg.audio.output.format is not None
         assert cfg.audio.output.format.type == "audio/pcm"
+
+    def test_session_config_allows_tool_search_as_named_function_tool_choice(self, model):
+        cfg = model._get_session_config(
+            {
+                "tool_choice": "tool_search",
+                "tools": [function_tool(lambda city: city, name_override="tool_search")],
+            }
+        )
+        assert cfg.tool_choice == "tool_search"
 
     def test_session_config_preserves_sip_audio_formats(self, model):
         model._call_id = "call-123"

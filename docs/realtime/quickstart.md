@@ -1,9 +1,14 @@
 # Quickstart
 
-Realtime agents enable voice conversations with your AI agents using OpenAI's Realtime API. This guide walks you through creating your first realtime voice agent.
+Realtime agents in the Python SDK are server-side, low-latency agents built on the OpenAI Realtime API over WebSocket transport.
 
 !!! warning "Beta feature"
-Realtime agents are in beta. Expect some breaking changes as we improve the implementation.
+
+    Realtime agents are in beta. Expect some breaking changes as we improve the implementation.
+
+!!! note "Python SDK boundary"
+
+    The Python SDK does **not** provide a browser WebRTC transport. This page only covers Python-managed realtime sessions over server-side WebSockets. Use this SDK for server-side orchestration, tools, approvals, and telephony integrations. See also [Realtime transport](transport.md).
 
 ## Prerequisites
 
@@ -19,25 +24,28 @@ If you haven't already, install the OpenAI Agents SDK:
 pip install openai-agents
 ```
 
-## Creating your first realtime agent
+## Create a server-side realtime session
 
-### 1. Import required components
+### 1. Import the realtime components
 
 ```python
 import asyncio
+
 from agents.realtime import RealtimeAgent, RealtimeRunner
 ```
 
-### 2. Create a realtime agent
+### 2. Define the starting agent
 
 ```python
 agent = RealtimeAgent(
     name="Assistant",
-    instructions="You are a helpful voice assistant. Keep your responses conversational and friendly.",
+    instructions="You are a helpful voice assistant. Keep responses short and conversational.",
 )
 ```
 
-### 3. Set up the runner
+### 3. Configure the runner
+
+Prefer the nested `audio.input` / `audio.output` session settings shape for new code.
 
 ```python
 runner = RealtimeRunner(
@@ -45,224 +53,106 @@ runner = RealtimeRunner(
     config={
         "model_settings": {
             "model_name": "gpt-realtime",
-            "voice": "ash",
-            "modalities": ["audio"],
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "input_audio_transcription": {"model": "gpt-4o-mini-transcribe"},
-            "turn_detection": {"type": "semantic_vad", "interrupt_response": True},
+            "audio": {
+                "input": {
+                    "format": "pcm16",
+                    "transcription": {"model": "gpt-4o-mini-transcribe"},
+                    "turn_detection": {
+                        "type": "semantic_vad",
+                        "interrupt_response": True,
+                    },
+                },
+                "output": {
+                    "format": "pcm16",
+                    "voice": "ash",
+                },
+            },
         }
-    }
+    },
 )
 ```
 
-### 4. Start a session
+### 4. Start the session and send input
+
+`runner.run()` returns a `RealtimeSession`. The connection is opened when you enter the session context.
 
 ```python
-# Start the session
-session = await runner.run()
-
-async with session:
-    print("Session started! The agent will stream audio responses in real-time.")
-    # Process events
-    async for event in session:
-        try:
-            if event.type == "agent_start":
-                print(f"Agent started: {event.agent.name}")
-            elif event.type == "agent_end":
-                print(f"Agent ended: {event.agent.name}")
-            elif event.type == "handoff":
-                print(f"Handoff from {event.from_agent.name} to {event.to_agent.name}")
-            elif event.type == "tool_start":
-                print(f"Tool started: {event.tool.name}")
-            elif event.type == "tool_end":
-                print(f"Tool ended: {event.tool.name}; output: {event.output}")
-            elif event.type == "audio_end":
-                print("Audio ended")
-            elif event.type == "audio":
-                # Enqueue audio for callback-based playback with metadata
-                # Non-blocking put; queue is unbounded, so drops won’t occur.
-                pass
-            elif event.type == "audio_interrupted":
-                print("Audio interrupted")
-                # Begin graceful fade + flush in the audio callback and rebuild jitter buffer.
-            elif event.type == "error":
-                print(f"Error: {event.error}")
-            elif event.type == "history_updated":
-                pass  # Skip these frequent events
-            elif event.type == "history_added":
-                pass  # Skip these frequent events
-            elif event.type == "raw_model_event":
-                print(f"Raw model event: {_truncate_str(str(event.data), 200)}")
-            else:
-                print(f"Unknown event type: {event.type}")
-        except Exception as e:
-            print(f"Error processing event: {_truncate_str(str(e), 200)}")
-
-def _truncate_str(s: str, max_length: int) -> str:
-    if len(s) > max_length:
-        return s[:max_length] + "..."
-    return s
-```
-
-## Full example (same flow in one file)
-
-This is the same quickstart flow rewritten as a single script.
-
-```python
-import asyncio
-from agents.realtime import RealtimeAgent, RealtimeRunner
-
-async def main():
-    # Create the agent
-    agent = RealtimeAgent(
-        name="Assistant",
-        instructions="You are a helpful voice assistant. Keep responses brief and conversational.",
-    )
-    # Set up the runner with configuration
-    runner = RealtimeRunner(
-        starting_agent=agent,
-        config={
-            "model_settings": {
-                "model_name": "gpt-realtime",
-                "voice": "ash",
-                "modalities": ["audio"],
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "input_audio_transcription": {"model": "gpt-4o-mini-transcribe"},
-                "turn_detection": {"type": "semantic_vad", "interrupt_response": True},
-            }
-        },
-    )
-    # Start the session
+async def main() -> None:
     session = await runner.run()
 
     async with session:
-        print("Session started! The agent will stream audio responses in real-time.")
-        # Process events
-        async for event in session:
-            try:
-                if event.type == "agent_start":
-                    print(f"Agent started: {event.agent.name}")
-                elif event.type == "agent_end":
-                    print(f"Agent ended: {event.agent.name}")
-                elif event.type == "handoff":
-                    print(f"Handoff from {event.from_agent.name} to {event.to_agent.name}")
-                elif event.type == "tool_start":
-                    print(f"Tool started: {event.tool.name}")
-                elif event.type == "tool_end":
-                    print(f"Tool ended: {event.tool.name}; output: {event.output}")
-                elif event.type == "audio_end":
-                    print("Audio ended")
-                elif event.type == "audio":
-                    # Enqueue audio for callback-based playback with metadata
-                    # Non-blocking put; queue is unbounded, so drops won’t occur.
-                    pass
-                elif event.type == "audio_interrupted":
-                    print("Audio interrupted")
-                    # Begin graceful fade + flush in the audio callback and rebuild jitter buffer.
-                elif event.type == "error":
-                    print(f"Error: {event.error}")
-                elif event.type == "history_updated":
-                    pass  # Skip these frequent events
-                elif event.type == "history_added":
-                    pass  # Skip these frequent events
-                elif event.type == "raw_model_event":
-                    print(f"Raw model event: {_truncate_str(str(event.data), 200)}")
-                else:
-                    print(f"Unknown event type: {event.type}")
-            except Exception as e:
-                print(f"Error processing event: {_truncate_str(str(e), 200)}")
+        await session.send_message("Say hello in one short sentence.")
 
-def _truncate_str(s: str, max_length: int) -> str:
-    if len(s) > max_length:
-        return s[:max_length] + "..."
-    return s
+        async for event in session:
+            if event.type == "audio":
+                # Forward or play event.audio.data.
+                pass
+            elif event.type == "history_added":
+                print(event.item)
+            elif event.type == "agent_end":
+                # One assistant turn finished.
+                break
+            elif event.type == "error":
+                print(f"Error: {event.error}")
+
 
 if __name__ == "__main__":
-    # Run the session
     asyncio.run(main())
 ```
 
-## Configuration and deployment notes
+`session.send_message()` accepts either a plain string or a structured realtime message. For raw audio chunks, use [`session.send_audio()`][agents.realtime.session.RealtimeSession.send_audio].
 
-Use these options after you have a basic session running.
+## What this quickstart does not include
 
-### Model settings
+-   Microphone capture and speaker playback code. See the realtime examples in [`examples/realtime`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime).
+-   SIP / telephony attach flows. See [Realtime transport](transport.md) and the [SIP section](guide.md#sip-and-telephony).
 
--   `model_name`: Choose from available realtime models (e.g., `gpt-realtime`)
--   `voice`: Select voice (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
--   `modalities`: Enable text or audio (`["text"]` or `["audio"]`)
--   `output_modalities`: Optionally constrain output to text and/or audio (`["text"]`, `["audio"]`, or both)
+## Key settings
 
-### Audio settings
+Once the basic session works, the settings most people reach for next are:
 
--   `input_audio_format`: Format for input audio (`pcm16`, `g711_ulaw`, `g711_alaw`)
--   `output_audio_format`: Format for output audio
--   `input_audio_transcription`: Transcription configuration
--   `input_audio_noise_reduction`: Input noise-reduction config (`near_field` or `far_field`)
+-   `model_name`
+-   `audio.input.format`, `audio.output.format`
+-   `audio.input.transcription`
+-   `audio.input.noise_reduction`
+-   `audio.input.turn_detection` for automatic turn detection
+-   `audio.output.voice`
+-   `tool_choice`, `prompt`, `tracing`
+-   `async_tool_calls`, `guardrails_settings.debounce_text_length`, `tool_error_formatter`
 
-### Turn detection
+The older flat aliases such as `input_audio_format`, `output_audio_format`, `input_audio_transcription`, and `turn_detection` still work, but nested `audio` settings are preferred for new code.
 
--   `type`: Detection method (`server_vad`, `semantic_vad`)
--   `threshold`: Voice activity threshold (0.0-1.0)
--   `silence_duration_ms`: Silence duration to detect turn end
--   `prefix_padding_ms`: Audio padding before speech
+For manual turn control, use a raw `session.update` / `input_audio_buffer.commit` / `response.create` flow as described in the [Realtime agents guide](guide.md#manual-response-control).
 
-### Run settings
+For the full schema, see [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] and [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings].
 
--   `async_tool_calls`: Whether function tools run asynchronously (defaults to `True`)
--   `guardrails_settings.debounce_text_length`: Minimum accumulated transcript size before output guardrails run (defaults to `100`)
--   `tool_error_formatter`: Callback to customize model-visible tool error messages
+## Connection options
 
-For the full schema, see the API reference for [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] and [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings].
-
-### Authentication
-
-Make sure your OpenAI API key is set in your environment:
+Set your API key in the environment:
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-Or pass it directly when creating the session:
+Or pass it directly when starting the session:
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})
 ```
 
-### Azure OpenAI endpoint format
+`model_config` also supports:
 
-If you connect to Azure OpenAI instead of OpenAI's default endpoint, pass a GA Realtime URL in
-`model_config["url"]` and set auth headers explicitly.
+-   `url`: Custom WebSocket endpoint
+-   `headers`: Custom request headers
+-   `call_id`: Attach to an existing realtime call. In this repo, the documented attach flow is SIP.
+-   `playback_tracker`: Report how much audio the user has actually heard
 
-```python
-session = await runner.run(
-    model_config={
-        "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
-        "headers": {"api-key": "<your-azure-api-key>"},
-    }
-)
-```
+If you pass `headers` explicitly, the SDK will **not** inject an `Authorization` header for you.
 
-You can also use a bearer token:
-
-```python
-session = await runner.run(
-    model_config={
-        "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
-        "headers": {"authorization": f"Bearer {token}"},
-    }
-)
-```
-
-Avoid using the legacy beta path (`/openai/realtime?api-version=...`) with realtime agents. The
-SDK expects the GA Realtime interface.
+When connecting to Azure OpenAI, pass a GA Realtime endpoint URL in `model_config["url"]` and explicit headers. Avoid the legacy beta path (`/openai/realtime?api-version=...`) with realtime agents. See the [Realtime agents guide](guide.md#low-level-access-and-custom-endpoints) for details.
 
 ## Next steps
 
--   [Learn more about realtime agents](guide.md)
--   Check out working examples in the [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) folder
--   Add tools to your agent
--   Implement handoffs between agents
--   Set up guardrails for safety
+-   Read [Realtime transport](transport.md) to choose between server-side WebSocket and SIP.
+-   Read the [Realtime agents guide](guide.md) for lifecycle, structured input, approvals, handoffs, guardrails, and low-level control.
+-   Browse the examples in [`examples/realtime`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime).

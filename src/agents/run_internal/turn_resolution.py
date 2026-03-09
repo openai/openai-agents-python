@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, cast
 
 from openai.types.responses import (
@@ -27,6 +27,17 @@ from openai.types.responses.response_output_item import (
 )
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
+from .._mcp_tool_metadata import collect_mcp_list_tools_metadata
+from .._tool_identity import (
+    build_function_tool_lookup_map,
+    get_function_tool_lookup_key,
+    get_function_tool_lookup_key_for_call,
+    get_tool_call_namespace,
+    get_tool_call_qualified_name,
+    get_tool_call_trace_name,
+    normalize_tool_call_for_function_tool,
+    should_allow_bare_name_approval_alias,
+)
 from ..agent import Agent, ToolsToFinalOutputResult
 from ..agent_output import AgentOutputSchemaBase
 from ..agent_tool_state import get_agent_tool_state_scope, peek_agent_tool_run_result
@@ -46,7 +57,11 @@ from ..items import (
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
     TResponseInputItem,
+    coerce_tool_search_call_raw_item,
+    coerce_tool_search_output_raw_item,
 )
 from ..lifecycle import RunHooks
 from ..logger import logger
@@ -108,6 +123,7 @@ from .tool_execution import (
     parse_apply_patch_function_args,
     process_hosted_mcp_approvals,
     resolve_approval_rejection_message,
+    resolve_enabled_function_tools,
     should_keep_hosted_mcp_item,
 )
 from .tool_planning import (
@@ -461,7 +477,7 @@ async def check_for_final_output_from_tools(
     elif isinstance(agent.tool_use_behavior, dict):
         names = agent.tool_use_behavior.get("stop_at_tool_names", [])
         for tool_result in tool_results:
-            if tool_result.tool.name in names:
+            if tool_result.tool.name in names or tool_result.tool.qualified_name in names:
                 return ToolsToFinalOutputResult(
                     is_final_output=True, final_output=tool_result.output
                 )
@@ -694,7 +710,7 @@ async def resolve_interrupted_turn(
                 context_wrapper=context_wrapper,
                 run_config=run_config,
                 tool_type="function",
-                tool_name=function_tool.name,
+                tool_name=get_tool_call_trace_name(tool_call) or function_tool.name,
                 call_id=call_id,
             )
         tool_origin = _get_tool_origin_info(function_tool)
@@ -836,7 +852,10 @@ async def resolve_interrupted_turn(
                 has_pending = True
                 continue
             status = context_wrapper.get_approval_status(
-                interruption.tool_name or "", call_id, existing_pending=interruption
+                interruption.tool_name or "",
+                call_id,
+                tool_namespace=interruption.tool_namespace,
+                existing_pending=interruption,
             )
             if status is False:
                 return "rejected"
@@ -880,13 +899,19 @@ async def resolve_interrupted_turn(
             return True
         return getattr(approval_agent, "name", None) == agent.name
 
+    available_function_tools = await resolve_enabled_function_tools(agent, context_wrapper)
+    approval_rebuild_function_tools = available_function_tools
+    if pending_approval_items and agent.mcp_servers:
+        approval_rebuild_function_tools = [
+            tool
+            for tool in await agent.get_all_tools(context_wrapper)
+            if isinstance(tool, FunctionTool)
+        ]
+
     async def _rebuild_function_runs_from_approvals() -> list[ToolRunFunction]:
         if not pending_approval_items:
             return []
-        all_tools = await agent.get_all_tools(context_wrapper)
-        tool_map: dict[str, FunctionTool] = {
-            tool.name: tool for tool in all_tools if isinstance(tool, FunctionTool)
-        }
+        tool_map = build_function_tool_lookup_map(approval_rebuild_function_tools)
         existing_pending_call_ids: set[str] = set()
         for existing_pending in pending_interruptions:
             if isinstance(existing_pending, ToolApprovalItem):
@@ -902,7 +927,10 @@ async def resolve_interrupted_turn(
                 return
             tool_name = approval.tool_name or ""
             approval_status = context_wrapper.get_approval_status(
-                tool_name, call_id, existing_pending=approval
+                tool_name,
+                call_id,
+                tool_namespace=approval.tool_namespace,
+                existing_pending=approval,
             )
             if approval_status is None:
                 _add_pending_interruption(approval)
@@ -919,7 +947,14 @@ async def resolve_interrupted_turn(
                 _add_unmatched_pending(approval)
                 continue
             name = get_mapping_or_attr(raw, "name")
-            if not (isinstance(name, str) and name in tool_map):
+            namespace = get_tool_call_namespace(raw)
+            if namespace is None and isinstance(approval.tool_namespace, str):
+                namespace = approval.tool_namespace
+            approval_key = getattr(approval, "tool_lookup_key", None)
+            if approval_key is None:
+                approval_key = get_function_tool_lookup_key(name, namespace)
+            resolved_tool = tool_map.get(approval_key) if approval_key is not None else None
+            if not (isinstance(name, str) and resolved_tool is not None):
                 _add_unmatched_pending(approval)
                 continue
 
@@ -944,26 +979,36 @@ async def resolve_interrupted_turn(
                     "incomplete",
                 ):
                     valid_status = status  # type: ignore[assignment]
-                tool_call = ResponseFunctionToolCall(
-                    type="function_call",
-                    name=name,
-                    call_id=rebuilt_call_id,
-                    arguments=arguments,
-                    status=valid_status,
-                )
+                tool_call_payload: dict[str, Any] = {
+                    "type": "function_call",
+                    "name": name,
+                    "call_id": rebuilt_call_id,
+                    "arguments": arguments,
+                    "status": valid_status,
+                }
+                if namespace is not None:
+                    tool_call_payload["namespace"] = namespace
+                tool_call = ResponseFunctionToolCall(**tool_call_payload)
+            tool_call = cast(
+                ResponseFunctionToolCall,
+                normalize_tool_call_for_function_tool(tool_call, resolved_tool),
+            )
 
             if not (isinstance(rebuilt_call_id, str) and isinstance(arguments, str)):
                 _add_unmatched_pending(approval)
                 continue
 
             approval_status = context_wrapper.get_approval_status(
-                name, rebuilt_call_id, existing_pending=approval
+                name,
+                rebuilt_call_id,
+                tool_namespace=namespace,
+                existing_pending=approval,
             )
             if approval_status is False:
                 await _record_function_rejection(
                     rebuilt_call_id,
                     tool_call,
-                    tool_map[name],
+                    resolved_tool,
                 )
                 continue
             if approval_status is None:
@@ -971,7 +1016,7 @@ async def resolve_interrupted_turn(
                     _add_pending_interruption(approval)
                     existing_pending_call_ids.add(rebuilt_call_id)
                 continue
-            rebuilt_runs.append(ToolRunFunction(function_tool=tool_map[name], tool_call=tool_call))
+            rebuilt_runs.append(ToolRunFunction(function_tool=resolved_tool, tool_call=tool_call))
         return rebuilt_runs
 
     function_tool_runs = await _select_function_tool_runs_for_resume(
@@ -987,6 +1032,12 @@ async def resolve_interrupted_turn(
             raw_item=run.tool_call,
             tool_name=run.function_tool.name,
             tool_origin=_get_tool_origin_info(run.function_tool),
+            tool_namespace=get_tool_call_namespace(run.tool_call),
+            tool_lookup_key=get_function_tool_lookup_key_for_call(run.tool_call),
+            _allow_bare_name_alias=should_allow_bare_name_approval_alias(
+                run.function_tool,
+                available_function_tools,
+            ),
         ),
     )
 
@@ -1225,6 +1276,7 @@ def process_model_response(
     response: ModelResponse,
     output_schema: AgentOutputSchemaBase | None,
     handoffs: list[Handoff],
+    existing_items: Sequence[RunItem] | None = None,
 ) -> ProcessedResponse:
     items: list[RunItem] = []
 
@@ -1237,7 +1289,9 @@ def process_model_response(
     mcp_approval_requests = []
     tools_used: list[str] = []
     handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
-    function_map = {tool.name: tool for tool in all_tools if isinstance(tool, FunctionTool)}
+    function_map = build_function_tool_lookup_map(
+        [tool for tool in all_tools if isinstance(tool, FunctionTool)]
+    )
     computer_tool = next((tool for tool in all_tools if isinstance(tool, ComputerTool)), None)
     local_shell_tool = next((tool for tool in all_tools if isinstance(tool, LocalShellTool)), None)
     shell_tool = next((tool for tool in all_tools if isinstance(tool, ShellTool)), None)
@@ -1247,6 +1301,21 @@ def process_model_response(
         for tool in all_tools
         if isinstance(tool, HostedMCPTool)
     }
+    hosted_mcp_tool_metadata = collect_mcp_list_tools_metadata(existing_items or ())
+    hosted_mcp_tool_metadata.update(collect_mcp_list_tools_metadata(response.output))
+
+    def _dump_output_item(raw_item: Any) -> dict[str, Any]:
+        if isinstance(raw_item, dict):
+            return dict(raw_item)
+        if hasattr(raw_item, "model_dump"):
+            dumped = cast(Any, raw_item).model_dump(exclude_unset=True)
+            if isinstance(dumped, Mapping):
+                return dict(dumped)
+            return {"type": get_mapping_or_attr(raw_item, "type")}
+        return {
+            "type": get_mapping_or_attr(raw_item, "type"),
+            "id": get_mapping_or_attr(raw_item, "id"),
+        }
 
     for output in response.output:
         output_type = get_mapping_or_attr(output, "type")
@@ -1375,6 +1444,26 @@ def process_model_response(
                 CompactionItem(agent=agent, raw_item=cast(TResponseInputItem, compaction_raw))
             )
             continue
+        if output_type == "tool_search_call":
+            tool_search_call_raw = coerce_tool_search_call_raw_item(output)
+            if get_mapping_or_attr(tool_search_call_raw, "execution") == "client":
+                raise ModelBehaviorError(
+                    "Client-executed tool_search calls are not supported by the standard "
+                    "agent runner. Handle the tool_search_call yourself and return a matching "
+                    "tool_search_output item with the same call_id."
+                )
+            items.append(ToolSearchCallItem(raw_item=tool_search_call_raw, agent=agent))
+            tools_used.append("tool_search")
+            continue
+        if output_type == "tool_search_output":
+            items.append(
+                ToolSearchOutputItem(
+                    raw_item=coerce_tool_search_output_raw_item(output),
+                    agent=agent,
+                )
+            )
+            tools_used.append("tool_search")
+            continue
         if isinstance(output, ResponseOutputMessage):
             items.append(MessageOutputItem(raw_item=output, agent=agent))
         elif isinstance(output, ResponseFileSearchToolCall):
@@ -1387,8 +1476,8 @@ def process_model_response(
             items.append(ReasoningItem(raw_item=output, agent=agent))
         elif isinstance(output, ResponseComputerToolCall):
             items.append(ToolCallItem(raw_item=output, agent=agent))
-            tools_used.append("computer_use")
             if not computer_tool:
+                tools_used.append("computer")
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Computer tool not found",
@@ -1396,6 +1485,7 @@ def process_model_response(
                     )
                 )
                 raise ModelBehaviorError("Model produced computer action without a computer tool.")
+            tools_used.append(computer_tool.name)
             computer_actions.append(
                 ToolRunComputerAction(tool_call=output, computer_tool=computer_tool)
             )
@@ -1425,19 +1515,15 @@ def process_model_response(
         elif isinstance(output, McpListTools):
             items.append(MCPListToolsItem(raw_item=output, agent=agent))
         elif isinstance(output, McpCall):
-            # Look up MCP tool description from the server's cached tools list.
-            # Tool discovery is async I/O, but this function is sync, so this is best-effort and
-            # only works if the server has cached tool metadata (e.g., when cache_tools_list is
-            # enabled).
-            _mcp_description: str | None = None
-            for _server in agent.mcp_servers:
-                if _server.name == output.server_label:
-                    for _tool in _server.cached_tools or []:
-                        if _tool.name == output.name:
-                            _mcp_description = _tool.description
-                            break
-                    break
-            items.append(ToolCallItem(raw_item=output, agent=agent, description=_mcp_description))
+            metadata = hosted_mcp_tool_metadata.get((output.server_label, output.name))
+            items.append(
+                ToolCallItem(
+                    raw_item=output,
+                    agent=agent,
+                    description=metadata.description if metadata is not None else None,
+                    title=metadata.title if metadata is not None else None,
+                )
+            )
             tools_used.append("mcp")
         elif isinstance(output, ImageGenerationCall):
             items.append(ToolCallItem(raw_item=output, agent=agent))
@@ -1498,7 +1584,7 @@ def process_model_response(
         elif (
             isinstance(output, ResponseFunctionToolCall)
             and is_apply_patch_name(output.name, apply_patch_tool)
-            and output.name not in function_map
+            and get_function_tool_lookup_key_for_call(output) not in function_map
         ):
             parsed_operation = parse_apply_patch_function_args(output.arguments)
             pseudo_call = {
@@ -1532,9 +1618,10 @@ def process_model_response(
         if not isinstance(output, ResponseFunctionToolCall):
             continue
 
-        tools_used.append(output.name)
+        tools_used.append(get_tool_call_trace_name(output) or output.name)
+        qualified_output_name = get_tool_call_qualified_name(output)
 
-        if output.name in handoff_map:
+        if qualified_output_name == output.name and output.name in handoff_map:
             items.append(HandoffCallItem(raw_item=output, agent=agent))
             handoff = ToolRunHandoff(
                 tool_call=output,
@@ -1542,7 +1629,9 @@ def process_model_response(
             )
             run_handoffs.append(handoff)
         else:
-            if output.name not in function_map:
+            lookup_key = get_function_tool_lookup_key_for_call(output)
+            func_tool = function_map.get(lookup_key) if lookup_key is not None else None
+            if func_tool is None:
                 if output_schema is not None and output.name == "json_tool_call":
                     json_tool = build_litellm_json_tool_call(output)
                     tool_origin = _get_tool_origin_info(json_tool)
@@ -1563,19 +1652,21 @@ def process_model_response(
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Tool not found",
-                        data={"tool_name": output.name},
+                        data={"tool_name": qualified_output_name or output.name},
                     )
                 )
-                error = f"Tool {output.name} not found in agent {agent.name}"
+                error = (
+                    f"Tool {qualified_output_name or output.name} not found in agent {agent.name}"
+                )
                 raise ModelBehaviorError(error)
 
-            func_tool = function_map[output.name]
             tool_origin = _get_tool_origin_info(func_tool)
             items.append(
                 ToolCallItem(
                     raw_item=output,
                     agent=agent,
                     description=func_tool.description,
+                    title=func_tool._mcp_title,
                     tool_origin=tool_origin,
                 )
             )
@@ -1621,9 +1712,10 @@ async def get_single_step_result_from_response(
         response=new_response,
         output_schema=output_schema,
         handoffs=handoffs,
+        existing_items=pre_step_items,
     )
 
-    tool_use_tracker.add_tool_use(agent, processed_response.tools_used)
+    tool_use_tracker.record_processed_response(agent, processed_response)
 
     if event_queue is not None and processed_response.new_items:
         handoff_items = [

@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import gc
 import weakref
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 from agents import (
     Agent,
+    AgentToolInvocation,
     MessageOutputItem,
     RunContextWrapper,
     RunItem,
@@ -18,6 +19,7 @@ from agents import (
     RunResultStreaming,
 )
 from agents.exceptions import AgentsException
+from agents.tool_context import ToolContext
 
 
 def create_run_result(
@@ -257,3 +259,75 @@ def test_run_result_streaming_release_agents_releases_current_agent() -> None:
     assert agent_ref() is None
     with pytest.raises(AgentsException):
         _ = streaming_result.last_agent
+
+
+def test_run_result_agent_tool_invocation_returns_none_for_plain_context() -> None:
+    result = create_run_result("ok")
+
+    assert result.agent_tool_invocation is None
+
+
+def test_run_result_agent_tool_invocation_returns_immutable_metadata() -> None:
+    tool_ctx = ToolContext(
+        context=None,
+        tool_name="my_tool",
+        tool_call_id="call_xyz",
+        tool_arguments="{}",
+    )
+    result = RunResult(
+        input="test",
+        new_items=[],
+        raw_responses=[],
+        final_output="ok",
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        _last_agent=Agent(name="test"),
+        context_wrapper=tool_ctx,
+        interruptions=[],
+    )
+
+    assert result.agent_tool_invocation == AgentToolInvocation(
+        tool_name="my_tool",
+        tool_call_id="call_xyz",
+        tool_arguments="{}",
+    )
+
+    invocation = result.agent_tool_invocation
+    assert invocation is not None
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cast(Any, invocation).tool_name = "other"
+
+
+def test_run_result_streaming_agent_tool_invocation_returns_metadata() -> None:
+    agent = Agent(name="streaming-tool-agent")
+    tool_ctx = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id="call_stream",
+        tool_arguments='{"input":"stream"}',
+    )
+    result = RunResultStreaming(
+        input="stream",
+        new_items=[],
+        raw_responses=[],
+        final_output="done",
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=tool_ctx,
+        current_agent=agent,
+        current_turn=0,
+        max_turns=1,
+        _current_agent_output_schema=None,
+        trace=None,
+        interruptions=[],
+    )
+
+    assert result.agent_tool_invocation == AgentToolInvocation(
+        tool_name="stream_tool",
+        tool_call_id="call_stream",
+        tool_arguments='{"input":"stream"}',
+    )

@@ -215,6 +215,13 @@ def test_convert_tool_choice_handles_standard_and_named_options() -> None:
     assert tool_choice_dict["function"]["name"] == "mytool"
 
 
+def test_convert_tool_choice_allows_tool_search_as_named_function_for_chat_models() -> None:
+    tool_choice_dict = Converter.convert_tool_choice("tool_search")
+    assert isinstance(tool_choice_dict, dict)
+    assert tool_choice_dict["type"] == "function"
+    assert tool_choice_dict["function"]["name"] == "tool_search"
+
+
 def test_convert_response_format_returns_not_given_for_plain_text_and_dict_for_schemas() -> None:
     """
     The `Converter.convert_response_format` method should return the omit sentinel

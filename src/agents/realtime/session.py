@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import json
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
+from pydantic import BaseModel
 from typing_extensions import assert_never
 
 from ..agent import Agent
@@ -65,6 +67,29 @@ from .model_inputs import (
 )
 
 REJECTION_MESSAGE = DEFAULT_APPROVAL_REJECTION_MESSAGE
+
+
+def _serialize_tool_output(output: Any) -> str:
+    """Serialize structured tool outputs to JSON when possible."""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, BaseModel):
+        try:
+            output = output.model_dump(mode="json")
+        except Exception:
+            try:
+                output = output.model_dump()
+            except Exception:
+                return str(output)
+    elif dataclasses.is_dataclass(output) and not isinstance(output, type):
+        try:
+            output = dataclasses.asdict(output)
+        except Exception:
+            return str(output)
+    try:
+        return json.dumps(output, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(output)
 
 
 class RealtimeSession(RealtimeModelListener):
@@ -617,7 +642,9 @@ class RealtimeSession(RealtimeModelListener):
 
             await self._model.send_event(
                 RealtimeModelSendToolOutput(
-                    tool_call=event, output=str(result), start_response=True
+                    tool_call=event,
+                    output=_serialize_tool_output(result),
+                    start_response=True,
                 )
             )
 

@@ -56,6 +56,7 @@ class SQLAlchemySession(SessionABC):
     _metadata: MetaData
     _sessions: Table
     _messages: Table
+    session_settings: SessionSettings | None = None
 
     def __init__(
         self,

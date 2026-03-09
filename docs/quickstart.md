@@ -68,6 +68,16 @@ if __name__ == "__main__":
 
 For a second turn, you can either pass `result.to_input_list()` back into `Runner.run(...)`, attach a [session](sessions/index.md), or reuse OpenAI server-managed state with `conversation_id` / `previous_response_id`. The [running agents](running_agents.md) guide compares these approaches.
 
+Use this rule of thumb:
+
+| If you want... | Start with... |
+| --- | --- |
+| Full manual control and provider-agnostic history | `result.to_input_list()` |
+| The SDK to load and save history for you | [`session=...`](sessions/index.md) |
+| OpenAI-managed server-side continuation | `previous_response_id` or `conversation_id` |
+
+For the tradeoffs and exact behaviors, see [Running agents](running_agents.md#choose-a-memory-strategy).
+
 ## Give your agent tools
 
 You can give an agent tools to look up information or perform actions.
@@ -103,6 +113,13 @@ if __name__ == "__main__":
 ```
 
 ## Add a few more agents
+
+Before you choose a multi-agent pattern, decide who should own the final answer:
+
+-   **Handoffs**: a specialist takes over the conversation for that part of the turn.
+-   **Agents as tools**: an orchestrator stays in control and calls specialists as tools.
+
+This quickstart continues with **handoffs** because it is the shortest first example. For the manager-style pattern, see [Agent orchestration](multi_agent.md) and [Tools: agents as tools](tools.md#agents-as-tools).
 
 Additional agents can be defined in the same way. `handoff_description` gives the routing agent extra context about when to delegate.
 

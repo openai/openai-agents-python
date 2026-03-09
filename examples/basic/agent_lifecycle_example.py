@@ -13,7 +13,7 @@ from agents import (
     Tool,
     function_tool,
 )
-from examples.auto_mode import input_with_fallback
+from examples.auto_mode import input_with_fallback, is_auto_mode
 
 
 class CustomAgentHooks(AgentHooks):
@@ -67,6 +67,15 @@ def random_number(max: int) -> int:
     """
     Generate a random number from 0 to max (inclusive).
     """
+    if is_auto_mode():
+        if max <= 0:
+            print("[debug] auto mode returning deterministic value 0")
+            return 0
+        value = min(max, 37)
+        if value % 2 == 0:
+            value = value - 1 if value > 1 else 1
+        print(f"[debug] auto mode returning deterministic odd number {value}")
+        return value
     return random.randint(0, max)
 
 

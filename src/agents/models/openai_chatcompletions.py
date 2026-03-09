@@ -20,6 +20,7 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from .. import _debug
 from ..agent_output import AgentOutputSchemaBase
+from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..logger import logger
@@ -41,6 +42,10 @@ if TYPE_CHECKING:
 
 
 class OpenAIChatCompletionsModel(Model):
+    _OFFICIAL_OPENAI_SUPPORTED_INPUT_CONTENT_TYPES = frozenset(
+        {"input_text", "input_image", "input_audio", "input_file"}
+    )
+
     def __init__(
         self,
         model: str | ChatModel,
@@ -51,6 +56,36 @@ class OpenAIChatCompletionsModel(Model):
 
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
+
+    def _validate_official_openai_input_content_types(
+        self, request_input: str | list[TResponseInputItem]
+    ) -> None:
+        if not ChatCmplHelpers.is_openai(self._client) or isinstance(request_input, str):
+            return
+
+        for item in request_input:
+            message = Converter.maybe_easy_input_message(item) or Converter.maybe_input_message(
+                item
+            )
+            if message is None or message["role"] != "user":
+                continue
+
+            content_parts = message["content"]
+            if isinstance(content_parts, str):
+                continue
+
+            for part in content_parts:
+                if not isinstance(part, dict):
+                    continue
+
+                content_type = part.get("type")
+                if content_type in self._OFFICIAL_OPENAI_SUPPORTED_INPUT_CONTENT_TYPES:
+                    continue
+
+                raise UserError(
+                    "Unsupported content type for official OpenAI Chat Completions: "
+                    f"{content_type!r} in {part}"
+                )
 
     async def get_response(
         self,
@@ -272,6 +307,7 @@ class OpenAIChatCompletionsModel(Model):
         stream: bool = False,
         prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
+        self._validate_official_openai_input_content_types(input)
         converted_messages = Converter.items_to_messages(input, model=self.model)
 
         if system_instructions:

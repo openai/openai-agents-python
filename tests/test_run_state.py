@@ -16,6 +16,8 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseReasoningItem,
+    ResponseToolSearchCall,
+    ResponseToolSearchOutputItem,
 )
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
@@ -46,6 +48,8 @@ from agents.items import (
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
     TResponseInputItem,
     TResponseStreamEvent,
 )
@@ -80,6 +84,7 @@ from agents.tool import (
     LocalShellTool,
     ShellTool,
     function_tool,
+    tool_namespace,
 )
 from agents.tool_context import ToolContext
 from agents.tool_guardrails import (
@@ -753,6 +758,128 @@ class TestRunState:
         assert call_id == "call_1"
 
     @pytest.mark.asyncio
+    async def test_anonymous_tool_search_items_keep_later_same_content_snapshot(self):
+        """Ensure later anonymous tool_search snapshots survive the generated-item merge."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="AgentToolSearchMerge")
+        state = make_state(agent, context=context, original_input="input", max_turns=2)
+
+        first_tool_search_call_item = ToolSearchCallItem(
+            raw_item={
+                "type": "tool_search_call",
+                "arguments": {"query": "account balance"},
+                "execution": "server",
+                "status": "completed",
+            },
+            agent=agent,
+        )
+        first_tool_search_output_item = ToolSearchOutputItem(
+            raw_item={
+                "type": "tool_search_output",
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+            },
+            agent=agent,
+        )
+
+        state._generated_items = [
+            first_tool_search_call_item,
+            first_tool_search_output_item,
+        ]
+        state._last_processed_response = make_processed_response(
+            new_items=[
+                ToolSearchCallItem(
+                    raw_item=dict(cast(dict[str, Any], first_tool_search_call_item.raw_item)),
+                    agent=agent,
+                ),
+                ToolSearchOutputItem(
+                    raw_item=dict(cast(dict[str, Any], first_tool_search_output_item.raw_item)),
+                    agent=agent,
+                ),
+            ]
+        )
+
+        json_data = state.to_json()
+        assert [item["type"] for item in json_data["generated_items"]] == [
+            "tool_search_call_item",
+            "tool_search_output_item",
+            "tool_search_call_item",
+            "tool_search_output_item",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_anonymous_tool_search_items_not_duplicated_across_round_trip(self):
+        """Ensure already-merged anonymous tool_search items do not grow across round-trips."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="AgentToolSearchDedup")
+        state = make_state(agent, context=context, original_input="input", max_turns=2)
+
+        first_tool_search_call_item = ToolSearchCallItem(
+            raw_item={
+                "type": "tool_search_call",
+                "arguments": {"query": "account balance"},
+                "execution": "server",
+                "status": "completed",
+            },
+            agent=agent,
+        )
+        first_tool_search_output_item = ToolSearchOutputItem(
+            raw_item={
+                "type": "tool_search_output",
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+            },
+            agent=agent,
+        )
+        later_tool_search_call_item = ToolSearchCallItem(
+            raw_item=dict(cast(dict[str, Any], first_tool_search_call_item.raw_item)),
+            agent=agent,
+        )
+        later_tool_search_output_item = ToolSearchOutputItem(
+            raw_item=dict(cast(dict[str, Any], first_tool_search_output_item.raw_item)),
+            agent=agent,
+        )
+
+        state._generated_items = [
+            first_tool_search_call_item,
+            first_tool_search_output_item,
+            later_tool_search_call_item,
+            later_tool_search_output_item,
+        ]
+        state._last_processed_response = make_processed_response(
+            new_items=[
+                ToolSearchCallItem(
+                    raw_item=dict(cast(dict[str, Any], later_tool_search_call_item.raw_item)),
+                    agent=agent,
+                ),
+                ToolSearchOutputItem(
+                    raw_item=dict(cast(dict[str, Any], later_tool_search_output_item.raw_item)),
+                    agent=agent,
+                ),
+            ]
+        )
+        state._mark_generated_items_merged_with_last_processed()
+
+        json_data = state.to_json()
+        assert [item["type"] for item in json_data["generated_items"]] == [
+            "tool_search_call_item",
+            "tool_search_output_item",
+            "tool_search_call_item",
+            "tool_search_output_item",
+        ]
+
+        restored = await RunState.from_json(agent, json_data)
+        restored_json = restored.to_json()
+        assert [item["type"] for item in restored_json["generated_items"]] == [
+            "tool_search_call_item",
+            "tool_search_output_item",
+            "tool_search_call_item",
+            "tool_search_output_item",
+        ]
+
+    @pytest.mark.asyncio
     async def test_to_json_deduplicates_items_with_direct_id_type_attributes(self):
         """Test deduplication when items have id/type attributes directly (not just in raw_item)."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
@@ -1084,7 +1211,12 @@ class TestSerializationRoundTrip:
             arguments='{"arg": "val"}',
         )
         state._generated_items.append(
-            ToolCallItem(agent=agent, raw_item=tool_call, description="My tool description")
+            ToolCallItem(
+                agent=agent,
+                raw_item=tool_call,
+                description="My tool description",
+                title="My tool title",
+            )
         )
 
         # 3. Tool call item without description
@@ -1118,9 +1250,11 @@ class TestSerializationRoundTrip:
         assert isinstance(new_state._generated_items[2], ToolCallItem)
         assert isinstance(new_state._generated_items[3], ToolCallOutputItem)
 
-        # Verify description field is preserved
+        # Verify display metadata is preserved
         assert new_state._generated_items[1].description == "My tool description"
+        assert new_state._generated_items[1].title == "My tool title"
         assert new_state._generated_items[2].description is None
+        assert new_state._generated_items[2].title is None
 
     async def test_serializes_original_input_with_function_call_output(self):
         """Test that original_input with function_call_output items is preserved."""
@@ -2394,6 +2528,51 @@ class TestRunStateSerializationEdgeCases:
         assert serialized["handoffs"][0]["handoff"]["tool_name"] == "handoff_tool"
         assert serialized["mcp_approval_requests"][0]["mcp_tool"]["name"] == "mcp_tool"
 
+    def test_serialize_tool_action_groups_preserves_synthetic_namespace_for_deferred_tools(self):
+        """Deferred top-level function tool calls should keep their synthetic namespace."""
+        deferred_tool = function_tool(
+            lambda city: city,
+            name_override="get_weather",
+            defer_loading=True,
+        )
+
+        processed_response = ProcessedResponse(
+            new_items=[],
+            handoffs=[],
+            functions=[
+                ToolRunFunction(
+                    tool_call=cast(
+                        ResponseFunctionToolCall,
+                        get_function_tool_call(
+                            "get_weather",
+                            '{"city": "Tokyo"}',
+                            call_id="weather-call",
+                            namespace="get_weather",
+                        ),
+                    ),
+                    function_tool=deferred_tool,
+                )
+            ],
+            computer_actions=[],
+            local_shell_calls=[],
+            shell_calls=[],
+            apply_patch_calls=[],
+            tools_used=[],
+            mcp_approval_requests=[],
+            interruptions=[],
+        )
+
+        serialized = _serialize_tool_action_groups(processed_response)
+
+        assert serialized["functions"][0]["tool"]["name"] == "get_weather"
+        assert "namespace" not in serialized["functions"][0]["tool"]
+        assert "qualifiedName" not in serialized["functions"][0]["tool"]
+        assert serialized["functions"][0]["tool"]["lookupKey"] == {
+            "kind": "deferred_top_level",
+            "name": "get_weather",
+        }
+        assert serialized["functions"][0]["tool_call"]["namespace"] == "get_weather"
+
     def test_serialize_guardrail_results(self):
         """Serialize both input and output guardrail results with agent data."""
         guardrail_output = GuardrailFunctionOutput(
@@ -2562,6 +2741,7 @@ class TestRunStateSerializationEdgeCases:
         # The computer action should have a computer field with description
         assert "computer" in computer_actions[0]
         computer_dict = computer_actions[0]["computer"]
+        assert computer_dict["name"] == "computer_use_preview"
         assert "description" in computer_dict
         assert computer_dict["description"] == "Computer tool description"
 
@@ -3055,6 +3235,244 @@ class TestRunStateSerializationEdgeCases:
         assert result is not None
         assert len(result.functions) == 1
 
+    async def test_deserialize_processed_response_function_uses_namespace(self):
+        """Test deserialization of ProcessedResponse with namespace-qualified function names."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        crm_tool = function_tool(lambda customer_id: customer_id, name_override="lookup_account")
+        billing_tool = function_tool(
+            lambda customer_id: customer_id,
+            name_override="lookup_account",
+        )
+        crm_namespace = tool_namespace(
+            name="crm",
+            description="CRM tools",
+            tools=[crm_tool],
+        )
+        billing_namespace = tool_namespace(
+            name="billing",
+            description="Billing tools",
+            tools=[billing_tool],
+        )
+        agent.tools = [*crm_namespace, *billing_namespace]
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": "lookup_account",
+                        "namespace": "billing",
+                        "call_id": "call123",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "tool": {"name": "lookup_account", "namespace": "billing"},
+                }
+            ],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}, [agent]
+        )
+
+        assert result is not None
+        assert len(result.functions) == 1
+        assert result.functions[0].function_tool is billing_namespace[0]
+
+    async def test_deserialize_processed_response_rejects_qualified_name_collision(self):
+        """Reject dotted top-level names that collide with namespace-wrapped functions."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        dotted_top_level_tool = function_tool(
+            lambda customer_id: customer_id,
+            name_override="crm.lookup_account",
+        )
+        namespaced_tool = tool_namespace(
+            name="crm",
+            description="CRM tools",
+            tools=[function_tool(lambda customer_id: customer_id, name_override="lookup_account")],
+        )[0]
+        agent.tools = [dotted_top_level_tool, namespaced_tool]
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": "lookup_account",
+                        "namespace": "crm",
+                        "call_id": "call123",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "tool": {"name": "lookup_account", "namespace": "crm"},
+                }
+            ],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        with pytest.raises(UserError, match="qualified name `crm.lookup_account`"):
+            await _deserialize_processed_response(
+                processed_response_data, agent, context, {"TestAgent": agent}, [agent]
+            )
+
+    async def test_deserialize_processed_response_uses_last_duplicate_top_level_function(self):
+        """Test deserialization preserves last-wins behavior for duplicate top-level tools."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        first_tool = function_tool(lambda customer_id: customer_id, name_override="lookup")
+        second_tool = function_tool(lambda customer_id: customer_id, name_override="lookup")
+        agent.tools = [first_tool, second_tool]
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": "lookup",
+                        "call_id": "call123",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "tool": {"name": "lookup"},
+                }
+            ],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}, [agent]
+        )
+
+        assert result is not None
+        assert len(result.functions) == 1
+        assert result.functions[0].function_tool is second_tool
+
+    async def test_deserialize_processed_response_uses_tool_call_namespace_for_deferred_top_level(
+        self,
+    ):
+        """Synthetic deferred namespaces should disambiguate resumed same-name top-level tools."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        visible_tool = function_tool(
+            lambda customer_id: customer_id, name_override="lookup_account"
+        )
+        deferred_tool = function_tool(
+            lambda customer_id: customer_id,
+            name_override="lookup_account",
+            defer_loading=True,
+        )
+        agent.tools = [visible_tool, deferred_tool]
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": "lookup_account",
+                        "namespace": "lookup_account",
+                        "call_id": "call123",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "tool": {"name": "lookup_account"},
+                }
+            ],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}, [agent]
+        )
+
+        assert result is not None
+        assert len(result.functions) == 1
+        assert result.functions[0].function_tool is deferred_tool
+
+    async def test_deserialize_processed_response_uses_serialized_lookup_key_for_deferred_top_level(
+        self,
+    ) -> None:
+        """Serialized lookup metadata should disambiguate deferred tools without raw namespace."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        visible_tool = function_tool(
+            lambda customer_id: f"visible:{customer_id}",
+            name_override="lookup_account",
+        )
+        deferred_tool = function_tool(
+            lambda customer_id: f"deferred:{customer_id}",
+            name_override="lookup_account",
+            defer_loading=True,
+        )
+        agent.tools = [visible_tool, deferred_tool]
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": "lookup_account",
+                        "call_id": "call123",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "tool": {
+                        "name": "lookup_account",
+                        "lookupKey": {
+                            "kind": "deferred_top_level",
+                            "name": "lookup_account",
+                        },
+                    },
+                }
+            ],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}, [agent]
+        )
+
+        assert result is not None
+        assert len(result.functions) == 1
+        assert result.functions[0].function_tool is deferred_tool
+
     async def test_deserialize_processed_response_computer_action_in_map(self):
         """Test deserialization of ProcessedResponse with computer action in computer_tools_map."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
@@ -3116,7 +3534,7 @@ class TestRunStateSerializationEdgeCases:
                         "pendingSafetyChecks": [],
                         "pending_safety_checks": [],
                     },
-                    "computer": {"name": computer_tool.name},
+                    "computer": {"name": "computer"},
                 }
             ],
             "local_shell_actions": [],
@@ -3132,6 +3550,78 @@ class TestRunStateSerializationEdgeCases:
         )
         assert result is not None
         assert len(result.computer_actions) == 1
+
+    async def test_deserialize_processed_response_computer_action_accepts_preview_name(self):
+        """Released preview-era computer tool names should still restore."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        class MockComputer(Computer):
+            @property
+            def environment(self) -> str:  # type: ignore[override]
+                return "mac"
+
+            @property
+            def dimensions(self) -> tuple[int, int]:
+                return (1920, 1080)
+
+            def screenshot(self) -> str:
+                return "screenshot"
+
+            def click(self, x: int, y: int, button: str) -> None:
+                pass
+
+            def double_click(self, x: int, y: int) -> None:
+                pass
+
+            def drag(self, path: list[tuple[int, int]]) -> None:
+                pass
+
+            def keypress(self, keys: list[str]) -> None:
+                pass
+
+            def move(self, x: int, y: int) -> None:
+                pass
+
+            def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+                pass
+
+            def type(self, text: str) -> None:
+                pass
+
+            def wait(self) -> None:
+                pass
+
+        agent.tools = [ComputerTool(computer=MockComputer())]
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [],
+            "computer_actions": [
+                {
+                    "tool_call": {
+                        "type": "computer_call",
+                        "id": "1",
+                        "call_id": "call123",
+                        "status": "completed",
+                        "action": {"type": "screenshot"},
+                        "pending_safety_checks": [],
+                    },
+                    "computer": {"name": "computer_use_preview"},
+                }
+            ],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}, [agent]
+        )
+        assert len(result.computer_actions) == 1
+        assert result.computer_actions[0].computer_tool.name == "computer_use_preview"
 
     async def test_deserialize_processed_response_shell_action_with_validation_error(self):
         """Test deserialization of ProcessedResponse with shell action ValidationError."""
@@ -3366,11 +3856,12 @@ class TestRunStateSerializationEdgeCases:
             await RunState.from_json(agent, state_json)
 
     @pytest.mark.asyncio
-    async def test_from_json_unsupported_schema_version(self):
+    @pytest.mark.parametrize("schema_version", ["1.6", "1.7", "2.0"])
+    async def test_from_json_unsupported_schema_version(self, schema_version: str):
         """Test that from_json raises error when schema version is unsupported."""
         agent = Agent(name="TestAgent")
         state_json = {
-            "$schemaVersion": "2.0",
+            "$schemaVersion": schema_version,
             "original_input": "test",
             "current_agent": {"name": "TestAgent"},
             "context": {
@@ -3384,7 +3875,9 @@ class TestRunStateSerializationEdgeCases:
             "generated_items": [],
         }
 
-        with pytest.raises(UserError, match="Run state schema version 2.0 is not supported"):
+        with pytest.raises(
+            UserError, match=f"Run state schema version {schema_version} is not supported"
+        ):
             await RunState.from_json(agent, state_json)
 
     @pytest.mark.asyncio
@@ -3411,6 +3904,12 @@ class TestRunStateSerializationEdgeCases:
         assert restored._current_agent.name == "TestAgent"
         assert restored._context is not None
         assert restored._context.context == {"foo": "bar"}
+
+    def test_supported_schema_versions_match_released_boundary(self):
+        """The support set should include released versions plus the current unreleased writer."""
+        assert SUPPORTED_SCHEMA_VERSIONS == frozenset(
+            {"1.0", "1.1", "1.2", "1.3", "1.4", CURRENT_SCHEMA_VERSION}
+        )
 
     @pytest.mark.asyncio
     async def test_from_json_agent_not_found(self):
@@ -3889,6 +4388,38 @@ class TestToolApprovalItem:
         assert restored_item.tool_name == "explicit_name"
         assert restored_item.name == "explicit_name"
 
+    async def test_round_trip_serialization_preserves_allow_bare_name_alias(self):
+        """Test round-trip serialization preserves bare-name approval alias metadata."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        raw_item = {
+            "type": "function_call",
+            "name": "get_weather",
+            "call_id": "call123",
+            "status": "completed",
+            "arguments": "{}",
+            "namespace": "get_weather",
+        }
+        approval_item = ToolApprovalItem(
+            agent=agent,
+            raw_item=raw_item,
+            tool_name="get_weather",
+            tool_namespace="get_weather",
+            _allow_bare_name_alias=True,
+        )
+        state._generated_items.append(approval_item)
+
+        json_data = state.to_json()
+        assert json_data["generated_items"][0]["allow_bare_name_alias"] is True
+
+        new_state = await RunState.from_json(agent, json_data)
+
+        restored_item = new_state._generated_items[0]
+        assert isinstance(restored_item, ToolApprovalItem)
+        assert restored_item._allow_bare_name_alias is True
+
     def test_tool_approval_item_arguments_property(self):
         """Test that ToolApprovalItem.arguments property correctly extracts arguments."""
         agent = Agent(name="TestAgent")
@@ -3929,6 +4460,144 @@ class TestToolApprovalItem:
         raw_item4 = {"type": "unknown", "name": "tool4"}
         approval_item4 = ToolApprovalItem(agent=agent, raw_item=raw_item4)
         assert approval_item4.arguments is None
+
+    def test_tool_approval_item_tracks_namespace(self):
+        """Test that ToolApprovalItem keeps namespace metadata from Responses tool calls."""
+        agent = Agent(name="TestAgent")
+        raw_item = make_tool_call(
+            call_id="call-ns-1",
+            name="lookup_account",
+            namespace="crm",
+            status="completed",
+            arguments="{}",
+        )
+
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+
+        assert approval_item.tool_name == "lookup_account"
+        assert approval_item.tool_namespace == "crm"
+        assert approval_item.qualified_name == "crm.lookup_account"
+
+    def test_tool_approval_item_collapses_synthetic_deferred_namespace_in_qualified_name(self):
+        """Synthetic deferred namespaces should display as the bare tool name."""
+        agent = Agent(name="TestAgent")
+        raw_item = make_tool_call(
+            call_id="call-weather-1",
+            name="get_weather",
+            namespace="get_weather",
+            status="completed",
+            arguments="{}",
+        )
+
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+
+        assert approval_item.tool_name == "get_weather"
+        assert approval_item.tool_namespace == "get_weather"
+        assert approval_item.qualified_name == "get_weather"
+
+    async def test_round_trip_serialization_with_tool_namespace(self):
+        """Test round-trip serialization preserves tool namespace metadata."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        raw_item = make_tool_call(
+            call_id="call123",
+            name="lookup_account",
+            namespace="billing",
+            status="completed",
+            arguments="{}",
+        )
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+        state._generated_items.append(approval_item)
+
+        new_state = await RunState.from_json(agent, state.to_json())
+
+        assert len(new_state._generated_items) == 1
+        restored_item = new_state._generated_items[0]
+        assert isinstance(restored_item, ToolApprovalItem)
+        assert restored_item.tool_name == "lookup_account"
+        assert restored_item.tool_namespace == "billing"
+        assert restored_item.qualified_name == "billing.lookup_account"
+
+    async def test_round_trip_serialization_preserves_tool_lookup_key(self) -> None:
+        """Deferred approval items should keep their explicit lookup key through RunState."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        raw_item = make_tool_call(
+            call_id="call-weather",
+            name="get_weather",
+            namespace="get_weather",
+            status="completed",
+            arguments="{}",
+        )
+        approval_item = ToolApprovalItem(
+            agent=agent,
+            raw_item=raw_item,
+            tool_lookup_key=("deferred_top_level", "get_weather"),
+        )
+        state._generated_items.append(approval_item)
+
+        new_state = await RunState.from_json(agent, state.to_json())
+
+        assert len(new_state._generated_items) == 1
+        restored_item = new_state._generated_items[0]
+        assert isinstance(restored_item, ToolApprovalItem)
+        assert restored_item.tool_lookup_key == ("deferred_top_level", "get_weather")
+
+    async def test_deserialize_items_restores_tool_search_items(self):
+        """Test that tool search run items survive RunState round-trips."""
+        agent = Agent(name="TestAgent")
+        items = _deserialize_items(
+            [
+                {
+                    "type": "tool_search_call_item",
+                    "agent": {"name": "TestAgent"},
+                    "raw_item": {
+                        "id": "tsc_state",
+                        "type": "tool_search_call",
+                        "arguments": {"paths": ["crm"], "query": "profile"},
+                        "execution": "server",
+                        "status": "completed",
+                    },
+                },
+                {
+                    "type": "tool_search_output_item",
+                    "agent": {"name": "TestAgent"},
+                    "raw_item": {
+                        "id": "tso_state",
+                        "type": "tool_search_output",
+                        "execution": "server",
+                        "status": "completed",
+                        "tools": [
+                            {
+                                "type": "function",
+                                "name": "get_customer_profile",
+                                "description": "Fetch a CRM customer profile.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "customer_id": {
+                                            "type": "string",
+                                        }
+                                    },
+                                    "required": ["customer_id"],
+                                },
+                                "defer_loading": True,
+                            }
+                        ],
+                    },
+                },
+            ],
+            {"TestAgent": agent},
+        )
+
+        assert isinstance(items[0], ToolSearchCallItem)
+        assert isinstance(items[1], ToolSearchOutputItem)
+        assert isinstance(items[0].raw_item, ResponseToolSearchCall)
+        assert isinstance(items[1].raw_item, ResponseToolSearchOutputItem)
 
     async def test_deserialize_items_handles_missing_agent_name(self):
         """Test that _deserialize_items handles items with missing agent name."""

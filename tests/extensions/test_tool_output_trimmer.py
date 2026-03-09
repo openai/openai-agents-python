@@ -5,7 +5,8 @@ large tool outputs from older conversation turns.
 from __future__ import annotations
 
 import copy
-from typing import Any
+import json
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,8 +27,11 @@ def _assistant(text: str = "response") -> dict[str, Any]:
     return {"role": "assistant", "content": text}
 
 
-def _func_call(call_id: str, name: str) -> dict[str, Any]:
-    return {"type": "function_call", "call_id": call_id, "name": name, "arguments": "{}"}
+def _func_call(call_id: str, name: str, *, namespace: str | None = None) -> dict[str, Any]:
+    item = {"type": "function_call", "call_id": call_id, "name": name, "arguments": "{}"}
+    if namespace is not None:
+        item["namespace"] = namespace
+    return item
 
 
 def _func_output(call_id: str, output: str) -> dict[str, Any]:
@@ -228,6 +232,134 @@ class TestTrimming:
         assert "[Trimmed:" in _output(result, 2)
         # resolve_entity output preserved
         assert _output(result, 4) == large
+
+    def test_respects_qualified_tool_names_allowlist(self) -> None:
+        """Qualified allowlist entries should match namespaced function tools."""
+        large = "x" * 1000
+        items = [
+            _user("q1"),
+            _func_call("c1", "lookup_account", namespace="billing"),
+            _func_output("c1", large),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+        trimmer = ToolOutputTrimmer(trimmable_tools=frozenset({"billing.lookup_account"}))
+        result = trimmer(_make_data(items))
+        assert "[Trimmed:" in _output(result, 2)
+        assert "billing.lookup_account" in _output(result, 2)
+
+    def test_namespaced_tools_still_match_bare_allowlist_entries(self) -> None:
+        """Bare allowlist entries remain valid for namespaced tools."""
+        large = "x" * 1000
+        items = [
+            _user("q1"),
+            _func_call("c1", "lookup_account", namespace="billing"),
+            _func_output("c1", large),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+        trimmer = ToolOutputTrimmer(trimmable_tools=frozenset({"lookup_account"}))
+        result = trimmer(_make_data(items))
+        assert "[Trimmed:" in _output(result, 2)
+        assert "billing.lookup_account" in _output(result, 2)
+
+    def test_synthetic_same_name_namespace_uses_bare_display_name(self) -> None:
+        """Deferred synthetic namespaces should not display as `name.name`."""
+        large = "x" * 1000
+        items = [
+            _user("q1"),
+            _func_call("c1", "get_weather", namespace="get_weather"),
+            _func_output("c1", large),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+        trimmer = ToolOutputTrimmer(trimmable_tools=frozenset({"get_weather"}))
+        result = trimmer(_make_data(items))
+        assert "[Trimmed:" in _output(result, 2)
+        assert "get_weather.get_weather" not in _output(result, 2)
+        assert "get_weather" in _output(result, 2)
+
+    def test_trims_tool_search_output_tool_definitions(self) -> None:
+        """Large tool_search_output tool definitions should be structurally trimmed."""
+        verbose_schema = {
+            "type": "object",
+            "description": "schema " * 200,
+            "properties": {
+                "customer_id": {
+                    "type": "string",
+                    "description": "customer id " * 200,
+                    "default": "cust_123",
+                }
+            },
+            "required": ["customer_id"],
+        }
+        items = [
+            _user("q1"),
+            {"type": "tool_search_call", "call_id": "ts1", "arguments": {"query": "profile"}},
+            {
+                "type": "tool_search_output",
+                "call_id": "ts1",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup_account",
+                        "description": "tool description " * 200,
+                        "parameters": verbose_schema,
+                    }
+                ],
+            },
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        original_len = len(json.dumps(items[2]["tools"], sort_keys=True))
+        trimmer = ToolOutputTrimmer(max_output_chars=400, preview_chars=60)
+        result = trimmer(_make_data(items))
+        trimmed_item_dict = cast(dict[str, Any], result.input[2])
+
+        assert trimmed_item_dict["type"] == "tool_search_output"
+        trimmed_tools = list(trimmed_item_dict["tools"])
+        assert trimmed_tools[0]["name"] == "lookup_account"
+        assert "description" not in trimmed_tools[0]["parameters"]
+        assert trimmed_tools[0]["parameters"]["properties"]["customer_id"]["default"] == "cust_123"
+        assert len(json.dumps(trimmed_tools, sort_keys=True)) < original_len
+
+    def test_trims_legacy_tool_search_output_results(self) -> None:
+        """Legacy tool_search_output snapshots with free-text results should still trim."""
+        large = "x" * 2000
+        items = [
+            _user("q1"),
+            {"type": "tool_search_call", "call_id": "ts1", "arguments": {"query": "profile"}},
+            {
+                "type": "tool_search_output",
+                "call_id": "ts1",
+                "results": [{"text": large}],
+            },
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(max_output_chars=400, preview_chars=80)
+        result = trimmer(_make_data(items))
+        trimmed_item = cast(dict[str, Any], result.input[2])
+
+        assert trimmed_item["type"] == "tool_search_output"
+        assert "[Trimmed: tool_search output" in trimmed_item["results"][0]["text"]
 
     def test_trims_all_tools_when_allowlist_is_none(self) -> None:
         """When trimmable_tools is None, all tools are eligible."""

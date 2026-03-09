@@ -4,7 +4,7 @@ The Agents SDK provides built-in session memory to automatically maintain conver
 
 Sessions stores conversation history for a specific session, allowing agents to maintain context without requiring explicit manual memory management. This is particularly useful for building chat applications or multi-turn conversations where you want the agent to remember previous interactions.
 
-Use sessions when you want the SDK to manage client-side memory for you. If you are already using OpenAI server-managed state with `conversation_id` or `previous_response_id`, you usually do not also need a session for the same conversation.
+Use sessions when you want the SDK to manage client-side memory for you. Sessions cannot be combined with `conversation_id`, `previous_response_id`, or `auto_previous_response_id` in the same run. If you want OpenAI server-managed continuation instead, choose one of those mechanisms rather than layering a session on top.
 
 ## Quick start
 
@@ -83,6 +83,8 @@ Use [`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_call
 
 Return the final list of input items that should be sent to the model.
 
+The callback receives copies of both lists, so you can safely mutate them. The returned list controls the model input for that turn, but the SDK still persists only items that belong to the new turn. Reordering or filtering old history therefore does not cause old session items to be saved again as fresh input.
+
 ```python
 from agents import Agent, RunConfig, Runner, SQLiteSession
 
@@ -103,7 +105,7 @@ result = await Runner.run(
 )
 ```
 
-Use this when you need custom pruning, reordering, or selective inclusion of history without changing how the session stores items.
+Use this when you need custom pruning, reordering, or selective inclusion of history without changing how the session stores items. If you need a later final pass immediately before the model call, use [`call_model_input_filter`][agents.run.RunConfig.call_model_input_filter] from the [running agents guide](../running_agents.md).
 
 ## Limiting retrieved history
 
@@ -204,12 +206,15 @@ Use this table to pick a starting point before reading the detailed examples bel
 | `AsyncSQLiteSession` | Async SQLite with `aiosqlite` | Extension backend with async driver support |
 | `RedisSession` | Shared memory across workers/services | Good for low-latency distributed deployments |
 | `SQLAlchemySession` | Production apps with existing databases | Works with SQLAlchemy-supported databases |
+| `DaprSession` | Cloud-native deployments with Dapr sidecars | Supports multiple state stores plus TTL and consistency controls |
 | `OpenAIConversationsSession` | Server-managed storage in OpenAI | OpenAI Conversations API-backed history |
 | `OpenAIResponsesCompactionSession` | Long conversations with automatic compaction | Wrapper around another session backend |
 | `AdvancedSQLiteSession` | SQLite plus branching/analytics | Heavier feature set; see dedicated page |
 | `EncryptedSession` | Encryption + TTL on top of another session | Wrapper; choose an underlying backend first |
 
 Some implementations have dedicated pages with additional details; those are linked inline in their subsections.
+
+If you are implementing a Python server for ChatKit, use a `chatkit.store.Store` implementation for ChatKit's thread and item persistence. Agents SDK sessions such as `SQLAlchemySession` manage SDK-side conversation history, but they are not a drop-in replacement for ChatKit's store. See the [`chatkit-python` guide on implementing your ChatKit data store](https://github.com/openai/chatkit-python/blob/main/docs/guides/respond-to-user-message.md#implement-your-chatkit-data-store).
 
 ### OpenAI Conversations API sessions
 
@@ -357,7 +362,7 @@ result = await Runner.run(agent, "Hello", session=session)
 
 ### SQLAlchemy sessions
 
-Production-ready sessions using any SQLAlchemy-supported database:
+Production-ready Agents SDK session persistence using any SQLAlchemy-supported database:
 
 ```python
 from agents.extensions.memory import SQLAlchemySession
@@ -377,6 +382,36 @@ session = SQLAlchemySession("user_123", engine=engine, create_tables=True)
 
 See [SQLAlchemy Sessions](sqlalchemy_session.md) for detailed documentation.
 
+### Dapr sessions
+
+Use `DaprSession` when you already run Dapr sidecars or want session storage that can move across different state-store backends without changing your agent code.
+
+```bash
+pip install openai-agents[dapr]
+```
+
+```python
+from agents import Agent, Runner
+from agents.extensions.memory import DaprSession
+
+agent = Agent(name="Assistant")
+
+async with DaprSession.from_address(
+    "user_123",
+    state_store_name="statestore",
+    dapr_address="localhost:50001",
+) as session:
+    result = await Runner.run(agent, "Hello", session=session)
+    print(result.final_output)
+```
+
+Notes:
+
+-   `from_address(...)` creates and owns the Dapr client for you. If your app already manages one, construct `DaprSession(...)` directly with `dapr_client=...`.
+-   Pass `ttl=...` to let the backing state store expire old session data automatically when the store supports TTL.
+-   Pass `consistency=DAPR_CONSISTENCY_STRONG` when you need stronger read-after-write guarantees.
+-   The Dapr Python SDK also checks the HTTP sidecar endpoint. In local development, start Dapr with `--dapr-http-port 3500` as well as the gRPC port used in `dapr_address`.
+-   See [`examples/memory/dapr_session_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/dapr_session_example.py) for a full setup walkthrough, including local components and troubleshooting.
 
 
 ### Advanced SQLite sessions
@@ -619,7 +654,7 @@ The community has developed additional session implementations:
 
 If you've built a session implementation, please feel free to submit a documentation PR to add it here!
 
-## API Reference
+## API reference
 
 For detailed API documentation, see:
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import json
 import weakref
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union, cast
 
@@ -20,6 +21,8 @@ from openai.types.responses import (
     ResponseOutputRefusal,
     ResponseOutputText,
     ResponseStreamEvent,
+    ResponseToolSearchCall,
+    ResponseToolSearchOutputItem,
 )
 from openai.types.responses.response_code_interpreter_tool_call import (
     ResponseCodeInterpreterToolCall,
@@ -47,6 +50,7 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from pydantic import BaseModel
 from typing_extensions import TypeAlias, assert_never
 
+from ._tool_identity import FunctionToolLookupKey, get_function_tool_lookup_key, tool_trace_name
 from .exceptions import AgentsException, ModelBehaviorError
 from .logger import logger
 from .tool import (
@@ -75,7 +79,9 @@ TResponseOutputItem = ResponseOutputItem
 TResponseStreamEvent = ResponseStreamEvent
 """A type alias for the ResponseStreamEvent type from the OpenAI SDK."""
 
-T = TypeVar("T", bound=Union[TResponseOutputItem, TResponseInputItem])
+T = TypeVar("T", bound=Union[TResponseOutputItem, TResponseInputItem, dict[str, Any]])
+ToolSearchCallRawItem: TypeAlias = ResponseToolSearchCall | dict[str, Any]
+ToolSearchOutputRawItem: TypeAlias = ResponseToolSearchOutputItem | dict[str, Any]
 
 # Distinguish a missing dict entry from an explicit None value.
 _MISSING_ATTR_SENTINEL = object()
@@ -155,6 +161,105 @@ class MessageOutputItem(RunItemBase[ResponseOutputMessage]):
     """The raw response output message."""
 
     type: Literal["message_output_item"] = "message_output_item"
+
+
+@dataclass
+class ToolSearchCallItem(RunItemBase[ToolSearchCallRawItem]):
+    """Represents a Responses API tool search request emitted by the model."""
+
+    raw_item: ToolSearchCallRawItem
+    """The raw tool search call item, preserving partial dict snapshots when needed."""
+
+    type: Literal["tool_search_call_item"] = "tool_search_call_item"
+
+    def to_input_item(self) -> TResponseInputItem:
+        """Convert the tool search call into a replayable Responses input item."""
+        return _tool_search_item_to_input_item(self.raw_item)
+
+
+@dataclass
+class ToolSearchOutputItem(RunItemBase[ToolSearchOutputRawItem]):
+    """Represents the output of a Responses API tool search."""
+
+    raw_item: ToolSearchOutputRawItem
+    """The raw tool search output item, preserving partial dict snapshots when needed."""
+
+    type: Literal["tool_search_output_item"] = "tool_search_output_item"
+
+    def to_input_item(self) -> TResponseInputItem:
+        """Convert the tool search output into a replayable Responses input item."""
+        return _tool_search_item_to_input_item(self.raw_item)
+
+
+def _tool_search_item_to_input_item(
+    raw_item: ToolSearchCallRawItem | ToolSearchOutputRawItem,
+) -> TResponseInputItem:
+    """Strip output-only tool_search fields before replaying items back to the API."""
+    if isinstance(raw_item, dict):
+        payload = dict(raw_item)
+    elif isinstance(raw_item, BaseModel):
+        payload = raw_item.model_dump(exclude_unset=True)
+    else:
+        raise AgentsException(f"Unexpected raw item type: {type(raw_item)}")
+
+    payload.pop("created_by", None)
+    return cast(TResponseInputItem, payload)
+
+
+def _output_item_to_input_item(raw_item: Any) -> TResponseInputItem:
+    """Convert an output item into replayable input, normalizing tool_search items."""
+    item_type = (
+        raw_item.get("type") if isinstance(raw_item, dict) else getattr(raw_item, "type", None)
+    )
+    if item_type in {"tool_search_call", "tool_search_output"}:
+        return _tool_search_item_to_input_item(raw_item)
+
+    if isinstance(raw_item, dict):
+        return cast(TResponseInputItem, dict(raw_item))
+    if isinstance(raw_item, BaseModel):
+        return cast(TResponseInputItem, raw_item.model_dump(exclude_unset=True))
+
+    raise AgentsException(f"Unexpected raw item type: {type(raw_item)}")
+
+
+def _copy_tool_search_mapping(raw_item: Mapping[str, Any]) -> dict[str, Any]:
+    copied = dict(raw_item)
+    copied_type = copied.get("type")
+    if isinstance(copied_type, str):
+        copied["type"] = copied_type
+    return copied
+
+
+def coerce_tool_search_call_raw_item(raw_item: Any) -> ToolSearchCallRawItem:
+    """Prefer the typed SDK tool_search call model while tolerating partial snapshots."""
+    if isinstance(raw_item, ResponseToolSearchCall):
+        return raw_item
+    if isinstance(raw_item, Mapping):
+        copied = _copy_tool_search_mapping(raw_item)
+        if copied.get("type") != "tool_search_call":
+            raise AgentsException(f"Unexpected tool search call item type: {copied.get('type')!r}")
+        try:
+            return ResponseToolSearchCall.model_validate(copied)
+        except pydantic.ValidationError:
+            return copied
+    raise AgentsException(f"Unexpected tool search call item type: {type(raw_item)}")
+
+
+def coerce_tool_search_output_raw_item(raw_item: Any) -> ToolSearchOutputRawItem:
+    """Prefer the typed SDK tool_search output model while tolerating partial snapshots."""
+    if isinstance(raw_item, ResponseToolSearchOutputItem):
+        return raw_item
+    if isinstance(raw_item, Mapping):
+        copied = _copy_tool_search_mapping(raw_item)
+        if copied.get("type") != "tool_search_output":
+            raise AgentsException(
+                f"Unexpected tool search output item type: {copied.get('type')!r}"
+            )
+        try:
+            return ResponseToolSearchOutputItem.model_validate(copied)
+        except pydantic.ValidationError:
+            return copied
+    raise AgentsException(f"Unexpected tool search output item type: {type(raw_item)}")
 
 
 @dataclass
@@ -250,6 +355,9 @@ class ToolCallItem(RunItemBase[Any]):
 
     description: str | None = None
     """Optional tool description if known at item creation time."""
+
+    title: str | None = None
+    """Optional short display label if known at item creation time."""
 
     tool_origin: ToolOrigin | None = field(default=None, repr=False)
     """Information about the origin/source of the tool call. Only set for FunctionTool calls."""
@@ -394,10 +502,25 @@ class ToolApprovalItem(RunItemBase[Any]):
     tool_name: str | None = None
     """Tool name for approval tracking; falls back to raw_item.name when absent."""
 
+    _allow_bare_name_alias: bool = field(default=False, kw_only=True, repr=False)
+    """Whether permanent approval decisions should also be recorded under the bare tool name."""
+
+    # Keep `type` ahead of `tool_namespace` to preserve the historical 4-argument positional
+    # constructor shape: `(agent, raw_item, tool_name, type)`.
+    type: Literal["tool_approval_item"] = "tool_approval_item"
+
+    tool_namespace: str | None = None
+    """Optional Responses API namespace for function-tool approvals."""
+
+    tool_lookup_key: FunctionToolLookupKey | None = field(
+        default=None,
+        kw_only=True,
+        repr=False,
+    )
+    """Canonical function-tool lookup metadata when the approval targets a function tool."""
+
     tool_origin: ToolOrigin | None = field(default=None, repr=False)
     """Information about the origin/source of the tool. Only set for FunctionTool calls."""
-
-    type: Literal["tool_approval_item"] = "tool_approval_item"
 
     def release_agent(self) -> None:
         """Release agent references including tool_origin.agent_as_tool."""
@@ -415,6 +538,26 @@ class ToolApprovalItem(RunItemBase[Any]):
                 self.tool_name = self.raw_item.name
             else:
                 self.tool_name = None
+        if self.tool_namespace is None:
+            if isinstance(self.raw_item, dict):
+                namespace = self.raw_item.get("namespace")
+            else:
+                namespace = getattr(self.raw_item, "namespace", None)
+            self.tool_namespace = namespace if isinstance(namespace, str) else None
+        if self.tool_lookup_key is None:
+            if isinstance(self.raw_item, dict):
+                raw_type = self.raw_item.get("type")
+            else:
+                raw_type = getattr(self.raw_item, "type", None)
+            if (
+                raw_type == "function_call"
+                and self.tool_name is not None
+                and (self.tool_namespace is None or self.tool_namespace != self.tool_name)
+            ):
+                self.tool_lookup_key = get_function_tool_lookup_key(
+                    self.tool_name,
+                    self.tool_namespace,
+                )
 
     def __hash__(self) -> int:
         """Hash by object identity to keep distinct approvals separate."""
@@ -436,6 +579,13 @@ class ToolApprovalItem(RunItemBase[Any]):
                 self.raw_item, "tool_name", None
             )
         return str(candidate) if candidate is not None else None
+
+    @property
+    def qualified_name(self) -> str | None:
+        """Return a display-friendly tool name, collapsing synthetic deferred namespaces."""
+        if self.tool_name is None:
+            return None
+        return tool_trace_name(self.tool_name, self.tool_namespace) or self.tool_name
 
     @property
     def arguments(self) -> str | None:
@@ -481,6 +631,8 @@ class ToolApprovalItem(RunItemBase[Any]):
 
 RunItem: TypeAlias = Union[
     MessageOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
     HandoffCallItem,
     HandoffOutputItem,
     ToolCallItem,
@@ -516,10 +668,10 @@ class ModelResponse:
 
     def to_input_items(self) -> list[TResponseInputItem]:
         """Convert the output into a list of input items suitable for passing to the model."""
-        # We happen to know that the shape of the Pydantic output items are the same as the
-        # equivalent TypedDict input items, so we can just convert each one.
-        # This is also tested via unit tests.
-        return [it.model_dump(exclude_unset=True) for it in self.output]  # type: ignore
+        # Most output items can be replayed via a direct model_dump. Tool-search items carry
+        # output-only metadata such as `created_by`, so they must go through the same replay
+        # sanitizer used elsewhere in the runtime.
+        return [_output_item_to_input_item(it) for it in self.output]
 
 
 class ItemHelpers:

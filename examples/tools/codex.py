@@ -26,13 +26,11 @@ from agents.extensions.experimental.codex import (
     codex_tool,
 )
 
+
 # This example runs the Codex CLI via the Codex tool wrapper.
 # You can configure the CLI path with CODEX_PATH or CodexOptions(codex_path_override="...").
 # codex_tool accepts options as keyword arguments or a plain dict.
 # For example: codex_tool(sandbox_mode="read-only") or codex_tool({"sandbox_mode": "read-only"}).
-# The prompt below asks Codex to use the $openai-knowledge skill (Docs MCP) for API lookups.
-
-
 async def on_codex_stream(payload: CodexToolStreamEvent) -> None:
     event = payload.event
 
@@ -107,7 +105,7 @@ async def main() -> None:
     agent = Agent(
         name="Codex Agent",
         instructions=(
-            "Use the codex tool to inspect the workspace and answer the question. "
+            "Use the codex tool to inspect the workspace in read-only mode and answer the question. "
             "When skill names, which usually starts with `$`, are mentioned, "
             "you must rely on the codex tool to use the skill and answer the question.\n\n"
             "When you send the final answer, you must include the following info at the end:\n\n"
@@ -116,11 +114,11 @@ async def main() -> None:
         tools=[
             # Run local Codex CLI as a sub process
             codex_tool(
-                sandbox_mode="workspace-write",
+                sandbox_mode="read-only",
                 default_thread_options=ThreadOptions(
                     # You can pass a Codex instance to customize CLI details
                     # codex=Codex(executable_path="/path/to/codex", base_url="..."),
-                    model="gpt-5.2-codex",
+                    model="gpt-5.4",
                     model_reasoning_effort="low",
                     network_access_enabled=True,
                     web_search_enabled=False,
@@ -138,25 +136,29 @@ async def main() -> None:
     log(f"View trace: https://platform.openai.com/traces/trace?trace_id={trace_id}")
 
     with trace("Codex tool example", trace_id=trace_id):
-        # Use a skill that requires network access and MCP server settings
-        log("Using $openai-knowledge skill to fetch the latest realtime model name...")
+        log("Using the Codex tool to inspect pyproject.toml and summarize Python requirements...")
         result = await Runner.run(
             agent,
-            "You must use `$openai-knowledge` skill to fetch the latest realtime model name.",
+            (
+                "Inspect pyproject.toml in this repository and summarize the supported Python "
+                "version plus the main local test command. Do not modify any files."
+            ),
         )
         log(result.final_output)
-        # The latest realtime model name, according to the $openai-knowledge skill, is gpt-realtime.
 
-        # Use a skill that runs local command and analyzes the output
+        # Use local inspection in read-only mode.
         log(
-            "Using $test-coverage-improver skill to analyze the test coverage of the project and improve it..."
+            "Using the Codex tool to inspect AGENTS.md and summarize the local verification workflow..."
         )
         result = await Runner.run(
             agent,
-            "You must use `$test-coverage-improver` skill to analyze the test coverage of the project and improve it.",
+            (
+                "Inspect AGENTS.md and summarize the mandatory local verification commands for this "
+                "repository. Do not modify any files or suggest code changes."
+            ),
         )
         log(result.final_output)
-        # (Aa few suggestions for improving the test coverage will be displayed.)
+        # (A read-only summary of the local verification workflow will be displayed.)
 
 
 if __name__ == "__main__":

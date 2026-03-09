@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
-import json
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, cast
@@ -12,7 +11,7 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from typing_extensions import NotRequired, TypeAlias, TypedDict
 
-from . import _debug
+from ._tool_identity import get_function_tool_approval_keys
 from .agent_output import AgentOutputSchemaBase
 from .agent_tool_input import (
     AgentAsToolInput,
@@ -49,12 +48,15 @@ from .tool import (
     ToolErrorFunction,
     ToolOrigin,
     ToolOriginType,
-    _extract_tool_argument_json_error,
+    _build_handled_function_tool_error_handler,
+    _build_wrapped_function_tool,
+    _log_function_tool_invocation,
+    _parse_function_tool_json_input,
     default_tool_error_function,
+    prune_orphaned_tool_search_tools,
 )
 from .tool_context import ToolContext
-from .tracing import SpanError
-from .util import _error_tracing, _transforms
+from .util import _transforms
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
@@ -212,7 +214,7 @@ class AgentBase(Generic[TContext]):
 
         results = await asyncio.gather(*(_check_tool_enabled(t) for t in self.tools))
         enabled: list[Tool] = [t for t, ok in zip(self.tools, results) if ok]
-        all_tools: list[Tool] = [*mcp_tools, *enabled]
+        all_tools: list[Tool] = prune_orphaned_tool_search_tools([*mcp_tools, *enabled])
         _validate_codex_tool_name_collisions(all_tools)
         return all_tools
 
@@ -503,7 +505,8 @@ class Agent(AgentBase, Generic[TContext]):
             tool_description: The description of the tool, which should indicate what it does and
                 when to use it.
             custom_output_extractor: A function that extracts the output from the agent. If not
-                provided, the last message from the agent will be used.
+                provided, the last message from the agent will be used. Nested run results expose
+                `agent_tool_invocation` metadata when this agent is invoked via `as_tool()`.
             is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
                 context and agent and returns whether the tool is enabled. Disabled tools are hidden
                 from the LLM at runtime.
@@ -548,43 +551,34 @@ class Agent(AgentBase, Generic[TContext]):
             include_json_schema=include_schema,
         )
 
-        def _normalize_tool_input(parsed: Any) -> Any:
+        def _normalize_tool_input(parsed: Any, tool_name: str) -> Any:
             # Prefer JSON mode so structured params (datetime/UUID/Decimal, etc.) serialize cleanly.
             try:
                 return params_adapter.dump_python(parsed, mode="json")
             except Exception as exc:
                 raise ModelBehaviorError(
-                    f"Failed to serialize structured tool input for {tool_name_resolved}: {exc}"
+                    f"Failed to serialize structured tool input for {tool_name}: {exc}"
                 ) from exc
 
         async def _run_agent_impl(context: ToolContext, input_json: str) -> Any:
             from .run import DEFAULT_MAX_TURNS, Runner
             from .tool_context import ToolContext
 
-            try:
-                json_data = json.loads(input_json) if input_json else {}
-            except Exception as exc:
-                if _debug.DONT_LOG_TOOL_DATA:
-                    logger.debug(f"Invalid JSON input for tool {tool_name_resolved}")
-                else:
-                    logger.debug(f"Invalid JSON input for tool {tool_name_resolved}: {input_json}")
-                raise ModelBehaviorError(
-                    f"Invalid JSON input for tool {tool_name_resolved}: {input_json}"
-                ) from exc
-
-            if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"Invoking tool {tool_name_resolved}")
-            else:
-                logger.debug(f"Invoking tool {tool_name_resolved} with input {input_json}")
+            tool_name = (
+                context.tool_name if isinstance(context, ToolContext) else tool_name_resolved
+            )
+            json_data = _parse_function_tool_json_input(
+                tool_name=tool_name,
+                input_json=input_json,
+            )
+            _log_function_tool_invocation(tool_name=tool_name, input_json=input_json)
 
             try:
                 parsed_params = params_adapter.validate_python(json_data)
             except ValidationError as exc:
-                raise ModelBehaviorError(
-                    f"Invalid JSON input for tool {tool_name_resolved}: {exc}"
-                ) from exc
+                raise ModelBehaviorError(f"Invalid JSON input for tool {tool_name}: {exc}") from exc
 
-            params_data = _normalize_tool_input(parsed_params)
+            params_data = _normalize_tool_input(parsed_params, tool_name)
             resolved_input = await resolve_agent_tool_input(
                 params=params_data,
                 schema_info=schema_info if should_capture_tool_input else None,
@@ -607,6 +601,7 @@ class Agent(AgentBase, Generic[TContext]):
                     tool_call_id=context.tool_call_id,
                     tool_arguments=context.tool_arguments,
                     tool_call=context.tool_call,
+                    tool_namespace=context.tool_namespace,
                     agent=context.agent,
                     run_config=resolved_run_config,
                 )
@@ -641,8 +636,12 @@ class Agent(AgentBase, Generic[TContext]):
                     if not call_id:
                         has_pending = True
                         continue
+                    tool_namespace = RunContextWrapper._resolve_tool_namespace(interruption)
                     status = context.get_approval_status(
-                        interruption.tool_name or "", call_id, existing_pending=interruption
+                        interruption.tool_name or "",
+                        call_id,
+                        tool_namespace=tool_namespace,
+                        existing_pending=interruption,
                     )
                     if status is False:
                         return "rejected"
@@ -661,17 +660,54 @@ class Agent(AgentBase, Generic[TContext]):
                 parent_context: RunContextWrapper[Any],
                 interruptions: list[ToolApprovalItem],
             ) -> None:
+                def _find_mirrored_approval_record(
+                    interruption: ToolApprovalItem,
+                    *,
+                    approved: bool,
+                ) -> Any | None:
+                    candidate_keys = list(RunContextWrapper._resolve_approval_keys(interruption))
+                    for candidate_key in get_function_tool_approval_keys(
+                        tool_name=RunContextWrapper._resolve_tool_name(interruption),
+                        tool_namespace=RunContextWrapper._resolve_tool_namespace(interruption),
+                        tool_lookup_key=RunContextWrapper._resolve_tool_lookup_key(interruption),
+                        include_legacy_deferred_key=True,
+                    ):
+                        if candidate_key not in candidate_keys:
+                            candidate_keys.append(candidate_key)
+                    fallback: Any | None = None
+                    for candidate_key in candidate_keys:
+                        candidate = parent_context._approvals.get(candidate_key)
+                        if candidate is None:
+                            continue
+                        if approved and candidate.approved is True:
+                            return candidate
+                        if not approved and candidate.rejected is True:
+                            return candidate
+                        if fallback is None:
+                            fallback = candidate
+                    return fallback
+
                 for interruption in interruptions:
                     call_id = interruption.call_id
                     if not call_id:
                         continue
                     tool_name = RunContextWrapper._resolve_tool_name(interruption)
+                    tool_namespace = RunContextWrapper._resolve_tool_namespace(interruption)
+                    approval_key = RunContextWrapper._resolve_approval_key(interruption)
                     status = parent_context.get_approval_status(
-                        tool_name, call_id, existing_pending=interruption
+                        tool_name,
+                        call_id,
+                        tool_namespace=tool_namespace,
+                        existing_pending=interruption,
                     )
                     if status is None:
                         continue
-                    approval_record = parent_context._approvals.get(tool_name)
+                    approval_record = parent_context._approvals.get(approval_key)
+                    if approval_record is None:
+                        approval_record = _find_mirrored_approval_record(
+                            interruption,
+                            approved=status,
+                        )
                     if status is True:
                         always_approve = bool(approval_record and approval_record.approved is True)
                         nested_context.approve_tool(
@@ -711,6 +747,7 @@ class Agent(AgentBase, Generic[TContext]):
 
             if run_result is None:
                 if on_stream is not None:
+                    stream_handler = on_stream
                     run_result_streaming = Runner.run_streamed(
                         starting_agent=cast(Agent[Any], self),
                         input=resume_state or resolved_input,
@@ -731,7 +768,7 @@ class Agent(AgentBase, Generic[TContext]):
                     async def _run_handler(payload: AgentToolStreamEvent) -> None:
                         """Execute the user callback while capturing exceptions."""
                         try:
-                            maybe_result = on_stream(payload)
+                            maybe_result = stream_handler(payload)
                             if inspect.isawaitable(maybe_result):
                                 await maybe_result
                         except Exception:
@@ -805,48 +842,17 @@ class Agent(AgentBase, Generic[TContext]):
 
             return run_result.final_output
 
-        async def _run_agent_tool(context: ToolContext, input_json: str) -> Any:
-            try:
-                return await _run_agent_impl(context, input_json)
-            except Exception as exc:
-                if failure_error_function is None:
-                    raise
-
-                result = failure_error_function(context, exc)
-                if inspect.isawaitable(result):
-                    result = await result
-
-                json_decode_error = _extract_tool_argument_json_error(exc)
-                if json_decode_error is not None:
-                    span_error_message = "Error running tool"
-                    span_error_detail = str(json_decode_error)
-                else:
-                    span_error_message = "Error running tool (non-fatal)"
-                    span_error_detail = str(exc)
-
-                _error_tracing.attach_error_to_current_span(
-                    SpanError(
-                        message=span_error_message,
-                        data={
-                            "tool_name": tool_name_resolved,
-                            "error": span_error_detail,
-                        },
-                    )
-                )
-                if _debug.DONT_LOG_TOOL_DATA:
-                    logger.debug(f"Tool {tool_name_resolved} failed")
-                else:
-                    logger.error(
-                        f"Tool {tool_name_resolved} failed: {input_json} {exc}",
-                        exc_info=exc,
-                    )
-                return result
-
-        run_agent_tool = FunctionTool(
+        run_agent_tool = _build_wrapped_function_tool(
             name=tool_name_resolved,
             description=tool_description_resolved,
             params_json_schema=params_schema,
-            on_invoke_tool=_run_agent_tool,
+            invoke_tool_impl=_run_agent_impl,
+            on_handled_error=_build_handled_function_tool_error_handler(
+                span_message="Error running tool (non-fatal)",
+                span_message_for_json_decode_error="Error running tool",
+                log_label="Tool",
+            ),
+            failure_error_function=failure_error_function,
             strict_json_schema=True,
             is_enabled=is_enabled,
             needs_approval=needs_approval,

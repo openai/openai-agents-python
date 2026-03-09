@@ -339,6 +339,56 @@ async def test_tool_call_runs():
 
 
 @pytest.mark.asyncio
+async def test_streamed_parallel_tool_call_with_cancelled_sibling_reaches_final_output() -> None:
+    async def _ok_tool() -> str:
+        return "ok"
+
+    async def _cancel_tool() -> str:
+        raise asyncio.CancelledError("tool-cancelled")
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[
+            function_tool(_ok_tool, name_override="ok_tool"),
+            function_tool(_cancel_tool, name_override="cancel_tool"),
+        ],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call("ok_tool", "{}", call_id="call_ok"),
+                get_function_tool_call("cancel_tool", "{}", call_id="call_cancel"),
+            ],
+            [get_text_message("final answer")],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="user_message")
+    await consume_stream(result)
+
+    assert result.final_output == "final answer"
+    assert len(result.raw_responses) == 2
+
+    second_turn_input = cast(list[dict[str, Any]], model.last_turn_args["input"])
+    tool_outputs = [
+        item for item in second_turn_input if item.get("type") == "function_call_output"
+    ]
+    assert tool_outputs == [
+        {"call_id": "call_ok", "output": "ok", "type": "function_call_output"},
+        {
+            "call_id": "call_cancel",
+            "output": (
+                "An error occurred while running the tool. Please try again. Error: tool-cancelled"
+            ),
+            "type": "function_call_output",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_streamed_reasoning_item_id_policy_omits_follow_up_reasoning_ids() -> None:
     model = FakeModel()
     agent = Agent(

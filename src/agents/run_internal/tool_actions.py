@@ -12,22 +12,12 @@ import json
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from openai.types.responses import ResponseComputerToolCall
-from openai.types.responses.response_computer_tool_call import (
-    ActionClick,
-    ActionDoubleClick,
-    ActionDrag,
-    ActionKeypress,
-    ActionMove,
-    ActionScreenshot,
-    ActionScroll,
-    ActionType,
-    ActionWait,
-)
 from openai.types.responses.response_input_item_param import (
     ComputerCallOutputAcknowledgedSafetyCheck,
 )
 from openai.types.responses.response_input_param import ComputerCallOutput
 
+from .._tool_identity import get_mapping_or_attr, get_tool_trace_name_for_tool
 from ..agent import Agent
 from ..exceptions import ModelBehaviorError
 from ..items import RunItem, ToolCallOutputItem
@@ -99,6 +89,9 @@ def _serialize_trace_payload(payload: Any) -> str:
 class ComputerAction:
     """Execute computer tool actions and emit screenshot outputs with hooks fired."""
 
+    TRACE_TOOL_NAME = "computer"
+    """Tracing should expose the GA computer tool alias."""
+
     @classmethod
     async def execute(
         cls,
@@ -111,10 +104,13 @@ class ComputerAction:
         acknowledged_safety_checks: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None,
     ) -> RunItem:
         """Run a computer action, capturing a screenshot and notifying hooks."""
+        trace_tool_name = get_tool_trace_name_for_tool(action.computer_tool) or cls.TRACE_TOOL_NAME
 
         async def _run_action(span: Any | None) -> RunItem:
             if span and config.trace_include_sensitive_data:
-                span.span_data.input = _serialize_trace_payload(action.tool_call.action)
+                span.span_data.input = _serialize_trace_payload(
+                    cls._get_trace_input_payload(action.tool_call)
+                )
 
             computer = await resolve_computer(
                 tool=action.computer_tool, run_context=context_wrapper
@@ -142,7 +138,7 @@ class ComputerAction:
                         SpanError(
                             message="Error running tool",
                             data={
-                                "tool_name": action.computer_tool.name,
+                                "tool_name": trace_tool_name,
                                 "error": trace_error,
                             },
                         )
@@ -179,7 +175,7 @@ class ComputerAction:
 
         return await with_tool_function_span(
             config=config,
-            tool_name=action.computer_tool.name,
+            tool_name=trace_tool_name,
             fn=_run_action,
         )
 
@@ -187,7 +183,7 @@ class ComputerAction:
     async def _execute_action_and_capture(
         cls, computer: Any, tool_call: ResponseComputerToolCall
     ) -> str:
-        """Execute the computer action (sync or async drivers) and return the screenshot."""
+        """Execute computer actions (sync or async drivers) and return the final screenshot."""
 
         async def maybe_call(method_name: str, *args: Any) -> Any:
             method = getattr(computer, method_name, None)
@@ -196,28 +192,98 @@ class ComputerAction:
             result = method(*args)
             return await result if inspect.isawaitable(result) else result
 
-        action = tool_call.action
-        if isinstance(action, ActionClick):
-            await maybe_call("click", action.x, action.y, action.button)
-        elif isinstance(action, ActionDoubleClick):
-            await maybe_call("double_click", action.x, action.y)
-        elif isinstance(action, ActionDrag):
-            await maybe_call("drag", [(p.x, p.y) for p in action.path])
-        elif isinstance(action, ActionKeypress):
-            await maybe_call("keypress", action.keys)
-        elif isinstance(action, ActionMove):
-            await maybe_call("move", action.x, action.y)
-        elif isinstance(action, ActionScreenshot):
-            await maybe_call("screenshot")
-        elif isinstance(action, ActionScroll):
-            await maybe_call("scroll", action.x, action.y, action.scroll_x, action.scroll_y)
-        elif isinstance(action, ActionType):
-            await maybe_call("type", action.text)
-        elif isinstance(action, ActionWait):
-            await maybe_call("wait")
+        last_action_was_screenshot = False
+        last_screenshot_result: Any = None
+        for action in cls._iter_actions(tool_call):
+            action_type = get_mapping_or_attr(action, "type")
+            last_action_was_screenshot = False
+            if action_type == "click":
+                await maybe_call(
+                    "click",
+                    get_mapping_or_attr(action, "x"),
+                    get_mapping_or_attr(action, "y"),
+                    get_mapping_or_attr(action, "button"),
+                )
+            elif action_type == "double_click":
+                await maybe_call(
+                    "double_click",
+                    get_mapping_or_attr(action, "x"),
+                    get_mapping_or_attr(action, "y"),
+                )
+            elif action_type == "drag":
+                path = get_mapping_or_attr(action, "path") or []
+                await maybe_call(
+                    "drag",
+                    [
+                        (
+                            cast(int, get_mapping_or_attr(point, "x")),
+                            cast(int, get_mapping_or_attr(point, "y")),
+                        )
+                        for point in path
+                    ],
+                )
+            elif action_type == "keypress":
+                await maybe_call("keypress", get_mapping_or_attr(action, "keys"))
+            elif action_type == "move":
+                await maybe_call(
+                    "move",
+                    get_mapping_or_attr(action, "x"),
+                    get_mapping_or_attr(action, "y"),
+                )
+            elif action_type == "screenshot":
+                last_screenshot_result = await maybe_call("screenshot")
+                last_action_was_screenshot = True
+            elif action_type == "scroll":
+                await maybe_call(
+                    "scroll",
+                    get_mapping_or_attr(action, "x"),
+                    get_mapping_or_attr(action, "y"),
+                    get_mapping_or_attr(action, "scroll_x"),
+                    get_mapping_or_attr(action, "scroll_y"),
+                )
+            elif action_type == "type":
+                await maybe_call("type", get_mapping_or_attr(action, "text"))
+            elif action_type == "wait":
+                await maybe_call("wait")
+            else:
+                raise ModelBehaviorError(
+                    f"Computer tool returned unknown action type {action_type!r}"
+                )
 
+        # Reuse the last screenshot action result when the batch already ended in a capture.
+        if last_action_was_screenshot:
+            return cast(str, last_screenshot_result)
         screenshot_result = await maybe_call("screenshot")
         return cast(str, screenshot_result)
+
+    @staticmethod
+    def _iter_actions(tool_call: ResponseComputerToolCall) -> list[Any]:
+        if tool_call.actions:
+            return list(tool_call.actions)
+        if tool_call.action is not None:
+            # The GA tool returns batched actions[], but released preview snapshots and older
+            # Responses payloads may still carry a single action field.
+            return [tool_call.action]
+        return []
+
+    @classmethod
+    def _get_trace_input_payload(cls, tool_call: ResponseComputerToolCall) -> Any:
+        actions = cls._iter_actions(tool_call)
+        if tool_call.actions:
+            return [cls._serialize_action_payload(action) for action in actions]
+        if actions:
+            return cls._serialize_action_payload(actions[0])
+        return None
+
+    @staticmethod
+    def _serialize_action_payload(action: Any) -> Any:
+        if hasattr(action, "model_dump") and callable(action.model_dump):
+            return action.model_dump(exclude_none=True)
+        if isinstance(action, dict):
+            return dict(action)
+        if dataclasses.is_dataclass(action) and not isinstance(action, type):
+            return dataclasses.asdict(action)
+        return action
 
 
 class LocalShellAction:

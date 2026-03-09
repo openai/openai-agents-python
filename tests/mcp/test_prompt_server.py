@@ -93,6 +93,7 @@ async def test_list_prompts():
 
     assert len(result.prompts) == 1
     assert result.prompts[0].name == "generate_code_review_instructions"
+    assert result.prompts[0].description is not None
     assert "code review" in result.prompts[0].description
 
 

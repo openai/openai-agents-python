@@ -159,6 +159,174 @@ async def test_tool_usage_tracking(agent: Agent):
     session.close()
 
 
+async def test_tool_usage_tracking_preserves_namespaces_and_tool_search(agent: Agent):
+    """Tool usage should retain namespaces and count tool_search calls once."""
+    session_id = "tools_namespace_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Look up the same account in multiple systems"},
+        {
+            "type": "function_call",
+            "name": "lookup_account",
+            "namespace": "crm",
+            "arguments": '{"account_id": "acct_123"}',
+            "call_id": "crm-call",
+        },
+        {
+            "type": "function_call",
+            "name": "lookup_account",
+            "namespace": "billing",
+            "arguments": '{"account_id": "acct_123"}',
+            "call_id": "billing-call",
+        },
+        {
+            "type": "tool_search_call",
+            "id": "tsc_memory",
+            "arguments": {"paths": ["crm"], "query": "lookup_account"},
+            "execution": "server",
+            "status": "completed",
+        },
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "id": "tso_memory",
+                "execution": "server",
+                "status": "completed",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup_account",
+                        "description": "Look up an account.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "account_id": {
+                                    "type": "string",
+                                }
+                            },
+                            "required": ["account_id"],
+                        },
+                        "defer_loading": True,
+                    }
+                ],
+            },
+        ),
+    ]
+    await session.add_items(items)
+
+    usage_by_tool = {tool_name: count for tool_name, count, _turn in await session.get_tool_usage()}
+
+    assert usage_by_tool["crm.lookup_account"] == 1
+    assert usage_by_tool["billing.lookup_account"] == 1
+    assert usage_by_tool["tool_search"] == 1
+
+    session.close()
+
+
+async def test_tool_usage_tracking_counts_tool_search_output_without_matching_call(
+    agent: Agent,
+) -> None:
+    """Tool-search output-only histories should still report one tool_search usage."""
+    session_id = "tools_tool_search_output_only_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Look up customer_42"},
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "id": "tso_memory_only",
+                "execution": "server",
+                "status": "completed",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup_account",
+                        "description": "Look up an account.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "account_id": {
+                                    "type": "string",
+                                }
+                            },
+                            "required": ["account_id"],
+                        },
+                    }
+                ],
+            },
+        ),
+    ]
+    await session.add_items(items)
+
+    usage_by_tool = {tool_name: count for tool_name, count, _turn in await session.get_tool_usage()}
+
+    assert usage_by_tool["tool_search"] == 1
+
+    session.close()
+
+
+async def test_tool_usage_tracking_uses_bare_name_for_deferred_top_level_calls(agent: Agent):
+    """Deferred top-level tool calls should not retain synthetic namespace aliases."""
+    session_id = "tools_deferred_top_level_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "What is the weather?"},
+        {
+            "type": "function_call",
+            "name": "get_weather",
+            "arguments": '{"city": "Tokyo"}',
+            "call_id": "weather-call",
+        },
+        {
+            "type": "function_call",
+            "name": "get_weather",
+            "namespace": "get_weather",
+            "arguments": '{"city": "Osaka"}',
+            "call_id": "weather-call-2",
+        },
+    ]
+    await session.add_items(items)
+
+    usage_by_tool = {tool_name: count for tool_name, count, _turn in await session.get_tool_usage()}
+
+    assert usage_by_tool["get_weather"] == 2
+    assert "get_weather.get_weather" not in usage_by_tool
+
+    session.close()
+
+
+async def test_tool_usage_tracking_collapses_reserved_same_name_namespace_shape(
+    agent: Agent,
+):
+    """Reserved same-name namespace wire shapes should collapse to the bare tool name."""
+    session_id = "tools_deferred_top_level_namespace_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "What is the weather?"},
+        {
+            "type": "function_call",
+            "name": "lookup_account",
+            "namespace": "lookup_account",
+            "arguments": '{"account_id": "acct_123"}',
+            "call_id": "lookup-call",
+        },
+    ]
+    await session.add_items(items)
+
+    usage_by_tool = {tool_name: count for tool_name, count, _turn in await session.get_tool_usage()}
+
+    assert usage_by_tool["lookup_account"] == 1
+    assert "lookup_account.lookup_account" not in usage_by_tool
+
+    session.close()
+
+
 async def test_branching_functionality(agent: Agent):
     """Test branching functionality - create, switch, and delete branches."""
     session_id = "branching_test"

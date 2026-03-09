@@ -86,7 +86,7 @@ from .models.openai_responses import OpenAIResponsesModel, OpenAIResponsesWSMode
 from .prompts import DynamicPromptFunction, GenerateDynamicPromptData, Prompt
 from .repl import run_demo_loop
 from .responses_websocket_session import ResponsesWebSocketSession, responses_websocket_session
-from .result import RunResult, RunResultStreaming
+from .result import AgentToolInvocation, RunResult, RunResultStreaming
 from .run import (
     ReasoningItemIdPolicy,
     RunConfig,
@@ -156,11 +156,13 @@ from .tool import (
     ToolOutputImageDict,
     ToolOutputText,
     ToolOutputTextDict,
+    ToolSearchTool,
     WebSearchTool,
     default_tool_error_function,
     dispose_resolved_computers,
     function_tool,
     resolve_computer,
+    tool_namespace,
 )
 from .tool_guardrails import (
     ToolGuardrailFunctionOutput,
@@ -361,6 +363,7 @@ __all__ = [
     "RunErrorHandlerInput",
     "RunErrorHandlerResult",
     "RunErrorHandlers",
+    "AgentToolInvocation",
     "RunResult",
     "RunResultStreaming",
     "ResponsesWebSocketSession",
@@ -423,7 +426,9 @@ __all__ = [
     "ToolOutputImageDict",
     "ToolOutputFileContent",
     "ToolOutputFileContentDict",
+    "ToolSearchTool",
     "function_tool",
+    "tool_namespace",
     "resolve_computer",
     "dispose_resolved_computers",
     "Usage",

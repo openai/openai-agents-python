@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
+from urllib.parse import unquote, urlparse, urlunparse
 
 from openai.types.responses.web_search_tool import Filters
 from openai.types.shared.reasoning import Reasoning
@@ -19,20 +20,68 @@ def _get_field(obj: Any, key: str) -> Any:
 # logging.basicConfig(level=logging.DEBUG)
 
 
+def _normalized_source_urls(sources: Any) -> list[str]:
+    allowed_hosts = {"developers.openai.com", "platform.openai.com"}
+    blocked_suffixes = (
+        ".css",
+        ".eot",
+        ".gif",
+        ".ico",
+        ".jpeg",
+        ".jpg",
+        ".js",
+        ".png",
+        ".svg",
+        ".svgz",
+        ".woff",
+        ".woff2",
+    )
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    if not isinstance(sources, list):
+        return urls
+
+    for source in sources:
+        url = getattr(source, "url", None)
+        if url is None and isinstance(source, Mapping):
+            url = source.get("url")
+        if not isinstance(url, str):
+            continue
+
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or parsed.netloc not in allowed_hosts:
+            continue
+
+        path = unquote(parsed.path).split("#", 1)[0].rstrip("/")
+        if not path or path.endswith(blocked_suffixes):
+            continue
+
+        normalized = urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+        if normalized in seen:
+            continue
+
+        seen.add(normalized)
+        urls.append(normalized)
+
+    return urls
+
+
 async def main():
     agent = Agent(
         name="WebOAI website searcher",
         model="gpt-5-nano",
-        instructions="You are a helpful agent that can search openai.com resources.",
+        instructions=(
+            "You are a helpful agent that searches OpenAI developer documentation and platform "
+            "docs. Ignore ChatGPT help-center or end-user release notes."
+        ),
         tools=[
             WebSearchTool(
                 # https://platform.openai.com/docs/guides/tools-web-search?api-mode=responses#domain-filtering
                 filters=Filters(
                     allowed_domains=[
-                        "openai.com",
-                        "developer.openai.com",
+                        "developers.openai.com",
                         "platform.openai.com",
-                        "help.openai.com",
                     ],
                 ),
                 search_context_size="medium",
@@ -48,7 +97,11 @@ async def main():
 
     with trace("Web search example"):
         today = datetime.now().strftime("%Y-%m-%d")
-        query = f"Write a summary of the latest OpenAI Platform updates for developers in the last few weeks (today is {today})."
+        query = (
+            "Write a summary of the latest OpenAI API and developer platform updates from the "
+            f"last few weeks (today is {today}). Focus on developer docs, API changes, model "
+            "release notes, and platform changelog items."
+        )
         result = await Runner.run(agent, query)
 
         print()
@@ -68,12 +121,8 @@ async def main():
             if not sources:
                 continue
 
-            for source in sources:
-                url = getattr(source, "url", None)
-                if url is None and isinstance(source, Mapping):
-                    url = source.get("url")
-                if url:
-                    print(f"- {url}")
+            for url in _normalized_source_urls(sources):
+                print(f"- {url}")
         print()
         print("### Final output ###")
         print()

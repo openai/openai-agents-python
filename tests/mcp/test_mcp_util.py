@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import logging
 from typing import Any
@@ -189,6 +190,60 @@ async def test_mcp_invocation_crash_causes_error(caplog: pytest.LogCaptureFixtur
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
 
     assert "Error invoking MCP tool test_tool_1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_invocation_mcp_error_reraises(caplog: pytest.LogCaptureFixture):
+    """Test that McpError from server.call_tool is re-raised so the FunctionTool failure
+    pipeline (failure_error_function) can handle it.
+
+    When an MCP server raises McpError (e.g. upstream HTTP 4xx/5xx), invoke_mcp_tool
+    re-raises so the configured failure_error_function shapes the model-visible error.
+    With the default failure_error_function the FunctionTool returns a string error
+    result; with failure_error_function=None the error is propagated to the caller.
+    """
+    caplog.set_level(logging.DEBUG)
+
+    from mcp.shared.exceptions import McpError
+    from mcp.types import ErrorData
+
+    class McpErrorFakeMCPServer(FakeMCPServer):
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None = None,
+        ):
+            raise McpError(ErrorData(code=-32000, message="upstream 422 Unprocessable Entity"))
+
+    server = McpErrorFakeMCPServer()
+    server.add_tool("search", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="search", inputSchema={})
+
+    # invoke_mcp_tool itself should re-raise McpError
+    with pytest.raises(McpError):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    # Warning (not error) should be logged before re-raising
+    assert "returned an error" in caplog.text
+
+    # Via FunctionTool with default failure_error_function: error becomes a string result
+    mcp_tool = MCPTool(name="search", inputSchema={})
+    agent = Agent(name="test-agent")
+    function_tool = MCPUtil.to_function_tool(
+        mcp_tool, server, convert_schemas_to_strict=False, agent=agent
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="search",
+        tool_call_id="test_call_mcp_error",
+        tool_arguments="{}",
+    )
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+    assert isinstance(result, str)
+    assert "upstream 422 Unprocessable Entity" in result or "error" in result.lower()
 
 
 @pytest.mark.asyncio
@@ -438,6 +493,38 @@ async def test_mcp_tool_failure_error_function_server_none_raises():
 
     with pytest.raises(AgentsException):
         await function_tool.on_invoke_tool(tool_context, "{}")
+
+
+@pytest.mark.asyncio
+async def test_replaced_mcp_tool_normal_failure_uses_replaced_policy():
+    server = CrashingFakeMCPServer()
+    server.add_tool("crashing_tool", {})
+
+    agent = Agent(
+        name="test-agent",
+        mcp_servers=[server],
+        mcp_config={"failure_error_function": default_tool_error_function},
+    )
+    run_context = RunContextWrapper(context=None)
+    function_tools = await agent.get_mcp_tools(run_context)
+    original_tool = next(tool for tool in function_tools if tool.name == "crashing_tool")
+    assert isinstance(original_tool, FunctionTool)
+
+    replaced_tool = dataclasses.replace(
+        original_tool,
+        _failure_error_function=None,
+        _use_default_failure_error_function=False,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name=replaced_tool.name,
+        tool_call_id="test_call_custom_4",
+        tool_arguments="{}",
+    )
+
+    with pytest.raises(AgentsException):
+        await replaced_tool.on_invoke_tool(tool_context, "{}")
 
 
 @pytest.mark.asyncio
@@ -992,3 +1079,33 @@ async def test_multiple_content_items_without_structured():
     assert result[0]["text"] == "First"
     assert result[1]["type"] == "text"
     assert result[1]["text"] == "Second"
+
+
+def test_to_function_tool_preserves_mcp_title_metadata():
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="search_docs",
+        inputSchema={},
+        description="Search the docs.",
+        title="Search Docs",
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+
+    assert function_tool.description == "Search the docs."
+    assert function_tool._mcp_title == "Search Docs"
+
+
+def test_to_function_tool_description_falls_back_to_mcp_title():
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="search_docs",
+        inputSchema={},
+        description=None,
+        title="Search Docs",
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+
+    assert function_tool.description == "Search Docs"
+    assert function_tool._mcp_title == "Search Docs"

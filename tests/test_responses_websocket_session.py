@@ -36,6 +36,42 @@ async def test_responses_websocket_session_preserves_openai_prefix_routing(monke
 
 
 @pytest.mark.asyncio
+async def test_responses_websocket_session_can_preserve_openai_prefix_model_ids(monkeypatch):
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def fake_get_model(model_name):
+        captured["model_name"] = model_name
+        return sentinel
+
+    async with responses_websocket_session(openai_prefix_mode="model_id") as ws:
+        monkeypatch.setattr(ws.provider, "get_model", fake_get_model)
+
+        result = ws.run_config.model_provider.get_model("openai/gpt-4.1")
+
+        assert result is sentinel
+        assert captured["model_name"] == "openai/gpt-4.1"
+
+
+@pytest.mark.asyncio
+async def test_responses_websocket_session_can_preserve_unknown_prefix_model_ids(monkeypatch):
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def fake_get_model(model_name):
+        captured["model_name"] = model_name
+        return sentinel
+
+    async with responses_websocket_session(unknown_prefix_mode="model_id") as ws:
+        monkeypatch.setattr(ws.provider, "get_model", fake_get_model)
+
+        result = ws.run_config.model_provider.get_model("openrouter/openai/gpt-4.1")
+
+        assert result is sentinel
+        assert captured["model_name"] == "openrouter/openai/gpt-4.1"
+
+
+@pytest.mark.asyncio
 async def test_responses_websocket_session_run_streamed_injects_run_config(monkeypatch):
     agent = Agent(name="test", instructions="Be concise.", model="gpt-4")
     captured = {}

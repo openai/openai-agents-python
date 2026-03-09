@@ -58,7 +58,7 @@ jobs:
         run: make sync
       - name: Run typecheck
         if: steps.changes.outputs.run == 'true'
-        run: make mypy
+        run: make typecheck
       - name: Skip typecheck
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping typecheck for non-code changes."
@@ -97,6 +97,9 @@ jobs:
       - name: Run tests
         if: steps.changes.outputs.run == 'true' && matrix.python-version != '3.12'
         run: make tests
+      - name: Run async teardown stability tests
+        if: steps.changes.outputs.run == 'true' && (matrix.python-version == '3.10' || matrix.python-version == '3.14')
+        run: make tests-asyncio-stability
       - name: Skip tests
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."

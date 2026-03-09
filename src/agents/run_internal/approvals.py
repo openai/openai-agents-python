@@ -77,10 +77,23 @@ def _build_function_tool_call_for_approval_error(
     """Coerce raw tool call payloads into a normalized function_call for approval errors."""
     if isinstance(tool_call, ResponseFunctionToolCall):
         return tool_call
-    return ResponseFunctionToolCall(
-        type="function_call",
-        name=tool_name,
-        call_id=call_id or "unknown",
-        status="completed",
-        arguments="{}",
-    )
+    namespace = None
+    if isinstance(tool_call, dict):
+        candidate = tool_call.get("namespace")
+        if isinstance(candidate, str) and candidate:
+            namespace = candidate
+    else:
+        candidate = getattr(tool_call, "namespace", None)
+        if isinstance(candidate, str) and candidate:
+            namespace = candidate
+
+    kwargs: dict[str, Any] = {
+        "type": "function_call",
+        "name": tool_name,
+        "call_id": call_id or "unknown",
+        "status": "completed",
+        "arguments": "{}",
+    }
+    if namespace is not None:
+        kwargs["namespace"] = namespace
+    return ResponseFunctionToolCall(**kwargs)
