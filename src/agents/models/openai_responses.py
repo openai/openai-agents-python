@@ -1768,12 +1768,19 @@ class Converter:
                 "resolve_computer({ tool, run_context }) with a run context first "
                 "when building payloads manually."
             )
+        environment = computer.environment
+        dimensions = computer.dimensions
+        if environment is None or dimensions is None:
+            raise UserError(
+                "Preview computer tool payloads require `environment` and `dimensions` on the "
+                "Computer/AsyncComputer implementation."
+            )
         return _require_responses_tool_param(
             {
                 "type": "computer_use_preview",
-                "environment": computer.environment,
-                "display_width": computer.dimensions[0],
-                "display_height": computer.dimensions[1],
+                "environment": environment,
+                "display_width": dimensions[0],
+                "display_height": dimensions[1],
             }
         )
 

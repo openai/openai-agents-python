@@ -11,7 +11,15 @@ from openai import NOT_GIVEN, omit
 from openai.types.responses import ResponseCompletedEvent
 from openai.types.shared.reasoning import Reasoning
 
-from agents import Computer, ComputerTool, ModelSettings, ModelTracing, ToolSearchTool, __version__
+from agents import (
+    AsyncComputer,
+    Computer,
+    ComputerTool,
+    ModelSettings,
+    ModelTracing,
+    ToolSearchTool,
+    __version__,
+)
 from agents.exceptions import UserError
 from agents.models.openai_responses import (
     _HEADERS_OVERRIDE as RESP_HEADERS,
@@ -934,6 +942,69 @@ async def test_prompt_id_keeps_explicit_tool_search_without_local_surface() -> N
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_ga_computer_tool_does_not_require_preview_metadata() -> None:
+    called_kwargs: dict[str, Any] = {}
+
+    class DummyComputer(AsyncComputer):
+        async def screenshot(self) -> str:
+            return "screenshot"
+
+        async def click(self, x: int, y: int, button: str) -> None:
+            pass
+
+        async def double_click(self, x: int, y: int) -> None:
+            pass
+
+        async def drag(self, path: list[tuple[int, int]]) -> None:
+            pass
+
+        async def keypress(self, keys: list[str]) -> None:
+            pass
+
+        async def move(self, x: int, y: int) -> None:
+            pass
+
+        async def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+            pass
+
+        async def type(self, text: str) -> None:
+            pass
+
+        async def wait(self) -> None:
+            pass
+
+    class DummyResponses:
+        async def create(self, **kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return get_response_obj([])
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(
+        model="gpt-5.4",
+        openai_client=DummyResponsesClient(),  # type: ignore[arg-type]
+        model_is_explicit=True,
+    )
+
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[ComputerTool(computer=DummyComputer())],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        prompt=None,
+    )
+
+    assert called_kwargs["tools"] == [{"type": "computer"}]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_prompt_id_uses_preview_computer_payload_when_prompt_owns_model() -> None:
     called_kwargs: dict[str, Any] = {}
 
@@ -1010,6 +1081,73 @@ async def test_prompt_id_uses_preview_computer_payload_when_prompt_owns_model() 
             "display_height": 600,
         }
     ]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_prompt_id_computer_without_preview_metadata_raises_clear_error() -> None:
+    called_kwargs: dict[str, Any] = {}
+
+    class DummyComputer(Computer):
+        def screenshot(self) -> str:
+            return "screenshot"
+
+        def click(self, x: int, y: int, button: str) -> None:
+            pass
+
+        def double_click(self, x: int, y: int) -> None:
+            pass
+
+        def drag(self, path: list[tuple[int, int]]) -> None:
+            pass
+
+        def keypress(self, keys: list[str]) -> None:
+            pass
+
+        def move(self, x: int, y: int) -> None:
+            pass
+
+        def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+            pass
+
+        def type(self, text: str) -> None:
+            pass
+
+        def wait(self) -> None:
+            pass
+
+    class DummyResponses:
+        async def create(self, **kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return get_response_obj([])
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(
+        model="gpt-5.4",
+        openai_client=DummyResponsesClient(),  # type: ignore[arg-type]
+        model_is_explicit=False,
+    )
+
+    with pytest.raises(
+        UserError,
+        match="Preview computer tool payloads require `environment` and `dimensions`",
+    ):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[ComputerTool(computer=DummyComputer())],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            prompt={"id": "pmpt_123"},
+        )
+
+    assert called_kwargs == {}
 
 
 @pytest.mark.allow_call_model_methods
