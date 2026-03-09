@@ -405,8 +405,18 @@ class BackendSpanExporter(TracingExporter):
             isinstance(value, float) and not math.isfinite(value)
         )
 
+    # Maximum safe integer in JavaScript (2^53 - 1)
+    _JS_MAX_SAFE_INTEGER = 9007199254740991  # 2^53 - 1
+    _JS_MIN_SAFE_INTEGER = -9007199254740991  # -(2^53 - 1)
+
     def _sanitize_json_compatible_value(self, value: Any, seen_ids: set[int] | None = None) -> Any:
-        if value is None or isinstance(value, str | bool | int):
+        if value is None or isinstance(value, str | bool):
+            return value
+        if isinstance(value, int):
+            # Convert big integers to strings to avoid precision loss in JavaScript
+            # JavaScript's Number type can only exactly represent integers up to 2^53
+            if value > self._JS_MAX_SAFE_INTEGER or value < self._JS_MIN_SAFE_INTEGER:
+                return str(value)
             return value
         if isinstance(value, float):
             return value if math.isfinite(value) else self._UNSERIALIZABLE

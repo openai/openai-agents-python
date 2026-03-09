@@ -57,6 +57,7 @@ from .run_internal.agent_runner_helpers import (
     save_turn_items_if_needed,
     should_cancel_parallel_model_task_on_input_guardrail_trip,
     update_run_state_for_interruption,
+    validate_nest_handoff_history_settings,
     validate_session_conversation_settings,
 )
 from .run_internal.approvals import approvals_from_step
@@ -442,6 +443,12 @@ class AgentRunner:
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,
             )
+            validate_nest_handoff_history_settings(
+                run_config,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
             starting_input = run_state._original_input
             original_user_input = copy_input_items(run_state._original_input)
             prepared_input = normalize_resumed_input(original_user_input)
@@ -459,6 +466,12 @@ class AgentRunner:
 
             validate_session_conversation_settings(
                 session,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
+            validate_nest_handoff_history_settings(
+                run_config,
                 conversation_id=conversation_id,
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,
@@ -1458,6 +1471,12 @@ class AgentRunner:
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,
             )
+            validate_nest_handoff_history_settings(
+                run_config,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
             # When resuming, use the original_input from state.
             # primeFromState will mark items as sent so prepareInput skips them
             starting_input = run_state._original_input
@@ -1489,6 +1508,12 @@ class AgentRunner:
             input_for_result = cast(Union[str, list[TResponseInputItem]], input)
             validate_session_conversation_settings(
                 session,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
+            validate_nest_handoff_history_settings(
+                run_config,
                 conversation_id=conversation_id,
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,

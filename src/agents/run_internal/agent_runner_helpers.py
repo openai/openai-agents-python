@@ -39,6 +39,7 @@ __all__ = [
     "ensure_context_wrapper",
     "finalize_conversation_tracking",
     "input_guardrails_triggered",
+    "validate_nest_handoff_history_settings",
     "validate_session_conversation_settings",
     "resolve_trace_settings",
     "resolve_processed_response",
@@ -101,6 +102,42 @@ def validate_session_conversation_settings(
     raise UserError(
         "Session persistence cannot be combined with conversation_id, "
         "previous_response_id, or auto_previous_response_id."
+    )
+
+
+def validate_nest_handoff_history_settings(
+    run_config: RunConfig | None,
+    *,
+    conversation_id: str | None,
+    previous_response_id: str | None,
+    auto_previous_response_id: bool,
+) -> None:
+    """Validate that nest_handoff_history is not used with server-managed conversations.
+
+    nest_handoff_history modifies the input history by creating synthetic summary messages,
+    which conflicts with server-managed conversations (conversation_id, previous_response_id)
+    because the server maintains its own conversation state.
+    """
+    if run_config is None:
+        return
+
+    if not run_config.nest_handoff_history:
+        return
+
+    server_manages_conversation = (
+        conversation_id is not None
+        or previous_response_id is not None
+        or auto_previous_response_id
+    )
+
+    if not server_manages_conversation:
+        return
+
+    raise UserError(
+        "nest_handoff_history is incompatible with server-managed conversations. "
+        "When using conversation_id, previous_response_id, or auto_previous_response_id, "
+        "set nest_handoff_history=False in RunConfig. "
+        "See https://github.com/openai/openai-agents-python/issues/2151 for details."
     )
 
 
