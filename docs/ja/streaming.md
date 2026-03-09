@@ -4,17 +4,19 @@ search:
 ---
 # ストリーミング
 
-ストリーミングを使うと、エージェント実行の進行中に更新を購読できます。これは、エンドユーザーに進捗更新や部分的な応答を表示するのに便利です。
+ストリーミングを使用すると、エージェント実行の進行に合わせた更新を購読できます。これは、エンドユーザーに進捗更新や部分的な応答を表示するのに役立ちます。
 
-ストリーミングするには、[`Runner.run_streamed()`][agents.run.Runner.run_streamed] を呼び出します。これにより [`RunResultStreaming`][agents.result.RunResultStreaming] が得られます。`result.stream_events()` を呼び出すと、以下で説明する [`StreamEvent`][agents.stream_events.StreamEvent] オブジェクトの非同期ストリームを取得できます。
+ストリーミングするには、[`Runner.run_streamed()`][agents.run.Runner.run_streamed] を呼び出します。これにより [`RunResultStreaming`][agents.result.RunResultStreaming] が返されます。`result.stream_events()` を呼び出すと、以下で説明する [`StreamEvent`][agents.stream_events.StreamEvent] オブジェクトの async ストリームが得られます。
 
-非同期イテレーターが終了するまで、`result.stream_events()` の消費を続けてください。ストリーミング実行は、イテレーターが終了するまで完了しません。また、セッション永続化、承認管理、履歴圧縮などの後処理は、最後に表示されるトークンが到着した後に完了する場合があります。ループ終了時に、`result.is_complete` が最終的な実行状態を反映します。
+async イテレーターが終了するまで、`result.stream_events()` の消費を続けてください。ストリーミング実行は、イテレーターが終了するまで完了しません。セッション永続化、承認記録、履歴圧縮などの後処理は、最後の可視トークン到着後に完了する場合があります。ループ終了時に、`result.is_complete` は最終的な実行状態を反映します。
 
 ## raw 応答イベント
 
-[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] は、LLM から直接渡される raw イベントです。これらは OpenAI Responses API 形式であり、各イベントは type（`response.created`、`response.output_text.delta` など）と data を持ちます。これらのイベントは、生成され次第すぐに応答メッセージをユーザーへストリーミングしたい場合に有用です。
+[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] は、LLM から直接渡される raw イベントです。これらは OpenAI Responses API 形式であり、各イベントは type（`response.created`、`response.output_text.delta` など）と data を持ちます。これらのイベントは、応答メッセージを生成され次第すぐにユーザーへストリーミングしたい場合に有用です。
 
-たとえば、これは LLM が生成したテキストをトークン単位で出力します。
+コンピュータツールの raw イベントは、保存された結果と同じく preview と GA の区別を維持します。Preview フローは 1 つの `action` を持つ `computer_call` 項目をストリーミングしますが、`gpt-5.4` はバッチ化された `actions[]` を持つ `computer_call` 項目をストリーミングできます。より高レベルな [`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] の表層では、これに対してコンピュータ専用の特別なイベント名は追加されません。どちらの形も引き続き `tool_called` として表れ、スクリーンショット結果は `computer_call_output` 項目をラップした `tool_output` として返されます。
+
+たとえば、以下は LLM が生成したテキストをトークン単位で出力します。
 
 ```python
 import asyncio
@@ -39,7 +41,7 @@ if __name__ == "__main__":
 
 ## ストリーミングと承認
 
-ストリーミングは、ツール承認のために一時停止する実行と互換性があります。ツールに承認が必要な場合、`result.stream_events()` は終了し、保留中の承認は [`RunResultStreaming.interruptions`][agents.result.RunResultStreaming.interruptions] で公開されます。`result.to_state()` で結果を [`RunState`][agents.run_state.RunState] に変換し、割り込みを承認または拒否してから、`Runner.run_streamed(...)` で再開してください。
+ストリーミングは、ツール承認のために一時停止する実行と互換性があります。ツールが承認を必要とする場合、`result.stream_events()` は終了し、保留中の承認は [`RunResultStreaming.interruptions`][agents.result.RunResultStreaming.interruptions] に公開されます。結果を `result.to_state()` で [`RunState`][agents.run_state.RunState] に変換し、割り込みを承認または拒否してから、`Runner.run_streamed(...)` で再開してください。
 
 ```python
 result = Runner.run_streamed(agent, "Delete temporary files if they are no longer needed.")
@@ -55,29 +57,33 @@ if result.interruptions:
         pass
 ```
 
-一時停止/再開の完全な手順は、[human-in-the-loop ガイド](human_in_the_loop.md) を参照してください。
+一時停止 / 再開の完全な手順については、[human-in-the-loop ガイド](human_in_the_loop.md) を参照してください。
 
-## 実行アイテムイベントとエージェントイベント
+## 実行項目イベントとエージェントイベント
 
-[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] は、より高レベルのイベントです。アイテムが完全に生成されたタイミングを通知します。これにより、各トークン単位ではなく、「メッセージ生成」「ツール実行」などのレベルで進捗更新をプッシュできます。同様に、[`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] は、現在のエージェントが変更されたとき（例: ハンドオフの結果）に更新を提供します。
+[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] は、より高レベルのイベントです。これは、項目が完全に生成されたタイミングを通知します。これにより、各トークンではなく「メッセージ生成」「ツール実行」などのレベルで進捗更新を送れます。同様に、[`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] は、現在のエージェントが変わったとき（例: ハンドオフの結果）に更新を提供します。
 
-### 実行アイテムイベント名
+### 実行項目イベント名
 
-`RunItemStreamEvent.name` は、固定された意味論的イベント名のセットを使用します。
+`RunItemStreamEvent.name` は、固定された意味的イベント名のセットを使用します。
 
 -   `message_output_created`
 -   `handoff_requested`
 -   `handoff_occured`
 -   `tool_called`
+-   `tool_search_called`
+-   `tool_search_output_created`
 -   `tool_output`
 -   `reasoning_item_created`
 -   `mcp_approval_requested`
 -   `mcp_approval_response`
 -   `mcp_list_tools`
 
-`handoff_occured` は、後方互換性のために意図的にスペルミスのままになっています。
+`handoff_occured` は、後方互換性のため意図的にスペルミスのままです。
 
-たとえば、これは raw イベントを無視して、更新をユーザーにストリーミングします。
+ホストされたツール検索を使用すると、モデルがツール検索リクエストを発行したときに `tool_search_called` が送出され、Responses API が読み込まれたサブセットを返したときに `tool_search_output_created` が送出されます。
+
+たとえば、以下は raw イベントを無視し、ユーザーへの更新をストリーミングします。
 
 ```python
 import asyncio
