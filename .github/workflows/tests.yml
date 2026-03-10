@@ -58,7 +58,7 @@ jobs:
         run: make sync
       - name: Run typecheck
         if: steps.changes.outputs.run == 'true'
-        run: make mypy
+        run: make typecheck
       - name: Skip typecheck
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping typecheck for non-code changes."

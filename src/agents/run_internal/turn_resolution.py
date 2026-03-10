@@ -27,6 +27,7 @@ from openai.types.responses.response_output_item import (
 )
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
+from .._mcp_tool_metadata import collect_mcp_list_tools_metadata
 from .._tool_identity import (
     build_function_tool_lookup_map,
     get_function_tool_lookup_key,
@@ -1271,6 +1272,7 @@ def process_model_response(
     response: ModelResponse,
     output_schema: AgentOutputSchemaBase | None,
     handoffs: list[Handoff],
+    existing_items: Sequence[RunItem] | None = None,
 ) -> ProcessedResponse:
     items: list[RunItem] = []
 
@@ -1295,6 +1297,8 @@ def process_model_response(
         for tool in all_tools
         if isinstance(tool, HostedMCPTool)
     }
+    hosted_mcp_tool_metadata = collect_mcp_list_tools_metadata(existing_items or ())
+    hosted_mcp_tool_metadata.update(collect_mcp_list_tools_metadata(response.output))
 
     def _dump_output_item(raw_item: Any) -> dict[str, Any]:
         if isinstance(raw_item, dict):
@@ -1468,8 +1472,8 @@ def process_model_response(
             items.append(ReasoningItem(raw_item=output, agent=agent))
         elif isinstance(output, ResponseComputerToolCall):
             items.append(ToolCallItem(raw_item=output, agent=agent))
-            tools_used.append("computer_use")
             if not computer_tool:
+                tools_used.append("computer")
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Computer tool not found",
@@ -1477,6 +1481,7 @@ def process_model_response(
                     )
                 )
                 raise ModelBehaviorError("Model produced computer action without a computer tool.")
+            tools_used.append(computer_tool.name)
             computer_actions.append(
                 ToolRunComputerAction(tool_call=output, computer_tool=computer_tool)
             )
@@ -1506,19 +1511,15 @@ def process_model_response(
         elif isinstance(output, McpListTools):
             items.append(MCPListToolsItem(raw_item=output, agent=agent))
         elif isinstance(output, McpCall):
-            # Look up MCP tool description from the server's cached tools list.
-            # Tool discovery is async I/O, but this function is sync, so this is best-effort and
-            # only works if the server has cached tool metadata (e.g., when cache_tools_list is
-            # enabled).
-            _mcp_description: str | None = None
-            for _server in agent.mcp_servers:
-                if _server.name == output.server_label:
-                    for _tool in _server.cached_tools or []:
-                        if _tool.name == output.name:
-                            _mcp_description = _tool.description
-                            break
-                    break
-            items.append(ToolCallItem(raw_item=output, agent=agent, description=_mcp_description))
+            metadata = hosted_mcp_tool_metadata.get((output.server_label, output.name))
+            items.append(
+                ToolCallItem(
+                    raw_item=output,
+                    agent=agent,
+                    description=metadata.description if metadata is not None else None,
+                    title=metadata.title if metadata is not None else None,
+                )
+            )
             tools_used.append("mcp")
         elif isinstance(output, ImageGenerationCall):
             items.append(ToolCallItem(raw_item=output, agent=agent))
@@ -1652,6 +1653,7 @@ def process_model_response(
                     raw_item=output,
                     agent=agent,
                     description=func_tool.description,
+                    title=func_tool._mcp_title,
                 )
             )
             functions.append(
@@ -1696,6 +1698,7 @@ async def get_single_step_result_from_response(
         response=new_response,
         output_schema=output_schema,
         handoffs=handoffs,
+        existing_items=pre_step_items,
     )
 
     tool_use_tracker.record_processed_response(agent, processed_response)

@@ -69,9 +69,29 @@ my_agent = Agent(
 
 For lower latency, using `reasoning.effort="none"` with `gpt-5.4` is recommended. The gpt-4.1 family (including mini and nano variants) also remains a solid choice for building interactive agent apps.
 
+#### ComputerTool model selection
+
+If an agent includes [`ComputerTool`][agents.tool.ComputerTool], the effective model on the actual Responses request determines which computer-tool payload the SDK sends. Explicit `gpt-5.4` requests use the GA built-in `computer` tool, while explicit `computer-use-preview` requests keep the older `computer_use_preview` payload.
+
+Prompt-managed calls are the main exception. If a prompt template owns the model and the SDK omits `model` from the request, the SDK defaults to the preview-compatible computer payload so it does not guess which model the prompt pins. To keep the GA path in that flow, either make `model="gpt-5.4"` explicit on the request or force the GA selector with `ModelSettings(tool_choice="computer")` or `ModelSettings(tool_choice="computer_use")`.
+
+With a registered [`ComputerTool`][agents.tool.ComputerTool], `tool_choice="computer"`, `"computer_use"`, and `"computer_use_preview"` are normalized to the built-in selector that matches the effective request model. If no `ComputerTool` is registered, those strings continue to behave like ordinary function names.
+
+Preview-compatible requests must serialize `environment` and display dimensions up front, so prompt-managed flows that use a [`ComputerProvider`][agents.tool.ComputerProvider] factory should either pass a concrete `Computer` or `AsyncComputer` instance or force the GA selector before sending the request. See [Tools](../tools.md#computertool-and-the-responses-computer-tool) for the full migration details.
+
 #### Non-GPT-5 models
 
 If you pass a non–GPT-5 model name without custom `model_settings`, the SDK reverts to generic `ModelSettings` compatible with any model.
+
+### Responses-only tool search features
+
+The following tool features are supported only with OpenAI Responses models:
+
+-   [`ToolSearchTool`][agents.tool.ToolSearchTool]
+-   [`tool_namespace()`][agents.tool.tool_namespace]
+-   `@function_tool(defer_loading=True)` and other deferred-loading Responses tool surfaces
+
+These features are rejected on Chat Completions models and on non-Responses backends. When you use deferred-loading tools, add `ToolSearchTool()` to the agent and let the model load tools through `auto` or `required` tool choice instead of forcing bare namespace names or deferred-only function names. See [Tools](../tools.md#hosted-tool-search) for the setup details and current constraints.
 
 ### Responses WebSocket transport
 

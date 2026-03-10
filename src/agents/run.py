@@ -8,6 +8,7 @@ from typing import Union, cast
 from typing_extensions import Unpack
 
 from . import _debug
+from ._tool_identity import get_tool_trace_name_for_tool
 from .agent import Agent
 from .agent_tool_state import set_agent_tool_state_scope
 from .exceptions import (
@@ -858,7 +859,11 @@ class AgentRunner:
                             output_type=output_type_name,
                         )
                         current_span.start(mark_as_current=True)
-                        current_span.span_data.tools = [t.name for t in all_tools]
+                        current_span.span_data.tools = [
+                            tool_name
+                            for tool in all_tools
+                            if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
+                        ]
 
                     current_turn += 1
                     if current_turn > max_turns:

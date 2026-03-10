@@ -1,14 +1,14 @@
 [project]
 name = "openai-agents"
-version = "0.10.5"
+version = "0.11.1"
 description = "OpenAI Agents SDK"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "OpenAI", email = "support@openai.com" }]
 dependencies = [
-    "openai>=2.25.0,<3",
-    "pydantic>=2.12.3, <3",
+    "openai>=2.26.0,<3",
+    "pydantic>=2.12.2, <3",
     "griffe>=1.5.6, <2",
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
@@ -74,6 +74,7 @@ dev = [
     "dapr>=1.14.0",
     "grpcio>=1.60.0",
     "testcontainers==4.12.0", # pinned to 4.12.0 because 4.13.0 has a warning bug in wait_for_logs, see https://github.com/testcontainers/testcontainers-python/issues/874
+    "pyright==1.1.408",
 ]
 
 [tool.uv.workspace]

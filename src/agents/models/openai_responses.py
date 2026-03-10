@@ -16,7 +16,6 @@ from openai import AsyncOpenAI, NotGiven, Omit, omit
 from openai.types import ChatModel
 from openai.types.responses import (
     ApplyPatchToolParam,
-    ComputerToolParam,
     FileSearchToolParam,
     FunctionToolParam,
     Response,
@@ -628,23 +627,38 @@ class OpenAIResponsesModel(Model):
         else:
             parallel_tool_calls = omit
 
+        should_omit_model = prompt is not None and not self._model_is_explicit
+        effective_request_model: str | ChatModel | None = None if should_omit_model else self.model
+        effective_computer_tool_model = Converter.resolve_computer_tool_model(
+            request_model=effective_request_model,
+            tools=tools,
+        )
         tool_choice = Converter.convert_tool_choice(
             model_settings.tool_choice,
             tools=tools,
             handoffs=handoffs,
+            model=effective_computer_tool_model,
         )
         if prompt is None:
-            converted_tools = Converter.convert_tools(tools, handoffs)
+            converted_tools = Converter.convert_tools(
+                tools,
+                handoffs,
+                model=effective_computer_tool_model,
+                tool_choice=model_settings.tool_choice,
+            )
         else:
             converted_tools = Converter.convert_tools(
                 tools,
                 handoffs,
                 allow_opaque_tool_search_surface=True,
+                model=effective_computer_tool_model,
+                tool_choice=model_settings.tool_choice,
             )
         converted_tools_payload = _materialize_responses_tool_params(converted_tools.tools)
         response_format = Converter.get_response_format(output_schema)
-        should_omit_model = prompt is not None and not self._model_is_explicit
-        model_param: str | ChatModel | Omit = self.model if not should_omit_model else omit
+        model_param: str | ChatModel | Omit = (
+            effective_request_model if effective_request_model is not None else omit
+        )
         should_omit_tools = prompt is not None and len(converted_tools_payload) == 0
         # In prompt-managed tool flows without local tools payload, omit only named tool choices
         # that must match an explicit tool list. Keep control literals like "none"/"required".
@@ -1390,6 +1404,7 @@ class Converter:
         *,
         tools: Sequence[Tool] | None = None,
         handoffs: Sequence[Handoff[Any, Any]] | None = None,
+        model: str | ChatModel | None = None,
     ) -> response_create_params.ToolChoice | Omit:
         if tool_choice is None:
             return omit
@@ -1419,6 +1434,15 @@ class Converter:
             return {
                 "type": "web_search_preview",
             }
+        elif tool_choice in {
+            "computer",
+            "computer_use",
+            "computer_use_preview",
+        } and cls._has_computer_tool(tools):
+            return cls._convert_builtin_computer_tool_choice(
+                tool_choice=tool_choice,
+                model=model,
+            )
         elif tool_choice == "computer_use_preview":
             return {
                 "type": "computer_use_preview",
@@ -1544,6 +1568,79 @@ class Converter:
             )
 
     @classmethod
+    def _has_computer_tool(cls, tools: Sequence[Tool] | None) -> bool:
+        return any(isinstance(tool, ComputerTool) for tool in tools or ())
+
+    @classmethod
+    def _has_unresolved_computer_tool(cls, tools: Sequence[Tool] | None) -> bool:
+        return any(
+            isinstance(tool, ComputerTool)
+            and not isinstance(tool.computer, (Computer, AsyncComputer))
+            for tool in tools or ()
+        )
+
+    @classmethod
+    def _is_preview_computer_model(cls, model: str | ChatModel | None) -> bool:
+        return isinstance(model, str) and model.startswith("computer-use-preview")
+
+    @classmethod
+    def _is_ga_computer_model(cls, model: str | ChatModel | None) -> bool:
+        return isinstance(model, str) and model.startswith("gpt-5.4")
+
+    @classmethod
+    def resolve_computer_tool_model(
+        cls,
+        *,
+        request_model: str | ChatModel | None,
+        tools: Sequence[Tool] | None,
+    ) -> str | ChatModel | None:
+        if not cls._has_computer_tool(tools):
+            return None
+        return request_model
+
+    @classmethod
+    def _should_use_preview_computer_tool(
+        cls,
+        *,
+        model: str | ChatModel | None,
+        tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None,
+    ) -> bool:
+        # Choose the computer tool wire shape from the effective request model when we know it.
+        # For prompt-managed calls that omit `model`, default to the released preview payload
+        # unless the caller explicitly opts into a GA computer-tool selector. The prompt may pin
+        # a different model than the local default, so we must not infer the wire shape from
+        # `self.model` when the request payload itself omits `model`.
+        if cls._is_preview_computer_model(model):
+            return True
+        if model is not None:
+            return False
+        if isinstance(tool_choice, str) and tool_choice in {"computer", "computer_use"}:
+            return False
+        return True
+
+    @classmethod
+    def _convert_builtin_computer_tool_choice(
+        cls,
+        *,
+        tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None,
+        model: str | ChatModel | None,
+    ) -> response_create_params.ToolChoice:
+        # Preview models only support the preview computer tool selector, even if callers force
+        # a GA-era alias such as "computer" or "computer_use".
+        if cls._is_preview_computer_model(model):
+            return {
+                "type": "computer_use_preview",
+            }
+        if cls._should_use_preview_computer_tool(model=model, tool_choice=tool_choice):
+            return {
+                "type": "computer_use_preview",
+            }
+        # `computer_use` is a compatibility alias, but the GA built-in tool surface is `computer`.
+        return {
+            "type": "computer",
+        }
+
+    @classmethod
     def get_response_format(
         cls, output_schema: AgentOutputSchemaBase | None
     ) -> ResponseTextConfigParam | Omit:
@@ -1566,12 +1663,18 @@ class Converter:
         handoffs: list[Handoff[Any, Any]],
         *,
         allow_opaque_tool_search_surface: bool = False,
+        model: str | ChatModel | None = None,
+        tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None = None,
     ) -> ConvertedTools:
         converted_tools: list[ResponsesToolParam | None] = []
         includes: list[ResponseIncludable] = []
         namespace_index_by_name: dict[str, int] = {}
         namespace_tools_by_name: dict[str, list[FunctionToolParam]] = {}
         namespace_descriptions: dict[str, str] = {}
+        use_preview_computer_tool = cls._should_use_preview_computer_tool(
+            model=model,
+            tool_choice=tool_choice,
+        )
         validate_responses_tool_search_configuration(
             tools,
             allow_opaque_search_surface=allow_opaque_tool_search_surface,
@@ -1613,7 +1716,10 @@ class Converter:
                     includes.append(include)
                 continue
 
-            converted_non_namespace_tool, include = cls._convert_tool(tool)
+            converted_non_namespace_tool, include = cls._convert_tool(
+                tool,
+                use_preview_computer_tool=use_preview_computer_tool,
+            )
             converted_tools.append(converted_non_namespace_tool)
             if include:
                 includes.append(include)
@@ -1654,7 +1760,37 @@ class Converter:
         return function_tool_param, None
 
     @classmethod
-    def _convert_tool(cls, tool: Tool) -> tuple[ResponsesToolParam, ResponseIncludable | None]:
+    def _convert_preview_computer_tool(cls, tool: ComputerTool[Any]) -> ResponsesToolParam:
+        computer = tool.computer
+        if not isinstance(computer, (Computer, AsyncComputer)):
+            raise UserError(
+                "Computer tool is not initialized for serialization. Call "
+                "resolve_computer({ tool, run_context }) with a run context first "
+                "when building payloads manually."
+            )
+        environment = computer.environment
+        dimensions = computer.dimensions
+        if environment is None or dimensions is None:
+            raise UserError(
+                "Preview computer tool payloads require `environment` and `dimensions` on the "
+                "Computer/AsyncComputer implementation."
+            )
+        return _require_responses_tool_param(
+            {
+                "type": "computer_use_preview",
+                "environment": environment,
+                "display_width": dimensions[0],
+                "display_height": dimensions[1],
+            }
+        )
+
+    @classmethod
+    def _convert_tool(
+        cls,
+        tool: Tool,
+        *,
+        use_preview_computer_tool: bool = False,
+    ) -> tuple[ResponsesToolParam, ResponseIncludable | None]:
         """Returns converted tool and includes"""
 
         if isinstance(tool, FunctionTool):
@@ -1688,20 +1824,10 @@ class Converter:
             )
             return file_search_tool_param, include
         elif isinstance(tool, ComputerTool):
-            computer = tool.computer
-            if not isinstance(computer, (Computer, AsyncComputer)):
-                raise UserError(
-                    "Computer tool is not initialized for serialization. Call "
-                    "resolve_computer({ tool, run_context }) with a run context first "
-                    "when building payloads manually."
-                )
             return (
-                ComputerToolParam(
-                    type="computer_use_preview",
-                    environment=computer.environment,
-                    display_width=computer.dimensions[0],
-                    display_height=computer.dimensions[1],
-                ),
+                cls._convert_preview_computer_tool(tool)
+                if use_preview_computer_tool
+                else _require_responses_tool_param({"type": "computer"}),
                 None,
             )
         elif isinstance(tool, HostedMCPTool):

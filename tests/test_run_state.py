@@ -1211,7 +1211,12 @@ class TestSerializationRoundTrip:
             arguments='{"arg": "val"}',
         )
         state._generated_items.append(
-            ToolCallItem(agent=agent, raw_item=tool_call, description="My tool description")
+            ToolCallItem(
+                agent=agent,
+                raw_item=tool_call,
+                description="My tool description",
+                title="My tool title",
+            )
         )
 
         # 3. Tool call item without description
@@ -1245,9 +1250,11 @@ class TestSerializationRoundTrip:
         assert isinstance(new_state._generated_items[2], ToolCallItem)
         assert isinstance(new_state._generated_items[3], ToolCallOutputItem)
 
-        # Verify description field is preserved
+        # Verify display metadata is preserved
         assert new_state._generated_items[1].description == "My tool description"
+        assert new_state._generated_items[1].title == "My tool title"
         assert new_state._generated_items[2].description is None
+        assert new_state._generated_items[2].title is None
 
     async def test_serializes_original_input_with_function_call_output(self):
         """Test that original_input with function_call_output items is preserved."""
@@ -2734,6 +2741,7 @@ class TestRunStateSerializationEdgeCases:
         # The computer action should have a computer field with description
         assert "computer" in computer_actions[0]
         computer_dict = computer_actions[0]["computer"]
+        assert computer_dict["name"] == "computer_use_preview"
         assert "description" in computer_dict
         assert computer_dict["description"] == "Computer tool description"
 
@@ -3524,7 +3532,7 @@ class TestRunStateSerializationEdgeCases:
                         "pendingSafetyChecks": [],
                         "pending_safety_checks": [],
                     },
-                    "computer": {"name": computer_tool.name},
+                    "computer": {"name": "computer"},
                 }
             ],
             "local_shell_actions": [],
@@ -3539,6 +3547,78 @@ class TestRunStateSerializationEdgeCases:
         )
         assert result is not None
         assert len(result.computer_actions) == 1
+
+    async def test_deserialize_processed_response_computer_action_accepts_preview_name(self):
+        """Released preview-era computer tool names should still restore."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        class MockComputer(Computer):
+            @property
+            def environment(self) -> str:  # type: ignore[override]
+                return "mac"
+
+            @property
+            def dimensions(self) -> tuple[int, int]:
+                return (1920, 1080)
+
+            def screenshot(self) -> str:
+                return "screenshot"
+
+            def click(self, x: int, y: int, button: str) -> None:
+                pass
+
+            def double_click(self, x: int, y: int) -> None:
+                pass
+
+            def drag(self, path: list[tuple[int, int]]) -> None:
+                pass
+
+            def keypress(self, keys: list[str]) -> None:
+                pass
+
+            def move(self, x: int, y: int) -> None:
+                pass
+
+            def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+                pass
+
+            def type(self, text: str) -> None:
+                pass
+
+            def wait(self) -> None:
+                pass
+
+        agent.tools = [ComputerTool(computer=MockComputer())]
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [],
+            "computer_actions": [
+                {
+                    "tool_call": {
+                        "type": "computer_call",
+                        "id": "1",
+                        "call_id": "call123",
+                        "status": "completed",
+                        "action": {"type": "screenshot"},
+                        "pending_safety_checks": [],
+                    },
+                    "computer": {"name": "computer_use_preview"},
+                }
+            ],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}
+        )
+        assert len(result.computer_actions) == 1
+        assert result.computer_actions[0].computer_tool.name == "computer_use_preview"
 
     async def test_deserialize_processed_response_shell_action_with_validation_error(self):
         """Test deserialization of ProcessedResponse with shell action ValidationError."""
@@ -3769,11 +3849,12 @@ class TestRunStateSerializationEdgeCases:
             await RunState.from_json(agent, state_json)
 
     @pytest.mark.asyncio
-    async def test_from_json_unsupported_schema_version(self):
+    @pytest.mark.parametrize("schema_version", ["1.6", "1.7", "2.0"])
+    async def test_from_json_unsupported_schema_version(self, schema_version: str):
         """Test that from_json raises error when schema version is unsupported."""
         agent = Agent(name="TestAgent")
         state_json = {
-            "$schemaVersion": "2.0",
+            "$schemaVersion": schema_version,
             "original_input": "test",
             "current_agent": {"name": "TestAgent"},
             "context": {
@@ -3787,7 +3868,9 @@ class TestRunStateSerializationEdgeCases:
             "generated_items": [],
         }
 
-        with pytest.raises(UserError, match="Run state schema version 2.0 is not supported"):
+        with pytest.raises(
+            UserError, match=f"Run state schema version {schema_version} is not supported"
+        ):
             await RunState.from_json(agent, state_json)
 
     @pytest.mark.asyncio
@@ -3814,6 +3897,12 @@ class TestRunStateSerializationEdgeCases:
         assert restored._current_agent.name == "TestAgent"
         assert restored._context is not None
         assert restored._context.context == {"foo": "bar"}
+
+    def test_supported_schema_versions_match_released_boundary(self):
+        """The support set should include released versions plus the current unreleased writer."""
+        assert SUPPORTED_SCHEMA_VERSIONS == frozenset(
+            {"1.0", "1.1", "1.2", "1.3", "1.4", CURRENT_SCHEMA_VERSION}
+        )
 
     @pytest.mark.asyncio
     async def test_from_json_agent_not_found(self):

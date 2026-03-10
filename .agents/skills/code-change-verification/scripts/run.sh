@@ -16,8 +16,8 @@ make format
 echo "Running make lint..."
 make lint
 
-echo "Running make mypy..."
-make mypy
+echo "Running make typecheck..."
+make typecheck
 
 echo "Running make tests..."
 make tests

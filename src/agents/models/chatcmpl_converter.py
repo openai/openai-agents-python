@@ -56,7 +56,11 @@ from ..tool import (
 )
 from .fake_id import FAKE_RESPONSES_ID
 
-ResponseInputContentWithAudioParam = Union[ResponseInputContentParam, ResponseInputAudioParam]
+ResponseInputContentWithAudioParam = Union[
+    ResponseInputContentParam,
+    ResponseInputAudioParam,
+    dict[str, Any],
+]
 
 
 class Converter:
@@ -309,10 +313,14 @@ class Converter:
         all_content = cls.extract_all_content(content)
         if isinstance(all_content, str):
             return all_content
+
         out: list[ChatCompletionContentPartTextParam] = []
         for c in all_content:
-            if c.get("type") == "text":
+            c_type = cast(dict[str, Any], c).get("type")
+            if c_type == "text":
                 out.append(cast(ChatCompletionContentPartTextParam, c))
+            elif c_type == "video_url":
+                raise UserError(f"Only text content is supported here, got: {c}")
         return out
 
     @classmethod
@@ -349,6 +357,19 @@ class Converter:
                         image_url={
                             "url": casted_image_param["image_url"],
                             "detail": detail,
+                        },
+                    )
+                )
+            elif isinstance(c, dict) and c.get("type") == "video_url":
+                video_payload = c.get("video_url")
+                if not isinstance(video_payload, dict) or not video_payload.get("url"):
+                    raise UserError(f"Only video URLs are supported for video_url {c}")
+                out.append(
+                    cast(
+                        Any,
+                        {
+                            "type": "video_url",
+                            "video_url": {"url": video_payload["url"]},
                         },
                     )
                 )
@@ -657,7 +678,15 @@ class Converter:
                 if preserve_tool_output_all_content:
                     tool_result_content = cls.extract_all_content(output_content)
                 else:
-                    tool_result_content = cls.extract_text_content(output_content)  # type: ignore[assignment]
+                    all_output_content = cls.extract_all_content(output_content)
+                    if isinstance(all_output_content, str):
+                        tool_result_content = all_output_content
+                    else:
+                        tool_result_content = [
+                            cast(ChatCompletionContentPartTextParam, c)
+                            for c in all_output_content
+                            if c.get("type") == "text"
+                        ]
                 msg: ChatCompletionToolMessageParam = {
                     "role": "tool",
                     "tool_call_id": func_output["call_id"],

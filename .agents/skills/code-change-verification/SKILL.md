@@ -20,7 +20,7 @@ Ensure work is only marked complete after formatting, linting, type checking, an
 ## Manual workflow
 
 - If dependencies are not installed or have changed, run `make sync` first to install dev requirements via `uv`.
-- Run from the repository root in this order: `make format`, `make lint`, `make mypy`, `make tests`.
+- Run from the repository root in this order: `make format`, `make lint`, `make typecheck`, `make tests`.
 - Do not skip steps; stop and fix issues immediately when a command fails.
 - Re-run the full stack after applying fixes so the commands execute in the required order.
 

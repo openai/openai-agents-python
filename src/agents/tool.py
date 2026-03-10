@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import copy
 import dataclasses
@@ -9,8 +10,10 @@ import math
 import weakref
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
+from types import UnionType
 from typing import (
     TYPE_CHECKING,
+    Annotated,
     Any,
     Callable,
     Generic,
@@ -19,6 +22,9 @@ from typing import (
     TypeVar,
     Union,
     cast,
+    get_args,
+    get_origin,
+    get_type_hints,
     overload,
 )
 
@@ -317,6 +323,9 @@ class FunctionTool:
     _tool_namespace_description: str | None = field(default=None, kw_only=True, repr=False)
     """Internal namespace description used when serializing grouped function tools."""
 
+    _mcp_title: str | None = field(default=None, kw_only=True, repr=False)
+    """Internal MCP display title used for ToolCallItem metadata."""
+
     @property
     def qualified_name(self) -> str:
         """Return the public qualified name used to identify this function tool."""
@@ -418,6 +427,7 @@ def _build_wrapped_function_tool(
     timeout_error_function: ToolErrorFunction | None = None,
     defer_loading: bool = False,
     sync_invoker: bool = False,
+    mcp_title: str | None = None,
 ) -> FunctionTool:
     """Create a FunctionTool with copied-tool-aware failure handling bound in one place."""
     on_invoke_tool = with_function_tool_failure_error_handler(
@@ -442,6 +452,7 @@ def _build_wrapped_function_tool(
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
             defer_loading=defer_loading,
+            _mcp_title=mcp_title,
         ),
         failure_error_function,
     )
@@ -495,7 +506,7 @@ class WebSearchTool:
 
 @dataclass(eq=False)
 class ComputerTool(Generic[ComputerT]):
-    """A hosted tool that lets the LLM control a computer."""
+    """A local computer harness exposed through the Responses API computer tool."""
 
     computer: ComputerConfig[ComputerT]
     """The computer implementation, or a factory that produces a computer per run."""
@@ -508,7 +519,15 @@ class ComputerTool(Generic[ComputerT]):
 
     @property
     def name(self):
+        # Keep the released preview-era runtime name for hooks and persisted
+        # RunState compatibility. The Responses serializer selects the actual
+        # wire tool type separately.
         return "computer_use_preview"
+
+    @property
+    def trace_name(self):
+        # Tracing should display the GA tool alias even while runtime names preserve compatibility.
+        return "computer"
 
 
 @dataclass
@@ -1365,6 +1384,117 @@ async def maybe_invoke_function_tool_failure_error_function(
     return result
 
 
+def _annotation_expr_name(expr: ast.expr) -> str | None:
+    """Return the unqualified type name for a string annotation expression node."""
+    if isinstance(expr, ast.Name):
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        return expr.attr
+    return None
+
+
+def _string_annotation_mentions_context_type(annotation: str, *, type_name: str) -> bool:
+    """Return True when a string annotation structurally references the given context type."""
+    try:
+        expression = ast.parse(annotation, mode="eval").body
+    except SyntaxError:
+        return False
+
+    return _annotation_expr_mentions_context_type(expression, type_name=type_name)
+
+
+def _annotation_expr_mentions_context_type(expr: ast.expr, *, type_name: str) -> bool:
+    """Return True when an annotation expression structurally references the given context type."""
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+        return _string_annotation_mentions_context_type(expr.value, type_name=type_name)
+
+    if _annotation_expr_name(expr) == type_name:
+        return True
+
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.BitOr):
+        return _annotation_expr_mentions_context_type(
+            expr.left, type_name=type_name
+        ) or _annotation_expr_mentions_context_type(expr.right, type_name=type_name)
+
+    if isinstance(expr, ast.Subscript):
+        wrapper_name = _annotation_expr_name(expr.value)
+        args = expr.slice.elts if isinstance(expr.slice, ast.Tuple) else (expr.slice,)
+
+        if wrapper_name == "Annotated":
+            return bool(args) and _annotation_expr_mentions_context_type(
+                args[0], type_name=type_name
+            )
+
+        if wrapper_name in {"Optional", "Union"}:
+            return any(
+                _annotation_expr_mentions_context_type(arg, type_name=type_name) for arg in args
+            )
+
+        return _annotation_expr_mentions_context_type(expr.value, type_name=type_name)
+
+    return False
+
+
+def _annotation_mentions_context_type(annotation: Any, *, context_type: type[Any]) -> bool:
+    """Return True when an annotation structurally references the given context type."""
+    if annotation is inspect.Signature.empty:
+        return False
+
+    if isinstance(annotation, str):
+        return _string_annotation_mentions_context_type(annotation, type_name=context_type.__name__)
+
+    origin = get_origin(annotation)
+
+    if annotation is context_type or origin is context_type:
+        return True
+
+    if origin is Annotated:
+        args = get_args(annotation)
+        return bool(args) and _annotation_mentions_context_type(args[0], context_type=context_type)
+
+    if origin in (Union, UnionType):
+        return any(
+            _annotation_mentions_context_type(arg, context_type=context_type)
+            for arg in get_args(annotation)
+        )
+
+    return False
+
+
+def _get_function_tool_invoke_context(
+    function_tool: FunctionTool,
+    context: ToolContext[Any],
+) -> ToolContext[Any] | RunContextWrapper[Any]:
+    """Choose the runtime context object to pass into a function tool wrapper.
+
+    Third-party wrappers may declare a narrower `RunContextWrapper` contract and then serialize
+    that object downstream. In those cases, passing the richer `ToolContext` can leak runtime-only
+    metadata such as agents or run config into incompatible serializers. When the wrapper
+    explicitly declares `RunContextWrapper`, preserve only the base context state.
+    """
+    try:
+        parameters = tuple(inspect.signature(function_tool.on_invoke_tool).parameters.values())
+    except (TypeError, ValueError):
+        return context
+
+    if not parameters:
+        return context
+
+    context_annotation = parameters[0].annotation
+    try:
+        resolved_annotations = get_type_hints(function_tool.on_invoke_tool, include_extras=True)
+    except Exception:
+        pass
+    else:
+        context_annotation = resolved_annotations.get(parameters[0].name, context_annotation)
+
+    if _annotation_mentions_context_type(context_annotation, context_type=ToolContext):
+        return context
+    if _annotation_mentions_context_type(context_annotation, context_type=RunContextWrapper):
+        return context._fork_with_tool_input(context.tool_input)
+    return context
+
+
 async def invoke_function_tool(
     *,
     function_tool: FunctionTool,
@@ -1372,12 +1502,13 @@ async def invoke_function_tool(
     arguments: str,
 ) -> Any:
     """Invoke a function tool, enforcing timeout configuration when provided."""
+    invoke_context = _get_function_tool_invoke_context(function_tool, context)
     timeout_seconds = function_tool.timeout_seconds
     if timeout_seconds is None:
-        return await function_tool.on_invoke_tool(context, arguments)
+        return await function_tool.on_invoke_tool(cast(Any, invoke_context), arguments)
 
     tool_task: asyncio.Future[Any] = asyncio.ensure_future(
-        function_tool.on_invoke_tool(context, arguments)
+        function_tool.on_invoke_tool(cast(Any, invoke_context), arguments)
     )
     try:
         return await asyncio.wait_for(tool_task, timeout=timeout_seconds)

@@ -15,6 +15,7 @@ Use this page as a catalog, then jump to the section that matches the runtime yo
 | If you want to... | Start here |
 | --- | --- |
 | Use OpenAI-managed tools (web search, file search, code interpreter, hosted MCP, image generation) | [Hosted tools](#hosted-tools) |
+| Defer large tool surfaces until runtime with tool search | [Hosted tool search](#hosted-tool-search) |
 | Run tools in your own process or environment | [Local runtime tools](#local-runtime-tools) |
 | Wrap Python functions as tools | [Function tools](#function-tools) |
 | Let one agent call another without a handoff | [Agents as tools](#agents-as-tools) |
@@ -29,6 +30,7 @@ OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agent
 -   The [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] lets the LLM execute code in a sandboxed environment.
 -   The [`HostedMCPTool`][agents.tool.HostedMCPTool] exposes a remote MCP server's tools to the model.
 -   The [`ImageGenerationTool`][agents.tool.ImageGenerationTool] generates images from a prompt.
+-   The [`ToolSearchTool`][agents.tool.ToolSearchTool] lets the model load deferred tools, namespaces, or hosted MCP servers on demand.
 
 Advanced hosted search options:
 
@@ -53,6 +55,69 @@ async def main():
     result = await Runner.run(agent, "Which coffee shop should I go to, taking into account my preferences and the weather today in SF?")
     print(result.final_output)
 ```
+
+### Hosted tool search
+
+Tool search lets OpenAI Responses models defer large tool surfaces until runtime, so the model loads only the subset it needs for the current turn. This is useful when you have many function tools, namespace groups, or hosted MCP servers and want to reduce tool-schema tokens without exposing every tool up front.
+
+Start with hosted tool search when the candidate tools are already known when you build the agent. If your application needs to decide what to load dynamically, the Responses API also supports client-executed tool search, but the standard `Runner` does not auto-execute that mode.
+
+```python
+from typing import Annotated
+
+from agents import Agent, Runner, ToolSearchTool, function_tool, tool_namespace
+
+
+@function_tool(defer_loading=True)
+def get_customer_profile(
+    customer_id: Annotated[str, "The customer ID to look up."],
+) -> str:
+    """Fetch a CRM customer profile."""
+    return f"profile for {customer_id}"
+
+
+@function_tool(defer_loading=True)
+def list_open_orders(
+    customer_id: Annotated[str, "The customer ID to look up."],
+) -> str:
+    """List open orders for a customer."""
+    return f"open orders for {customer_id}"
+
+
+crm_tools = tool_namespace(
+    name="crm",
+    description="CRM tools for customer lookups.",
+    tools=[get_customer_profile, list_open_orders],
+)
+
+
+agent = Agent(
+    name="Operations assistant",
+    model="gpt-5.4",
+    instructions="Load the crm namespace before using CRM tools.",
+    tools=[*crm_tools, ToolSearchTool()],
+)
+
+result = await Runner.run(agent, "Look up customer_42 and list their open orders.")
+print(result.final_output)
+```
+
+What to know:
+
+-   Hosted tool search is available only with OpenAI Responses models. The current Python SDK support depends on `openai>=2.25.0`.
+-   Add exactly one `ToolSearchTool()` when you configure deferred-loading surfaces on an agent.
+-   Searchable surfaces include `@function_tool(defer_loading=True)`, `tool_namespace(name=..., description=..., tools=[...])`, and `HostedMCPTool(tool_config={..., "defer_loading": True})`.
+-   Deferred-loading function tools must be paired with `ToolSearchTool()`. Namespace-only setups may also use `ToolSearchTool()` to let the model load the right group on demand.
+-   `tool_namespace()` groups `FunctionTool` instances under a shared namespace name and description. This is usually the best fit when you have many related tools, such as `crm`, `billing`, or `shipping`.
+-   OpenAI's official best-practice guidance is [Use namespaces where possible](https://developers.openai.com/api/docs/guides/tools-tool-search#use-namespaces-where-possible).
+-   Prefer namespaces or hosted MCP servers over many individually deferred functions when possible. They usually give the model a better high-level search surface and better token savings.
+-   Namespaces can mix immediate and deferred tools. Tools without `defer_loading=True` remain callable immediately, while deferred tools in the same namespace are loaded through tool search.
+-   As a rule of thumb, keep each namespace fairly small, ideally fewer than 10 functions.
+-   Named `tool_choice` cannot target bare namespace names or deferred-only tools. Prefer `auto`, `required`, or a real top-level callable tool name.
+-   `ToolSearchTool(execution="client")` is for manual Responses orchestration. If the model emits a client-executed `tool_search_call`, the standard `Runner` raises instead of executing it for you.
+-   Tool search activity appears in [`RunResult.new_items`](results.md#new-items) and in [`RunItemStreamEvent`](streaming.md#run-item-event-names) with dedicated item and event types.
+-   See `examples/tools/tool_search.py` for complete runnable examples covering both namespaced loading and top-level deferred tools.
+-   Official platform guide: [Tool search](https://developers.openai.com/api/docs/guides/tools-tool-search).
 
 ### Hosted container shell + skills
 
@@ -117,6 +182,25 @@ Local runtime tools require you to supply implementations:
 -   [`ApplyPatchTool`][agents.tool.ApplyPatchTool]: implement [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor] to apply diffs locally.
 -   Local shell skills are available with `ShellTool(environment={"type": "local", "skills": [...]})`.
 
+### ComputerTool and the Responses computer tool
+
+`ComputerTool` is still a local harness: you provide a [`Computer`][agents.computer.Computer] or [`AsyncComputer`][agents.computer.AsyncComputer] implementation, and the SDK maps that harness onto the OpenAI Responses API computer surface.
+
+For explicit [`gpt-5.4`](https://developers.openai.com/api/docs/models/gpt-5.4) requests, the SDK sends the GA built-in tool payload `{"type": "computer"}`. The older `computer-use-preview` model keeps the preview payload `{"type": "computer_use_preview", "environment": ..., "display_width": ..., "display_height": ...}`. This mirrors the platform migration described in OpenAI's [Computer use guide](https://developers.openai.com/api/docs/guides/tools-computer-use/):
+
+-   Model: `computer-use-preview` -> `gpt-5.4`
+-   Tool selector: `computer_use_preview` -> `computer`
+-   Computer call shape: one `action` per `computer_call` -> batched `actions[]` on `computer_call`
+-   Truncation: `ModelSettings(truncation="auto")` required on the preview path -> not required on the GA path
+
+The SDK chooses that wire shape from the effective model on the actual Responses request. If you use a prompt template and the request omits `model` because the prompt owns it, the SDK keeps the preview-compatible computer payload unless you either keep `model="gpt-5.4"` explicit or force the GA selector with `ModelSettings(tool_choice="computer")` or `ModelSettings(tool_choice="computer_use")`.
+
+When a [`ComputerTool`][agents.tool.ComputerTool] is present, `tool_choice="computer"`, `"computer_use"`, and `"computer_use_preview"` are all accepted and normalized to the built-in selector that matches the effective request model. Without a `ComputerTool`, those strings still behave like ordinary function names.
+
+This distinction matters when `ComputerTool` is backed by a [`ComputerProvider`][agents.tool.ComputerProvider] factory. The GA `computer` payload does not need `environment` or dimensions at serialization time, so unresolved factories are fine. Preview-compatible serialization still needs a resolved `Computer` or `AsyncComputer` instance so the SDK can send `environment`, `display_width`, and `display_height`.
+
+At runtime, both paths still use the same local harness. Preview responses emit `computer_call` items with a single `action`; `gpt-5.4` can emit batched `actions[]`, and the SDK executes them in order before producing a `computer_call_output` screenshot item. See `examples/tools/computer_use.py` for a runnable Playwright-based harness.
+
 ```python
 from agents import Agent, ApplyPatchTool, ShellTool
 from agents.computer import AsyncComputer
@@ -167,6 +251,8 @@ You can use any Python function as a tool. The Agents SDK will setup the tool au
 -   Descriptions for each input are taken from the docstring of the function, unless disabled
 
 We use Python's `inspect` module to extract the function signature, along with [`griffe`](https://mkdocstrings.github.io/griffe/) to parse docstrings and `pydantic` for schema creation.
+
+When you are using OpenAI Responses models, `@function_tool(defer_loading=True)` hides a function tool until `ToolSearchTool()` loads it. You can also group related function tools with [`tool_namespace()`][agents.tool.tool_namespace]. See [Hosted tool search](#hosted-tool-search) for the full setup and constraints.
 
 ```python
 import json

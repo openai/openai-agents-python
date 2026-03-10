@@ -112,14 +112,14 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 
 
 # RunState schema policy.
-# 1. Bump CURRENT_SCHEMA_VERSION when serialized shape/semantics change.
-# 2. Keep older readable versions in SUPPORTED_SCHEMA_VERSIONS for backward reads.
+# 1. Keep schema versions shipped in releases readable.
+# 2. Unreleased schema versions may be renumbered or squashed before release when their
+#    intermediate snapshots are intentionally unsupported.
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
-# 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer versions).
-CURRENT_SCHEMA_VERSION = "1.6"
-SUPPORTED_SCHEMA_VERSIONS = frozenset(
-    {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", CURRENT_SCHEMA_VERSION}
-)
+# 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
+#    versions).
+CURRENT_SCHEMA_VERSION = "1.5"
+SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2", "1.3", "1.4", CURRENT_SCHEMA_VERSION})
 
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
 _COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(ComputerCallOutput)
@@ -759,6 +759,8 @@ class RunState(Generic[TContext, TAgent]):
             result["allow_bare_name_alias"] = True
         if hasattr(item, "description") and item.description is not None:
             result["description"] = item.description
+        if hasattr(item, "title") and item.title is not None:
+            result["title"] = item.title
 
         return result
 
@@ -1436,6 +1438,13 @@ def _build_named_tool_map(
         if not isinstance(tool_name, str) or not tool_name:
             continue
         tool_map[tool_name] = tool
+        if tool_type is ComputerTool:
+            # Persisted runs may contain either the released preview name or the GA alias from
+            # newer branches. Mirror both so either payload restores against the local tool.
+            if tool_name == "computer":
+                tool_map["computer_use_preview"] = tool
+            elif tool_name == "computer_use_preview":
+                tool_map["computer"] = tool
     return tool_map
 
 
@@ -2470,10 +2479,16 @@ def _deserialize_items(
                 # Tool call items can be function calls, shell calls, apply_patch calls,
                 # MCP calls, etc. Check the type field to determine which type to deserialize as
                 raw_item_tool = _deserialize_tool_call_raw_item(normalized_raw_item)
-                # Preserve description if it was stored with the item
+                # Preserve display metadata if it was stored with the item.
                 description = item_data.get("description")
+                title = item_data.get("title")
                 result.append(
-                    ToolCallItem(agent=agent, raw_item=raw_item_tool, description=description)
+                    ToolCallItem(
+                        agent=agent,
+                        raw_item=raw_item_tool,
+                        description=description,
+                        title=title,
+                    )
                 )
 
             elif item_type == "tool_call_output_item":

@@ -4,10 +4,13 @@ from typing import cast
 
 from agents.items import TResponseInputItem
 from agents.memory.session import Session
+from agents.memory.session_settings import SessionSettings
 
 
 class SimpleListSession(Session):
     """A minimal in-memory session implementation for tests."""
+
+    session_settings: SessionSettings | None = None
 
     def __init__(
         self,

@@ -161,6 +161,16 @@ def get_tool_call_trace_name(tool_call: Any) -> str | None:
     )
 
 
+def get_tool_trace_name_for_tool(tool: Any) -> str | None:
+    """Return the trace display name for a tool definition."""
+    trace_name = getattr(tool, "trace_name", None)
+    if isinstance(trace_name, str) and trace_name:
+        return trace_name
+
+    tool_name = getattr(tool, "name", None)
+    return tool_name if isinstance(tool_name, str) and tool_name else None
+
+
 def _remove_tool_call_namespace(tool_call: Any) -> Any:
     """Return a shallow copy of the tool call without its namespace field."""
     if isinstance(tool_call, dict):

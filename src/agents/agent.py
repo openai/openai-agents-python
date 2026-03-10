@@ -745,6 +745,7 @@ class Agent(AgentBase, Generic[TContext]):
 
             if run_result is None:
                 if on_stream is not None:
+                    stream_handler = on_stream
                     run_result_streaming = Runner.run_streamed(
                         starting_agent=cast(Agent[Any], self),
                         input=resume_state or resolved_input,
@@ -765,7 +766,7 @@ class Agent(AgentBase, Generic[TContext]):
                     async def _run_handler(payload: AgentToolStreamEvent) -> None:
                         """Execute the user callback while capturing exceptions."""
                         try:
-                            maybe_result = on_stream(payload)
+                            maybe_result = stream_handler(payload)
                             if inspect.isawaitable(maybe_result):
                                 await maybe_result
                         except Exception:

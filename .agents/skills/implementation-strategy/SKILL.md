@@ -19,16 +19,17 @@ Use this skill before editing code when the task changes runtime behavior or any
    ```
 3. Judge breaking-change risk against that latest release tag, not against unreleased branch churn or post-tag changes already on `main`.
 4. Prefer the simplest implementation that satisfies the current task. Update callers, tests, docs, and examples directly instead of preserving superseded unreleased interfaces.
-5. Add a compatibility layer only when there is a concrete released consumer or durable external state that requires it, or when the user explicitly asks for a migration path.
+5. Add a compatibility layer only when there is a concrete released consumer or an explicitly supported durable external state boundary that requires it, or when the user explicitly asks for a migration path.
 
 ## Compatibility boundary rules
 
 - Released public API or documented external behavior: preserve compatibility or provide an explicit migration path.
-- Persisted schema, serialized state, wire protocol, CLI flags, environment variables, and externally consumed config: treat as compatibility-sensitive even if the implementation is local.
-- Python-specific durable surfaces such as `RunState`, session persistence, exported dataclass constructor order, and documented model/provider configuration should be treated as compatibility-sensitive when they were part of the latest release tag.
+- Persisted schema, serialized state, wire protocol, CLI flags, environment variables, and externally consumed config: treat as compatibility-sensitive when they are part of the latest release or when the repo explicitly intends to preserve them across commits, processes, or machines.
+- Python-specific durable surfaces such as `RunState`, session persistence, exported dataclass constructor order, and documented model/provider configuration should be treated as compatibility-sensitive when they were part of the latest release tag or are explicitly supported as a shared durability boundary.
 - Interface changes introduced only on the current branch: not a compatibility target. Rewrite them directly.
-- Interface changes present on `main` but added after the latest release tag: not a semver breaking change by themselves. Rewrite them directly unless they already define durable external state.
+- Interface changes present on `main` but added after the latest release tag: not a semver breaking change by themselves. Rewrite them directly unless they already define a released or explicitly supported durable external state boundary.
 - Internal helpers, private types, same-branch tests, fixtures, and examples: update them directly instead of adding adapters.
+- Unreleased persisted schema versions on `main` may be renumbered or squashed before release when intermediate snapshots are intentionally unsupported. When you do that, update the support set and tests together so the boundary is explicit.
 
 ## Default implementation stance
 

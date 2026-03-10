@@ -214,6 +214,8 @@ Use this table to pick a starting point before reading the detailed examples bel
 
 Some implementations have dedicated pages with additional details; those are linked inline in their subsections.
 
+If you are implementing a Python server for ChatKit, use a `chatkit.store.Store` implementation for ChatKit's thread and item persistence. Agents SDK sessions such as `SQLAlchemySession` manage SDK-side conversation history, but they are not a drop-in replacement for ChatKit's store. See the [`chatkit-python` guide on implementing your ChatKit data store](https://github.com/openai/chatkit-python/blob/main/docs/guides/respond-to-user-message.md#implement-your-chatkit-data-store).
+
 ### OpenAI Conversations API sessions
 
 Use [OpenAI's Conversations API](https://platform.openai.com/docs/api-reference/conversations) through `OpenAIConversationsSession`.
@@ -360,7 +362,7 @@ result = await Runner.run(agent, "Hello", session=session)
 
 ### SQLAlchemy sessions
 
-Production-ready sessions using any SQLAlchemy-supported database:
+Production-ready Agents SDK session persistence using any SQLAlchemy-supported database:
 
 ```python
 from agents.extensions.memory import SQLAlchemySession
