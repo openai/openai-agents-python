@@ -14,6 +14,9 @@ Each of these steps can be performed by an agent. The output of one agent is use
 
 See the [`deterministic.py`](./deterministic.py) file for an example of this.
 
+You can also implement a guided, interactive deterministic flow where an agent asks the user questions step-by-step in a fluid, conversational manner, rather than relying on rigid predefined questions. By passing a shared State object through the context, you can dynamically update the agent's instructions and enable/disable tools (via `is_enabled`) based on the information collected so far. Restricting the active tools at each step means the agent handles a smaller set of options, making it much more precise and accurate when deciding which tool to call next.
+See [`deterministic_workflow.py`](./deterministic_workflow.py) for an example of this pattern applied to a full travel booking workflow.
+
 ## Handoffs and routing
 
 In many situations, you have specialized sub-agents that handle specific tasks. You can use handoffs to route the task to the right agent.

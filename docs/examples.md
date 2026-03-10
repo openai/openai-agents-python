@@ -7,7 +7,7 @@ Check out a variety of sample implementations of the SDK in the examples section
 -   **[agent_patterns](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns):**
     Examples in this category illustrate common agent design patterns, such as
 
-    -   Deterministic workflows
+    -   Deterministic workflows (`deterministic.py`, `deterministic_workflow.py`)
     -   Agents as tools
     -   Parallel agent execution
     -   Conditional tool usage
