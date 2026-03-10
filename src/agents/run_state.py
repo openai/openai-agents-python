@@ -1846,6 +1846,7 @@ async def _deserialize_processed_response(
         approval_item = _deserialize_tool_approval_item(
             interruption_data,
             agent_map=agent_map,
+            agent_list=agent_list,
             fallback_agent=current_agent,
         )
         if approval_item is not None:
@@ -2744,6 +2745,7 @@ def _deserialize_items(
                 approval_item = _deserialize_tool_approval_item(
                     item_data,
                     agent_map=agent_map,
+                    agent_list=agent_list,
                     fallback_agent=agent,
                     pre_normalized_raw_item=normalized_raw_item,
                 )
