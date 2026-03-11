@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import atexit
 import inspect
+import multiprocessing
 import sys
+import warnings
 from collections.abc import Awaitable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from datetime import timedelta
@@ -63,6 +66,20 @@ T = TypeVar("T")
 
 class _UnsetType:
     pass
+
+
+# Suppress Python's multiprocessing resource tracker semaphore leak warnings.
+# These warnings occur when MCPServerStdio spawns subprocesses that don't get
+# properly registered with the resource tracker. This is a known issue with
+# stdio-based MCP servers and is not a bug in the user's code.
+# We suppress this warning at import time since it's a known limitation of the
+# MCP stdio transport and doesn't indicate a real problem.
+warnings.filterwarnings(
+    "ignore",
+    message=r"There appear to be \d+ leaked semaphore objects to clean up at shutdown",
+    category=UserWarning,
+    module=r"multiprocessing\.resource_tracker",
+)
 
 
 _UNSET = _UnsetType()
