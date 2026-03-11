@@ -1277,6 +1277,14 @@ class _FunctionToolBatchExecutor:
         self.propagating_failure: BaseException | None = None
         self.available_function_tools: list[FunctionTool] = []
 
+        # Resolve max_parallel_tool_calls from the merged model settings.
+        # Agent-level settings are the base; run-level config settings override them.
+        resolved_settings = agent.model_settings.resolve(config.model_settings)
+        max_parallel = resolved_settings.max_parallel_tool_calls
+        self._concurrency_semaphore: asyncio.Semaphore | None = (
+            asyncio.Semaphore(max_parallel) if max_parallel is not None else None
+        )
+
     async def execute(
         self,
     ) -> tuple[
@@ -1545,6 +1553,32 @@ class _FunctionToolBatchExecutor:
         )
 
     async def _execute_single_tool_body(
+        self,
+        *,
+        current_task: asyncio.Task[Any] | None,
+        func_tool: FunctionTool,
+        tool_call: ResponseFunctionToolCall,
+        tool_context: ToolContext[Any],
+        agent_hooks: Any,
+    ) -> Any:
+        if self._concurrency_semaphore is not None:
+            async with self._concurrency_semaphore:
+                return await self._execute_single_tool_body_inner(
+                    current_task=current_task,
+                    func_tool=func_tool,
+                    tool_call=tool_call,
+                    tool_context=tool_context,
+                    agent_hooks=agent_hooks,
+                )
+        return await self._execute_single_tool_body_inner(
+            current_task=current_task,
+            func_tool=func_tool,
+            tool_call=tool_call,
+            tool_context=tool_context,
+            agent_hooks=agent_hooks,
+        )
+
+    async def _execute_single_tool_body_inner(
         self,
         *,
         current_task: asyncio.Task[Any] | None,

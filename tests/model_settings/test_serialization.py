@@ -65,6 +65,7 @@ def test_all_fields_serialization() -> None:
         extra_body={"foo": "bar"},
         extra_headers={"foo": "bar"},
         extra_args={"custom_param": "value", "another_param": 42},
+        max_parallel_tool_calls=4,
     )
 
     # Verify that every single field is set to a non-None value
@@ -178,3 +179,47 @@ def test_pydantic_serialization() -> None:
     deserialized = TypeAdapter(ModelSettings).validate_json(json)
 
     assert model_settings == deserialized
+
+
+def test_max_parallel_tool_calls_valid() -> None:
+    """Positive values are accepted."""
+    s = ModelSettings(max_parallel_tool_calls=4)
+    assert s.max_parallel_tool_calls == 4
+
+
+def test_max_parallel_tool_calls_one() -> None:
+    """1 is valid (serial execution)."""
+    s = ModelSettings(max_parallel_tool_calls=1)
+    assert s.max_parallel_tool_calls == 1
+
+
+def test_max_parallel_tool_calls_zero_raises() -> None:
+    """0 is rejected with a clear error."""
+    import pytest
+
+    with pytest.raises(ValueError, match="max_parallel_tool_calls must be a positive integer"):
+        ModelSettings(max_parallel_tool_calls=0)
+
+
+def test_max_parallel_tool_calls_negative_raises() -> None:
+    """-1 is rejected with a clear error."""
+    import pytest
+
+    with pytest.raises(ValueError, match="max_parallel_tool_calls must be a positive integer"):
+        ModelSettings(max_parallel_tool_calls=-1)
+
+
+def test_max_parallel_tool_calls_true_raises() -> None:
+    """True is a bool, not a valid concurrency integer — must be rejected."""
+    import pytest
+
+    with pytest.raises(ValueError, match="must be an integer, not bool"):
+        ModelSettings(max_parallel_tool_calls=True)
+
+
+def test_max_parallel_tool_calls_false_raises() -> None:
+    """False is a bool — must be rejected before the < 1 range check."""
+    import pytest
+
+    with pytest.raises(ValueError, match="must be an integer, not bool"):
+        ModelSettings(max_parallel_tool_calls=False)

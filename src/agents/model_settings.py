@@ -9,7 +9,7 @@ from openai import Omit as _Omit
 from openai._types import Body, Query
 from openai.types.responses import ResponseIncludable
 from openai.types.shared import Reasoning
-from pydantic import BaseModel, GetCoreSchemaHandler
+from pydantic import BaseModel, GetCoreSchemaHandler, field_validator
 from pydantic.dataclasses import dataclass
 from pydantic_core import core_schema
 from typing_extensions import TypeAlias
@@ -153,6 +153,50 @@ class ModelSettings:
     """Arbitrary keyword arguments to pass to the model API call.
     These will be passed directly to the underlying model provider's API.
     Use with caution as not all models support all parameters."""
+
+    max_parallel_tool_calls: int | None = None
+    """Maximum number of tool calls to execute concurrently in a single turn.
+
+    When the model returns multiple tool calls at once this setting caps how
+    many of them the SDK runs at the same time.  The remaining calls are
+    queued and started as running ones finish, so all tool calls are still
+    executed – just not all at the same time.
+
+    ``None`` (the default) means no limit: all tool calls in the turn are
+    launched concurrently, which is the historical behaviour.
+
+    Example – allow at most 4 tool calls to run in parallel::
+
+        agent = Agent(
+            name="Assistant",
+            tools=[...],
+            model_settings=ModelSettings(max_parallel_tool_calls=4),
+        )
+
+    Setting ``max_parallel_tool_calls=1`` is equivalent to serial execution
+    and can be useful to avoid rate-limiting on downstream services.
+
+    .. note::
+        This is an SDK-side concurrency limit, not a model API parameter.
+        It does not affect how many tool calls the model *requests*; it only
+        controls how many the SDK executes concurrently.
+    """
+
+    @field_validator("max_parallel_tool_calls", mode="before")
+    @classmethod
+    def _validate_max_parallel_tool_calls(cls, v: object) -> object:
+        # Pydantic coerces bool→int before __post_init__ runs, so we must
+        # intercept booleans here (mode="before") while the raw value is intact.
+        if isinstance(v, bool):
+            raise ValueError("max_parallel_tool_calls must be an integer, not bool")
+        return v
+
+    def __post_init__(self) -> None:
+        if self.max_parallel_tool_calls is not None and self.max_parallel_tool_calls < 1:
+            raise ValueError(
+                "max_parallel_tool_calls must be a positive integer, "
+                f"got {self.max_parallel_tool_calls}"
+            )
 
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the
