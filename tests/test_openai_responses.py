@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
-from openai import NOT_GIVEN, omit
+from openai import NOT_GIVEN, APIConnectionError, RateLimitError, omit
 from openai.types.responses import ResponseCompletedEvent
 from openai.types.shared.reasoning import Reasoning
 
@@ -21,6 +21,10 @@ from agents import (
     __version__,
 )
 from agents.exceptions import UserError
+from agents.models._retry_runtime import (
+    provider_managed_retries_disabled,
+    websocket_pre_event_retries_disabled,
+)
 from agents.models.openai_responses import (
     _HEADERS_OVERRIDE as RESP_HEADERS,
     ConvertedTools,
@@ -28,7 +32,9 @@ from agents.models.openai_responses import (
     OpenAIResponsesModel,
     OpenAIResponsesWSModel,
     ResponsesWebSocketError,
+    _should_retry_pre_event_websocket_disconnect,
 )
+from agents.retry import ModelRetryAdviceRequest
 from tests.fake_model import get_response_obj
 
 
@@ -93,6 +99,14 @@ def _response_error_frame(code: str, message: str, sequence_number: int) -> str:
             "sequence_number": sequence_number,
         }
     )
+
+
+def _connection_closed_error(message: str) -> Exception:
+    class ConnectionClosedError(Exception):
+        pass
+
+    ConnectionClosedError.__module__ = "websockets.client"
+    return ConnectionClosedError(message)
 
 
 @pytest.mark.allow_call_model_methods
@@ -177,6 +191,26 @@ async def test_get_response_exposes_request_id():
 
     assert response.response_id == "resp-request-id"
     assert response.request_id == "req_nonstream_123"
+
+
+def test_get_client_disables_provider_managed_retries_on_runner_retry() -> None:
+    class DummyResponsesClient:
+        def __init__(self) -> None:
+            self.responses = SimpleNamespace()
+            self.with_options_calls: list[dict[str, Any]] = []
+
+        def with_options(self, **kwargs):
+            self.with_options_calls.append(kwargs)
+            return self
+
+    client = DummyResponsesClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    assert cast(object, model._get_client()) is client
+    with provider_managed_retries_disabled(True):
+        assert cast(object, model._get_client()) is client
+
+    assert client.with_options_calls == [{"max_retries": 0}]
 
 
 @pytest.mark.allow_call_model_methods
@@ -2565,6 +2599,63 @@ async def test_websocket_model_get_response_applies_timeout_to_recv(monkeypatch)
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_websocket_model_get_response_marks_partial_receive_timeout_unsafe_to_replay(
+    monkeypatch,
+):
+    client = DummyWSClient()
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    class PartialThenSlowRecvWSConnection(DummyWSConnection):
+        def __init__(self) -> None:
+            super().__init__([_response_event_frame("response.created", "resp-partial", 1)])
+            self.recv_calls = 0
+
+        async def recv(self) -> str:
+            self.recv_calls += 1
+            if self.recv_calls == 1:
+                return await super().recv()
+            await asyncio.sleep(0.2)
+            return await super().recv()
+
+    ws = PartialThenSlowRecvWSConnection()
+
+    async def fake_open(
+        ws_url: str, headers: dict[str, str], *, connect_timeout: float | None = None
+    ) -> DummyWSConnection:
+        return ws
+
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+
+    with pytest.raises(TimeoutError, match="Responses websocket receive timed out") as exc_info:
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(extra_args={"timeout": 0.01}),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+
+    error = exc_info.value
+    assert getattr(error, "_openai_agents_ws_replay_safety", None) == "unsafe"
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is False
+    assert advice.replay_safety == "unsafe"
+    assert ws.close_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_websocket_model_get_response_applies_timeout_while_waiting_for_request_lock(
     monkeypatch,
 ):
@@ -3012,3 +3103,366 @@ async def test_websocket_model_open_websocket_connection_honors_connect_timeout(
 
     assert result is sentinel
     assert captured["kwargs"]["open_timeout"] == 42.0
+
+
+@pytest.mark.allow_call_model_methods
+def test_get_retry_advice_uses_openai_headers() -> None:
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    response = httpx.Response(
+        429,
+        request=request,
+        headers={
+            "x-should-retry": "true",
+            "retry-after-ms": "250",
+            "x-request-id": "req_456",
+        },
+        json={"error": {"code": "rate_limit"}},
+    )
+    error = RateLimitError(
+        "rate limited", response=response, body={"error": {"code": "rate_limit"}}
+    )
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, object()))
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.retry_after == 0.25
+    assert advice.replay_safety == "safe"
+    assert advice.normalized is not None
+    assert advice.normalized.error_code == "rate_limit"
+    assert advice.normalized.status_code == 429
+    assert advice.normalized.request_id == "req_456"
+
+
+@pytest.mark.allow_call_model_methods
+def test_get_retry_advice_keeps_stateful_transport_failures_ambiguous() -> None:
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, object()))
+    error = APIConnectionError(
+        message="connection error",
+        request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+    )
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+            previous_response_id="resp_prev",
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety is None
+    assert advice.normalized is not None
+    assert advice.normalized.is_network_error is True
+
+
+@pytest.mark.allow_call_model_methods
+def test_get_retry_advice_marks_stateful_http_failures_replay_safe() -> None:
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    response = httpx.Response(
+        429,
+        request=request,
+        json={"error": {"code": "rate_limit"}},
+    )
+    error = RateLimitError(
+        "rate limited", response=response, body={"error": {"code": "rate_limit"}}
+    )
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, object()))
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+            previous_response_id="resp_prev",
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety == "safe"
+    assert advice.normalized is not None
+    assert advice.normalized.status_code == 429
+
+
+@pytest.mark.allow_call_model_methods
+def test_get_retry_advice_keeps_stateless_transport_failures_retryable() -> None:
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, object()))
+    error = APIConnectionError(
+        message="connection error",
+        request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+    )
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety is None
+    assert advice.normalized is not None
+    assert advice.normalized.is_network_error is True
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_marks_ambiguous_replay_unsafe() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = RuntimeError("Responses websocket connection closed before a terminal response event.")
+    error.__cause__ = _connection_closed_error("peer closed after request send")
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+            previous_response_id="resp_prev",
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is False
+    assert advice.replay_safety == "unsafe"
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_allows_stateless_ambiguous_disconnect_retry() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = RuntimeError("Responses websocket connection closed before a terminal response event.")
+    error.__cause__ = _connection_closed_error("peer closed after request send")
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety is None
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_keeps_wrapped_pre_send_disconnect_safe() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = RuntimeError(
+        "Responses websocket connection closed before any response events were received."
+    )
+    setattr(error, "_openai_agents_ws_replay_safety", "safe")  # noqa: B010
+    error.__cause__ = _connection_closed_error("peer closed before request send")
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+            previous_response_id="resp_prev",
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety == "safe"
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_allows_stateless_wrapped_post_send_disconnect_retry() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = RuntimeError(
+        "Responses websocket connection closed before any response events were received."
+    )
+    setattr(error, "_openai_agents_ws_replay_safety", "unsafe")  # noqa: B010
+    error.__cause__ = _connection_closed_error("peer closed after request send")
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety is None
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_allows_stateless_nonstream_post_send_retry() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = RuntimeError(
+        "Responses websocket connection closed before any response events were received."
+    )
+    setattr(error, "_openai_agents_ws_replay_safety", "unsafe")  # noqa: B010
+    error.__cause__ = _connection_closed_error("peer closed after request send")
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety is None
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_marks_wrapped_post_send_disconnect_unsafe() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = RuntimeError(
+        "Responses websocket connection closed before any response events were received."
+    )
+    setattr(error, "_openai_agents_ws_replay_safety", "unsafe")  # noqa: B010
+    error.__cause__ = _connection_closed_error("peer closed after request send")
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+            previous_response_id="resp_prev",
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is False
+    assert advice.replay_safety == "unsafe"
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_marks_partial_nonstream_failure_unsafe() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = TimeoutError("Responses websocket receive timed out after 5.0 seconds.")
+    setattr(error, "_openai_agents_ws_replay_safety", "unsafe")  # noqa: B010
+    setattr(error, "_openai_agents_ws_response_started", True)  # noqa: B010
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is False
+    assert advice.replay_safety == "unsafe"
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_marks_connect_timeout_replay_safe() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = TimeoutError("Responses websocket connect timed out after 5.0 seconds.")
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+            previous_response_id="resp_prev",
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety == "safe"
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_marks_request_lock_timeout_replay_safe() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = TimeoutError("Responses websocket request lock wait timed out after 5.0 seconds.")
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+            previous_response_id="resp_prev",
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety == "safe"
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_marks_stateful_receive_timeout_unsafe() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = TimeoutError("Responses websocket receive timed out after 5.0 seconds.")
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+            previous_response_id="resp_prev",
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is False
+    assert advice.replay_safety == "unsafe"
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_allows_stateless_receive_timeout_retry() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = TimeoutError("Responses websocket receive timed out after 5.0 seconds.")
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety is None
+
+
+def test_get_client_disables_provider_managed_retries_when_requested() -> None:
+    class DummyClient:
+        def __init__(self):
+            self.calls: list[dict[str, int]] = []
+
+        def with_options(self, **kwargs):
+            self.calls.append(kwargs)
+            return "retry-client"
+
+    client = DummyClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, client))
+
+    assert cast(object, model._get_client()) is client
+
+    with provider_managed_retries_disabled(True):
+        assert cast(object, model._get_client()) == "retry-client"
+
+    assert client.calls == [{"max_retries": 0}]
+
+
+def test_websocket_pre_event_disconnect_retry_respects_websocket_retry_disable() -> None:
+    assert _should_retry_pre_event_websocket_disconnect() is True
+
+    with websocket_pre_event_retries_disabled(True):
+        assert _should_retry_pre_event_websocket_disconnect() is False

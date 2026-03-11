@@ -1,18 +1,24 @@
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Mapping
 from dataclasses import fields, replace
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, Union, cast
 
 from openai import Omit as _Omit
 from openai._types import Body, Query
 from openai.types.responses import ResponseIncludable
 from openai.types.shared import Reasoning
-from pydantic import BaseModel, GetCoreSchemaHandler
+from pydantic import GetCoreSchemaHandler, TypeAdapter
 from pydantic.dataclasses import dataclass
 from pydantic_core import core_schema
 from typing_extensions import TypeAlias
+
+from .retry import (
+    ModelRetryBackoffInput,
+    ModelRetryBackoffSettings,
+    ModelRetrySettings,
+    _coerce_backoff_settings,
+)
 
 
 class _OmitTypeAnnotation:
@@ -154,6 +160,9 @@ class ModelSettings:
     These will be passed directly to the underlying model provider's API.
     Use with caution as not all models support all parameters."""
 
+    retry: ModelRetrySettings | None = None
+    """Opt-in runner-managed retry settings for model calls."""
+
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the
         override on top of this instance."""
@@ -166,7 +175,7 @@ class ModelSettings:
             if getattr(override, field.name) is not None
         }
 
-        # Handle extra_args merging specially - merge dictionaries instead of replacing
+        # Handle extra_args merging specially - merge dictionaries instead of replacing.
         if self.extra_args is not None or override.extra_args is not None:
             merged_args = {}
             if self.extra_args:
@@ -175,17 +184,47 @@ class ModelSettings:
                 merged_args.update(override.extra_args)
             changes["extra_args"] = merged_args if merged_args else None
 
+        if self.retry is not None or override.retry is not None:
+            changes["retry"] = _merge_retry_settings(self.retry, override.retry)
+
         return replace(self, **changes)
 
     def to_json_dict(self) -> dict[str, Any]:
-        dataclass_dict = dataclasses.asdict(self)
+        return cast(dict[str, Any], TypeAdapter(ModelSettings).dump_python(self, mode="json"))
 
-        json_dict: dict[str, Any] = {}
 
-        for field_name, value in dataclass_dict.items():
-            if isinstance(value, BaseModel):
-                json_dict[field_name] = value.model_dump(mode="json")
-            else:
-                json_dict[field_name] = value
+def _merge_retry_settings(
+    inherited: ModelRetrySettings | None,
+    override: ModelRetrySettings | None,
+) -> ModelRetrySettings | None:
+    if inherited is None:
+        return override
+    if override is None:
+        return inherited
 
-        return json_dict
+    merged_backoff = _merge_backoff_settings(inherited.backoff, override.backoff)
+    retry_changes = {
+        field.name: getattr(override, field.name)
+        for field in fields(inherited)
+        if field.name != "backoff" and getattr(override, field.name) is not None
+    }
+    return replace(inherited, **retry_changes, backoff=merged_backoff)
+
+
+def _merge_backoff_settings(
+    inherited: ModelRetryBackoffInput | None,
+    override: ModelRetryBackoffInput | None,
+) -> ModelRetryBackoffSettings | None:
+    inherited = _coerce_backoff_settings(inherited)
+    override = _coerce_backoff_settings(override)
+    if inherited is None:
+        return override
+    if override is None:
+        return inherited
+
+    changes = {
+        field.name: getattr(override, field.name)
+        for field in fields(inherited)
+        if getattr(override, field.name) is not None
+    }
+    return replace(inherited, **changes)

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
-from openai import AsyncOpenAI, omit
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI, omit
 from openai.types.chat.chat_completion import ChatCompletion, Choice, ChoiceLogprobs
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
@@ -31,6 +31,7 @@ from openai.types.responses import (
 
 from agents import (
     ModelResponse,
+    ModelRetryAdviceRequest,
     ModelSettings,
     ModelTracing,
     OpenAIChatCompletionsModel,
@@ -38,6 +39,7 @@ from agents import (
     __version__,
     generation_span,
 )
+from agents.models._retry_runtime import provider_managed_retries_disabled
 from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE, ChatCmplHelpers
 from agents.models.fake_id import FAKE_RESPONSES_ID
 
@@ -261,6 +263,27 @@ async def test_get_response_with_tool_call(monkeypatch) -> None:
     assert fn_call_item.arguments == "{'x':1}"
 
 
+def test_get_client_disables_provider_managed_retries_on_runner_retry() -> None:
+    class DummyChatCompletionsClient:
+        def __init__(self) -> None:
+            self.base_url = httpx.URL("https://api.openai.com/v1/")
+            self.chat = type("ChatNamespace", (), {"completions": object()})()
+            self.with_options_calls: list[dict[str, Any]] = []
+
+        def with_options(self, **kwargs):
+            self.with_options_calls.append(kwargs)
+            return self
+
+    client = DummyChatCompletionsClient()
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    assert cast(object, model._get_client()) is client
+    with provider_managed_retries_disabled(True):
+        assert cast(object, model._get_client()) is client
+
+    assert client.with_options_calls == [{"max_retries": 0}]
+
+
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 async def test_get_response_with_no_message(monkeypatch) -> None:
@@ -433,6 +456,112 @@ def test_store_param():
     assert ChatCmplHelpers.get_store_param(client, model_settings) is True, (
         "Should respect explicitly set store=True"
     )
+
+
+def test_get_retry_advice_uses_openai_headers() -> None:
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx.Response(
+        429,
+        request=request,
+        headers={
+            "x-should-retry": "true",
+            "retry-after-ms": "500",
+            "x-request-id": "req_123",
+        },
+        json={"error": {"code": "rate_limit"}},
+    )
+    error = APIStatusError(
+        "rate limited", response=response, body={"error": {"code": "rate_limit"}}
+    )
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=cast(Any, object()))
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.retry_after == 0.5
+    assert advice.replay_safety == "safe"
+    assert advice.normalized is not None
+    assert advice.normalized.error_code == "rate_limit"
+    assert advice.normalized.status_code == 429
+    assert advice.normalized.request_id == "req_123"
+
+
+def test_get_retry_advice_keeps_stateful_transport_failures_ambiguous() -> None:
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=cast(Any, object()))
+    error = APIConnectionError(
+        message="connection error",
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+    )
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+            previous_response_id="resp_prev",
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety is None
+    assert advice.normalized is not None
+    assert advice.normalized.is_network_error is True
+
+
+def test_get_retry_advice_marks_stateful_http_failures_replay_safe() -> None:
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx.Response(
+        429,
+        request=request,
+        json={"error": {"code": "rate_limit"}},
+    )
+    error = APIStatusError(
+        "rate limited", response=response, body={"error": {"code": "rate_limit"}}
+    )
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=cast(Any, object()))
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+            previous_response_id="resp_prev",
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety == "safe"
+    assert advice.normalized is not None
+    assert advice.normalized.status_code == 429
+
+
+def test_get_client_disables_provider_managed_retries_when_requested() -> None:
+    class DummyClient:
+        def __init__(self):
+            self.calls: list[dict[str, int]] = []
+
+        def with_options(self, **kwargs):
+            self.calls.append(kwargs)
+            return "retry-client"
+
+    client = DummyClient()
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=cast(Any, client))
+
+    assert cast(object, model._get_client()) is client
+
+    with provider_managed_retries_disabled(True):
+        assert cast(object, model._get_client()) == "retry-client"
+
+    assert client.calls == [{"max_retries": 0}]
 
 
 @pytest.mark.allow_call_model_methods

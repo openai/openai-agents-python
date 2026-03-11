@@ -87,6 +87,17 @@ from .prompts import DynamicPromptFunction, GenerateDynamicPromptData, Prompt
 from .repl import run_demo_loop
 from .responses_websocket_session import ResponsesWebSocketSession, responses_websocket_session
 from .result import AgentToolInvocation, RunResult, RunResultStreaming
+from .retry import (
+    ModelRetryAdvice,
+    ModelRetryAdviceRequest,
+    ModelRetryBackoffSettings,
+    ModelRetryNormalizedError,
+    ModelRetrySettings,
+    RetryDecision,
+    RetryPolicy,
+    RetryPolicyContext,
+    retry_policies,
+)
 from .run import (
     ReasoningItemIdPolicy,
     RunConfig,
@@ -284,6 +295,15 @@ __all__ = [
     "ModelProvider",
     "ModelTracing",
     "ModelSettings",
+    "ModelRetryAdvice",
+    "ModelRetryAdviceRequest",
+    "ModelRetryBackoffSettings",
+    "ModelRetryNormalizedError",
+    "ModelRetrySettings",
+    "RetryDecision",
+    "RetryPolicy",
+    "RetryPolicyContext",
+    "retry_policies",
     "OpenAIChatCompletionsModel",
     "MultiProvider",
     "OpenAIProvider",

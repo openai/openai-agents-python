@@ -96,6 +96,11 @@ from .items import (
     normalize_input_items_for_api,
     normalize_resumed_input,
 )
+from .model_retry import (
+    apply_retry_attempt_usage,
+    get_response_with_retry,
+    stream_response_with_retry,
+)
 from .oai_conversation import OpenAIServerConversationTracker
 from .run_steps import (
     NextStepFinalOutput,
@@ -1187,7 +1192,8 @@ async def run_single_turn_streamed(
             len(filtered.input),
             [id(i) for i in filtered.input],
         )
-        # Track only the items actually sent after call_model_input_filter runs.
+        # Track only the items actually sent after call_model_input_filter runs. Retry helpers
+        # explicitly rewind this state before replaying a failed request.
         server_conversation_tracker.mark_input_as_sent(filtered.input)
     if not filtered.input and server_conversation_tracker is None:
         raise RuntimeError("Prepared model input is empty")
@@ -1232,20 +1238,37 @@ async def run_single_turn_streamed(
     else:
         logger.debug("No conversation_id available for request")
 
-    async for event in model.stream_response(
-        filtered.instructions,
-        filtered.input,
-        model_settings,
-        all_tools,
-        output_schema,
-        handoffs,
-        get_model_tracing_impl(
-            run_config.tracing_disabled, run_config.trace_include_sensitive_data
+    async def rewind_model_request() -> None:
+        items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
+        await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
+        if server_conversation_tracker is not None:
+            server_conversation_tracker.rewind_input(filtered.input)
+
+    stream_failed_retry_attempts: list[int] = [0]
+    retry_stream = stream_response_with_retry(
+        get_stream=lambda: model.stream_response(
+            filtered.instructions,
+            filtered.input,
+            model_settings,
+            all_tools,
+            output_schema,
+            handoffs,
+            get_model_tracing_impl(
+                run_config.tracing_disabled, run_config.trace_include_sensitive_data
+            ),
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt_config,
         ),
+        rewind=rewind_model_request,
+        retry_settings=model_settings.retry,
+        get_retry_advice=model.get_retry_advice,
         previous_response_id=previous_response_id,
         conversation_id=conversation_id,
-        prompt=prompt_config,
-    ):
+        failed_retry_attempts_out=stream_failed_retry_attempts,
+    )
+
+    async for event in retry_stream:
         streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
         terminal_response: Response | None = None
@@ -1258,13 +1281,16 @@ async def run_single_turn_streamed(
 
         if terminal_response is not None:
             usage = (
-                Usage(
-                    requests=1,
-                    input_tokens=terminal_response.usage.input_tokens,
-                    output_tokens=terminal_response.usage.output_tokens,
-                    total_tokens=terminal_response.usage.total_tokens,
-                    input_tokens_details=terminal_response.usage.input_tokens_details,
-                    output_tokens_details=terminal_response.usage.output_tokens_details,
+                apply_retry_attempt_usage(
+                    Usage(
+                        requests=1,
+                        input_tokens=terminal_response.usage.input_tokens,
+                        output_tokens=terminal_response.usage.output_tokens,
+                        total_tokens=terminal_response.usage.total_tokens,
+                        input_tokens_details=terminal_response.usage.input_tokens_details,
+                        output_tokens_details=terminal_response.usage.output_tokens_details,
+                    ),
+                    stream_failed_retry_attempts[0],
                 )
                 if terminal_response.usage
                 else Usage()
@@ -1275,7 +1301,6 @@ async def run_single_turn_streamed(
                 response_id=terminal_response.id,
                 request_id=getattr(terminal_response, "_request_id", None),
             )
-            context_wrapper.usage.add(usage)
 
         if isinstance(event, ResponseOutputItemDoneEvent):
             output_item = event.item
@@ -1361,6 +1386,7 @@ async def run_single_turn_streamed(
                     )
 
     if final_response is not None:
+        context_wrapper.usage.add(final_response.usage)
         await asyncio.gather(
             (
                 agent.hooks.on_llm_end(context_wrapper, agent, final_response)
@@ -1374,6 +1400,9 @@ async def run_single_turn_streamed(
         raise ModelBehaviorError("Model did not produce a final response!")
 
     if server_conversation_tracker is not None:
+        # Streaming uses the same rewind helper, so a successful retry must restore delivered
+        # input tracking before the next turn computes server-managed deltas.
+        server_conversation_tracker.mark_input_as_sent(filtered.input)
         server_conversation_tracker.track_server_items(final_response)
 
     single_step_result = await get_single_step_result_from_response(
@@ -1560,12 +1589,12 @@ async def get_new_response(
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 
-    if server_conversation_tracker is not None:
-        server_conversation_tracker.mark_input_as_sent(filtered.input)
-
     model = get_model(agent, run_config)
     model_settings = agent.model_settings.resolve(run_config.model_settings)
     model_settings = maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
+
+    if server_conversation_tracker is not None:
+        server_conversation_tracker.mark_input_as_sent(filtered.input)
 
     await asyncio.gather(
         hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
@@ -1595,8 +1624,14 @@ async def get_new_response(
     else:
         logger.debug("No conversation_id available for request")
 
-    try:
-        new_response = await model.get_response(
+    async def rewind_model_request() -> None:
+        items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
+        await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
+        if server_conversation_tracker is not None:
+            server_conversation_tracker.rewind_input(filtered.input)
+
+    new_response = await get_response_with_retry(
+        get_response=lambda: model.get_response(
             system_instructions=filtered.instructions,
             input=filtered.input,
             model_settings=model_settings,
@@ -1609,61 +1644,18 @@ async def get_new_response(
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
             prompt=prompt_config,
-        )
-    except Exception as exc:
-        from openai import BadRequestError
-
-        if isinstance(exc, BadRequestError) and getattr(exc, "code", "") == "conversation_locked":
-            max_retries = 3
-            last_exception = exc
-            for attempt in range(max_retries):
-                wait_time = 1.0 * (2**attempt)
-                logger.debug(
-                    "Conversation locked, retrying in %ss (attempt %s/%s)",
-                    wait_time,
-                    attempt + 1,
-                    max_retries,
-                )
-                await asyncio.sleep(wait_time)
-                items_to_rewind = (
-                    session_items_to_rewind if session_items_to_rewind is not None else []
-                )
-                await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
-                if server_conversation_tracker is not None:
-                    server_conversation_tracker.rewind_input(filtered.input)
-                try:
-                    new_response = await model.get_response(
-                        system_instructions=filtered.instructions,
-                        input=filtered.input,
-                        model_settings=model_settings,
-                        tools=all_tools,
-                        output_schema=output_schema,
-                        handoffs=handoffs,
-                        tracing=get_model_tracing_impl(
-                            run_config.tracing_disabled, run_config.trace_include_sensitive_data
-                        ),
-                        previous_response_id=previous_response_id,
-                        conversation_id=conversation_id,
-                        prompt=prompt_config,
-                    )
-                    break
-                except BadRequestError as retry_exc:
-                    last_exception = retry_exc
-                    if (
-                        getattr(retry_exc, "code", "") == "conversation_locked"
-                        and attempt < max_retries - 1
-                    ):
-                        continue
-                    else:
-                        raise
-            else:
-                logger.error(
-                    "Conversation locked after all retries; filtered.input=%s", filtered.input
-                )
-                raise last_exception
-        else:
-            logger.error("Error getting response; filtered.input=%s", filtered.input)
-            raise
+        ),
+        rewind=rewind_model_request,
+        retry_settings=model_settings.retry,
+        get_retry_advice=model.get_retry_advice,
+        previous_response_id=previous_response_id,
+        conversation_id=conversation_id,
+    )
+    if server_conversation_tracker is not None:
+        # Retry helpers rewind sent-input tracking before replaying a failed request. Mark the
+        # filtered input as delivered again once a retry succeeds so subsequent turns only send
+        # new deltas.
+        server_conversation_tracker.mark_input_as_sent(filtered.input)
 
     context_wrapper.usage.add(new_response.usage)
 

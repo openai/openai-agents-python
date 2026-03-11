@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from openai import BadRequestError
+from openai import APIConnectionError, BadRequestError
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_output_text import AnnotationFileCitation, ResponseOutputText
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
@@ -24,6 +24,8 @@ from agents import (
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     ModelBehaviorError,
+    ModelRetryAdvice,
+    ModelRetrySettings,
     ModelSettings,
     OpenAIConversationsSession,
     OutputGuardrail,
@@ -35,6 +37,7 @@ from agents import (
     ToolTimeoutError,
     UserError,
     handoff,
+    retry_policies,
     tool_namespace,
 )
 from agents.agent import ToolsToFinalOutputResult
@@ -2037,6 +2040,51 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_new_response_uses_agent_retry_settings() -> None:
+    model = FakeModel()
+    model.set_hardcoded_usage(Usage(requests=1))
+    model.add_multiple_turn_outputs(
+        [
+            APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            [get_text_message("ok")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+
+    result = await get_new_response(
+        agent=agent,
+        system_prompt=None,
+        input=[get_text_input_item("hello")],
+        output_schema=None,
+        all_tools=[],
+        handoffs=[],
+        hooks=RunHooks(),
+        context_wrapper=RunContextWrapper(context={}),
+        run_config=RunConfig(),
+        tool_use_tracker=AgentToolUseTracker(),
+        server_conversation_tracker=None,
+        prompt_config=None,
+        session=None,
+        session_items_to_rewind=[],
+    )
+
+    assert isinstance(result, ModelResponse)
+    assert result.usage.requests == 2
+
+
+@pytest.mark.asyncio
 async def test_save_result_to_session_preserves_function_outputs():
     session = SimpleListSession()
     original_item = cast(
@@ -2839,6 +2887,49 @@ async def test_previous_response_id_only_sends_new_items_multi_turn():
 
 
 @pytest.mark.asyncio
+async def test_previous_response_id_retry_does_not_resend_initial_input_multi_turn():
+    class StatefulRetrySafeFakeModel(FakeModel):
+        def get_retry_advice(self, request):
+            if request.previous_response_id or request.conversation_id:
+                return ModelRetryAdvice(suggested=True, replay_safety="safe")
+            return None
+
+    model = StatefulRetrySafeFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent, input="user_message", previous_response_id="initial-response-123"
+    )
+    assert result.final_output == "done"
+
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1
+    assert last_input[0].get("type") == "function_call_output"
+
+
+@pytest.mark.asyncio
 async def test_previous_response_id_only_sends_new_items_multi_turn_streamed():
     """Test that previous_response_id mode only sends new items and updates
     previous_response_id between turns (streamed mode)."""
@@ -2893,6 +2984,52 @@ async def test_previous_response_id_only_sends_new_items_multi_turn_streamed():
 
     # Verify that previous_response_id is modified according to fake_model behavior
     assert model.last_turn_args.get("previous_response_id") == "resp-789"
+
+
+@pytest.mark.asyncio
+async def test_previous_response_id_retry_does_not_resend_initial_input_multi_turn_streamed():
+    class StatefulRetrySafeFakeModel(FakeModel):
+        def get_retry_advice(self, request):
+            if request.previous_response_id or request.conversation_id:
+                return ModelRetryAdvice(suggested=True, replay_safety="safe")
+            return None
+
+    model = StatefulRetrySafeFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(
+        agent, input="user_message", previous_response_id="initial-response-123"
+    )
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1
+    assert last_input[0].get("type") == "function_call_output"
 
 
 @pytest.mark.asyncio

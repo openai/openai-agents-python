@@ -41,12 +41,15 @@ from ...handoffs import Handoff
 from ...items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ...logger import logger
 from ...model_settings import ModelSettings
+from ...models._openai_retry import get_openai_retry_advice
+from ...models._retry_runtime import should_disable_provider_managed_retries
 from ...models.chatcmpl_converter import Converter
 from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
 from ...models.fake_id import FAKE_RESPONSES_ID
 from ...models.interface import Model, ModelTracing
 from ...models.openai_responses import Converter as OpenAIResponsesConverter
+from ...retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ...tool import Tool
 from ...tracing import generation_span
 from ...tracing.span_data import GenerationSpanData
@@ -147,6 +150,11 @@ class LitellmModel(Model):
         self.model = model
         self.base_url = base_url
         self.api_key = api_key
+
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
+        # LiteLLM exceptions mirror OpenAI-style status/header fields.
+        # Reuse the same normalization to expose retry-after and explicit retry/no-retry hints.
+        return get_openai_retry_advice(request)
 
     async def get_response(
         self,
@@ -479,7 +487,7 @@ class LitellmModel(Model):
         if stream and model_settings.include_usage is not None:
             stream_options = {"include_usage": model_settings.include_usage}
 
-        extra_kwargs = {}
+        extra_kwargs: dict[str, Any] = {}
         if model_settings.extra_query:
             extra_kwargs["extra_query"] = copy(model_settings.extra_query)
         if model_settings.metadata:
@@ -490,6 +498,12 @@ class LitellmModel(Model):
         # Add kwargs from model_settings.extra_args, filtering out None values
         if model_settings.extra_args:
             extra_kwargs.update(model_settings.extra_args)
+
+        if should_disable_provider_managed_retries():
+            # Preserve provider-managed retries on the first attempt, but make runner retries the
+            # sole retry layer by forcing LiteLLM's retry knobs off on replay attempts.
+            extra_kwargs["num_retries"] = 0
+            extra_kwargs["max_retries"] = 0
 
         # Prevent duplicate reasoning_effort kwargs when it was promoted to a top-level argument.
         extra_kwargs.pop("reasoning_effort", None)

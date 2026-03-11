@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from openai import APIConnectionError, BadRequestError
 from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseFailedEvent,
@@ -23,6 +24,8 @@ from agents import (
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
+    ModelRetrySettings,
+    ModelSettings,
     OpenAIResponsesWSModel,
     OutputGuardrail,
     OutputGuardrailTripwireTriggered,
@@ -31,6 +34,7 @@ from agents import (
     UserError,
     function_tool,
     handoff,
+    retry_policies,
 )
 from agents.items import RunItem, ToolApprovalItem, TResponseInputItem
 from agents.memory.openai_conversations_session import OpenAIConversationsSession
@@ -38,6 +42,7 @@ from agents.run import RunConfig
 from agents.run_internal import run_loop
 from agents.run_internal.run_loop import QueueCompleteSentinel
 from agents.stream_events import AgentUpdatedStreamEvent, StreamEvent
+from agents.usage import Usage
 
 from .fake_model import FakeModel, get_response_obj
 from .test_responses import (
@@ -55,6 +60,22 @@ from .utils.hitl import (
     resume_streamed_after_first_approval,
 )
 from .utils.simple_session import SimpleListSession
+
+
+def _conversation_locked_error() -> BadRequestError:
+    request = httpx.Request("POST", "https://example.com")
+    response = httpx.Response(
+        400,
+        request=request,
+        json={"error": {"code": "conversation_locked", "message": "locked"}},
+    )
+    error = BadRequestError(
+        "locked",
+        response=response,
+        body={"error": {"code": "conversation_locked"}},
+    )
+    error.code = "conversation_locked"
+    return error
 
 
 def _find_reasoning_input_item(
@@ -210,6 +231,93 @@ async def test_streamed_run_exposes_request_id_on_raw_responses() -> None:
 
     assert len(result.raw_responses) == 1
     assert result.raw_responses[0].request_id == "req_streamed_result_123"
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_preserves_request_usage_entries_after_retry() -> None:
+    model = FakeModel()
+    model.set_hardcoded_usage(
+        Usage(
+            requests=1,
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+        )
+    )
+    model.add_multiple_turn_outputs(
+        [
+            APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+
+    result = Runner.run_streamed(agent, input="test")
+    async for _ in result.stream_events():
+        pass
+
+    usage = result.context_wrapper.usage
+    assert usage.requests == 2
+    assert len(usage.request_usage_entries) == 2
+    assert usage.request_usage_entries[0].total_tokens == 0
+    assert usage.request_usage_entries[1].input_tokens == 10
+    assert usage.request_usage_entries[1].output_tokens == 5
+    assert usage.request_usage_entries[1].total_tokens == 15
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_preserves_request_usage_entries_after_conversation_locked_retry() -> (
+    None
+):
+    model = FakeModel()
+    model.set_hardcoded_usage(
+        Usage(
+            requests=1,
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+        )
+    )
+    model.add_multiple_turn_outputs(
+        [
+            _conversation_locked_error(),
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+
+    result = Runner.run_streamed(agent, input="test")
+    async for _ in result.stream_events():
+        pass
+
+    usage = result.context_wrapper.usage
+    assert usage.requests == 2
+    assert len(usage.request_usage_entries) == 2
+    assert usage.request_usage_entries[0].total_tokens == 0
+    assert usage.request_usage_entries[1].input_tokens == 10
+    assert usage.request_usage_entries[1].output_tokens == 5
+    assert usage.request_usage_entries[1].total_tokens == 15
 
 
 @pytest.mark.allow_call_model_methods

@@ -14,6 +14,7 @@ from ..tool import Tool
 
 if TYPE_CHECKING:
     from ..model_settings import ModelSettings
+    from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 
 
 class ModelTracing(enum.Enum):
@@ -41,6 +42,14 @@ class Model(abc.ABC):
 
         Models that maintain persistent connections can override this. The default implementation
         is a no-op.
+        """
+        return None
+
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
+        """Return provider-specific retry guidance for a failed model request.
+
+        Models can override this to surface transport- or provider-specific hints such as replay
+        safety, retry-after delays, or explicit server retry guidance.
         """
         return None
 

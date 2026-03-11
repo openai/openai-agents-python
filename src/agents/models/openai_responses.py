@@ -42,6 +42,7 @@ from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import logger
 from ..model_settings import MCPToolChoice
+from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import (
     ApplyPatchTool,
     CodeInterpreterTool,
@@ -63,6 +64,11 @@ from ..tracing import SpanError, response_span
 from ..usage import Usage
 from ..util._json import _to_dump_compatible
 from ..version import __version__
+from ._openai_retry import get_openai_retry_advice
+from ._retry_runtime import (
+    should_disable_provider_managed_retries,
+    should_disable_websocket_pre_event_retries,
+)
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
 
@@ -311,6 +317,60 @@ class ResponsesWebSocketError(RuntimeError):
         return value if isinstance(value, str) else None
 
 
+def _iter_retry_error_chain(error: Exception):
+    current: Exception | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        next_error = current.__cause__ or current.__context__
+        current = next_error if isinstance(next_error, Exception) else None
+
+
+def _get_wrapped_websocket_replay_safety(error: Exception) -> str | None:
+    replay_safety = getattr(error, "_openai_agents_ws_replay_safety", None)
+    return replay_safety if replay_safety in {"safe", "unsafe"} else None
+
+
+def _did_start_websocket_response(error: Exception) -> bool:
+    return bool(getattr(error, "_openai_agents_ws_response_started", False))
+
+
+def _is_never_sent_websocket_error(error: Exception) -> bool:
+    for candidate in _iter_retry_error_chain(error):
+        if candidate.__class__.__module__.startswith(
+            "websockets"
+        ) and candidate.__class__.__name__.startswith("ConnectionClosed"):
+            if "client closed" not in str(candidate).lower():
+                return True
+    return False
+
+
+def _is_ambiguous_websocket_replay_error(error: Exception) -> bool:
+    for candidate in _iter_retry_error_chain(error):
+        message = str(candidate)
+        if message.startswith(
+            "Responses websocket connection closed before a terminal response event."
+        ):
+            return True
+    return False
+
+
+def _get_websocket_timeout_phase(error: Exception) -> str | None:
+    for candidate in _iter_retry_error_chain(error):
+        if not isinstance(candidate, TimeoutError):
+            continue
+        message = str(candidate)
+        for phase in ("request lock wait", "connect", "send", "receive"):
+            if message.startswith(f"Responses websocket {phase} timed out"):
+                return phase
+    return None
+
+
+def _should_retry_pre_event_websocket_disconnect() -> bool:
+    return not should_disable_websocket_pre_event_retries()
+
+
 class OpenAIResponsesModel(Model):
     """
     Implementation of `Model` that uses the OpenAI Responses API.
@@ -329,6 +389,9 @@ class OpenAIResponsesModel(Model):
 
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
+
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
+        return get_openai_retry_advice(request)
 
     async def _maybe_aclose_async_iterator(self, iterator: Any) -> None:
         aclose = getattr(iterator, "aclose", None)
@@ -574,17 +637,18 @@ class OpenAIResponsesModel(Model):
             stream=stream,
             prompt=prompt,
         )
+        client = self._get_client()
 
         if not stream:
-            response = await self._client.responses.create(**create_kwargs)
+            response = await client.responses.create(**create_kwargs)
             return cast(Response, response)
 
-        streaming_response = getattr(self._client.responses, "with_streaming_response", None)
+        streaming_response = getattr(client.responses, "with_streaming_response", None)
         stream_create = getattr(streaming_response, "create", None)
         if not callable(stream_create):
             # Some tests and custom clients only implement `responses.create()`. Fall back to the
             # older path in that case and simply omit request IDs for streamed calls.
-            response = await self._client.responses.create(**create_kwargs)
+            response = await client.responses.create(**create_kwargs)
             return cast(AsyncIterator[ResponseStreamEvent], response)
 
         # Keep the raw API response open while callers consume the SSE stream so we can expose
@@ -798,6 +862,10 @@ class OpenAIResponsesModel(Model):
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
             self._client = AsyncOpenAI()
+        if should_disable_provider_managed_retries():
+            with_options = getattr(self._client, "with_options", None)
+            if callable(with_options):
+                return cast(AsyncOpenAI, with_options(max_retries=0))
         return self._client
 
     def _merge_headers(self, model_settings: ModelSettings):
@@ -836,6 +904,63 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
             None
         )
         self._ws_client_close_generation = 0
+
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
+        stateful_request = bool(request.previous_response_id or request.conversation_id)
+        wrapped_replay_safety = _get_wrapped_websocket_replay_safety(request.error)
+        if wrapped_replay_safety == "unsafe":
+            if stateful_request or _did_start_websocket_response(request.error):
+                return ModelRetryAdvice(
+                    suggested=False,
+                    replay_safety="unsafe",
+                    reason=str(request.error),
+                )
+            return ModelRetryAdvice(
+                suggested=True,
+                reason=str(request.error),
+            )
+        if wrapped_replay_safety == "safe":
+            return ModelRetryAdvice(
+                suggested=True,
+                replay_safety="safe",
+                reason=str(request.error),
+            )
+        if _is_ambiguous_websocket_replay_error(request.error):
+            if stateful_request:
+                return ModelRetryAdvice(
+                    suggested=False,
+                    replay_safety="unsafe",
+                    reason=str(request.error),
+                )
+            return ModelRetryAdvice(
+                suggested=True,
+                reason=str(request.error),
+            )
+        timeout_phase = _get_websocket_timeout_phase(request.error)
+        if timeout_phase is not None:
+            if timeout_phase in {"request lock wait", "connect"}:
+                return ModelRetryAdvice(
+                    suggested=True,
+                    replay_safety="safe",
+                    reason=str(request.error),
+                )
+            if stateful_request:
+                return ModelRetryAdvice(
+                    suggested=False,
+                    replay_safety="unsafe",
+                    reason=str(request.error),
+                )
+            return ModelRetryAdvice(
+                suggested=True,
+                reason=str(request.error),
+            )
+        if _is_never_sent_websocket_error(request.error):
+            return ModelRetryAdvice(
+                suggested=True,
+                replay_safety="safe",
+                reason=str(request.error),
+            )
+        return super().get_retry_advice(request)
 
     def _get_ws_request_lock(self) -> asyncio.Lock:
         running_loop = asyncio.get_running_loop()
@@ -953,7 +1078,7 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
             request_frame, ws_url, request_headers = await self._prepare_websocket_request(
                 create_kwargs
             )
-            retry_pre_event_disconnect = True
+            retry_pre_event_disconnect = _should_retry_pre_event_websocket_disconnect()
             while True:
                 connection = await self._await_websocket_with_timeout(
                     self._ensure_websocket_connection(
@@ -1026,6 +1151,14 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                     elif not (yielded_terminal_event and isinstance(exc, GeneratorExit)):
                         await self._drop_websocket_connection()
 
+                    if (
+                        isinstance(exc, Exception)
+                        and received_any_event
+                        and not yielded_terminal_event
+                    ):
+                        setattr(exc, "_openai_agents_ws_replay_safety", "unsafe")  # noqa: B010
+                        setattr(exc, "_openai_agents_ws_response_started", True)  # noqa: B010
+
                     is_pre_event_disconnect = (
                         not received_any_event
                         and isinstance(exc, Exception)
@@ -1045,11 +1178,17 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                         retry_pre_event_disconnect = False
                         continue
                     if is_pre_event_disconnect:
-                        raise RuntimeError(
+                        wrapped_disconnect = RuntimeError(
                             "Responses websocket connection closed before any response events "
                             "were received. The feature may not be enabled for this account/model "
                             "yet, or the server closed the connection."
-                        ) from exc
+                        )
+                        setattr(  # noqa: B010
+                            wrapped_disconnect,
+                            "_openai_agents_ws_replay_safety",
+                            "safe" if is_retryable_pre_event_disconnect else "unsafe",
+                        )
+                        raise wrapped_disconnect from exc
                     raise
         finally:
             request_lock.release()

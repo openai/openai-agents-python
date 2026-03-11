@@ -24,12 +24,15 @@ from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..logger import logger
+from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import Tool
 from ..tracing import generation_span
 from ..tracing.span_data import GenerationSpanData
 from ..tracing.spans import Span
 from ..usage import Usage
 from ..util._json import _to_dump_compatible
+from ._openai_retry import get_openai_retry_advice
+from ._retry_runtime import should_disable_provider_managed_retries
 from .chatcmpl_converter import Converter
 from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
@@ -56,6 +59,9 @@ class OpenAIChatCompletionsModel(Model):
 
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
+
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
+        return get_openai_retry_advice(request)
 
     def _validate_official_openai_input_content_types(
         self, request_input: str | list[TResponseInputItem]
@@ -430,6 +436,10 @@ class OpenAIChatCompletionsModel(Model):
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
             self._client = AsyncOpenAI()
+        if should_disable_provider_managed_retries():
+            with_options = getattr(self._client, "with_options", None)
+            if callable(with_options):
+                return cast(AsyncOpenAI, with_options(max_retries=0))
         return self._client
 
     def _merge_headers(self, model_settings: ModelSettings):
