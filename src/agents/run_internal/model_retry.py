@@ -459,25 +459,36 @@ def _should_disable_provider_managed_retries(
     attempt: int,
     stateful_request: bool,
 ) -> bool:
-    if retry_settings is None:
-        return False
-    if retry_settings.max_retries is not None and retry_settings.max_retries <= 0:
+    if (
+        retry_settings is not None
+        and retry_settings.max_retries is not None
+        and retry_settings.max_retries <= 0
+    ):
         # An explicit no-retry budget should also disable hidden provider retries so callers
         # can fully opt out of retries.
         return True
-    if attempt <= 1:
-        if not stateful_request:
-            # Keep provider-managed retries on the initial attempt for backward compatibility.
+
+    if attempt > 1:
+        if stateful_request:
+            # Any stateful replay attempt already passed through runner rewind/safety decisions,
+            # including conversation-locked compatibility retries that can run without a policy.
+            return True
+        if retry_settings is None or retry_settings.policy is None:
+            # Without a policy, the runner never schedules stateless retries, so provider retries
+            # remain the only transient-failure recovery path.
             return False
-        max_retries = retry_settings.max_retries
-        # Stateful requests must route replay decisions through the runner so hidden SDK retries
-        # cannot resend conversation-bound deltas before rewind/replay-safety checks run.
-        return max_retries is not None and max_retries > 0 and retry_settings.policy is not None
-    if retry_settings.policy is None:
-        # Without a policy, the runner never schedules retries, so provider retries remain the
-        # only transient-failure recovery path.
+        return max(retry_settings.max_retries or 0, 0) > 0
+
+    if retry_settings is None:
         return False
-    return max(retry_settings.max_retries or 0, 0) > 0
+    if not stateful_request:
+        # Keep provider-managed retries on the initial attempt for backward compatibility.
+        return False
+
+    max_retries = retry_settings.max_retries
+    # Stateful requests must route replay decisions through the runner so hidden SDK retries
+    # cannot resend conversation-bound deltas before rewind/replay-safety checks run.
+    return max_retries is not None and max_retries > 0 and retry_settings.policy is not None
 
 
 def _should_disable_websocket_pre_event_retry(

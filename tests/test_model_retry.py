@@ -748,6 +748,52 @@ async def test_get_response_with_retry_preserves_conversation_locked_compatibili
 
 
 @pytest.mark.asyncio
+async def test_get_response_with_retry_disables_provider_retries_on_stateful_compat_replay(
+    monkeypatch,
+) -> None:
+    calls = 0
+    rewinds = 0
+    provider_retry_flags: list[bool] = []
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    async def rewind() -> None:
+        nonlocal rewinds
+        rewinds += 1
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        provider_retry_flags.append(should_disable_provider_managed_retries())
+        calls += 1
+        if calls == 1:
+            raise _conversation_locked_error()
+        return ModelResponse(
+            output=[get_text_message("ok")],
+            usage=Usage(requests=1),
+            response_id="resp_stateful_compat_disable_none",
+        )
+
+    result = await get_response_with_retry(
+        get_response=get_response,
+        rewind=rewind,
+        retry_settings=None,
+        get_retry_advice=lambda _request: None,
+        previous_response_id="resp_prev",
+        conversation_id=None,
+    )
+
+    assert calls == 2
+    assert rewinds == 1
+    assert provider_retry_flags == [False, True]
+    assert sleeps == [1.0]
+    assert result.response_id == "resp_stateful_compat_disable_none"
+
+
+@pytest.mark.asyncio
 async def test_get_response_with_retry_respects_explicit_disable_for_conversation_locked(
     monkeypatch,
 ) -> None:
@@ -2225,6 +2271,55 @@ async def test_stream_response_with_retry_preserves_conversation_locked_compatib
     assert attempts == 2
     assert rewinds == 1
     assert failed_attempts == [1]
+    assert sleeps == [1.0]
+    assert events == [cast(TResponseStreamEvent, {"type": "response.created"})]
+
+
+@pytest.mark.asyncio
+async def test_stream_response_with_retry_disables_provider_retries_on_stateful_compat_replay(
+    monkeypatch,
+) -> None:
+    attempts = 0
+    rewinds = 0
+    provider_retry_flags: list[bool] = []
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    async def rewind() -> None:
+        nonlocal rewinds
+        rewinds += 1
+
+    def get_stream() -> AsyncIterator[TResponseStreamEvent]:
+        nonlocal attempts
+        provider_retry_flags.append(should_disable_provider_managed_retries())
+        attempts += 1
+
+        async def iterator() -> AsyncIterator[TResponseStreamEvent]:
+            if attempts == 1:
+                raise _conversation_locked_error()
+            yield cast(TResponseStreamEvent, {"type": "response.created"})
+
+        return iterator()
+
+    events = [
+        event
+        async for event in stream_response_with_retry(
+            get_stream=get_stream,
+            rewind=rewind,
+            retry_settings=ModelRetrySettings(max_retries=1),
+            get_retry_advice=lambda _request: None,
+            previous_response_id="resp_prev",
+            conversation_id=None,
+        )
+    ]
+
+    assert attempts == 2
+    assert rewinds == 1
+    assert provider_retry_flags == [False, True]
     assert sleeps == [1.0]
     assert events == [cast(TResponseStreamEvent, {"type": "response.created"})]
 
