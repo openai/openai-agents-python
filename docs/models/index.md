@@ -268,6 +268,7 @@ When you are using the OpenAI Responses API, several request fields already have
 | `prompt_cache_retention` | Keep cached prompt prefixes around longer, for example with `"24h"`. |
 | `response_include` | Request richer response payloads such as `web_search_call.action.sources`, `file_search_call.results`, or `reasoning.encrypted_content`. |
 | `top_logprobs` | Request top-token logprobs for output text. The SDK also adds `message.output_text.logprobs` automatically. |
+| `retry` | Opt in to runner-managed retry settings for model calls. See [Runner-managed retries](#runner-managed-retries). |
 
 ```python
 from agents import Agent, ModelSettings
@@ -284,6 +285,91 @@ research_agent = Agent(
     ),
 )
 ```
+
+#### Runner-managed retries
+
+Retries are runtime-only and opt in. The SDK does not retry general model requests unless you set `ModelSettings(retry=...)` and your retry policy chooses to retry.
+
+```python
+from agents import Agent, ModelRetrySettings, ModelSettings, retry_policies
+
+agent = Agent(
+    name="Assistant",
+    model="gpt-5.4",
+    model_settings=ModelSettings(
+        retry=ModelRetrySettings(
+            max_retries=4,
+            backoff={
+                "initial_delay": 0.5,
+                "max_delay": 5.0,
+                "multiplier": 2.0,
+                "jitter": True,
+            },
+            policy=retry_policies.any(
+                retry_policies.provider_suggested(),
+                retry_policies.retry_after(),
+                retry_policies.network_error(),
+                retry_policies.http_status([408, 409, 429, 500, 502, 503, 504]),
+            ),
+        )
+    ),
+)
+```
+
+`ModelRetrySettings` has three fields:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `max_retries` | `int \| None` | Number of retry attempts allowed after the initial request. |
+| `backoff` | `ModelRetryBackoffSettings \| dict \| None` | Default delay strategy when the policy retries without returning an explicit delay. |
+| `policy` | `RetryPolicy \| None` | Callback that decides whether to retry. This field is runtime-only and is not serialized. |
+
+A retry policy receives a [`RetryPolicyContext`][agents.retry.RetryPolicyContext] with:
+
+- `attempt` and `max_retries` so you can make attempt-aware decisions.
+- `stream` so you can branch between streamed and non-streamed behavior.
+- `error` for raw inspection.
+- `normalized` facts such as `status_code`, `retry_after`, `error_code`, `is_network_error`, `is_timeout`, and `is_abort`.
+- `provider_advice` when the underlying model adapter can supply retry guidance.
+
+The policy can return either:
+
+- `True` / `False` for a simple retry decision.
+- A [`RetryDecision`][agents.retry.RetryDecision] when you want to override the delay or attach a diagnostic reason.
+
+The SDK exports ready-made helpers on `retry_policies`:
+
+| Helper | Behavior |
+| --- | --- |
+| `retry_policies.never()` | Always opts out. |
+| `retry_policies.provider_suggested()` | Follows provider retry advice when available. |
+| `retry_policies.network_error()` | Matches transient transport and timeout failures. |
+| `retry_policies.http_status([...])` | Matches selected HTTP status codes. |
+| `retry_policies.retry_after()` | Retries only when a retry-after hint is available, using that delay. |
+| `retry_policies.any(...)` | Retries when any nested policy opts in. |
+| `retry_policies.all(...)` | Retries only when every nested policy opts in. |
+
+When you compose policies, `provider_suggested()` is the safest first building block because it preserves provider vetoes and replay-safety approvals when the provider can distinguish them.
+
+##### Safety boundaries
+
+Some failures are never retried automatically:
+
+- Abort errors.
+- Requests where provider advice marks replay as unsafe.
+- Streamed runs after output has already started in a way that would make replay unsafe.
+
+Stateful follow-up requests using `previous_response_id` or `conversation_id` are also treated more conservatively. For those requests, non-provider predicates such as `network_error()` or `http_status([500])` are not enough by themselves. The retry policy should include a replay-safe approval from the provider, typically via `retry_policies.provider_suggested()`.
+
+##### Runner and agent merge behavior
+
+`retry` is deep-merged between runner-level and agent-level `ModelSettings`:
+
+- An agent can override only `retry.max_retries` and still inherit the runner's `policy`.
+- An agent can override only part of `retry.backoff` and keep sibling backoff fields from the runner.
+- `policy` is runtime-only, so serialized `ModelSettings` keep `max_retries` and `backoff` but omit the callback itself.
+
+For fuller examples, see [`examples/basic/retry.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/retry.py) and [`examples/basic/retry_litellm.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/retry_litellm.py).
 
 Use `extra_args` when you need provider-specific or newer request fields that the SDK does not expose directly at the top level yet.
 

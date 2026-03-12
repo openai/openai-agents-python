@@ -370,6 +370,9 @@ settings so the resumed turn continues in the same server-managed conversation.
     `previous_response_id`, or `auto_previous_response_id`), the SDK also performs a best-effort
     rollback of recently persisted input items to reduce duplicate history entries after a retry.
 
+    This compatibility retry happens even if you do not configure `ModelSettings.retry`. For
+    broader opt-in retry behavior on model requests, see [Runner-managed retries](models/index.md#runner-managed-retries).
+
 ## Hooks and customization
 
 ### Call model input filter

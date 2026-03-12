@@ -27,6 +27,8 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Prompt templates
     -   File handling (local and remote, images and PDFs)
     -   Usage tracking
+    -   Runner-managed retry settings (`examples/basic/retry.py`)
+    -   Runner-managed retries with LiteLLM (`examples/basic/retry_litellm.py`)
     -   Non-strict output types
     -   Previous response ID usage
 
