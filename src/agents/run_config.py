@@ -76,6 +76,9 @@ class ToolErrorFormatterArgs(Generic[TContext]):
     run_context: RunContextWrapper[TContext]
     """The active run context for the current execution."""
 
+    rejection_message: str | None = None
+    """The user-provided reason for rejecting the tool call (via RunState.reject())."""
+
 
 ToolErrorFormatter = Callable[[ToolErrorFormatterArgs[Any]], MaybeAwaitable[Optional[str]]]
 

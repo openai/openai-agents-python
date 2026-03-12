@@ -249,11 +249,20 @@ class RunState(Generic[TContext, TAgent]):
             raise UserError("Cannot approve tool: RunState has no context")
         self._context.approve_tool(approval_item, always_approve=always_approve)
 
-    def reject(self, approval_item: ToolApprovalItem, always_reject: bool = False) -> None:
-        """Reject a tool call and rerun with this state to continue."""
+    def reject(
+        self, approval_item: ToolApprovalItem, always_reject: bool = False, rejection_message: str | None = None
+    ) -> None:
+        """Reject a tool call and rerun with this state to continue.
+        
+        Args:
+            approval_item: The tool approval item to reject.
+            always_reject: If True, reject all future calls to this tool without prompting.
+            rejection_message: Optional message explaining why the tool call was rejected.
+                This will be passed to the model instead of the default rejection message.
+        """
         if self._context is None:
             raise UserError("Cannot reject tool: RunState has no context")
-        self._context.reject_tool(approval_item, always_reject=always_reject)
+        self._context.reject_tool(approval_item, always_reject=always_reject, rejection_message=rejection_message)
 
     def _serialize_approvals(self) -> dict[str, dict[str, Any]]:
         """Serialize approval records into a JSON-friendly mapping."""

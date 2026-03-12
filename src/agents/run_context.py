@@ -169,13 +169,28 @@ class RunContextWrapper(Generic[TContext]):
             approve=True,
         )
 
-    def reject_tool(self, approval_item: ToolApprovalItem, always_reject: bool = False) -> None:
-        """Reject a tool call, optionally for all future calls."""
+    def reject_tool(
+        self, approval_item: ToolApprovalItem, always_reject: bool = False, rejection_message: str | None = None
+    ) -> None:
+        """Reject a tool call, optionally for all future calls.
+        
+        Args:
+            approval_item: The tool approval item to reject.
+            always_reject: If True, reject all future calls to this tool without prompting.
+            rejection_message: Optional message explaining why the tool call was rejected.
+        """
         self._apply_approval_decision(
             approval_item,
             always=always_reject,
             approve=False,
         )
+        # Store rejection message for use in tool error formatter
+        if rejection_message:
+            call_id = approval_item.raw_item.get("call_id") if isinstance(approval_item.raw_item, dict) else getattr(approval_item.raw_item, "call_id", None)
+            if call_id:
+                if not hasattr(self, "_rejection_messages"):
+                    self._rejection_messages = {}
+                self._rejection_messages[call_id] = rejection_message
 
     def get_approval_status(
         self, tool_name: str, call_id: str, *, existing_pending: ToolApprovalItem | None = None

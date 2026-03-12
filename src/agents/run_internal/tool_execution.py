@@ -995,7 +995,16 @@ async def resolve_approval_rejection_message(
 ) -> str:
     """Resolve model-visible output text for approval rejections."""
     formatter = run_config.tool_error_formatter
+    
+    # Get rejection message from context if available
+    rejection_message = None
+    if hasattr(context_wrapper, "_rejection_messages"):
+        rejection_message = context_wrapper._rejection_messages.get(call_id)
+    
     if formatter is None:
+        # If no formatter but we have a rejection message, use it
+        if rejection_message:
+            return rejection_message
         return REJECTION_MESSAGE
 
     try:
@@ -1007,6 +1016,7 @@ async def resolve_approval_rejection_message(
                 call_id=call_id,
                 default_message=REJECTION_MESSAGE,
                 run_context=context_wrapper,
+                rejection_message=rejection_message,
             )
         )
         message = await maybe_message if inspect.isawaitable(maybe_message) else maybe_message
