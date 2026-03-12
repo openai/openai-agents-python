@@ -69,7 +69,14 @@ from ..stream_events import (
     RawResponsesStreamEvent,
     RunItemStreamEvent,
 )
-from ..tool import FunctionTool, Tool, dispose_resolved_computers, get_function_tool_origin
+from ..tool import (
+    FunctionTool,
+    Tool,
+    ToolOrigin,
+    ToolOriginType,
+    dispose_resolved_computers,
+    get_function_tool_origin,
+)
 from ..tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
 from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData, TaskSpanData
@@ -1563,6 +1570,10 @@ async def run_single_turn_streamed(
                         if metadata is not None:
                             tool_description = metadata.description
                             tool_title = metadata.title
+                        tool_origin = ToolOrigin(
+                            type=ToolOriginType.MCP,
+                            mcp_server_name=output_item.server_label,
+                        )
                     elif matched_tool is not None:
                         tool_description = getattr(matched_tool, "description", None)
                         tool_title = getattr(matched_tool, "_mcp_title", None)
