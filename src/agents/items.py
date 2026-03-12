@@ -500,6 +500,9 @@ class ToolApprovalItem(RunItemBase[Any]):
     tool_namespace: str | None = None
     """Optional Responses API namespace for function-tool approvals."""
 
+    tool_origin: ToolOrigin | None = None
+    """Optional metadata describing where the approved tool call came from."""
+
     tool_lookup_key: FunctionToolLookupKey | None = field(
         default=None,
         kw_only=True,

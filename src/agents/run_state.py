@@ -1214,6 +1214,8 @@ def _serialize_tool_approval_interruption(
         interruption_dict["tool_name"] = interruption.tool_name
     if interruption.tool_namespace is not None:
         interruption_dict["tool_namespace"] = interruption.tool_namespace
+    if interruption.tool_origin is not None:
+        interruption_dict["tool_origin"] = interruption.tool_origin.to_json_dict()
     tool_lookup_key = serialize_function_tool_lookup_key(
         getattr(interruption, "tool_lookup_key", None)
     )
@@ -1885,6 +1887,7 @@ def _deserialize_tool_approval_item(
 
     tool_name = item_data.get("tool_name")
     tool_namespace = item_data.get("tool_namespace")
+    tool_origin = _deserialize_tool_origin(item_data.get("tool_origin"))
     tool_lookup_key = deserialize_function_tool_lookup_key(item_data.get("tool_lookup_key"))
     allow_bare_name_alias = item_data.get("allow_bare_name_alias") is True
     raw_item = _deserialize_tool_approval_raw_item(raw_item_data)
@@ -1893,6 +1896,7 @@ def _deserialize_tool_approval_item(
         raw_item=raw_item,
         tool_name=tool_name,
         tool_namespace=tool_namespace,
+        tool_origin=tool_origin,
         tool_lookup_key=tool_lookup_key,
         _allow_bare_name_alias=allow_bare_name_alias,
     )

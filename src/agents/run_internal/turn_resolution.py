@@ -78,6 +78,8 @@ from ..tool import (
     LocalShellTool,
     ShellTool,
     Tool,
+    ToolOrigin,
+    ToolOriginType,
     get_function_tool_origin,
 )
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
@@ -1031,6 +1033,7 @@ async def resolve_interrupted_turn(
             raw_item=run.tool_call,
             tool_name=run.function_tool.name,
             tool_namespace=get_tool_call_namespace(run.tool_call),
+            tool_origin=get_function_tool_origin(run.function_tool),
             tool_lookup_key=get_function_tool_lookup_key_for_call(run.tool_call),
             _allow_bare_name_alias=should_allow_bare_name_approval_alias(
                 run.function_tool,
@@ -1520,6 +1523,10 @@ def process_model_response(
                     agent=agent,
                     description=metadata.description if metadata is not None else None,
                     title=metadata.title if metadata is not None else None,
+                    tool_origin=ToolOrigin(
+                        type=ToolOriginType.MCP,
+                        mcp_server_name=output.server_label,
+                    ),
                 )
             )
             tools_used.append("mcp")

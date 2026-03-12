@@ -995,6 +995,7 @@ async def resolve_approval_status(
     context_wrapper: RunContextWrapper[Any],
     tool_namespace: str | None = None,
     tool_lookup_key: FunctionToolLookupKey | None = None,
+    tool_origin: ToolOrigin | None = None,
     on_approval: Callable[[RunContextWrapper[Any], ToolApprovalItem], Any] | None = None,
 ) -> tuple[bool | None, ToolApprovalItem]:
     """Build approval item, run on_approval hook if needed, and return latest approval status."""
@@ -1003,6 +1004,7 @@ async def resolve_approval_status(
         raw_item=raw_item,
         tool_name=tool_name,
         tool_namespace=tool_namespace,
+        tool_origin=tool_origin,
         tool_lookup_key=tool_lookup_key,
     )
     approval_status = context_wrapper.get_approval_status(
@@ -1506,6 +1508,7 @@ class _FunctionToolBatchExecutor:
                 raw_item=raw_tool_call,
                 tool_name=func_tool.name,
                 tool_namespace=tool_namespace,
+                tool_origin=get_function_tool_origin(func_tool),
                 tool_lookup_key=tool_lookup_key,
                 _allow_bare_name_alias=should_allow_bare_name_approval_alias(
                     func_tool,

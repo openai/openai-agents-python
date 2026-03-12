@@ -4,14 +4,16 @@ import gc
 import json
 import weakref
 from collections.abc import Sequence
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import pytest
 from mcp import Tool as MCPTool
+from openai.types.responses.response_output_item import McpCall, McpListTools, McpListToolsTool
 from pydantic import BaseModel
 
 from agents import (
     Agent,
+    HostedMCPTool,
     ModelResponse,
     RunConfig,
     RunContextWrapper,
@@ -25,6 +27,7 @@ from agents import (
     Usage,
     function_tool,
 )
+from agents.items import MCPListToolsItem, ToolApprovalItem
 from agents.mcp import MCPUtil
 from agents.run_internal import run_loop
 from agents.run_internal.run_loop import get_output_schema
@@ -46,6 +49,22 @@ def _first_item(items: Sequence[object], item_type: type[TItem]) -> TItem:
 
 class StructuredOutputPayload(BaseModel):
     status: str
+
+
+def _make_hosted_mcp_list_tools(server_label: str, tool_name: str) -> McpListTools:
+    return McpListTools(
+        id=f"list_{server_label}",
+        server_label=server_label,
+        tools=[
+            McpListToolsTool(
+                name=tool_name,
+                input_schema={},
+                description="Search the docs.",
+                annotations={"title": "Search Docs"},
+            )
+        ],
+        type="mcp_list_tools",
+    )
 
 
 @pytest.mark.asyncio
@@ -176,6 +195,104 @@ async def test_streamed_tool_call_item_includes_local_mcp_origin() -> None:
             and seen_tool_item is None
         ):
             seen_tool_item = event.item
+
+    assert seen_tool_item is not None
+    assert seen_tool_item.tool_origin == ToolOrigin(
+        type=ToolOriginType.MCP,
+        mcp_server_name="docs_server",
+    )
+
+
+def test_process_model_response_attaches_hosted_mcp_tool_origin() -> None:
+    agent = Agent(name="hosted-mcp")
+    hosted_tool = HostedMCPTool(
+        tool_config=cast(
+            Any,
+            {
+                "type": "mcp",
+                "server_label": "docs_server",
+                "server_url": "https://example.com/mcp",
+            },
+        )
+    )
+    existing_items = [
+        MCPListToolsItem(
+            agent=agent,
+            raw_item=_make_hosted_mcp_list_tools("docs_server", "search_docs"),
+        )
+    ]
+    response = ModelResponse(
+        output=[
+            McpCall(
+                id="mcp_call_1",
+                arguments="{}",
+                name="search_docs",
+                server_label="docs_server",
+                type="mcp_call",
+                status="completed",
+            )
+        ],
+        usage=Usage(),
+        response_id="resp_hosted_mcp",
+    )
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=[hosted_tool],
+        response=response,
+        output_schema=None,
+        handoffs=[],
+        existing_items=existing_items,
+    )
+
+    tool_call_item = _first_item(processed.new_items, ToolCallItem)
+    assert tool_call_item.tool_origin == ToolOrigin(
+        type=ToolOriginType.MCP,
+        mcp_server_name="docs_server",
+    )
+
+
+@pytest.mark.asyncio
+async def test_streamed_tool_call_item_includes_hosted_mcp_origin() -> None:
+    model = FakeModel()
+    hosted_tool = HostedMCPTool(
+        tool_config=cast(
+            Any,
+            {
+                "type": "mcp",
+                "server_label": "docs_server",
+                "server_url": "https://example.com/mcp",
+            },
+        )
+    )
+    agent = Agent(name="stream-hosted-mcp", model=model, tools=[hosted_tool])
+    model.add_multiple_turn_outputs(
+        [
+            [
+                _make_hosted_mcp_list_tools("docs_server", "search_docs"),
+                McpCall(
+                    id="mcp_call_stream_1",
+                    arguments="{}",
+                    name="search_docs",
+                    server_label="docs_server",
+                    type="mcp_call",
+                    status="completed",
+                ),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="hello")
+    seen_tool_item: ToolCallItem | None = None
+    async for event in result.stream_events():
+        if (
+            event.type == "run_item_stream_event"
+            and isinstance(event.item, ToolCallItem)
+            and isinstance(event.item.raw_item, McpCall)
+        ):
+            seen_tool_item = event.item
+            break
 
     assert seen_tool_item is not None
     assert seen_tool_item.tool_origin == ToolOrigin(
@@ -332,3 +449,52 @@ async def test_run_state_from_json_reads_legacy_1_5_without_tool_origin() -> Non
     restored_item = _first_item(restored._generated_items, ToolCallItem)
     assert restored_item.description == "Legacy tool"
     assert restored_item.tool_origin is None
+
+
+@pytest.mark.asyncio
+async def test_run_state_roundtrip_preserves_tool_origin_on_approval_interruptions() -> None:
+    agent = Agent(name="approval-origin")
+    state: RunState[Any, Agent[Any]] = make_run_state(agent)
+    state._generated_items.append(
+        ToolApprovalItem(
+            agent=agent,
+            raw_item=make_tool_call(call_id="call_approval", name="approval_tool"),
+            tool_name="approval_tool",
+            tool_origin=ToolOrigin(type=ToolOriginType.FUNCTION),
+        )
+    )
+
+    restored = await roundtrip_state(agent, state)
+
+    approval_item = _first_item(restored._generated_items, ToolApprovalItem)
+    assert approval_item.tool_origin == ToolOrigin(type=ToolOriginType.FUNCTION)
+
+
+@pytest.mark.asyncio
+async def test_run_state_from_json_reads_legacy_1_6_approval_without_tool_origin() -> None:
+    agent = Agent(name="approval-origin-legacy")
+    state: RunState[Any, Agent[Any]] = make_run_state(agent)
+    state._generated_items.append(
+        ToolApprovalItem(
+            agent=agent,
+            raw_item=make_tool_call(call_id="call_legacy_approval", name="approval_tool"),
+            tool_name="approval_tool",
+            tool_origin=ToolOrigin(type=ToolOriginType.FUNCTION),
+        )
+    )
+
+    restored = await roundtrip_state(
+        agent,
+        state,
+        mutate_json=lambda data: {
+            **data,
+            "$schemaVersion": "1.6",
+            "generated_items": [
+                {key: value for key, value in item.items() if key != "tool_origin"}
+                for item in data["generated_items"]
+            ],
+        },
+    )
+
+    approval_item = _first_item(restored._generated_items, ToolApprovalItem)
+    assert approval_item.tool_origin is None
