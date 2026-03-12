@@ -80,6 +80,7 @@ from .tool import (
     HostedMCPTool,
     LocalShellTool,
     ShellTool,
+    ToolOrigin,
 )
 from .tool_guardrails import (
     AllowBehavior,
@@ -118,8 +119,10 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.5"
-SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2", "1.3", "1.4", CURRENT_SCHEMA_VERSION})
+CURRENT_SCHEMA_VERSION = "1.6"
+SUPPORTED_SCHEMA_VERSIONS = frozenset(
+    {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", CURRENT_SCHEMA_VERSION}
+)
 
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
 _COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(ComputerCallOutput)
@@ -131,6 +134,11 @@ _MCP_APPROVAL_RESPONSE_ADAPTER: TypeAdapter[McpApprovalResponse] = TypeAdapter(M
 _HANDOFF_OUTPUT_ADAPTER: TypeAdapter[TResponseInputItem] = TypeAdapter(TResponseInputItem)
 _LOCAL_SHELL_CALL_ADAPTER: TypeAdapter[LocalShellCall] = TypeAdapter(LocalShellCall)
 _MISSING_CONTEXT_SENTINEL = object()
+
+
+def _deserialize_tool_origin(data: Any) -> ToolOrigin | None:
+    """Best-effort deserialization for optional tool origin metadata."""
+    return ToolOrigin.from_json_dict(data)
 
 
 @dataclass
@@ -761,6 +769,9 @@ class RunState(Generic[TContext, TAgent]):
             result["description"] = item.description
         if hasattr(item, "title") and item.title is not None:
             result["title"] = item.title
+        tool_origin = getattr(item, "tool_origin", None)
+        if isinstance(tool_origin, ToolOrigin):
+            result["tool_origin"] = tool_origin.to_json_dict()
 
         return result
 
@@ -2482,12 +2493,14 @@ def _deserialize_items(
                 # Preserve display metadata if it was stored with the item.
                 description = item_data.get("description")
                 title = item_data.get("title")
+                tool_origin = _deserialize_tool_origin(item_data.get("tool_origin"))
                 result.append(
                     ToolCallItem(
                         agent=agent,
                         raw_item=raw_item_tool,
                         description=description,
                         title=title,
+                        tool_origin=tool_origin,
                     )
                 )
 
@@ -2502,6 +2515,7 @@ def _deserialize_items(
                         agent=agent,
                         raw_item=raw_item_output,
                         output=item_data.get("output", ""),
+                        tool_origin=_deserialize_tool_origin(item_data.get("tool_origin")),
                     )
                 )
 

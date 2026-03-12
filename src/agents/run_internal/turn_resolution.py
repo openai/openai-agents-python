@@ -78,6 +78,7 @@ from ..tool import (
     LocalShellTool,
     ShellTool,
     Tool,
+    get_function_tool_origin,
 )
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from ..tracing import SpanError, handoff_span
@@ -718,6 +719,7 @@ async def resolve_interrupted_turn(
                 tool_call,
                 rejection_message=rejection_message,
                 scope_id=tool_state_scope_id,
+                tool_origin=get_function_tool_origin(function_tool),
             )
         )
         if isinstance(call_id, str):
@@ -1629,11 +1631,19 @@ def process_model_response(
             func_tool = function_map.get(lookup_key) if lookup_key is not None else None
             if func_tool is None:
                 if output_schema is not None and output.name == "json_tool_call":
-                    items.append(ToolCallItem(raw_item=output, agent=agent))
+                    synthetic_tool = build_litellm_json_tool_call(output)
+                    items.append(
+                        ToolCallItem(
+                            raw_item=output,
+                            agent=agent,
+                            description=synthetic_tool.description,
+                            tool_origin=get_function_tool_origin(synthetic_tool),
+                        )
+                    )
                     functions.append(
                         ToolRunFunction(
                             tool_call=output,
-                            function_tool=build_litellm_json_tool_call(output),
+                            function_tool=synthetic_tool,
                         )
                     )
                     continue
@@ -1654,6 +1664,7 @@ def process_model_response(
                     agent=agent,
                     description=func_tool.description,
                     title=func_tool._mcp_title,
+                    tool_origin=get_function_tool_origin(func_tool),
                 )
             )
             functions.append(
