@@ -71,6 +71,8 @@ from ..tool import (
     ShellCallOutcome,
     ShellCommandOutput,
     Tool,
+    ToolOrigin,
+    get_function_tool_origin,
     invoke_function_tool,
     maybe_invoke_function_tool_failure_error_function,
     resolve_computer,
@@ -1050,6 +1052,7 @@ def build_litellm_json_tool_call(output: ResponseFunctionToolCall) -> FunctionTo
         on_invoke_tool=on_invoke_tool,
         strict_json_schema=True,
         is_enabled=True,
+        _emit_tool_origin=False,
     )
 
 
@@ -1649,6 +1652,7 @@ class _FunctionToolBatchExecutor:
                 tool_call,
                 rejection_message=rejection_message,
                 scope_id=self.tool_state_scope_id,
+                tool_origin=get_function_tool_origin(func_tool),
             ),
         )
 
@@ -1844,6 +1848,7 @@ class _FunctionToolBatchExecutor:
                     output=result,
                     raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
                     agent=self.public_agent,
+                    tool_origin=get_function_tool_origin(tool_run.function_tool),
                 )
             else:
                 # Skip tool output until nested interruptions are resolved.
@@ -2060,7 +2065,14 @@ async def execute_approved_tools(
             if isinstance(tool_name, str) and tool_name:
                 tool_map[tool_name] = tool
 
-    def _append_error(message: str, *, tool_call: Any, tool_name: str, call_id: str) -> None:
+    def _append_error(
+        message: str,
+        *,
+        tool_call: Any,
+        tool_name: str,
+        call_id: str,
+        tool_origin: ToolOrigin | None = None,
+    ) -> None:
         append_approval_error_output(
             message=message,
             tool_call=tool_call,
@@ -2068,6 +2080,7 @@ async def execute_approved_tools(
             call_id=call_id,
             generated_items=generated_items,
             agent=agent,
+            tool_origin=tool_origin,
         )
 
     async def _resolve_tool_run(
@@ -2095,14 +2108,25 @@ async def execute_approved_tools(
 
         call_id = extract_tool_call_id(tool_call)
         if not call_id:
+            resolved_tool = tool_map.get(approval_key) if approval_key is not None else None
+            if resolved_tool is None and tool_namespace is None:
+                resolved_tool = tool_map.get(tool_name)
             _append_error(
                 message="Tool approval item missing call ID.",
                 tool_call=tool_call,
                 tool_name=tool_name,
                 call_id="unknown",
+                tool_origin=(
+                    get_function_tool_origin(resolved_tool)
+                    if isinstance(resolved_tool, FunctionTool)
+                    else None
+                ),
             )
             return None
 
+        resolved_tool = tool_map.get(approval_key) if approval_key is not None else None
+        if resolved_tool is None and tool_namespace is None:
+            resolved_tool = tool_map.get(tool_name)
         approval_status = context_wrapper.get_approval_status(
             tool_name,
             call_id,
@@ -2111,9 +2135,6 @@ async def execute_approved_tools(
             tool_lookup_key=tool_lookup_key,
         )
         if approval_status is False:
-            resolved_tool = tool_map.get(approval_key) if approval_key is not None else None
-            if resolved_tool is None and tool_namespace is None:
-                resolved_tool = tool_map.get(tool_name)
             message = REJECTION_MESSAGE
             if isinstance(resolved_tool, FunctionTool):
                 message = await resolve_approval_rejection_message(
@@ -2131,6 +2152,11 @@ async def execute_approved_tools(
                 tool_call=tool_call,
                 tool_name=tool_name,
                 call_id=call_id,
+                tool_origin=(
+                    get_function_tool_origin(resolved_tool)
+                    if isinstance(resolved_tool, FunctionTool)
+                    else None
+                ),
             )
             return None
 
@@ -2140,12 +2166,15 @@ async def execute_approved_tools(
                 tool_call=tool_call,
                 tool_name=tool_name,
                 call_id=call_id,
+                tool_origin=(
+                    get_function_tool_origin(resolved_tool)
+                    if isinstance(resolved_tool, FunctionTool)
+                    else None
+                ),
             )
             return None
 
-        tool = tool_map.get(approval_key) if approval_key is not None else None
-        if tool is None and tool_namespace is None:
-            tool = tool_map.get(tool_name)
+        tool = resolved_tool
         if tool is None:
             _append_error(
                 message=f"Tool '{display_tool_name}' not found.",
