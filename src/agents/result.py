@@ -211,22 +211,33 @@ class RunResultBase(abc.ABC):
     def to_input_list(self) -> list[TResponseInputItem]:
         """Creates a new input list, merging the original input with all the new items generated.
 
-        When ``nest_handoff_history=True`` is active, ``self.input`` is replaced
-        with a nested summary that already embeds function_call / function_call_output
-        items as text.  Using the full ``new_items`` would duplicate those items as
-        orphaned structured entries, which the API rejects.  In that case we fall
-        back to ``_model_input_items`` which contains only the filtered items that
-        are consistent with the (possibly nested) ``self.input``.
+        Prefer ``_model_input_items`` only when it has already been reduced to safe
+        post-handoff items. If it still contains structured tool or reasoning items,
+        it may just be a partial model delta and ``new_items`` remains the complete
+        transcript.
         """
         original_items: list[TResponseInputItem] = ItemHelpers.input_to_new_input_list(self.input)
         new_items: list[TResponseInputItem] = []
         reasoning_item_id_policy = getattr(self, "_reasoning_item_id_policy", None)
 
-        # Only prefer _model_input_items when handoff nesting actually occurred,
-        # so server-managed conversation runs still use the full new_items transcript.
         model_input_items = getattr(self, "_model_input_items", None)
-        has_nesting = model_input_items and model_input_items != self.new_items
-        source_items = model_input_items if has_nesting else self.new_items
+        filtered_model_items: list[RunItem] | None = None
+        if isinstance(model_input_items, list):
+            candidate_items = list(model_input_items)
+            contains_structured_items = False
+            for item in candidate_items:
+                converted = run_item_to_input_item(item, reasoning_item_id_policy)
+                if converted is not None and converted.get("type") in {
+                    "function_call",
+                    "function_call_output",
+                    "reasoning",
+                }:
+                    contains_structured_items = True
+                    break
+            if candidate_items and not contains_structured_items:
+                filtered_model_items = candidate_items
+
+        source_items = filtered_model_items if filtered_model_items is not None else self.new_items
 
         for item in source_items:
             converted = run_item_to_input_item(item, reasoning_item_id_policy)
