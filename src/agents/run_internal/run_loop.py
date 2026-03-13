@@ -69,10 +69,7 @@ from ..tracing.span_data import AgentSpanData
 from ..usage import Usage
 from ..util import _coro, _error_tracing
 from .agent_runner_helpers import apply_resumed_conversation_settings
-from .approvals import (
-    append_input_items_excluding_approvals,
-    approvals_from_step,
-)
+from .approvals import approvals_from_step
 from .error_handlers import (
     build_run_error_data,
     create_message_output_item,
@@ -93,8 +90,9 @@ from .items import (
     copy_input_items,
     deduplicate_input_items_preferring_latest,
     ensure_input_item_format,
-    normalize_input_items_for_api,
     normalize_resumed_input,
+    prepare_model_input_items,
+    run_items_to_input_items,
 )
 from .model_retry import (
     apply_retry_attempt_usage,
@@ -242,6 +240,16 @@ async def _should_persist_stream_items(
         return False
     should_skip_session_save = await input_guardrail_tripwire_triggered_for_stream(streamed_result)
     return should_skip_session_save is False
+
+
+def _prepare_turn_input_items(
+    caller_input: str | list[TResponseInputItem],
+    generated_items: list[RunItem],
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None,
+) -> list[TResponseInputItem]:
+    caller_items = ItemHelpers.input_to_new_input_list(caller_input)
+    continuation_items = run_items_to_input_items(generated_items, reasoning_item_id_policy)
+    return prepare_model_input_items(caller_items, continuation_items)
 
 
 def _complete_stream_interruption(
@@ -1164,15 +1172,11 @@ async def run_single_turn_streamed(
             else 0,
         )
     else:
-        input = ItemHelpers.input_to_new_input_list(streamed_result.input)
-        append_input_items_excluding_approvals(
-            input,
+        input = _prepare_turn_input_items(
+            streamed_result.input,
             streamed_result._model_input_items,
             reasoning_item_id_policy,
         )
-
-    if isinstance(input, list):
-        input = normalize_input_items_for_api(input)
 
     filtered = await maybe_filter_model_input(
         agent=agent,
@@ -1512,23 +1516,7 @@ async def run_single_turn(
     if server_conversation_tracker is not None:
         input = server_conversation_tracker.prepare_input(original_input, generated_items)
     else:
-        input = ItemHelpers.input_to_new_input_list(original_input)
-        if isinstance(input, list):
-            append_input_items_excluding_approvals(
-                input,
-                generated_items,
-                reasoning_item_id_policy,
-            )
-        else:
-            input = ItemHelpers.input_to_new_input_list(input)
-            append_input_items_excluding_approvals(
-                input,
-                generated_items,
-                reasoning_item_id_policy,
-            )
-
-    if isinstance(input, list):
-        input = normalize_input_items_for_api(input)
+        input = _prepare_turn_input_items(original_input, generated_items, reasoning_item_id_policy)
 
     new_response = await get_new_response(
         agent,

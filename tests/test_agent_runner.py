@@ -74,7 +74,7 @@ from agents.run_internal.session_persistence import (
 from agents.run_internal.tool_execution import execute_approved_tools
 from agents.run_internal.tool_use_tracker import AgentToolUseTracker
 from agents.run_state import RunState
-from agents.tool import ComputerTool, FunctionToolResult, function_tool
+from agents.tool import ComputerTool, FunctionToolResult, ShellTool, function_tool
 from agents.tool_context import ToolContext
 from agents.usage import Usage
 
@@ -88,7 +88,7 @@ from .test_responses import (
     get_text_message,
 )
 from .utils.factories import make_run_state
-from .utils.hitl import make_context_wrapper, make_model_and_agent
+from .utils.hitl import make_context_wrapper, make_model_and_agent, make_shell_call
 from .utils.simple_session import CountingSession, IdStrippingSession, SimpleListSession
 
 
@@ -1694,6 +1694,45 @@ async def test_prepare_input_with_session_drops_orphan_function_calls():
     )
 
 
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_preserves_pending_new_shell_calls() -> None:
+    orphan_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "orphan_call",
+            "name": "tool_orphan",
+            "arguments": "{}",
+        },
+    )
+    pending_shell_call = cast(
+        TResponseInputItem,
+        make_shell_call("manual_shell", id_value="shell_1", commands=["echo hi"]),
+    )
+    session = SimpleListSession(history=[orphan_call])
+
+    prepared_input, session_items = await prepare_input_with_session(
+        [pending_shell_call],
+        session,
+        None,
+    )
+
+    assert isinstance(prepared_input, list)
+    assert session_items == [pending_shell_call]
+    assert not any(
+        isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and item.get("call_id") == "orphan_call"
+        for item in prepared_input
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "shell_call"
+        and item.get("call_id") == "manual_shell"
+        for item in prepared_input
+    )
+
+
 def test_ensure_api_input_item_handles_model_dump_objects():
     class _ModelDumpItem:
         def model_dump(self, exclude_unset: bool = True) -> dict[str, Any]:
@@ -3155,6 +3194,198 @@ async def test_default_send_all_items_streamed():
     # Check function result
     assert function_result.get("type") == "function_call_output"
     assert function_result.get("call_id") is not None
+
+
+@pytest.mark.asyncio
+async def test_default_multi_turn_drops_orphan_hosted_shell_calls() -> None:
+    model = FakeModel()
+    agent = Agent(
+        name="hosted-shell",
+        model=model,
+        tools=[ShellTool(environment={"type": "container_auto"})],
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [make_shell_call("call_shell_1", id_value="shell_1", commands=["echo hi"])],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="user_message")
+
+    assert result.final_output == "done"
+
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1
+    assert not any(
+        isinstance(item, dict) and item.get("type") == "shell_call" for item in last_input
+    )
+    assert last_input[0].get("role") == "user"
+    assert last_input[0].get("content") == "user_message"
+
+
+@pytest.mark.asyncio
+async def test_manual_pending_shell_call_input_is_preserved_non_streamed() -> None:
+    model = FakeModel()
+    agent = Agent(
+        name="manual-shell",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+    pending_shell_call = cast(
+        TResponseInputItem,
+        make_shell_call("manual_shell", id_value="shell_1", commands=["echo hi"]),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("test_func", '{"arg": "foo"}')],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input=[pending_shell_call])
+
+    assert result.final_output == "done"
+    assert isinstance(model.first_turn_args, dict)
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "shell_call"
+        and item.get("call_id") == "manual_shell"
+        for item in model.first_turn_args["input"]
+    )
+
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "shell_call"
+        and item.get("call_id") == "manual_shell"
+        for item in last_input
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_pending_shell_call_input_is_preserved_non_streamed_with_session() -> None:
+    model = FakeModel()
+    agent = Agent(
+        name="manual-shell",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+    session = SimpleListSession()
+    pending_shell_call = cast(
+        TResponseInputItem,
+        make_shell_call("manual_shell", id_value="shell_1", commands=["echo hi"]),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("test_func", '{"arg": "foo"}')],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input=[pending_shell_call], session=session)
+
+    assert result.final_output == "done"
+    assert isinstance(model.first_turn_args, dict)
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "shell_call"
+        and item.get("call_id") == "manual_shell"
+        for item in model.first_turn_args["input"]
+    )
+
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "shell_call"
+        and item.get("call_id") == "manual_shell"
+        for item in last_input
+    )
+
+
+@pytest.mark.asyncio
+async def test_default_multi_turn_streamed_drops_orphan_hosted_shell_calls() -> None:
+    model = FakeModel()
+    agent = Agent(
+        name="hosted-shell",
+        model=model,
+        tools=[ShellTool(environment={"type": "container_auto"})],
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [make_shell_call("call_shell_1", id_value="shell_1", commands=["echo hi"])],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="user_message")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1
+    assert not any(
+        isinstance(item, dict) and item.get("type") == "shell_call" for item in last_input
+    )
+    assert last_input[0].get("role") == "user"
+    assert last_input[0].get("content") == "user_message"
+
+
+@pytest.mark.asyncio
+async def test_manual_pending_shell_call_input_is_preserved_streamed() -> None:
+    model = FakeModel()
+    agent = Agent(name="manual-shell", model=model)
+    pending_shell_call = cast(
+        TResponseInputItem,
+        make_shell_call("manual_shell", id_value="shell_1", commands=["echo hi"]),
+    )
+    model.set_next_output([get_text_message("done")])
+
+    result = Runner.run_streamed(agent, input=[pending_shell_call])
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "shell_call"
+        and item.get("call_id") == "manual_shell"
+        for item in last_input
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_pending_shell_call_input_is_preserved_streamed_with_session() -> None:
+    model = FakeModel()
+    agent = Agent(name="manual-shell", model=model)
+    session = SimpleListSession()
+    pending_shell_call = cast(
+        TResponseInputItem,
+        make_shell_call("manual_shell", id_value="shell_1", commands=["echo hi"]),
+    )
+    model.set_next_output([get_text_message("done")])
+
+    result = Runner.run_streamed(agent, input=[pending_shell_call], session=session)
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+    last_input = model.last_turn_args["input"]
+    assert isinstance(last_input, list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "shell_call"
+        and item.get("call_id") == "manual_shell"
+        for item in last_input
+    )
 
 
 @pytest.mark.asyncio

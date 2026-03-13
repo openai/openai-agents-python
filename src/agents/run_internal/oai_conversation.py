@@ -23,6 +23,7 @@ from .items import (
     drop_orphan_function_calls,
     fingerprint_input_item,
     normalize_input_items_for_api,
+    prepare_model_input_items,
     run_item_to_input_item,
 )
 
@@ -153,8 +154,7 @@ class OpenAIServerConversationTracker:
 
         normalized_input = original_input
         if isinstance(original_input, list):
-            normalized = normalize_input_items_for_api(original_input)
-            normalized_input = drop_orphan_function_calls(normalized)
+            normalized_input = prepare_model_input_items(original_input)
 
         for item in ItemHelpers.input_to_new_input_list(normalized_input):
             if item is None:
@@ -404,13 +404,17 @@ class OpenAIServerConversationTracker:
         generated_items: list[RunItem],
     ) -> list[TResponseInputItem]:
         """Assemble the next model input while skipping duplicates and approvals."""
-        input_items: list[TResponseInputItem] = []
+        prepared_initial_items: list[TResponseInputItem] = []
+        prepared_generated_items: list[TResponseInputItem] = []
+        generated_item_sources: dict[int, TResponseInputItem] = {}
 
         if not self.sent_initial_input:
             initial_items = ItemHelpers.input_to_new_input_list(original_input)
-            input_items.extend(initial_items)
-            for item in initial_items:
-                self._register_prepared_item_source(item)
+            prepared_initial_items = normalize_input_items_for_api(initial_items)
+            for prepared_item, source_item in zip(
+                prepared_initial_items, initial_items, strict=False
+            ):
+                self._register_prepared_item_source(prepared_item, source_item)
             filtered_initials = []
             for item in initial_items:
                 if item is None or isinstance(item, (str, bytes)):
@@ -419,9 +423,11 @@ class OpenAIServerConversationTracker:
             self.remaining_initial_input = filtered_initials or None
             self.sent_initial_input = True
         elif self.remaining_initial_input:
-            input_items.extend(self.remaining_initial_input)
-            for item in self.remaining_initial_input:
-                self._register_prepared_item_source(item)
+            prepared_initial_items = normalize_input_items_for_api(self.remaining_initial_input)
+            for prepared_item, source_item in zip(
+                prepared_initial_items, self.remaining_initial_input, strict=False
+            ):
+                self._register_prepared_item_source(prepared_item, source_item)
 
         for item in generated_items:  # type: ignore[assignment]
             run_item: RunItem = cast(RunItem, item)
@@ -474,13 +480,23 @@ class OpenAIServerConversationTracker:
             ):
                 continue
 
-            input_items.append(converted_input_item)
-            self._register_prepared_item_source(
-                converted_input_item,
-                cast(TResponseInputItem, raw_item),
-            )
+            prepared_generated_items.append(converted_input_item)
+            generated_item_sources[id(converted_input_item)] = cast(TResponseInputItem, raw_item)
 
-        return input_items
+        normalized_generated_items = normalize_input_items_for_api(prepared_generated_items)
+        normalized_generated_sources = {
+            id(normalized_item): generated_item_sources[id(source_item)]
+            for normalized_item, source_item in zip(
+                normalized_generated_items, prepared_generated_items, strict=False
+            )
+        }
+        filtered_generated_items = drop_orphan_function_calls(normalized_generated_items)
+        for item in filtered_generated_items:
+            prepared_source_item = normalized_generated_sources.get(id(item))
+            if prepared_source_item is not None:
+                self._register_prepared_item_source(item, prepared_source_item)
+
+        return prepared_initial_items + filtered_generated_items
 
     def _register_prepared_item_source(
         self, prepared_item: TResponseInputItem, source_item: TResponseInputItem | None = None

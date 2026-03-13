@@ -33,6 +33,7 @@ __all__ = [
     "copy_input_items",
     "drop_orphan_function_calls",
     "ensure_input_item_format",
+    "prepare_model_input_items",
     "run_item_to_input_item",
     "run_items_to_input_items",
     "normalize_input_items_for_api",
@@ -86,7 +87,11 @@ def run_items_to_input_items(
     return converted
 
 
-def drop_orphan_function_calls(items: list[TResponseInputItem]) -> list[TResponseInputItem]:
+def drop_orphan_function_calls(
+    items: list[TResponseInputItem],
+    *,
+    pruning_indexes: set[int] | None = None,
+) -> list[TResponseInputItem]:
     """
     Remove tool call items that do not have corresponding outputs so resumptions or retries do not
     replay stale tool calls.
@@ -106,6 +111,9 @@ def drop_orphan_function_calls(items: list[TResponseInputItem]) -> list[TRespons
             continue
         output_type = _TOOL_CALL_TO_OUTPUT_TYPE.get(entry_type)
         if output_type is None:
+            filtered.append(entry)
+            continue
+        if pruning_indexes is not None and index not in pruning_indexes:
             filtered.append(entry)
             continue
         call_id = entry.get("call_id")
@@ -143,6 +151,20 @@ def normalize_input_items_for_api(items: list[TResponseInputItem]) -> list[TResp
         normalized_item = dict(coerced)
         normalized.append(cast(TResponseInputItem, normalized_item))
     return normalized
+
+
+def prepare_model_input_items(
+    caller_items: Sequence[TResponseInputItem],
+    generated_items: Sequence[TResponseInputItem] = (),
+) -> list[TResponseInputItem]:
+    """Normalize model input while pruning orphans only from runner-generated history."""
+    normalized_caller_items = normalize_input_items_for_api(list(caller_items))
+    if not generated_items:
+        return normalized_caller_items
+
+    normalized_generated_items = normalize_input_items_for_api(list(generated_items))
+    filtered_generated_items = drop_orphan_function_calls(normalized_generated_items)
+    return normalized_caller_items + filtered_generated_items
 
 
 def normalize_resumed_input(
