@@ -57,6 +57,7 @@ from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
 from ..run_state import RunState
+from ..sandbox.runtime import SandboxRuntime
 from ..stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
@@ -68,6 +69,7 @@ from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData
 from ..usage import Usage
 from ..util import _coro, _error_tracing
+from .agent_bindings import AgentBindings, bind_public_agent
 from .agent_runner_helpers import apply_resumed_conversation_settings
 from .approvals import approvals_from_step
 from .error_handlers import (
@@ -413,6 +415,7 @@ async def start_streaming(
     run_state: RunState[TContext] | None = None,
     *,
     is_resumed_state: bool = False,
+    sandbox_runtime: SandboxRuntime[TContext] | None = None,
 ):
     """Run the streaming loop for a run result."""
     if streamed_result.trace:
@@ -598,6 +601,25 @@ async def start_streaming(
 
     try:
         while True:
+            current_bindings = bind_public_agent(current_agent)
+            execution_agent = current_bindings.execution_agent
+            prepared_turn_input = copy_input_items(streamed_result.input)
+            if sandbox_runtime is not None:
+                prepared_sandbox = await sandbox_runtime.prepare_agent(
+                    current_agent=current_agent,
+                    current_input=prepared_turn_input,
+                    context_wrapper=context_wrapper,
+                    is_resumed_state=is_resumed_state,
+                )
+                current_bindings = prepared_sandbox.bindings
+                execution_agent = current_bindings.execution_agent
+                prepared_turn_input = copy_input_items(prepared_sandbox.input)
+                streamed_result.input = prepared_turn_input
+                streamed_result._original_input = copy_input_items(prepared_turn_input)
+                if run_state is not None:
+                    run_state._original_input = copy_input_items(prepared_turn_input)
+                sandbox_runtime.apply_result_metadata(streamed_result)
+
             if is_resumed_state and run_state is not None and run_state._current_step is not None:
                 if isinstance(run_state._current_step, NextStepInterruption):
                     if not run_state._model_responses or not run_state._last_processed_response:
@@ -606,7 +628,7 @@ async def start_streaming(
                     last_model_response = run_state._model_responses[-1]
 
                     turn_result = await resolve_interrupted_turn(
-                        agent=current_agent,
+                        bindings=current_bindings,
                         original_input=run_state._original_input,
                         original_pre_step_items=run_state._generated_items,
                         new_response=last_model_response,
@@ -621,7 +643,12 @@ async def start_streaming(
                         current_agent, run_state._last_processed_response
                     )
                     streamed_result._tool_use_tracker_snapshot = serialize_tool_use_tracker(
-                        tool_use_tracker
+                        tool_use_tracker,
+                        starting_agent=(
+                            run_state._starting_agent
+                            if run_state is not None and run_state._starting_agent is not None
+                            else starting_agent
+                        ),
                     )
 
                     streamed_result.input = turn_result.original_input
@@ -712,14 +739,14 @@ async def start_streaming(
             if streamed_result.is_complete:
                 break
 
-            all_tools = await get_all_tools(current_agent, context_wrapper)
+            all_tools = await get_all_tools(execution_agent, context_wrapper)
             await initialize_computer_tools(tools=all_tools, context_wrapper=context_wrapper)
 
             if current_span is None:
                 handoff_names = [
-                    h.agent_name for h in await get_handoffs(current_agent, context_wrapper)
+                    h.agent_name for h in await get_handoffs(execution_agent, context_wrapper)
                 ]
-                if output_schema := get_output_schema(current_agent):
+                if output_schema := get_output_schema(execution_agent):
                     output_type_name = output_schema.name()
                 else:
                     output_type_name = "str"
@@ -831,7 +858,7 @@ async def start_streaming(
                     await run_input_guardrails_with_queue(
                         starting_agent,
                         sequential_guardrails,
-                        ItemHelpers.input_to_new_input_list(prepared_input),
+                        ItemHelpers.input_to_new_input_list(prepared_turn_input),
                         context_wrapper,
                         streamed_result,
                         current_span,
@@ -858,7 +885,7 @@ async def start_streaming(
                         run_input_guardrails_with_queue(
                             starting_agent,
                             parallel_guardrails,
-                            ItemHelpers.input_to_new_input_list(prepared_input),
+                            ItemHelpers.input_to_new_input_list(prepared_turn_input),
                             context_wrapper,
                             streamed_result,
                             current_span,
@@ -882,7 +909,7 @@ async def start_streaming(
                     )
                 turn_result = await run_single_turn_streamed(
                     streamed_result,
-                    current_agent,
+                    current_bindings,
                     hooks,
                     context_wrapper,
                     run_config,
@@ -906,7 +933,12 @@ async def start_streaming(
                 )
                 should_run_agent_start_hooks = False
                 streamed_result._tool_use_tracker_snapshot = serialize_tool_use_tracker(
-                    tool_use_tracker
+                    tool_use_tracker,
+                    starting_agent=(
+                        run_state._starting_agent
+                        if run_state is not None and run_state._starting_agent is not None
+                        else starting_agent
+                    ),
                 )
 
                 streamed_result.raw_responses = streamed_result.raw_responses + [
@@ -1086,7 +1118,7 @@ async def start_streaming(
 
 async def run_single_turn_streamed(
     streamed_result: RunResultStreaming,
-    agent: Agent[TContext],
+    bindings: AgentBindings[TContext],
     hooks: RunHooks[TContext],
     context_wrapper: RunContextWrapper[TContext],
     run_config: RunConfig,
@@ -1100,6 +1132,8 @@ async def run_single_turn_streamed(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> SingleStepResult:
     """Run a single streamed turn and emit events as results arrive."""
+    public_agent = bindings.public_agent
+    execution_agent = bindings.execution_agent
     emitted_tool_call_ids: set[str] = set()
     emitted_reasoning_item_ids: set[str] = set()
     emitted_tool_search_fingerprints: set[str] = set()
@@ -1145,28 +1179,28 @@ async def run_single_turn_streamed(
             turn_input=turn_input,
         )
         await asyncio.gather(
-            hooks.on_agent_start(agent_hook_context, agent),
+            hooks.on_agent_start(agent_hook_context, public_agent),
             (
-                agent.hooks.on_start(agent_hook_context, agent)
-                if agent.hooks
+                public_agent.hooks.on_start(agent_hook_context, public_agent)
+                if public_agent.hooks
                 else _coro.noop_coroutine()
             ),
         )
 
-    output_schema = get_output_schema(agent)
+    output_schema = get_output_schema(execution_agent)
 
-    streamed_result.current_agent = agent
-    streamed_result._current_agent_output_schema = output_schema
+    streamed_result.current_agent = public_agent
+    streamed_result._current_agent_output_schema = get_output_schema(public_agent)
 
     system_prompt, prompt_config = await asyncio.gather(
-        agent.get_system_prompt(context_wrapper),
-        agent.get_prompt(context_wrapper),
+        execution_agent.get_system_prompt(context_wrapper),
+        execution_agent.get_prompt(context_wrapper),
     )
 
-    handoffs = await get_handoffs(agent, context_wrapper)
-    model = get_model(agent, run_config)
-    model_settings = agent.model_settings.resolve(run_config.model_settings)
-    model_settings = maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
+    handoffs = await get_handoffs(execution_agent, context_wrapper)
+    model = get_model(execution_agent, run_config)
+    model_settings = execution_agent.model_settings.resolve(run_config.model_settings)
+    model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
     final_response: ModelResponse | None = None
 
@@ -1190,7 +1224,7 @@ async def run_single_turn_streamed(
         )
 
     filtered = await maybe_filter_model_input(
-        agent=agent,
+        agent=public_agent,
         run_config=run_config,
         context_wrapper=context_wrapper,
         input_items=input,
@@ -1214,10 +1248,15 @@ async def run_single_turn_streamed(
         raise RuntimeError("Prepared model input is empty")
 
     await asyncio.gather(
-        hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
+        hooks.on_llm_start(context_wrapper, public_agent, filtered.instructions, filtered.input),
         (
-            agent.hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input)
-            if agent.hooks
+            public_agent.hooks.on_llm_start(
+                context_wrapper,
+                public_agent,
+                filtered.instructions,
+                filtered.input,
+            )
+            if public_agent.hooks
             else _coro.noop_coroutine()
         ),
     )
@@ -1327,7 +1366,7 @@ async def run_single_turn_streamed(
                     RunItemStreamEvent(
                         item=ToolSearchCallItem(
                             raw_item=coerce_tool_search_call_raw_item(output_item),
-                            agent=agent,
+                            agent=public_agent,
                         ),
                         name="tool_search_called",
                     )
@@ -1339,7 +1378,7 @@ async def run_single_turn_streamed(
                     RunItemStreamEvent(
                         item=ToolSearchOutputItem(
                             raw_item=coerce_tool_search_output_raw_item(output_item),
-                            agent=agent,
+                            agent=public_agent,
                         ),
                         name="tool_search_output_created",
                     )
@@ -1381,7 +1420,7 @@ async def run_single_turn_streamed(
 
                     tool_item = ToolCallItem(
                         raw_item=cast(ToolCallItemTypes, output_item),
-                        agent=agent,
+                        agent=public_agent,
                         description=tool_description,
                         title=tool_title,
                     )
@@ -1395,7 +1434,7 @@ async def run_single_turn_streamed(
                 if reasoning_id and reasoning_id not in emitted_reasoning_item_ids:
                     emitted_reasoning_item_ids.add(reasoning_id)
 
-                    reasoning_item = ReasoningItem(raw_item=output_item, agent=agent)
+                    reasoning_item = ReasoningItem(raw_item=output_item, agent=public_agent)
                     streamed_result._event_queue.put_nowait(
                         RunItemStreamEvent(item=reasoning_item, name="reasoning_item_created")
                     )
@@ -1404,11 +1443,11 @@ async def run_single_turn_streamed(
         context_wrapper.usage.add(final_response.usage)
         await asyncio.gather(
             (
-                agent.hooks.on_llm_end(context_wrapper, agent, final_response)
-                if agent.hooks
+                public_agent.hooks.on_llm_end(context_wrapper, public_agent, final_response)
+                if public_agent.hooks
                 else _coro.noop_coroutine()
             ),
-            hooks.on_llm_end(context_wrapper, agent, final_response),
+            hooks.on_llm_end(context_wrapper, public_agent, final_response),
         )
 
     if not final_response:
@@ -1421,7 +1460,7 @@ async def run_single_turn_streamed(
         server_conversation_tracker.track_server_items(final_response)
 
     single_step_result = await get_single_step_result_from_response(
-        agent=agent,
+        bindings=bindings,
         original_input=streamed_result.input,
         pre_step_items=streamed_result._model_input_items,
         new_response=final_response,
@@ -1480,7 +1519,7 @@ async def run_single_turn_streamed(
 
 async def run_single_turn(
     *,
-    agent: Agent[TContext],
+    bindings: AgentBindings[TContext],
     all_tools: list[Tool],
     original_input: str | list[TResponseInputItem],
     generated_items: list[RunItem],
@@ -1495,6 +1534,8 @@ async def run_single_turn(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> SingleStepResult:
     """Run a single non-streaming turn of the agent loop."""
+    public_agent = bindings.public_agent
+    execution_agent = bindings.execution_agent
     try:
         turn_input = ItemHelpers.input_to_new_input_list(original_input)
     except Exception:
@@ -1509,28 +1550,28 @@ async def run_single_turn(
             turn_input=turn_input,
         )
         await asyncio.gather(
-            hooks.on_agent_start(agent_hook_context, agent),
+            hooks.on_agent_start(agent_hook_context, public_agent),
             (
-                agent.hooks.on_start(agent_hook_context, agent)
-                if agent.hooks
+                public_agent.hooks.on_start(agent_hook_context, public_agent)
+                if public_agent.hooks
                 else _coro.noop_coroutine()
             ),
         )
 
     system_prompt, prompt_config = await asyncio.gather(
-        agent.get_system_prompt(context_wrapper),
-        agent.get_prompt(context_wrapper),
+        execution_agent.get_system_prompt(context_wrapper),
+        execution_agent.get_prompt(context_wrapper),
     )
 
-    output_schema = get_output_schema(agent)
-    handoffs = await get_handoffs(agent, context_wrapper)
+    output_schema = get_output_schema(execution_agent)
+    handoffs = await get_handoffs(execution_agent, context_wrapper)
     if server_conversation_tracker is not None:
         input = server_conversation_tracker.prepare_input(original_input, generated_items)
     else:
         input = _prepare_turn_input_items(original_input, generated_items, reasoning_item_id_policy)
 
     new_response = await get_new_response(
-        agent,
+        bindings,
         system_prompt,
         input,
         output_schema,
@@ -1547,7 +1588,7 @@ async def run_single_turn(
     )
 
     return await get_single_step_result_from_response(
-        agent=agent,
+        bindings=bindings,
         original_input=original_input,
         pre_step_items=generated_items,
         new_response=new_response,
@@ -1562,7 +1603,7 @@ async def run_single_turn(
 
 
 async def get_new_response(
-    agent: Agent[TContext],
+    bindings: AgentBindings[TContext],
     system_prompt: str | None,
     input: list[TResponseInputItem],
     output_schema: AgentOutputSchemaBase | None,
@@ -1578,8 +1619,10 @@ async def get_new_response(
     session_items_to_rewind: list[TResponseInputItem] | None = None,
 ) -> ModelResponse:
     """Call the model and return the raw response, handling retries and hooks."""
+    public_agent = bindings.public_agent
+    execution_agent = bindings.execution_agent
     filtered = await maybe_filter_model_input(
-        agent=agent,
+        agent=public_agent,
         run_config=run_config,
         context_wrapper=context_wrapper,
         input_items=input,
@@ -1588,23 +1631,23 @@ async def get_new_response(
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 
-    model = get_model(agent, run_config)
-    model_settings = agent.model_settings.resolve(run_config.model_settings)
-    model_settings = maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
+    model = get_model(execution_agent, run_config)
+    model_settings = execution_agent.model_settings.resolve(run_config.model_settings)
+    model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
     if server_conversation_tracker is not None:
         server_conversation_tracker.mark_input_as_sent(filtered.input)
 
     await asyncio.gather(
-        hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
+        hooks.on_llm_start(context_wrapper, public_agent, filtered.instructions, filtered.input),
         (
-            agent.hooks.on_llm_start(
+            public_agent.hooks.on_llm_start(
                 context_wrapper,
-                agent,
+                public_agent,
                 filtered.instructions,
                 filtered.input,
             )
-            if agent.hooks
+            if public_agent.hooks
             else _coro.noop_coroutine()
         ),
     )
@@ -1660,11 +1703,11 @@ async def get_new_response(
 
     await asyncio.gather(
         (
-            agent.hooks.on_llm_end(context_wrapper, agent, new_response)
-            if agent.hooks
+            public_agent.hooks.on_llm_end(context_wrapper, public_agent, new_response)
+            if public_agent.hooks
             else _coro.noop_coroutine()
         ),
-        hooks.on_llm_end(context_wrapper, agent, new_response),
+        hooks.on_llm_end(context_wrapper, public_agent, new_response),
     )
 
     return new_response

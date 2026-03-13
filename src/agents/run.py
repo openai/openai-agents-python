@@ -43,6 +43,7 @@ from .run_config import (
 )
 from .run_context import RunContextWrapper, TContext
 from .run_error_handlers import RunErrorHandlers
+from .run_internal.agent_bindings import bind_public_agent
 from .run_internal.agent_runner_helpers import (
     append_model_response_if_new,
     apply_resumed_conversation_settings,
@@ -106,6 +107,7 @@ from .run_internal.tool_use_tracker import (
     serialize_tool_use_tracker,
 )
 from .run_state import RunState
+from .sandbox.runtime import SandboxRuntime
 from .tool import dispose_resolved_computers
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Span, SpanError, agent_span, get_current_trace
@@ -583,11 +585,44 @@ class AgentRunner:
                 run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
                 run_state.set_trace(get_current_trace())
 
+            sandbox_runtime = SandboxRuntime(
+                starting_agent=starting_agent,
+                run_config=run_config,
+                run_state=run_state,
+            )
+
+            completed_result: RunResult | None = None
+
             def _with_reasoning_item_id_policy(result: RunResult) -> RunResult:
                 result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
                 if run_state is not None:
                     run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
                 return result
+
+            def _tool_use_tracker_snapshot() -> dict[str, list[str]]:
+                identity_root_agent = starting_agent
+                if run_state is not None and run_state._starting_agent is not None:
+                    identity_root_agent = run_state._starting_agent
+                return serialize_tool_use_tracker(
+                    tool_use_tracker,
+                    starting_agent=identity_root_agent,
+                )
+
+            def _finalize_result(result: RunResult) -> RunResult:
+                nonlocal completed_result
+                result._starting_agent_for_state = (
+                    run_state._starting_agent
+                    if run_state is not None and run_state._starting_agent is not None
+                    else starting_agent
+                )
+                finalized_result = finalize_conversation_tracking(
+                    _with_reasoning_item_id_policy(result),
+                    server_conversation_tracker=server_conversation_tracker,
+                    run_state=run_state,
+                )
+                sandbox_runtime.apply_result_metadata(finalized_result)
+                completed_result = finalized_result
+                return finalized_result
 
             pending_server_items: list[RunItem] | None = None
             input_guardrail_results: list[InputGuardrailResult] = (
@@ -609,6 +644,7 @@ class AgentRunner:
                 current_agent = run_state._current_agent
             else:
                 current_agent = starting_agent
+            sandbox_runtime.assert_agent_supported(current_agent)
             should_run_agent_start_hooks = True
             store_setting = current_agent.model_settings.resolve(run_config.model_settings).store
 
@@ -618,11 +654,16 @@ class AgentRunner:
                 and original_user_input is not None
                 and session_input_items_for_persistence is None
             ):
+                sandbox_runtime.assert_agent_supported(current_agent)
                 session_input_items_for_persistence = ItemHelpers.input_to_new_input_list(
                     original_user_input
                 )
 
-            if session_persistence_enabled and session_input_items_for_persistence:
+            if (
+                session_persistence_enabled
+                and session_input_items_for_persistence
+                and not sandbox_runtime.enabled
+            ):
                 # Capture the exact input saved so it can be rewound on conversation lock retries.
                 last_saved_input_snapshot_for_rewind = list(session_input_items_for_persistence)
                 await save_result_to_session(
@@ -637,6 +678,22 @@ class AgentRunner:
             try:
                 while True:
                     resuming_turn = is_resumed_state
+                    current_bindings = bind_public_agent(current_agent)
+                    execution_agent = current_bindings.execution_agent
+                    prepared_sandbox = await sandbox_runtime.prepare_agent(
+                        current_agent=current_agent,
+                        current_input=original_input,
+                        context_wrapper=context_wrapper,
+                        is_resumed_state=resuming_turn,
+                    )
+                    current_bindings = prepared_sandbox.bindings
+                    execution_agent = current_bindings.execution_agent
+                    original_input = copy_input_items(prepared_sandbox.input)
+                    if starting_input is not None and not isinstance(starting_input, RunState):
+                        starting_input = copy_input_items(prepared_sandbox.input)
+                    if run_state is not None:
+                        run_state._original_input = copy_input_items(original_input)
+
                     normalized_starting_input: str | list[TResponseInputItem] = (
                         starting_input
                         if starting_input is not None and not isinstance(starting_input, RunState)
@@ -645,6 +702,18 @@ class AgentRunner:
                     store_setting = current_agent.model_settings.resolve(
                         run_config.model_settings
                     ).store
+                    if session_persistence_enabled and session_input_items_for_persistence:
+                        last_saved_input_snapshot_for_rewind = list(
+                            session_input_items_for_persistence
+                        )
+                        await save_result_to_session(
+                            session,
+                            list(last_saved_input_snapshot_for_rewind),
+                            [],
+                            run_state,
+                            store=store_setting,
+                        )
+                        session_input_items_for_persistence = []
                     if run_state is not None and run_state._current_step is not None:
                         if isinstance(run_state._current_step, NextStepInterruption):
                             logger.debug("Continuing from interruption")
@@ -655,7 +724,7 @@ class AgentRunner:
                                 raise UserError("No model response found in previous state")
 
                             turn_result = await resolve_interrupted_turn(
-                                agent=current_agent,
+                                bindings=current_bindings,
                                 original_input=original_input,
                                 original_pre_step_items=generated_items,
                                 new_response=run_state._model_responses[-1],
@@ -750,11 +819,7 @@ class AgentRunner:
                                     run_state=run_state,
                                     original_input=original_input,
                                 )
-                                return finalize_conversation_tracking(
-                                    _with_reasoning_item_id_policy(result),
-                                    server_conversation_tracker=server_conversation_tracker,
-                                    run_state=run_state,
-                                )
+                                return _finalize_result(result)
 
                             if isinstance(turn_result.next_step, NextStepRunAgain):
                                 continue
@@ -791,9 +856,7 @@ class AgentRunner:
                                     tool_output_guardrail_results=tool_output_guardrail_results,
                                     context_wrapper=context_wrapper,
                                     interruptions=approvals_from_state,
-                                    _tool_use_tracker_snapshot=serialize_tool_use_tracker(
-                                        tool_use_tracker
-                                    ),
+                                    _tool_use_tracker_snapshot=_tool_use_tracker_snapshot(),
                                     max_turns=max_turns,
                                 )
                                 result._current_turn = current_turn
@@ -820,11 +883,7 @@ class AgentRunner:
                                         store=store_setting,
                                     )
                                 result._original_input = copy_input_items(original_input)
-                                return finalize_conversation_tracking(
-                                    _with_reasoning_item_id_policy(result),
-                                    server_conversation_tracker=server_conversation_tracker,
-                                    run_state=run_state,
-                                )
+                                return _finalize_result(result)
                             elif isinstance(turn_result.next_step, NextStepHandoff):
                                 current_agent = cast(
                                     Agent[TContext], turn_result.next_step.new_agent
@@ -844,16 +903,17 @@ class AgentRunner:
                     if run_state is not None:
                         if run_state._current_step is None:
                             run_state._current_step = NextStepRunAgain()  # type: ignore[assignment]
-                    all_tools = await get_all_tools(current_agent, context_wrapper)
+                    all_tools = await get_all_tools(execution_agent, context_wrapper)
                     await initialize_computer_tools(
                         tools=all_tools, context_wrapper=context_wrapper
                     )
 
                     if current_span is None:
                         handoff_names = [
-                            h.agent_name for h in await get_handoffs(current_agent, context_wrapper)
+                            h.agent_name
+                            for h in await get_handoffs(execution_agent, context_wrapper)
                         ]
-                        if output_schema := get_output_schema(current_agent):
+                        if output_schema := get_output_schema(execution_agent):
                             output_type_name = output_schema.name()
                         else:
                             output_type_name = "str"
@@ -932,7 +992,7 @@ class AgentRunner:
                             tool_output_guardrail_results=tool_output_guardrail_results,
                             context_wrapper=context_wrapper,
                             interruptions=approvals_from_state,
-                            _tool_use_tracker_snapshot=serialize_tool_use_tracker(tool_use_tracker),
+                            _tool_use_tracker_snapshot=_tool_use_tracker_snapshot(),
                             max_turns=max_turns,
                         )
                         result._current_turn = max_turns
@@ -957,11 +1017,7 @@ class AgentRunner:
                                 store=store_setting,
                             )
                         result._original_input = copy_input_items(original_input)
-                        return finalize_conversation_tracking(
-                            _with_reasoning_item_id_policy(result),
-                            server_conversation_tracker=server_conversation_tracker,
-                            run_state=run_state,
-                        )
+                        return _finalize_result(result)
 
                     if run_state is not None and not resuming_turn:
                         run_state._current_turn_persisted_item_count = 0
@@ -997,7 +1053,7 @@ class AgentRunner:
                                 sequential_results = await run_input_guardrails(
                                     starting_agent,
                                     sequential_guardrails,
-                                    copy_input_items(prepared_input),
+                                    copy_input_items(original_input),
                                     context_wrapper,
                                 )
                         except InputGuardrailTripwireTriggered:
@@ -1016,7 +1072,7 @@ class AgentRunner:
                         parallel_results: list[InputGuardrailResult] = []
                         model_task = asyncio.create_task(
                             run_single_turn(
-                                agent=current_agent,
+                                bindings=current_bindings,
                                 all_tools=all_tools,
                                 original_input=original_input,
                                 generated_items=items_for_model,
@@ -1042,7 +1098,7 @@ class AgentRunner:
                                     run_input_guardrails(
                                         starting_agent,
                                         parallel_guardrails,
-                                        copy_input_items(prepared_input),
+                                        copy_input_items(original_input),
                                         context_wrapper,
                                     ),
                                     model_task,
@@ -1070,7 +1126,7 @@ class AgentRunner:
                         input_guardrail_results.extend(parallel_results)
                     else:
                         turn_result = await run_single_turn(
-                            agent=current_agent,
+                            bindings=current_bindings,
                             all_tools=all_tools,
                             original_input=original_input,
                             generated_items=items_for_model,
@@ -1201,9 +1257,7 @@ class AgentRunner:
                                 tool_output_guardrail_results=tool_output_guardrail_results,
                                 context_wrapper=context_wrapper,
                                 interruptions=[],
-                                _tool_use_tracker_snapshot=serialize_tool_use_tracker(
-                                    tool_use_tracker
-                                ),
+                                _tool_use_tracker_snapshot=_tool_use_tracker_snapshot(),
                                 max_turns=max_turns,
                             )
                             result._current_turn = current_turn
@@ -1225,11 +1279,7 @@ class AgentRunner:
                                 store=store_setting,
                             )
                             result._original_input = copy_input_items(original_input)
-                            return finalize_conversation_tracking(
-                                _with_reasoning_item_id_policy(result),
-                                server_conversation_tracker=server_conversation_tracker,
-                                run_state=run_state,
-                            )
+                            return _finalize_result(result)
                         elif isinstance(turn_result.next_step, NextStepInterruption):
                             if session_persistence_enabled:
                                 if not input_guardrails_triggered(input_guardrail_results):
@@ -1286,11 +1336,7 @@ class AgentRunner:
                                 run_state=run_state,
                                 original_input=original_input,
                             )
-                            return finalize_conversation_tracking(
-                                _with_reasoning_item_id_policy(result),
-                                server_conversation_tracker=server_conversation_tracker,
-                                run_state=run_state,
-                            )
+                            return _finalize_result(result)
                         elif isinstance(turn_result.next_step, NextStepHandoff):
                             current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
                             if run_state is not None:
@@ -1336,6 +1382,16 @@ class AgentRunner:
                 )
                 raise
             finally:
+                try:
+                    sandbox_resume_state = await sandbox_runtime.cleanup()
+                except Exception as error:
+                    logger.warning("Failed to clean up sandbox resources after run: %s", error)
+                else:
+                    if completed_result is not None:
+                        completed_result._sandbox_resume_state = sandbox_resume_state
+                finally:
+                    if completed_result is not None:
+                        completed_result._sandbox_session = None
                 try:
                     await dispose_resolved_computers(run_context=context_wrapper)
                 except Exception as error:
@@ -1550,9 +1606,16 @@ class AgentRunner:
         if run_state is not None:
             run_state.set_trace(new_trace or get_current_trace())
 
+        sandbox_runtime = SandboxRuntime(
+            starting_agent=starting_agent,
+            run_config=run_config,
+            run_state=run_state,
+        )
+
         schema_agent = (
             run_state._current_agent if run_state and run_state._current_agent else starting_agent
         )
+        sandbox_runtime.assert_agent_supported(schema_agent)
         output_schema = get_output_schema(schema_agent)
 
         streamed_input: str | list[TResponseInputItem] = (
@@ -1618,6 +1681,8 @@ class AgentRunner:
         streamed_result._state = run_state
         if run_state is not None:
             streamed_result._tool_use_tracker_snapshot = run_state.get_tool_use_tracker_snapshot()
+        if sandbox_runtime.enabled:
+            sandbox_runtime.apply_result_metadata(streamed_result)
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         streamed_result.run_loop_task = asyncio.create_task(
@@ -1636,8 +1701,11 @@ class AgentRunner:
                 session=session,
                 run_state=run_state,
                 is_resumed_state=is_resumed_state,
+                sandbox_runtime=sandbox_runtime,
             )
         )
+        if sandbox_runtime.enabled:
+            streamed_result.ensure_sandbox_cleanup_on_completion()
         return streamed_result
 
 

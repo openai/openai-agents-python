@@ -204,7 +204,7 @@ async def test_execute_shell_calls_surfaces_missing_local_executor() -> None:
     context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
 
     result = await execute_shell_calls(
-        agent=agent,
+        public_agent=agent,
         calls=[tool_run],
         context_wrapper=context_wrapper,
         hooks=RunHooks[Any](),

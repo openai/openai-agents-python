@@ -17,7 +17,11 @@ from ..items import (
     ToolSearchCallItem,
     ToolSearchOutputItem,
 )
-from ..run_state import _build_agent_map
+from ..run_state import (
+    _build_agent_identity_keys_by_id,
+    _build_agent_identity_map,
+    _build_agent_map,
+)
 from .run_steps import ProcessedResponse, ToolRunFunction
 
 __all__ = [
@@ -112,11 +116,23 @@ class AgentToolUseTracker:
         return tracker
 
 
-def serialize_tool_use_tracker(tool_use_tracker: AgentToolUseTracker) -> dict[str, list[str]]:
+def serialize_tool_use_tracker(
+    tool_use_tracker: AgentToolUseTracker,
+    *,
+    starting_agent: Agent[Any] | None = None,
+) -> dict[str, list[str]]:
     """Convert the AgentToolUseTracker into a serializable snapshot."""
+    agent_identity_keys_by_id = (
+        _build_agent_identity_keys_by_id(starting_agent) if starting_agent is not None else None
+    )
     snapshot: dict[str, list[str]] = {}
     for agent, tool_names in tool_use_tracker.agent_to_tools:
-        snapshot[agent.name] = list(tool_names)
+        agent_key = None
+        if agent_identity_keys_by_id is not None:
+            agent_key = agent_identity_keys_by_id.get(id(agent))
+        if agent_key is None:
+            agent_key = getattr(agent, "name", agent.__class__.__name__)
+        snapshot.setdefault(agent_key, []).extend(tool_names)
     return snapshot
 
 
@@ -131,8 +147,9 @@ def hydrate_tool_use_tracker(
         return
 
     agent_map = _build_agent_map(starting_agent)
+    agent_identity_map = _build_agent_identity_map(starting_agent)
     for agent_name, tool_names in snapshot.items():
-        agent = agent_map.get(agent_name)
+        agent = agent_identity_map.get(agent_name) or agent_map.get(agent_name)
         if agent is None:
             continue
         tool_use_tracker.add_tool_use(agent, list(tool_names))

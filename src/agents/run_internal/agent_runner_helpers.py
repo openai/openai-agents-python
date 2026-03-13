@@ -253,6 +253,11 @@ def build_interruption_result(
     original_input: str | list[TResponseInputItem],
 ) -> RunResult:
     """Create a RunResult for an interruption path."""
+    identity_root_agent = (
+        run_state._starting_agent
+        if run_state is not None and run_state._starting_agent is not None
+        else current_agent
+    )
     result = RunResult(
         input=result_input,
         new_items=session_items,
@@ -266,7 +271,10 @@ def build_interruption_result(
         context_wrapper=context_wrapper,
         interruptions=interruptions,
         _last_processed_response=processed_response,
-        _tool_use_tracker_snapshot=serialize_tool_use_tracker(tool_use_tracker),
+        _tool_use_tracker_snapshot=serialize_tool_use_tracker(
+            tool_use_tracker,
+            starting_agent=identity_root_agent,
+        ),
         max_turns=max_turns,
     )
     result._current_turn = current_turn

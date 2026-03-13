@@ -87,6 +87,7 @@ from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
 from ..util._types import MaybeAwaitable
 from ._asyncio_progress import get_function_tool_task_progress_deadline
+from .agent_bindings import AgentBindings, bind_public_agent
 from .approvals import append_approval_error_output
 from .items import (
     REJECTION_MESSAGE,
@@ -1279,14 +1280,15 @@ class _FunctionToolBatchExecutor:
     def __init__(
         self,
         *,
-        agent: Agent[Any],
+        bindings: AgentBindings[Any],
         tool_runs: list[ToolRunFunction],
         hooks: RunHooks[Any],
         context_wrapper: RunContextWrapper[Any],
         config: RunConfig,
         isolate_parallel_failures: bool | None,
     ) -> None:
-        self.agent = agent
+        self.execution_agent = bindings.execution_agent
+        self.public_agent = bindings.public_agent
         self.tool_runs = tool_runs
         self.hooks = hooks
         self.context_wrapper = context_wrapper
@@ -1310,7 +1312,7 @@ class _FunctionToolBatchExecutor:
         list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
     ]:
         self.available_function_tools = await resolve_enabled_function_tools(
-            self.agent,
+            self.execution_agent,
             self.context_wrapper,
         )
         for tool_run in self.tool_runs:
@@ -1457,10 +1459,10 @@ class _FunctionToolBatchExecutor:
                 tool_call.call_id,
                 tool_call=raw_tool_call,
                 tool_namespace=tool_context_namespace,
-                agent=self.agent,
+                agent=self.public_agent,
                 run_config=self.config,
             )
-            agent_hooks = self.agent.hooks
+            agent_hooks = self.public_agent.hooks
             if self.config.trace_include_sensitive_data:
                 span_fn.span_data.input = tool_call.arguments
 
@@ -1526,7 +1528,7 @@ class _FunctionToolBatchExecutor:
         )
         if approval_status is None:
             approval_item = ToolApprovalItem(
-                agent=self.agent,
+                agent=self.public_agent,
                 raw_item=raw_tool_call,
                 tool_name=func_tool.name,
                 tool_namespace=tool_namespace,
@@ -1566,7 +1568,7 @@ class _FunctionToolBatchExecutor:
             tool=func_tool,
             output=rejection_message,
             run_item=function_rejection_item(
-                self.agent,
+                self.public_agent,
                 tool_call,
                 rejection_message=rejection_message,
                 scope_id=self.tool_state_scope_id,
@@ -1585,16 +1587,16 @@ class _FunctionToolBatchExecutor:
         rejected_message = await _execute_tool_input_guardrails(
             func_tool=func_tool,
             tool_context=tool_context,
-            agent=self.agent,
+            agent=self.public_agent,
             tool_input_guardrail_results=self.tool_input_guardrail_results,
         )
         if rejected_message is not None:
             return rejected_message
 
         await asyncio.gather(
-            self.hooks.on_tool_start(tool_context, self.agent, func_tool),
+            self.hooks.on_tool_start(tool_context, self.public_agent, func_tool),
             (
-                agent_hooks.on_tool_start(tool_context, self.agent, func_tool)
+                agent_hooks.on_tool_start(tool_context, self.public_agent, func_tool)
                 if agent_hooks
                 else _coro.noop_coroutine()
             ),
@@ -1654,15 +1656,15 @@ class _FunctionToolBatchExecutor:
         final_result = await _execute_tool_output_guardrails(
             func_tool=func_tool,
             tool_context=tool_context,
-            agent=self.agent,
+            agent=self.public_agent,
             real_result=real_result,
             tool_output_guardrail_results=self.tool_output_guardrail_results,
         )
 
         await asyncio.gather(
-            self.hooks.on_tool_end(tool_context, self.agent, func_tool, final_result),
+            self.hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result),
             (
-                agent_hooks.on_tool_end(tool_context, self.agent, func_tool, final_result)
+                agent_hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result)
                 if agent_hooks
                 else _coro.noop_coroutine()
             ),
@@ -1763,7 +1765,7 @@ class _FunctionToolBatchExecutor:
                 run_item = ToolCallOutputItem(
                     output=result,
                     raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
-                    agent=self.agent,
+                    agent=self.public_agent,
                 )
             else:
                 # Skip tool output until nested interruptions are resolved.
@@ -1784,7 +1786,7 @@ class _FunctionToolBatchExecutor:
 
 async def execute_function_tool_calls(
     *,
-    agent: Agent[Any],
+    bindings: AgentBindings[Any],
     tool_runs: list[ToolRunFunction],
     hooks: RunHooks[Any],
     context_wrapper: RunContextWrapper[Any],
@@ -1795,7 +1797,7 @@ async def execute_function_tool_calls(
 ]:
     """Execute function tool calls with approvals, guardrails, and hooks."""
     return await _FunctionToolBatchExecutor(
-        agent=agent,
+        bindings=bindings,
         tool_runs=tool_runs,
         hooks=hooks,
         context_wrapper=context_wrapper,
@@ -1806,7 +1808,7 @@ async def execute_function_tool_calls(
 
 async def execute_local_shell_calls(
     *,
-    agent: Agent[Any],
+    public_agent: Agent[Any],
     calls: list[ToolRunLocalShellCall],
     context_wrapper: RunContextWrapper[Any],
     hooks: RunHooks[Any],
@@ -1819,7 +1821,7 @@ async def execute_local_shell_calls(
     for call in calls:
         results.append(
             await LocalShellAction.execute(
-                agent=agent,
+                agent=public_agent,
                 call=call,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
@@ -1831,7 +1833,7 @@ async def execute_local_shell_calls(
 
 async def execute_shell_calls(
     *,
-    agent: Agent[Any],
+    public_agent: Agent[Any],
     calls: list[ToolRunShellCall],
     context_wrapper: RunContextWrapper[Any],
     hooks: RunHooks[Any],
@@ -1844,7 +1846,7 @@ async def execute_shell_calls(
     for call in calls:
         results.append(
             await ShellAction.execute(
-                agent=agent,
+                agent=public_agent,
                 call=call,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
@@ -1856,7 +1858,7 @@ async def execute_shell_calls(
 
 async def execute_apply_patch_calls(
     *,
-    agent: Agent[Any],
+    public_agent: Agent[Any],
     calls: list[ToolRunApplyPatchCall],
     context_wrapper: RunContextWrapper[Any],
     hooks: RunHooks[Any],
@@ -1869,7 +1871,7 @@ async def execute_apply_patch_calls(
     for call in calls:
         results.append(
             await ApplyPatchAction.execute(
-                agent=agent,
+                agent=public_agent,
                 call=call,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
@@ -1881,7 +1883,7 @@ async def execute_apply_patch_calls(
 
 async def execute_computer_actions(
     *,
-    agent: Agent[Any],
+    public_agent: Agent[Any],
     actions: list[ToolRunComputerAction],
     hooks: RunHooks[Any],
     context_wrapper: RunContextWrapper[Any],
@@ -1898,7 +1900,7 @@ async def execute_computer_actions(
             for check in action.tool_call.pending_safety_checks:
                 data = ComputerToolSafetyCheckData(
                     ctx_wrapper=context_wrapper,
-                    agent=agent,
+                    agent=public_agent,
                     tool_call=action.tool_call,
                     safety_check=check,
                 )
@@ -1917,7 +1919,7 @@ async def execute_computer_actions(
 
         results.append(
             await ComputerAction.execute(
-                agent=agent,
+                agent=public_agent,
                 action=action,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
@@ -2081,7 +2083,7 @@ async def execute_approved_tools(
 
     if tool_runs:
         function_results, _, _ = await execute_function_tool_calls(
-            agent=agent,
+            bindings=bind_public_agent(agent),
             tool_runs=tool_runs,
             hooks=hooks,
             context_wrapper=context_wrapper,

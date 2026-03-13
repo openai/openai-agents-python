@@ -893,4 +893,10 @@ class Agent(AgentBase, Generic[TContext]):
         self, run_context: RunContextWrapper[TContext]
     ) -> ResponsePromptParam | None:
         """Get the prompt for the agent."""
-        return await PromptUtil.to_model_input(self.prompt, run_context, self)
+        from ._public_agent import get_public_agent
+
+        return await PromptUtil.to_model_input(
+            self.prompt,
+            run_context,
+            cast(Agent[TContext], get_public_agent(self)),
+        )

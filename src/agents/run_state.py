@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import dataclasses
 import json
+import threading
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, Union, cast
 from uuid import uuid4
 
@@ -42,6 +45,7 @@ from ._tool_identity import (
     get_function_tool_qualified_name,
     serialize_function_tool_lookup_key,
 )
+from .agent import Agent
 from .exceptions import UserError
 from .guardrail import (
     GuardrailFunctionOutput,
@@ -73,6 +77,7 @@ from .items import (
 )
 from .logger import logger
 from .run_context import RunContextWrapper
+from .sandbox.session.base_sandbox_session import BaseSandboxSession
 from .tool import (
     ApplyPatchTool,
     ComputerTool,
@@ -96,7 +101,6 @@ from .usage import deserialize_usage, serialize_usage
 from .util._json import _to_dump_compatible
 
 if TYPE_CHECKING:
-    from .agent import Agent
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
     from .items import ModelResponse, RunItem
     from .run_internal.run_steps import (
@@ -118,10 +122,36 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.6"
-SUPPORTED_SCHEMA_VERSIONS = frozenset(
-    {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", CURRENT_SCHEMA_VERSION}
-)
+CURRENT_SCHEMA_VERSION = "1.7"
+# Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
+SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
+    "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
+    "1.1": "Same payload as 1.0, but introduces explicit backward-read support policy.",
+    "1.2": "Persists reasoning_item_id_policy for resumed and streamed follow-up turns.",
+    "1.3": "Updates resumed trace semantics to reattach traces without duplicate starts.",
+    "1.4": "Stores request_id alongside each serialized model response.",
+    "1.5": "Renumbered unreleased baseline for tool-search snapshots and richer tool metadata.",
+    "1.6": "Persists explicit approval rejection messages across resume flows.",
+    "1.7": (
+        "Persists duplicate-name agent identities across agent-owned state "
+        "and sandbox resume state."
+    ),
+}
+SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
+
+if CURRENT_SCHEMA_VERSION not in SCHEMA_VERSION_SUMMARIES:
+    raise AssertionError(
+        "CURRENT_SCHEMA_VERSION must have a matching entry in SCHEMA_VERSION_SUMMARIES."
+    )
+
+_missing_schema_version_summaries = [
+    version for version, summary in SCHEMA_VERSION_SUMMARIES.items() if not summary.strip()
+]
+if _missing_schema_version_summaries:
+    raise AssertionError(
+        "Every supported RunState schema version must have a non-empty summary. "
+        f"Missing summaries: {', '.join(_missing_schema_version_summaries)}"
+    )
 
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
 _COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(ComputerCallOutput)
@@ -156,6 +186,9 @@ class RunState(Generic[TContext, TAgent]):
 
     _current_agent: TAgent | None = None
     """The agent currently handling the conversation."""
+
+    _starting_agent: TAgent | None = field(default=None, repr=False)
+    """The root agent used to derive stable duplicate-name identities during resume."""
 
     _original_input: str | list[Any] = field(default_factory=list)
     """Original user input prior to any processing."""
@@ -220,6 +253,12 @@ class RunState(Generic[TContext, TAgent]):
     _agent_tool_state_scope_id: str | None = field(default=None, repr=False)
     """Private scope id used to isolate agent-tool pending state per RunState instance."""
 
+    _sandbox: dict[str, Any] | None = field(default=None, repr=False)
+    """Serialized sandbox resume payload for sandbox-aware runs."""
+
+    _schema_version: str = field(default=CURRENT_SCHEMA_VERSION, repr=False)
+    """Schema version the snapshot was loaded from for schema-gated resume compatibility."""
+
     def __init__(
         self,
         context: RunContextWrapper[TContext],
@@ -234,6 +273,7 @@ class RunState(Generic[TContext, TAgent]):
         """Initialize a new RunState."""
         self._context = context
         self._original_input = _clone_original_input(original_input)
+        self._starting_agent = starting_agent
         self._current_agent = starting_agent
         self._max_turns = max_turns
         self._conversation_id = conversation_id
@@ -254,6 +294,8 @@ class RunState(Generic[TContext, TAgent]):
         self._current_turn_persisted_item_count = 0
         self._tool_use_tracker_snapshot = {}
         self._trace_state = None
+        self._sandbox = None
+        self._schema_version = CURRENT_SCHEMA_VERSION
         from .agent_tool_state import get_agent_tool_state_scope
 
         self._agent_tool_state_scope_id = get_agent_tool_state_scope(context)
@@ -498,8 +540,14 @@ class RunState(Generic[TContext, TAgent]):
         latest_response_id = (
             self._model_responses[-1].response_id if self._model_responses else None
         )
+        agent_identity_keys_by_id = (
+            _build_agent_identity_keys_by_id(cast(Agent[Any], self._starting_agent))
+            if self._starting_agent is not None
+            else None
+        )
         serialized_items = [
-            self._serialize_item(item) for item in self._last_processed_response.new_items
+            self._serialize_item(item, agent_identity_keys_by_id=agent_identity_keys_by_id)
+            for item in self._last_processed_response.new_items
         ]
         return json.dumps(
             {
@@ -633,19 +681,33 @@ class RunState(Generic[TContext, TAgent]):
         if tool_input is not None:
             context_entry["tool_input"] = tool_input
 
+        agent_identity_keys_by_id = (
+            _build_agent_identity_keys_by_id(cast(Agent[Any], self._starting_agent))
+            if self._starting_agent is not None
+            else None
+        )
+        current_agent_entry = _serialize_agent_reference(
+            cast(Agent[Any], self._current_agent),
+            agent_identity_keys_by_id=agent_identity_keys_by_id,
+        )
+
         result = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
             "current_turn": self._current_turn,
-            "current_agent": {"name": self._current_agent.name},
+            "current_agent": current_agent_entry,
             "original_input": original_input_serialized,
             "model_responses": model_responses,
             "context": context_entry,
             "tool_use_tracker": copy.deepcopy(self._tool_use_tracker_snapshot),
             "max_turns": self._max_turns,
             "no_active_agent_run": True,
-            "input_guardrail_results": _serialize_guardrail_results(self._input_guardrail_results),
+            "input_guardrail_results": _serialize_guardrail_results(
+                self._input_guardrail_results,
+                agent_identity_keys_by_id=agent_identity_keys_by_id,
+            ),
             "output_guardrail_results": _serialize_guardrail_results(
-                self._output_guardrail_results
+                self._output_guardrail_results,
+                agent_identity_keys_by_id=agent_identity_keys_by_id,
             ),
             "tool_input_guardrail_results": _serialize_tool_guardrail_results(
                 self._tool_input_guardrail_results, type_label="tool_input"
@@ -660,13 +722,20 @@ class RunState(Generic[TContext, TAgent]):
         }
 
         generated_items = self._merge_generated_items_with_processed()
-        result["generated_items"] = [self._serialize_item(item) for item in generated_items]
-        result["session_items"] = [self._serialize_item(item) for item in list(self._session_items)]
+        result["generated_items"] = [
+            self._serialize_item(item, agent_identity_keys_by_id=agent_identity_keys_by_id)
+            for item in generated_items
+        ]
+        result["session_items"] = [
+            self._serialize_item(item, agent_identity_keys_by_id=agent_identity_keys_by_id)
+            for item in list(self._session_items)
+        ]
         result["current_step"] = self._serialize_current_step()
         result["last_model_response"] = _serialize_last_model_response(model_responses)
         result["last_processed_response"] = (
             self._serialize_processed_response(
                 self._last_processed_response,
+                agent_identity_keys_by_id=agent_identity_keys_by_id,
                 context_serializer=context_serializer,
                 strict_context=strict_context,
                 include_tracing_api_key=include_tracing_api_key,
@@ -678,6 +747,8 @@ class RunState(Generic[TContext, TAgent]):
         result["trace"] = self._serialize_trace_data(
             include_tracing_api_key=include_tracing_api_key
         )
+        if self._sandbox is not None:
+            result["sandbox"] = copy.deepcopy(self._sandbox)
 
         return result
 
@@ -685,6 +756,7 @@ class RunState(Generic[TContext, TAgent]):
         self,
         processed_response: ProcessedResponse,
         *,
+        agent_identity_keys_by_id: Mapping[int, str] | None = None,
         context_serializer: ContextSerializer | None = None,
         strict_context: bool = False,
         include_tracing_api_key: bool = False,
@@ -710,13 +782,20 @@ class RunState(Generic[TContext, TAgent]):
         )
 
         interruptions_data = [
-            _serialize_tool_approval_interruption(interruption, include_tool_name=True)
+            _serialize_tool_approval_interruption(
+                interruption,
+                include_tool_name=True,
+                agent_identity_keys_by_id=agent_identity_keys_by_id,
+            )
             for interruption in processed_response.interruptions
             if isinstance(interruption, ToolApprovalItem)
         ]
 
         return {
-            "new_items": [self._serialize_item(item) for item in processed_response.new_items],
+            "new_items": [
+                self._serialize_item(item, agent_identity_keys_by_id=agent_identity_keys_by_id)
+                for item in processed_response.new_items
+            ],
             "tools_used": processed_response.tools_used,
             **action_groups,
             "interruptions": interruptions_data,
@@ -727,12 +806,20 @@ class RunState(Generic[TContext, TAgent]):
         # Import at runtime to avoid circular import
         from .run_internal.run_steps import NextStepInterruption
 
+        agent_identity_keys_by_id = (
+            _build_agent_identity_keys_by_id(cast(Agent[Any], self._starting_agent))
+            if self._starting_agent is not None
+            else None
+        )
+
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return None
 
         interruptions_data = [
             _serialize_tool_approval_interruption(
-                item, include_tool_name=item.tool_name is not None
+                item,
+                include_tool_name=item.tool_name is not None,
+                agent_identity_keys_by_id=agent_identity_keys_by_id,
             )
             for item in self._current_step.interruptions
             if isinstance(item, ToolApprovalItem)
@@ -745,14 +832,22 @@ class RunState(Generic[TContext, TAgent]):
             },
         }
 
-    def _serialize_item(self, item: RunItem) -> dict[str, Any]:
+    def _serialize_item(
+        self,
+        item: RunItem,
+        *,
+        agent_identity_keys_by_id: Mapping[int, str] | None = None,
+    ) -> dict[str, Any]:
         """Serialize a run item to JSON-compatible dict."""
         raw_item_dict: Any = _serialize_raw_item_value(item.raw_item)
 
         result: dict[str, Any] = {
             "type": item.type,
             "raw_item": raw_item_dict,
-            "agent": {"name": item.agent.name},
+            "agent": _serialize_agent_reference(
+                item.agent,
+                agent_identity_keys_by_id=agent_identity_keys_by_id,
+            ),
         }
 
         # Add additional fields based on item type
@@ -768,9 +863,15 @@ class RunState(Generic[TContext, TAgent]):
                 serialized_output = str(item.output)
             result["output"] = serialized_output
         if hasattr(item, "source_agent"):
-            result["source_agent"] = {"name": item.source_agent.name}
+            result["source_agent"] = _serialize_agent_reference(
+                item.source_agent,
+                agent_identity_keys_by_id=agent_identity_keys_by_id,
+            )
         if hasattr(item, "target_agent"):
-            result["target_agent"] = {"name": item.target_agent.name}
+            result["target_agent"] = _serialize_agent_reference(
+                item.target_agent,
+                agent_identity_keys_by_id=agent_identity_keys_by_id,
+            )
         if hasattr(item, "tool_name") and item.tool_name is not None:
             result["tool_name"] = item.tool_name
         if hasattr(item, "tool_namespace") and item.tool_namespace is not None:
@@ -1090,6 +1191,19 @@ def _serialize_raw_item_value(raw_item: Any) -> Any:
     return raw_item
 
 
+def _serialize_agent_reference(
+    agent: Agent[Any],
+    agent_identity_keys_by_id: Mapping[int, str] | None = None,
+) -> dict[str, Any]:
+    """Serialize an agent reference with an optional duplicate-name identity key."""
+    entry: dict[str, Any] = {"name": agent.name}
+    if agent_identity_keys_by_id is not None:
+        identity = agent_identity_keys_by_id.get(id(agent))
+        if identity is not None and identity != agent.name:
+            entry["identity"] = identity
+    return entry
+
+
 def _ensure_json_compatible(value: Any) -> Any:
     try:
         return json.loads(json.dumps(value, default=str))
@@ -1214,13 +1328,19 @@ def _serialize_mcp_tool(mcp_tool: Any) -> dict[str, Any]:
 
 
 def _serialize_tool_approval_interruption(
-    interruption: ToolApprovalItem, *, include_tool_name: bool
+    interruption: ToolApprovalItem,
+    *,
+    include_tool_name: bool,
+    agent_identity_keys_by_id: Mapping[int, str] | None = None,
 ) -> dict[str, Any]:
     """Serialize a ToolApprovalItem interruption."""
     interruption_dict: dict[str, Any] = {
         "type": "tool_approval_item",
         "raw_item": _serialize_raw_item_value(interruption.raw_item),
-        "agent": {"name": interruption.agent.name},
+        "agent": _serialize_agent_reference(
+            interruption.agent,
+            agent_identity_keys_by_id=agent_identity_keys_by_id,
+        ),
     }
     if include_tool_name and interruption.tool_name is not None:
         interruption_dict["tool_name"] = interruption.tool_name
@@ -1388,6 +1508,8 @@ class _SerializedAgentToolRunResult:
 
 def _serialize_guardrail_results(
     results: Sequence[InputGuardrailResult | OutputGuardrailResult],
+    *,
+    agent_identity_keys_by_id: Mapping[int, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Serialize guardrail results for persistence."""
     serialized: list[dict[str, Any]] = []
@@ -1404,7 +1526,10 @@ def _serialize_guardrail_results(
         }
         if isinstance(result, OutputGuardrailResult):
             entry["agentOutput"] = result.agent_output
-            entry["agent"] = {"name": result.agent.name}
+            entry["agent"] = _serialize_agent_reference(
+                result.agent,
+                agent_identity_keys_by_id=agent_identity_keys_by_id,
+            )
         serialized.append(entry)
     return serialized
 
@@ -1544,6 +1669,7 @@ async def _deserialize_processed_response(
     context: RunContextWrapper[Any],
     agent_map: dict[str, Agent[Any]],
     *,
+    agent_identity_map: Mapping[str, Agent[Any]] | None = None,
     scope_id: str | None = None,
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
@@ -1559,7 +1685,11 @@ async def _deserialize_processed_response(
     Returns:
         A reconstructed ProcessedResponse instance.
     """
-    new_items = _deserialize_items(processed_response_data.get("new_items", []), agent_map)
+    new_items = _deserialize_items(
+        processed_response_data.get("new_items", []),
+        agent_map,
+        agent_identity_map=agent_identity_map,
+    )
 
     if hasattr(current_agent, "get_all_tools"):
         all_tools = await current_agent.get_all_tools(context)
@@ -1811,6 +1941,7 @@ async def _deserialize_processed_response(
         approval_item = _deserialize_tool_approval_item(
             interruption_data,
             agent_map=agent_map,
+            agent_identity_map=agent_identity_map,
             fallback_agent=current_agent,
         )
         if approval_item is not None:
@@ -1855,16 +1986,32 @@ def _deserialize_tool_call_raw_item(normalized_raw_item: Mapping[str, Any]) -> A
 def _resolve_agent_from_data(
     agent_data: Any,
     agent_map: Mapping[str, Agent[Any]],
+    agent_identity_map: Mapping[str, Agent[Any]] | None = None,
     fallback_agent: Agent[Any] | None = None,
 ) -> Agent[Any] | None:
     """Resolve an agent from serialized data with an optional fallback."""
     agent_name = None
+    agent_identity = None
     if isinstance(agent_data, Mapping):
+        agent_identity = agent_data.get("identity")
         agent_name = agent_data.get("name")
     elif isinstance(agent_data, str):
         agent_name = agent_data
 
+    if isinstance(agent_identity, str) and agent_identity_map is not None:
+        resolved = agent_identity_map.get(agent_identity)
+        if resolved is not None:
+            return resolved
+        raise UserError(
+            "Run state references an agent identity that is not present in the restored graph: "
+            f"{agent_identity}"
+        )
+
     if agent_name:
+        if agent_identity_map is not None:
+            resolved = agent_identity_map.get(agent_name)
+            if resolved is not None:
+                return resolved
         return agent_map.get(agent_name) or fallback_agent
     return fallback_agent
 
@@ -1881,11 +2028,17 @@ def _deserialize_tool_approval_item(
     item_data: Mapping[str, Any],
     *,
     agent_map: Mapping[str, Agent[Any]],
+    agent_identity_map: Mapping[str, Agent[Any]] | None = None,
     fallback_agent: Agent[Any] | None = None,
     pre_normalized_raw_item: Any | None = None,
 ) -> ToolApprovalItem | None:
     """Deserialize a ToolApprovalItem from serialized data."""
-    agent = _resolve_agent_from_data(item_data.get("agent"), agent_map, fallback_agent)
+    agent = _resolve_agent_from_data(
+        item_data.get("agent"),
+        agent_map,
+        agent_identity_map,
+        fallback_agent,
+    )
     if agent is None:
         return None
 
@@ -2018,6 +2171,7 @@ def _deserialize_output_guardrail_results(
     results_data: list[dict[str, Any]],
     *,
     agent_map: dict[str, Agent[Any]],
+    agent_identity_map: Mapping[str, Agent[Any]] | None = None,
     fallback_agent: Agent[Any],
 ) -> list[OutputGuardrailResult]:
     """Rehydrate output guardrail results from serialized data."""
@@ -2029,9 +2183,14 @@ def _deserialize_output_guardrail_results(
         name, guardrail_output, entry_dict = parsed
         agent_output = entry_dict.get("agentOutput")
         agent_data = entry_dict.get("agent")
-        agent_name = agent_data.get("name") if isinstance(agent_data, dict) else None
-        resolved_agent = agent_map.get(agent_name) if isinstance(agent_name, str) else None
-        resolved_agent = resolved_agent or fallback_agent
+        resolved_agent = _resolve_agent_from_data(
+            agent_data,
+            agent_map,
+            agent_identity_map,
+            fallback_agent,
+        )
+        if resolved_agent is None:
+            resolved_agent = fallback_agent
 
         def _output_guardrail_fn(
             context: RunContextWrapper[Any],
@@ -2134,10 +2293,16 @@ async def _build_run_state_from_json(
             f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
         )
 
+    agent_identity_map = _build_agent_identity_map(initial_agent)
     agent_map = _build_agent_map(initial_agent)
 
-    current_agent_name = state_json["current_agent"]["name"]
-    current_agent = agent_map.get(current_agent_name)
+    current_agent_data = state_json["current_agent"]
+    current_agent_name = current_agent_data["name"]
+    current_agent = _resolve_agent_from_data(
+        current_agent_data,
+        agent_map,
+        agent_identity_map=agent_identity_map,
+    )
     if not current_agent:
         raise UserError(f"Agent {current_agent_name} not found in agent map")
 
@@ -2218,6 +2383,8 @@ async def _build_run_state_from_json(
         previous_response_id=state_json.get("previous_response_id"),
         auto_previous_response_id=bool(state_json.get("auto_previous_response_id", False)),
     )
+    state._starting_agent = initial_agent
+    state._schema_version = schema_version
     from .agent_tool_state import set_agent_tool_state_scope
 
     state._agent_tool_state_scope_id = uuid4().hex
@@ -2225,7 +2392,11 @@ async def _build_run_state_from_json(
 
     state._current_turn = state_json["current_turn"]
     state._model_responses = _deserialize_model_responses(state_json.get("model_responses", []))
-    state._generated_items = _deserialize_items(state_json.get("generated_items", []), agent_map)
+    state._generated_items = _deserialize_items(
+        state_json.get("generated_items", []),
+        agent_map,
+        agent_identity_map=agent_identity_map,
+    )
 
     last_processed_response_data = state_json.get("last_processed_response")
     if last_processed_response_data and state._context is not None:
@@ -2234,6 +2405,7 @@ async def _build_run_state_from_json(
             current_agent,
             state._context,
             agent_map,
+            agent_identity_map=agent_identity_map,
             scope_id=state._agent_tool_state_scope_id,
             context_deserializer=context_deserializer,
             strict_context=strict_context,
@@ -2242,7 +2414,11 @@ async def _build_run_state_from_json(
         state._last_processed_response = None
 
     if "session_items" in state_json:
-        state._session_items = _deserialize_items(state_json.get("session_items", []), agent_map)
+        state._session_items = _deserialize_items(
+            state_json.get("session_items", []),
+            agent_map,
+            agent_identity_map=agent_identity_map,
+        )
     else:
         state._session_items = state._merge_generated_items_with_processed()
 
@@ -2254,6 +2430,7 @@ async def _build_run_state_from_json(
     state._output_guardrail_results = _deserialize_output_guardrail_results(
         state_json.get("output_guardrail_results", []),
         agent_map=agent_map,
+        agent_identity_map=agent_identity_map,
         fallback_agent=current_agent,
     )
     state._tool_input_guardrail_results = _deserialize_tool_input_guardrail_results(
@@ -2270,7 +2447,11 @@ async def _build_run_state_from_json(
             "interruptions", current_step_data.get("interruptions", [])
         )
         for item_data in interruptions_data:
-            approval_item = _deserialize_tool_approval_item(item_data, agent_map=agent_map)
+            approval_item = _deserialize_tool_approval_item(
+                item_data,
+                agent_map=agent_map,
+                agent_identity_map=agent_identity_map,
+            )
             if approval_item is not None:
                 interruptions.append(approval_item)
 
@@ -2294,29 +2475,25 @@ async def _build_run_state_from_json(
         state._trace_state = TraceState.from_json(trace_data)
     else:
         state._trace_state = None
+    sandbox_data = state_json.get("sandbox")
+    state._sandbox = dict(sandbox_data) if isinstance(sandbox_data, Mapping) else None
 
     return state
 
 
-def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
-    """Build a map of agent names to agents by traversing handoffs.
-
-    Args:
-        initial_agent: The starting agent.
-
-    Returns:
-        Dictionary mapping agent names to agent instances.
-    """
-    agent_map: dict[str, Agent[Any]] = {}
+def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
+    """Yield agents reachable from the starting agent in breadth-first order."""
     queue: deque[Agent[Any]] = deque([initial_agent])
+    seen_agent_ids: set[int] = set()
 
     while queue:
         current = queue.popleft()
-        if current.name in agent_map:
+        current_id = id(current)
+        if current_id in seen_agent_ids:
             continue
-        agent_map[current.name] = current
+        seen_agent_ids.add(current_id)
+        yield current
 
-        # Add handoff agents to the queue
         for handoff_item in current.handoffs:
             handoff_agent: Any | None = None
             handoff_agent_name: str | None = None
@@ -2329,8 +2506,6 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
                 )
                 if isinstance(candidate_name, str):
                     handoff_agent_name = candidate_name
-                    if handoff_agent_name in agent_map:
-                        continue
 
                 handoff_ref = getattr(handoff_item, "_agent_ref", None)
                 handoff_agent = handoff_ref() if callable(handoff_ref) else None
@@ -2368,12 +2543,8 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
                 candidate_name = getattr(handoff_agent, "name", None)
                 handoff_agent_name = candidate_name if isinstance(candidate_name, str) else None
 
-            if (
-                handoff_agent is not None
-                and handoff_agent_name
-                and handoff_agent_name not in agent_map
-            ):
-                queue.append(cast(Any, handoff_agent))
+            if handoff_agent is not None and handoff_agent_name:
+                queue.append(cast(Agent[Any], handoff_agent))
 
         # Include agent-as-tool instances so nested approvals can be restored.
         tools = getattr(current, "tools", None)
@@ -2383,8 +2554,390 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
                     continue
                 tool_agent = getattr(tool, "_agent_instance", None)
                 tool_agent_name = getattr(tool_agent, "name", None)
-                if tool_agent and tool_agent_name and tool_agent_name not in agent_map:
+                if tool_agent and tool_agent_name:
                     queue.append(tool_agent)
+
+
+def _allocate_unique_agent_identity(agent_name: str, used_identities: set[str]) -> str:
+    """Return a deterministic identity key without colliding with literal agent names."""
+    candidate = agent_name
+    next_index = 1
+    while candidate in used_identities:
+        next_index += 1
+        candidate = f"{agent_name}#{next_index}"
+    used_identities.add(candidate)
+    return candidate
+
+
+def _identity_type_name(value: Any) -> str:
+    return f"{type(value).__module__}.{type(value).__qualname__}"
+
+
+def _callable_identity_name(value: Any) -> str:
+    module = getattr(value, "__module__", type(value).__module__)
+    qualname = getattr(value, "__qualname__", type(value).__qualname__)
+    return f"{module}.{qualname}"
+
+
+def _normalize_identity_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return {"type": "bytes", "length": len(value)}
+    if callable(value):
+        return {"callable": _callable_identity_name(value)}
+    if dataclasses.is_dataclass(value):
+        return {
+            "dataclass": _identity_type_name(value),
+            "value": _normalize_identity_value(dataclasses.asdict(cast(Any, value))),
+        }
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump(exclude_unset=True)
+        except TypeError:
+            dumped = value.model_dump()
+        return {
+            "model": _identity_type_name(value),
+            "value": _normalize_identity_value(dumped),
+        }
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalize_identity_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_normalize_identity_value(item) for item in value]
+
+    value_name = getattr(value, "name", None)
+    if isinstance(value_name, str):
+        return {"type": _identity_type_name(value), "name": value_name}
+    return {"type": _identity_type_name(value)}
+
+
+def _stable_identity_text(value: Any) -> str:
+    return json.dumps(
+        _normalize_identity_value(value),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _tool_identity_signature(tool: Any) -> dict[str, Any]:
+    signature: dict[str, Any] = {
+        "type": _identity_type_name(tool),
+        "name": getattr(tool, "name", None),
+    }
+    namespace = get_function_tool_namespace(tool)
+    if namespace is not None:
+        signature["namespace"] = namespace
+    qualified_name = get_function_tool_qualified_name(tool)
+    if qualified_name is not None:
+        signature["qualified_name"] = qualified_name
+    if hasattr(tool, "environment"):
+        signature["environment"] = _normalize_identity_value(tool.environment)
+    if getattr(tool, "_is_agent_tool", False):
+        nested_agent = getattr(tool, "_agent_instance", None)
+        signature["agent_tool_target"] = getattr(nested_agent, "name", None)
+    return signature
+
+
+_THREADING_LOCK_TYPES = (type(threading.Lock()), type(threading.RLock()))
+
+
+def _is_capability_runtime_only_value(value: Any) -> bool:
+    return isinstance(
+        value,
+        (
+            BaseSandboxSession,
+            asyncio.Event,
+            asyncio.Lock,
+            asyncio.Semaphore,
+            asyncio.Condition,
+            threading.Event,
+            *_THREADING_LOCK_TYPES,
+        ),
+    )
+
+
+def _normalize_capability_identity_value(
+    value: Any,
+    *,
+    seen: set[int] | None = None,
+) -> Any:
+    if seen is None:
+        seen = set()
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return value.as_posix()
+    if isinstance(value, (bytes, bytearray)):
+        return {"type": "bytes", "length": len(value)}
+    if callable(value):
+        return {"callable": _callable_identity_name(value)}
+    if _is_capability_runtime_only_value(value):
+        return {"runtime_only": _identity_type_name(value)}
+    if isinstance(
+        value,
+        (
+            ApplyPatchTool,
+            ComputerTool,
+            FunctionTool,
+            HostedMCPTool,
+            LocalShellTool,
+            ShellTool,
+        ),
+    ):
+        return _tool_identity_signature(value)
+
+    object_id = id(value)
+    if object_id in seen:
+        return {"recursive": _identity_type_name(value)}
+
+    if dataclasses.is_dataclass(value):
+        seen.add(object_id)
+        try:
+            merged_fields = {
+                field.name: getattr(value, field.name) for field in dataclasses.fields(value)
+            }
+            if hasattr(value, "__dict__"):
+                for name, item in vars(value).items():
+                    if name.startswith("_") or name in merged_fields:
+                        continue
+                    merged_fields[name] = item
+            return {
+                "dataclass": _identity_type_name(value),
+                "value": {
+                    name: _normalize_capability_identity_value(
+                        item,
+                        seen=seen,
+                    )
+                    for name, item in sorted(merged_fields.items())
+                },
+            }
+        finally:
+            seen.remove(object_id)
+
+    if hasattr(value, "model_dump"):
+        seen.add(object_id)
+        try:
+            try:
+                dumped = value.model_dump(mode="json", round_trip=True)
+            except TypeError:
+                dumped = value.model_dump(mode="json")
+            return {
+                "model": _identity_type_name(value),
+                "value": _normalize_capability_identity_value(dumped, seen=seen),
+            }
+        finally:
+            seen.remove(object_id)
+
+    if isinstance(value, Mapping):
+        seen.add(object_id)
+        try:
+            return {
+                str(key): _normalize_capability_identity_value(item, seen=seen)
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            }
+        finally:
+            seen.remove(object_id)
+
+    if isinstance(value, (set, frozenset)):
+        seen.add(object_id)
+        try:
+            normalized_items = [
+                _normalize_capability_identity_value(item, seen=seen) for item in value
+            ]
+            return sorted(normalized_items, key=_stable_identity_text)
+        finally:
+            seen.remove(object_id)
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        seen.add(object_id)
+        try:
+            return [_normalize_capability_identity_value(item, seen=seen) for item in value]
+        finally:
+            seen.remove(object_id)
+
+    if hasattr(value, "__dict__"):
+        seen.add(object_id)
+        try:
+            return {
+                "object": _identity_type_name(value),
+                "value": {
+                    name: _normalize_capability_identity_value(item, seen=seen)
+                    for name, item in sorted(vars(value).items())
+                    if not name.startswith("_")
+                },
+            }
+        finally:
+            seen.remove(object_id)
+
+    value_name = getattr(value, "name", None)
+    if isinstance(value_name, str):
+        return {"type": _identity_type_name(value), "name": value_name}
+    return {"type": _identity_type_name(value)}
+
+
+def _capability_identity_signature(capability: Any) -> dict[str, Any]:
+    return {
+        "type": _identity_type_name(capability),
+        "value": _normalize_capability_identity_value(capability),
+    }
+
+
+def _handoff_identity_signature(handoff_item: Agent[Any] | Handoff[Any, Any]) -> dict[str, Any]:
+    if isinstance(handoff_item, Handoff):
+        tool_name = getattr(handoff_item, "tool_name", None)
+        if not isinstance(tool_name, str):
+            tool_name = getattr(handoff_item, "name", None)
+        agent_name = getattr(handoff_item, "agent_name", None)
+        return {
+            "type": _identity_type_name(handoff_item),
+            "tool_name": tool_name,
+            "agent_name": agent_name if isinstance(agent_name, str) else None,
+            "input_filter": _normalize_identity_value(getattr(handoff_item, "input_filter", None)),
+            "nest_handoff_history": getattr(handoff_item, "nest_handoff_history", None),
+        }
+
+    return {
+        "type": _identity_type_name(handoff_item),
+        "agent_name": getattr(handoff_item, "name", None),
+    }
+
+
+def _agent_identity_signature(agent: Agent[Any]) -> str:
+    signature: dict[str, Any] = {
+        "agent_type": _identity_type_name(agent),
+        "handoff_description": getattr(agent, "handoff_description", None),
+        "instructions": _normalize_identity_value(getattr(agent, "instructions", None)),
+        "prompt": _normalize_identity_value(getattr(agent, "prompt", None)),
+        "model": _normalize_identity_value(getattr(agent, "model", None)),
+        "model_settings": _normalize_identity_value(getattr(agent, "model_settings", None)),
+        "mcp_config": _normalize_capability_identity_value(getattr(agent, "mcp_config", None)),
+        "hooks": _normalize_capability_identity_value(getattr(agent, "hooks", None)),
+        "input_guardrails": sorted(
+            _stable_identity_text(_normalize_capability_identity_value(guardrail))
+            for guardrail in getattr(agent, "input_guardrails", [])
+        ),
+        "output_guardrails": sorted(
+            _stable_identity_text(_normalize_capability_identity_value(guardrail))
+            for guardrail in getattr(agent, "output_guardrails", [])
+        ),
+        "output_type": _normalize_identity_value(getattr(agent, "output_type", None)),
+        "tool_use_behavior": _normalize_capability_identity_value(
+            getattr(agent, "tool_use_behavior", None)
+        ),
+        "reset_tool_choice": getattr(agent, "reset_tool_choice", None),
+        "tools": sorted(
+            _stable_identity_text(_tool_identity_signature(tool))
+            for tool in getattr(agent, "tools", [])
+        ),
+        "handoffs": sorted(
+            _stable_identity_text(_handoff_identity_signature(handoff_item))
+            for handoff_item in getattr(agent, "handoffs", [])
+        ),
+        "mcp_servers": sorted(
+            _stable_identity_text(server) for server in getattr(agent, "mcp_servers", [])
+        ),
+    }
+
+    default_manifest = getattr(agent, "default_manifest", None)
+    if default_manifest is not None:
+        signature["default_manifest"] = _normalize_capability_identity_value(default_manifest)
+
+    developer_instructions = getattr(agent, "developer_instructions", None)
+    if developer_instructions is not None:
+        signature["developer_instructions"] = developer_instructions
+
+    capabilities = getattr(agent, "capabilities", None)
+    if isinstance(capabilities, Sequence):
+        signature["capabilities"] = sorted(
+            _stable_identity_text(_capability_identity_signature(capability))
+            for capability in capabilities
+        )
+
+    return _stable_identity_text(signature)
+
+
+def _agent_identity_sort_key(
+    agent: Agent[Any],
+    *,
+    root_agent: Agent[Any],
+    original_index: int,
+) -> tuple[int, str, int]:
+    return (
+        0 if agent is root_agent else 1,
+        _agent_identity_signature(agent),
+        original_index,
+    )
+
+
+def _build_agent_identity_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
+    """Build a stable identity map that preserves duplicate agent names."""
+    ordered_agents = list(_iter_agent_graph(initial_agent))
+    original_indices = {id(agent): index for index, agent in enumerate(ordered_agents)}
+    literal_names = {agent.name for agent in ordered_agents}
+    agents_by_name: dict[str, list[Agent[Any]]] = {}
+    for agent in ordered_agents:
+        agents_by_name.setdefault(agent.name, []).append(agent)
+
+    agent_identity_map: dict[str, Agent[Any]] = {}
+    used_identities: set[str] = set()
+    processed_names: set[str] = set()
+
+    for agent in ordered_agents:
+        agent_name = agent.name
+        if agent_name in processed_names:
+            continue
+        processed_names.add(agent_name)
+
+        group = agents_by_name[agent_name]
+        sorted_group = sorted(
+            group,
+            key=lambda candidate: _agent_identity_sort_key(
+                candidate,
+                root_agent=initial_agent,
+                original_index=original_indices[id(candidate)],
+            ),
+        )
+
+        base_agent = sorted_group[0]
+        used_identities.add(agent_name)
+        agent_identity_map[agent_name] = base_agent
+
+        next_index = 2
+        for duplicate_agent in sorted_group[1:]:
+            candidate = f"{agent_name}#{next_index}"
+            while candidate in used_identities or candidate in literal_names:
+                next_index += 1
+                candidate = f"{agent_name}#{next_index}"
+            used_identities.add(candidate)
+            agent_identity_map[candidate] = duplicate_agent
+            next_index += 1
+
+    return agent_identity_map
+
+
+def _build_agent_identity_keys_by_id(initial_agent: Agent[Any]) -> dict[int, str]:
+    """Build stable identity keys for the reachable agent graph."""
+    return {
+        id(agent): identity for identity, agent in _build_agent_identity_map(initial_agent).items()
+    }
+
+
+def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
+    """Build a map of agent names to agents by traversing handoffs.
+
+    Args:
+        initial_agent: The starting agent.
+
+    Returns:
+        Dictionary mapping agent names to agent instances.
+    """
+    agent_map: dict[str, Agent[Any]] = {}
+    for agent in _iter_agent_graph(initial_agent):
+        agent_map.setdefault(agent.name, agent)
 
     return agent_map
 
@@ -2426,7 +2979,10 @@ def _deserialize_model_responses(responses_data: list[dict[str, Any]]) -> list[M
 
 
 def _deserialize_items(
-    items_data: list[dict[str, Any]], agent_map: dict[str, Agent[Any]]
+    items_data: list[dict[str, Any]],
+    agent_map: dict[str, Agent[Any]],
+    *,
+    agent_identity_map: Mapping[str, Agent[Any]] | None = None,
 ) -> list[RunItem]:
     """Deserialize run items from JSON data.
 
@@ -2456,7 +3012,11 @@ def _deserialize_items(
             elif isinstance(raw_agent, str):
                 candidate_name = raw_agent
 
-            agent_candidate = _resolve_agent_from_data(raw_agent, agent_map)
+            agent_candidate = _resolve_agent_from_data(
+                raw_agent,
+                agent_map,
+                agent_identity_map,
+            )
             if agent_candidate:
                 return agent_candidate, agent_candidate.name
 
@@ -2537,8 +3097,16 @@ def _deserialize_items(
                 result.append(HandoffCallItem(agent=agent, raw_item=raw_item_handoff))
 
             elif item_type == "handoff_output_item":
-                source_agent = _resolve_agent_from_data(item_data.get("source_agent"), agent_map)
-                target_agent = _resolve_agent_from_data(item_data.get("target_agent"), agent_map)
+                source_agent = _resolve_agent_from_data(
+                    item_data.get("source_agent"),
+                    agent_map,
+                    agent_identity_map,
+                )
+                target_agent = _resolve_agent_from_data(
+                    item_data.get("target_agent"),
+                    agent_map,
+                    agent_identity_map,
+                )
 
                 # If we cannot resolve both agents, skip this item gracefully
                 if not source_agent or not target_agent:
@@ -2601,12 +3169,15 @@ def _deserialize_items(
                 approval_item = _deserialize_tool_approval_item(
                     item_data,
                     agent_map=agent_map,
+                    agent_identity_map=agent_identity_map,
                     fallback_agent=agent,
                     pre_normalized_raw_item=normalized_raw_item,
                 )
                 if approval_item is not None:
                     result.append(approval_item)
 
+        except UserError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to deserialize item of type {item_type}: {e}")
             continue

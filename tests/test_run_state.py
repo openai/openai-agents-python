@@ -68,8 +68,10 @@ from agents.run_internal.run_loop import (
 )
 from agents.run_state import (
     CURRENT_SCHEMA_VERSION,
+    SCHEMA_VERSION_SUMMARIES,
     SUPPORTED_SCHEMA_VERSIONS,
     RunState,
+    _build_agent_identity_map,
     _build_agent_map,
     _deserialize_items,
     _deserialize_processed_response,
@@ -101,6 +103,7 @@ from .fake_model import FakeModel
 from .test_responses import (
     get_final_output_message,
     get_function_tool_call,
+    get_handoff_tool_call,
     get_text_message,
 )
 from .utils.factories import (
@@ -117,6 +120,9 @@ from .utils.hitl import (
     make_state_with_interruptions,
     run_and_resume_with_mutation,
 )
+
+_CURRENT_SCHEMA_MAJOR, _CURRENT_SCHEMA_MINOR = CURRENT_SCHEMA_VERSION.split(".")
+_NEXT_UNSUPPORTED_SCHEMA_VERSION = f"{_CURRENT_SCHEMA_MAJOR}.{int(_CURRENT_SCHEMA_MINOR) + 1}"
 
 TContext = TypeVar("TContext")
 
@@ -241,6 +247,304 @@ class TestRunState:
         str_data = state.to_string()
         assert isinstance(str_data, str)
         assert json.loads(str_data) == json_data
+
+    @pytest.mark.asyncio
+    async def test_from_json_restores_duplicate_name_current_agent_by_identity(self):
+        """Duplicate agent names should round-trip through the serialized identity key."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        second = Agent(name="duplicate")
+        first = Agent(name="duplicate", handoffs=[second])
+        second.handoffs = [first]
+        state = make_state(first, context=context, original_input="input1", max_turns=2)
+        state._current_agent = second
+
+        json_data = state.to_json()
+        assert json_data["current_agent"] == {"name": "duplicate", "identity": "duplicate#2"}
+
+        restored = await RunState.from_json(first, json_data)
+        assert restored._current_agent is second
+
+    def test_build_agent_identity_map_avoids_literal_suffix_collisions(self) -> None:
+        """Literal `#<n>` names should not collide with generated duplicate identities."""
+        first = Agent(name="sandbox")
+        literal_suffix = Agent(name="sandbox#2")
+        second = Agent(name="sandbox")
+        first.handoffs = [literal_suffix, second]
+        literal_suffix.handoffs = [first, second]
+        second.handoffs = [first, literal_suffix]
+
+        identity_map = _build_agent_identity_map(first)
+
+        assert identity_map == {
+            "sandbox": first,
+            "sandbox#2": literal_suffix,
+            "sandbox#3": second,
+        }
+
+    def test_build_agent_identity_map_is_stable_across_reordered_duplicate_agents(self) -> None:
+        """Duplicate-name identities should not change when reachable order changes."""
+
+        @function_tool(name_override="alpha_tool")
+        def alpha_tool() -> str:
+            return "alpha"
+
+        @function_tool(name_override="beta_tool")
+        def beta_tool() -> str:
+            return "beta"
+
+        def _identity_for(
+            identity_map: Mapping[str, Agent[Any]],
+            target: Agent[Any],
+        ) -> str:
+            return next(identity for identity, agent in identity_map.items() if agent is target)
+
+        first_alpha = Agent(name="sandbox", instructions="Alpha", tools=[alpha_tool])
+        first_beta = Agent(name="sandbox", instructions="Beta", tools=[beta_tool])
+        first_root = Agent(name="triage", handoffs=[first_beta, first_alpha])
+        first_alpha.handoffs = [first_root]
+        first_beta.handoffs = [first_root]
+
+        second_alpha = Agent(name="sandbox", instructions="Alpha", tools=[alpha_tool])
+        second_beta = Agent(name="sandbox", instructions="Beta", tools=[beta_tool])
+        second_root = Agent(name="triage", handoffs=[second_alpha, second_beta])
+        second_alpha.handoffs = [second_root]
+        second_beta.handoffs = [second_root]
+
+        first_identity_map = _build_agent_identity_map(first_root)
+        second_identity_map = _build_agent_identity_map(second_root)
+
+        assert _identity_for(first_identity_map, first_alpha) == _identity_for(
+            second_identity_map, second_alpha
+        )
+        assert _identity_for(first_identity_map, first_beta) == _identity_for(
+            second_identity_map, second_beta
+        )
+
+    @pytest.mark.asyncio
+    async def test_from_json_restores_duplicate_name_current_agent_with_reordered_graph(self):
+        """Restore should keep the same logical duplicate agent after graph reordering."""
+
+        @function_tool(name_override="alpha_tool")
+        def alpha_tool() -> str:
+            return "alpha"
+
+        @function_tool(name_override="beta_tool")
+        def beta_tool() -> str:
+            return "beta"
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        first_alpha = Agent(name="sandbox", instructions="Alpha", tools=[alpha_tool])
+        first_beta = Agent(name="sandbox", instructions="Beta", tools=[beta_tool])
+        first_root = Agent(name="triage", handoffs=[first_beta, first_alpha])
+        first_alpha.handoffs = [first_root]
+        first_beta.handoffs = [first_root]
+
+        state = make_state(first_root, context=context, original_input="input1", max_turns=2)
+        state._current_agent = first_beta
+        json_data = state.to_json()
+
+        restored_alpha = Agent(name="sandbox", instructions="Alpha", tools=[alpha_tool])
+        restored_beta = Agent(name="sandbox", instructions="Beta", tools=[beta_tool])
+        restored_root = Agent(name="triage", handoffs=[restored_alpha, restored_beta])
+        restored_alpha.handoffs = [restored_root]
+        restored_beta.handoffs = [restored_root]
+
+        restored = await RunState.from_json(restored_root, json_data)
+        assert restored._current_agent is restored_beta
+
+    @pytest.mark.asyncio
+    async def test_from_json_restores_bare_duplicate_name_current_agent_via_identity_map(self):
+        """Bare duplicate names should resolve through the identity map, not traversal order."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        first = Agent(name="duplicate", instructions="zeta")
+        second = Agent(name="duplicate", instructions="alpha")
+        root = Agent(name="triage", handoffs=[first, second])
+        first.handoffs = [root]
+        second.handoffs = [root]
+
+        state = make_state(root, context=context, original_input="input1", max_turns=2)
+        state._current_agent = second
+
+        json_data = state.to_json()
+        assert json_data["current_agent"] == {"name": "duplicate"}
+
+        restored = await RunState.from_json(root, json_data)
+        assert restored._current_agent is second
+
+    def test_build_agent_identity_map_uses_tool_use_behavior_for_duplicate_names(self) -> None:
+        """Duplicate-name identities should stay stable when only tool_use_behavior differs."""
+
+        def _identity_for(
+            identity_map: Mapping[str, Agent[Any]],
+            target: Agent[Any],
+        ) -> str:
+            return next(identity for identity, agent in identity_map.items() if agent is target)
+
+        first_default = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="run_llm_again",
+        )
+        first_stop = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="stop_on_first_tool",
+        )
+        first_root = Agent(name="triage", handoffs=[first_default, first_stop])
+        first_default.handoffs = [first_root]
+        first_stop.handoffs = [first_root]
+
+        second_default = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="run_llm_again",
+        )
+        second_stop = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="stop_on_first_tool",
+        )
+        second_root = Agent(name="triage", handoffs=[second_stop, second_default])
+        second_default.handoffs = [second_root]
+        second_stop.handoffs = [second_root]
+
+        first_identity_map = _build_agent_identity_map(first_root)
+        second_identity_map = _build_agent_identity_map(second_root)
+
+        assert _identity_for(first_identity_map, first_default) == _identity_for(
+            second_identity_map, second_default
+        )
+        assert _identity_for(first_identity_map, first_stop) == _identity_for(
+            second_identity_map, second_stop
+        )
+
+    @pytest.mark.asyncio
+    async def test_from_json_restores_duplicate_name_current_agent_when_tool_use_behavior_differs(
+        self,
+    ) -> None:
+        """Duplicate-name restore should stay stable when tool_use_behavior is the only delta."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        first_default = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="run_llm_again",
+        )
+        first_stop = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="stop_on_first_tool",
+        )
+        first_root = Agent(name="triage", handoffs=[first_default, first_stop])
+        first_default.handoffs = [first_root]
+        first_stop.handoffs = [first_root]
+
+        state = make_state(first_root, context=context, original_input="input1", max_turns=2)
+        state._current_agent = first_stop
+        json_data = state.to_json()
+
+        restored_default = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="run_llm_again",
+        )
+        restored_stop = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="stop_on_first_tool",
+        )
+        restored_root = Agent(name="triage", handoffs=[restored_stop, restored_default])
+        restored_default.handoffs = [restored_root]
+        restored_stop.handoffs = [restored_root]
+
+        restored = await RunState.from_json(restored_root, json_data)
+        assert restored._current_agent is restored_stop
+
+    @pytest.mark.asyncio
+    async def test_from_json_rejects_missing_saved_duplicate_identity(self):
+        """Identity-aware snapshots should fail when the saved duplicate no longer exists."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        second = Agent(name="duplicate", instructions="Second")
+        first = Agent(name="duplicate", instructions="First", handoffs=[second])
+        second.handoffs = [first]
+        state = make_state(first, context=context, original_input="input1", max_turns=2)
+        state._current_agent = second
+
+        json_data = state.to_json()
+        restored_root = Agent(name="duplicate", instructions="First")
+
+        with pytest.raises(UserError, match="agent identity"):
+            await RunState.from_json(restored_root, json_data)
+
+    @pytest.mark.asyncio
+    async def test_result_to_state_preserves_duplicate_name_root_and_owned_state(self):
+        """RunResult.to_state should keep the root graph while preserving the active duplicate."""
+
+        @function_tool(name_override="approval_tool", needs_approval=True)
+        def approval_tool() -> str:
+            return "approved"
+
+        first_model = FakeModel()
+        second_model = FakeModel()
+        first = Agent(name="duplicate", model=first_model)
+        second = Agent(
+            name="duplicate",
+            model=second_model,
+            tools=[approval_tool],
+            model_settings=ModelSettings(tool_choice="required"),
+        )
+        first.handoffs = [second]
+        second.handoffs = [first]
+
+        first_model.add_multiple_turn_outputs([[get_handoff_tool_call(second)]])
+        second_model.add_multiple_turn_outputs(
+            [[get_function_tool_call("approval_tool", json.dumps({}), call_id="call_approval")]]
+        )
+
+        result = await Runner.run(first, "start")
+        assert result.interruptions
+
+        state = result.to_state()
+        assert state._starting_agent is first
+        assert state._current_agent is second
+
+        json_data = state.to_json()
+        assert json_data["current_agent"] == {"name": "duplicate", "identity": "duplicate#2"}
+        assert json_data["tool_use_tracker"]["duplicate#2"] == ["approval_tool"]
+        assert json_data["current_step"] is not None
+        assert json_data["current_step"]["data"]["interruptions"][0]["agent"] == {
+            "name": "duplicate",
+            "identity": "duplicate#2",
+        }
+
+        approval_tool_items = [
+            item
+            for item in json_data["generated_items"]
+            if item["type"] == "tool_call_item"
+            and item["raw_item"].get("call_id") == "call_approval"
+        ]
+        assert len(approval_tool_items) == 1
+        assert approval_tool_items[0]["agent"] == {
+            "name": "duplicate",
+            "identity": "duplicate#2",
+        }
+        assert approval_tool_items[0]["raw_item"] == {
+            "arguments": "{}",
+            "call_id": "call_approval",
+            "id": "1",
+            "name": "approval_tool",
+            "type": "function_call",
+        }
+
+        restored = await RunState.from_json(first, json_data)
+        assert restored._starting_agent is first
+        assert restored._current_agent is second
+        assert restored.get_interruptions()[0].agent is second
+        assert any(
+            isinstance(item, ToolCallItem)
+            and item.agent is second
+            and getattr(item.raw_item, "call_id", None) == "call_approval"
+            for item in restored._generated_items
+        )
 
     async def test_reasoning_item_id_policy_survives_serialization(self):
         """RunState should preserve reasoning item input policy across serialization."""
@@ -1916,6 +2220,64 @@ class TestDeserializeHelpers:
         restored = await RunState.from_string(agent_a, state.to_string())
         assert len(restored._generated_items) == 1
         assert restored._generated_items[0].type == "handoff_output_item"
+
+    @pytest.mark.asyncio
+    async def test_serialization_uses_duplicate_identities_for_handoff_and_output_guardrails(self):
+        """Duplicate-name item ownership should round-trip with identity keys."""
+        first = Agent(name="duplicate")
+        second = Agent(name="duplicate")
+        third = Agent(name="duplicate")
+        first.handoffs = [second, third]
+        second.handoffs = [third]
+        third.handoffs = [first]
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        state = make_state(first, context=context, original_input="test handoff", max_turns=2)
+        state._current_agent = second
+        state._generated_items = [
+            HandoffOutputItem(
+                agent=second,
+                raw_item={"type": "handoff_output", "status": "completed"},  # type: ignore[arg-type]
+                source_agent=second,
+                target_agent=third,
+            )
+        ]
+
+        output_guardrail = OutputGuardrail(
+            guardrail_function=lambda _ctx, _agent, _output: GuardrailFunctionOutput(
+                output_info={"guardrail": "ok"},
+                tripwire_triggered=False,
+            ),
+            name="duplicate_output_guardrail",
+        )
+        state._output_guardrail_results = [
+            OutputGuardrailResult(
+                guardrail=output_guardrail,
+                agent_output="done",
+                agent=third,
+                output=GuardrailFunctionOutput(
+                    output_info={"guardrail": "ok"},
+                    tripwire_triggered=False,
+                ),
+            )
+        ]
+
+        json_data = state.to_json()
+        item_data = json_data["generated_items"][0]
+        assert item_data["agent"] == {"name": "duplicate", "identity": "duplicate#2"}
+        assert item_data["source_agent"] == {"name": "duplicate", "identity": "duplicate#2"}
+        assert item_data["target_agent"] == {"name": "duplicate", "identity": "duplicate#3"}
+        assert json_data["output_guardrail_results"][0]["agent"] == {
+            "name": "duplicate",
+            "identity": "duplicate#3",
+        }
+
+        restored = await RunState.from_json(first, json_data)
+        restored_item = cast(HandoffOutputItem, restored._generated_items[0])
+        assert restored_item.agent is second
+        assert restored_item.source_agent is second
+        assert restored_item.target_agent is third
+        assert restored._output_guardrail_results[0].agent is third
 
     async def test_model_response_serialization_roundtrip(self):
         """Test that model responses serialize and deserialize correctly."""
@@ -3969,7 +4331,7 @@ class TestRunStateSerializationEdgeCases:
             await RunState.from_json(agent, state_json)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("schema_version", ["1.7", "2.0"])
+    @pytest.mark.parametrize("schema_version", [_NEXT_UNSUPPORTED_SCHEMA_VERSION, "2.0", "9.9"])
     async def test_from_json_unsupported_schema_version(self, schema_version: str):
         """Test that from_json raises error when schema version is unsupported."""
         agent = Agent(name="TestAgent")
@@ -4021,8 +4383,41 @@ class TestRunStateSerializationEdgeCases:
     def test_supported_schema_versions_match_released_boundary(self):
         """The support set should include released versions plus the current unreleased writer."""
         assert SUPPORTED_SCHEMA_VERSIONS == frozenset(
-            {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", CURRENT_SCHEMA_VERSION}
+            {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", CURRENT_SCHEMA_VERSION}
         )
+
+    def test_supported_schema_versions_have_non_empty_summaries(self):
+        """Every supported schema version should have a one-line historical summary."""
+        assert frozenset(SCHEMA_VERSION_SUMMARIES) == SUPPORTED_SCHEMA_VERSIONS
+        assert CURRENT_SCHEMA_VERSION in SCHEMA_VERSION_SUMMARIES
+        assert all(summary.strip() for summary in SCHEMA_VERSION_SUMMARIES.values())
+
+    @pytest.mark.asyncio
+    async def test_from_json_accepts_schema_version_1_5_without_sandbox_payload(self):
+        """RunState snapshots written before sandbox resume support should still restore."""
+        agent = Agent(name="TestAgent")
+        state_json = {
+            "$schemaVersion": "1.5",
+            "original_input": "test",
+            "current_agent": {"name": "TestAgent"},
+            "context": {
+                "context": {"foo": "bar"},
+                "usage": {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "approvals": {},
+            },
+            "max_turns": 3,
+            "current_turn": 0,
+            "model_responses": [],
+            "generated_items": [],
+        }
+
+        restored = await RunState.from_json(agent, state_json)
+
+        assert restored._current_agent is not None
+        assert restored._current_agent.name == "TestAgent"
+        assert restored._context is not None
+        assert restored._context.context == {"foo": "bar"}
+        assert restored._sandbox is None
 
     @pytest.mark.asyncio
     async def test_from_json_agent_not_found(self):

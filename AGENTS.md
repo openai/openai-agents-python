@@ -85,6 +85,7 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
   - `src/agents/run_state.py` (RunState serialization/deserialization)
   - `src/agents/run_internal/session_persistence.py` (session save/rewind)
 - If the serialized RunState shape changes, update `CURRENT_SCHEMA_VERSION` in `src/agents/run_state.py` and the related serialization/deserialization logic. Keep released schema versions readable, and feel free to renumber or squash unreleased schema versions before release when those intermediate snapshots are intentionally unsupported.
+- When bumping `CURRENT_SCHEMA_VERSION`, also add or update the matching entry in `SCHEMA_VERSION_SUMMARIES` in `src/agents/run_state.py` so every supported version keeps a short historical note describing what changed in that schema.
 
 ## Operation Guide
 

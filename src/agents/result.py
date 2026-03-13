@@ -46,7 +46,9 @@ from .util._pretty_print import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from collections.abc import Awaitable, Callable
+
+    from .sandbox.session.base_sandbox_session import BaseSandboxSession
 
 T = TypeVar("T")
 
@@ -78,6 +80,7 @@ def _populate_state_from_result(
     auto_previous_response_id: bool = False,
 ) -> RunState[Any]:
     """Populate a RunState with common fields from a RunResult."""
+    state._current_agent = result.last_agent
     model_input_items = getattr(result, "_model_input_items", None)
     if isinstance(model_input_items, list):
         state._generated_items = list(model_input_items)
@@ -106,6 +109,11 @@ def _populate_state_from_result(
     if trace_state is None:
         trace_state = TraceState.from_trace(getattr(result, "trace", None))
     state._trace_state = copy.deepcopy(trace_state) if trace_state else None
+    sandbox_resume_state = getattr(result, "_sandbox_resume_state", None)
+    if isinstance(sandbox_resume_state, dict):
+        state._sandbox = copy.deepcopy(sandbox_resume_state)
+    else:
+        state._sandbox = None
 
     return state
 
@@ -142,6 +150,20 @@ def _input_items_for_result(
     # When the runner marks a divergence, generated_items already reflect the continuation input
     # chosen for the next local run after applying handoff/input filtering.
     return run_items_to_input_items(model_input_items, reasoning_item_id_policy)
+
+
+def _starting_agent_for_state(result: RunResultBase) -> Agent[Any]:
+    """Return the root agent graph that should seed RunState identity resolution."""
+    state = getattr(result, "_state", None)
+    starting_agent = getattr(state, "_starting_agent", None)
+    if isinstance(starting_agent, Agent):
+        return starting_agent
+
+    stored_starting_agent = getattr(result, "_starting_agent_for_state", None)
+    if isinstance(stored_starting_agent, Agent):
+        return stored_starting_agent
+
+    return result.last_agent
 
 
 @dataclass
@@ -185,6 +207,12 @@ class RunResultBase(abc.ABC):
     This is only set when the runner preserved extra session history items that should not be
     replayed into the next local run, such as nested handoff history or filtered handoff input.
     """
+    _sandbox_resume_state: dict[str, object] | None = field(default=None, init=False, repr=False)
+    """Serialized sandbox session state captured during the run."""
+    _sandbox_session: BaseSandboxSession | None = field(default=None, init=False, repr=False)
+    """Live sandbox session attached to this run result when sandbox execution is enabled."""
+    _starting_agent_for_state: Agent[Any] | None = field(default=None, init=False, repr=False)
+    """Root agent graph used when converting the result back into RunState."""
 
     @classmethod
     def __get_pydantic_core_schema__(
@@ -385,7 +413,7 @@ class RunResult(RunResultBase):
             original_input=original_input_for_state
             if original_input_for_state is not None
             else self.input,
-            starting_agent=self.last_agent,
+            starting_agent=_starting_agent_for_state(self),
             max_turns=self.max_turns,
         )
 
@@ -493,6 +521,13 @@ class RunResultStreaming(RunResultBase):
     )
     """How reasoning IDs should be represented when converting to input history."""
     _run_impl_task: InitVar[asyncio.Task[Any] | None] = None
+    _sandbox_cleanup: Callable[[], Awaitable[None]] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _sandbox_cleanup_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _sandbox_cleanup_callback_registered: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self, _run_impl_task: asyncio.Task[Any] | None) -> None:
         self._current_agent_ref = weakref.ref(self.current_agent)
@@ -524,6 +559,57 @@ class RunResultStreaming(RunResultBase):
         self._current_agent_ref = weakref.ref(agent)
         # Preserve dataclass field so repr/asdict continue to succeed.
         self.__dict__["current_agent"] = None
+
+    async def _run_sandbox_cleanup(self) -> None:
+        sandbox_cleanup = self._sandbox_cleanup
+        if sandbox_cleanup is None:
+            return
+
+        task = self._sandbox_cleanup_task
+        if task is None:
+
+            async def _cleanup_once() -> None:
+                try:
+                    await sandbox_cleanup()
+                except Exception as error:
+                    logger.warning(
+                        "Failed to clean up sandbox resources after streamed run: %s", error
+                    )
+
+            task = asyncio.create_task(_cleanup_once())
+            self._sandbox_cleanup_task = task
+
+        await task
+
+    def ensure_sandbox_cleanup_on_completion(self) -> None:
+        if (
+            self._sandbox_cleanup is None
+            or self.run_loop_task is None
+            or self._sandbox_cleanup_callback_registered
+        ):
+            return
+
+        original_task = self.run_loop_task
+        self._sandbox_cleanup_callback_registered = True
+        original_task.add_done_callback(
+            lambda _task: asyncio.create_task(self._run_sandbox_cleanup())
+        )
+
+        async def _await_run_and_cleanup() -> Any:
+            try:
+                result = await original_task
+            except asyncio.CancelledError:
+                if not original_task.done():
+                    original_task.cancel()
+                raise
+            except Exception:
+                await self._run_sandbox_cleanup()
+                raise
+
+            await self._run_sandbox_cleanup()
+            return result
+
+        self.run_loop_task = asyncio.create_task(_await_run_and_cleanup())
 
     def cancel(self, mode: Literal["immediate", "after_turn"] = "immediate") -> None:
         """Cancel the streaming run.
@@ -622,24 +708,28 @@ class RunResultStreaming(RunResultBase):
                 yield item
                 self._event_queue.task_done()
         finally:
-            if cancelled:
-                # Cancellation should return promptly, so avoid waiting on long-running tasks.
-                # Tasks have already been cancelled above.
-                self._cleanup_tasks()
-            else:
-                # Ensure main execution completes before cleanup to avoid race conditions
-                # with session operations
-                await self._await_task_safely(self.run_loop_task)
-                # Safely terminate all background tasks after main execution has finished
-                self._cleanup_tasks()
+            try:
+                if cancelled:
+                    # Cancellation should return promptly, so avoid waiting on long-running tasks.
+                    # Tasks have already been cancelled above.
+                    self._cleanup_tasks()
+                else:
+                    # Ensure main execution completes before cleanup to avoid race conditions
+                    # with session operations.
+                    await self._await_task_safely(self.run_loop_task)
+                    # Safely terminate all background tasks after main execution has finished.
+                    self._cleanup_tasks()
 
-            # Allow any pending callbacks (e.g., cancellation handlers) to enqueue their
-            # completion sentinels before we clear the queues for observability.
-            await asyncio.sleep(0)
+                if not cancelled:
+                    await self._run_sandbox_cleanup()
+            finally:
+                # Allow any pending callbacks (e.g., cancellation handlers) to enqueue their
+                # completion sentinels before we clear the queues for observability.
+                await asyncio.sleep(0)
 
-            # Drain queues so callers observing internal state see them empty after completion.
-            self._drain_event_queue()
-            self._drain_input_guardrail_queue()
+                # Drain queues so callers observing internal state see them empty after completion.
+                self._drain_event_queue()
+                self._drain_input_guardrail_queue()
 
         if self._stored_exception:
             raise self._stored_exception
@@ -781,7 +871,7 @@ class RunResultStreaming(RunResultBase):
         state = RunState(
             context=self.context_wrapper,
             original_input=self._original_input if self._original_input is not None else self.input,
-            starting_agent=self.last_agent,
+            starting_agent=_starting_agent_for_state(self),
             max_turns=self.max_turns,
         )
 

@@ -46,7 +46,9 @@ from agents import (
     tool_output_guardrail,
     trace,
 )
-from agents.run_internal import run_loop
+from agents._public_agent import set_public_agent
+from agents.run_internal import run_loop, turn_resolution
+from agents.run_internal.agent_bindings import bind_execution_agent, bind_public_agent
 from agents.run_internal.run_loop import (
     NextStepFinalOutput,
     NextStepHandoff,
@@ -104,6 +106,13 @@ def _function_span_names() -> list[str]:
         if isinstance(name, str):
             names.append(name)
     return names
+
+
+def _bind_agent(agent: Agent[Any]):
+    public_agent = getattr(agent, "_agents_public_agent", None)
+    if isinstance(public_agent, Agent):
+        return bind_execution_agent(public_agent=public_agent, execution_agent=agent)
+    return bind_public_agent(agent)
 
 
 @pytest.mark.asyncio
@@ -1142,7 +1151,7 @@ async def test_execute_function_tool_calls_parent_cancellation_skips_post_invoke
 
     execution_task = asyncio.create_task(
         execute_function_tool_calls(
-            agent=agent,
+            bindings=bind_public_agent(agent),
             tool_runs=tool_runs,
             hooks=RecordingHooks(),
             context_wrapper=RunContextWrapper(None),
@@ -1188,7 +1197,7 @@ async def test_execute_function_tool_calls_collapse_trace_name_for_top_level_def
 
     with trace("test_execute_function_tool_calls_collapse_trace_name_for_top_level_deferred_tools"):
         await execute_function_tool_calls(
-            agent=Agent(name="test", tools=[tool]),
+            bindings=bind_public_agent(Agent(name="test", tools=[tool])),
             tool_runs=[tool_run],
             hooks=RunHooks(),
             context_wrapper=RunContextWrapper(None),
@@ -1230,7 +1239,7 @@ async def test_execute_function_tool_calls_preserve_trace_name_for_explicit_name
 
     with trace("test_execute_function_tool_calls_preserve_trace_name_for_explicit_namespace"):
         await execute_function_tool_calls(
-            agent=Agent(name="test", tools=[tool]),
+            bindings=bind_public_agent(Agent(name="test", tools=[tool])),
             tool_runs=[tool_run],
             hooks=RunHooks(),
             context_wrapper=RunContextWrapper(None),
@@ -2556,7 +2565,7 @@ async def get_execute_result(
         handoffs=handoffs,
     )
     return await run_loop.execute_tools_and_side_effects(
-        agent=agent,
+        bindings=_bind_agent(agent),
         original_input=original_input or "hello",
         new_response=response,
         pre_step_items=generated_items or [],
@@ -2574,7 +2583,7 @@ async def run_execute_with_processed_response(
     """Execute tools for a pre-constructed ProcessedResponse."""
 
     return await run_loop.execute_tools_and_side_effects(
-        agent=agent,
+        bindings=_bind_agent(agent),
         original_input="test",
         pre_step_items=[],
         new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
@@ -2760,6 +2769,58 @@ async def test_execute_tools_runs_hosted_mcp_callback_when_present():
 
 
 @pytest.mark.asyncio
+async def test_execute_tools_uses_public_agent_for_hosted_mcp_callback_results():
+    """Hosted MCP callback responses should expose the public agent when execution uses a clone."""
+
+    mcp_tool = HostedMCPTool(
+        tool_config={
+            "type": "mcp",
+            "server_label": "test_mcp_server",
+            "server_url": "https://example.com",
+            "require_approval": "always",
+        },
+        on_approval_request=lambda request: {"approve": True},
+    )
+    public_agent = make_agent(tools=[mcp_tool])
+    execution_agent = public_agent.clone()
+    set_public_agent(execution_agent, public_agent)
+    request_item = McpApprovalRequest(
+        id="mcp-approval-callback-public-agent",
+        type="mcp_approval_request",
+        server_label="test_mcp_server",
+        arguments="{}",
+        name="list_repo_languages",
+    )
+    processed_response = make_processed_response(
+        new_items=[MCPApprovalRequestItem(raw_item=request_item, agent=execution_agent)],
+        mcp_approval_requests=[
+            ToolRunMCPApprovalRequest(
+                request_item=request_item,
+                mcp_tool=mcp_tool,
+            )
+        ],
+    )
+
+    result = await run_loop.execute_tools_and_side_effects(
+        bindings=_bind_agent(execution_agent),
+        original_input="test",
+        pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        output_schema=None,
+        hooks=RunHooks(),
+        context_wrapper=make_context_wrapper(),
+        run_config=RunConfig(),
+    )
+
+    assert not isinstance(result.next_step, NextStepInterruption)
+    assert any(
+        isinstance(item, MCPApprovalResponseItem) and item.agent is public_agent
+        for item in result.new_step_items
+    )
+
+
+@pytest.mark.asyncio
 async def test_execute_tools_surfaces_hosted_mcp_interruptions_without_callback():
     """Hosted MCP approvals should surface as interruptions when no callback is provided."""
 
@@ -2803,6 +2864,150 @@ async def test_execute_tools_surfaces_hosted_mcp_interruptions_without_callback(
 
 
 @pytest.mark.asyncio
+async def test_execute_tools_uses_public_agent_for_hosted_mcp_interruptions():
+    """Hosted MCP approval items should expose the public agent when execution uses a clone."""
+
+    mcp_tool = HostedMCPTool(
+        tool_config={
+            "type": "mcp",
+            "server_label": "test_mcp_server",
+            "server_url": "https://example.com",
+            "require_approval": "always",
+        },
+        on_approval_request=None,
+    )
+    public_agent = make_agent(tools=[mcp_tool])
+    execution_agent = public_agent.clone()
+    set_public_agent(execution_agent, public_agent)
+    request_item = McpApprovalRequest(
+        id="mcp-approval-public-agent",
+        type="mcp_approval_request",
+        server_label="test_mcp_server",
+        arguments="{}",
+        name="list_repo_languages",
+    )
+    processed_response = make_processed_response(
+        new_items=[MCPApprovalRequestItem(raw_item=request_item, agent=execution_agent)],
+        mcp_approval_requests=[
+            ToolRunMCPApprovalRequest(
+                request_item=request_item,
+                mcp_tool=mcp_tool,
+            )
+        ],
+    )
+
+    result = await run_loop.execute_tools_and_side_effects(
+        bindings=_bind_agent(execution_agent),
+        original_input="test",
+        pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        output_schema=None,
+        hooks=RunHooks(),
+        context_wrapper=make_context_wrapper(),
+        run_config=RunConfig(),
+    )
+
+    assert isinstance(result.next_step, NextStepInterruption)
+    assert result.next_step.interruptions
+    assert all(item.agent is public_agent for item in result.next_step.interruptions)
+    assert any(
+        isinstance(item, ToolApprovalItem)
+        and getattr(item.raw_item, "id", None) == "mcp-approval-public-agent"
+        and item.agent is public_agent
+        for item in result.new_step_items
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_interrupted_turn_uses_public_agent_for_resumed_hosted_mcp_approvals():
+    """Resumed hosted MCP approvals should keep the public agent on approval responses."""
+
+    mcp_tool = HostedMCPTool(
+        tool_config={
+            "type": "mcp",
+            "server_label": "test_mcp_server",
+            "server_url": "https://example.com",
+            "require_approval": "always",
+        },
+        on_approval_request=None,
+    )
+    public_agent = make_agent(tools=[mcp_tool])
+    execution_agent = public_agent.clone()
+    set_public_agent(execution_agent, public_agent)
+    request_item = McpApprovalRequest(
+        id="mcp-approval-resume-public-agent",
+        type="mcp_approval_request",
+        server_label="test_mcp_server",
+        arguments="{}",
+        name="list_repo_languages",
+    )
+    approval_item = ToolApprovalItem(
+        agent=public_agent,
+        raw_item=request_item,
+        tool_name="list_repo_languages",
+    )
+    context_wrapper = make_context_wrapper()
+    context_wrapper.approve_tool(approval_item)
+    processed_response = make_processed_response(
+        new_items=[MCPApprovalRequestItem(raw_item=request_item, agent=execution_agent)],
+        mcp_approval_requests=[
+            ToolRunMCPApprovalRequest(
+                request_item=request_item,
+                mcp_tool=mcp_tool,
+            )
+        ],
+    )
+
+    result = await turn_resolution.resolve_interrupted_turn(
+        bindings=_bind_agent(execution_agent),
+        original_input="test",
+        original_pre_step_items=[approval_item],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+    )
+
+    responses = [
+        item
+        for item in result.new_step_items
+        if isinstance(item, MCPApprovalResponseItem)
+        and item.raw_item.get("approval_request_id") == "mcp-approval-resume-public-agent"
+    ]
+    assert responses
+    assert all(item.agent is public_agent for item in responses)
+
+
+@pytest.mark.asyncio
+async def test_execute_handoffs_uses_public_agent_for_ignored_extra_handoffs():
+    """Ignored extra handoff outputs should stay owned by the public agent."""
+
+    first_target = Agent(name="alpha")
+    second_target = Agent(name="beta")
+    public_agent = Agent(name="triage", handoffs=[first_target, second_target])
+    execution_agent = public_agent.clone()
+    set_public_agent(execution_agent, public_agent)
+    response = ModelResponse(
+        output=[get_handoff_tool_call(first_target), get_handoff_tool_call(second_target)],
+        usage=Usage(),
+        response_id="resp",
+    )
+
+    result = await get_execute_result(execution_agent, response)
+
+    ignored_outputs = [
+        item
+        for item in result.new_step_items
+        if isinstance(item, ToolCallOutputItem)
+        and item.output == "Multiple handoffs detected, ignoring this one."
+    ]
+    assert len(ignored_outputs) == 1
+    assert ignored_outputs[0].agent is public_agent
+
+
+@pytest.mark.asyncio
 async def test_execute_tools_emits_hosted_mcp_rejection_response():
     """Hosted MCP rejections without callbacks should emit approval responses."""
 
@@ -2836,7 +3041,7 @@ async def test_execute_tools_emits_hosted_mcp_rejection_response():
     reject_tool_call(context_wrapper, agent, request_item, tool_name="list_repo_languages")
 
     result = await run_loop.execute_tools_and_side_effects(
-        agent=agent,
+        bindings=_bind_agent(agent),
         original_input="test",
         pre_step_items=[],
         new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
@@ -2897,7 +3102,7 @@ async def test_execute_tools_emits_hosted_mcp_rejection_reason_from_explicit_mes
     )
 
     result = await run_loop.execute_tools_and_side_effects(
-        agent=agent,
+        bindings=_bind_agent(agent),
         original_input="test",
         pre_step_items=[],
         new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),

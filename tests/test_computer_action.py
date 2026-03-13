@@ -571,7 +571,7 @@ async def test_pending_safety_check_acknowledged() -> None:
     ctx = RunContextWrapper(context=None)
 
     results = await run_loop.execute_computer_actions(
-        agent=agent,
+        public_agent=agent,
         actions=[run_action],
         hooks=RunHooks[Any](),
         context_wrapper=ctx,

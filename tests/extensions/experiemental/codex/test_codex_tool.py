@@ -27,6 +27,7 @@ from agents.extensions.experimental.codex.codex_tool import CodexToolInputItem
 from agents.lifecycle import RunHooks
 from agents.run_config import RunConfig
 from agents.run_context import RunContextWrapper
+from agents.run_internal.agent_bindings import bind_public_agent
 from agents.run_internal.run_steps import ToolRunFunction
 from agents.run_internal.tool_execution import execute_function_tool_calls
 from agents.tool_context import ToolContext
@@ -920,7 +921,7 @@ async def test_codex_tool_persists_thread_id_for_handled_parallel_cancellation()
 
     with pytest.raises(UserError, match="Error running tool error_tool: boom"):
         await execute_function_tool_calls(
-            agent=agent,
+            bindings=bind_public_agent(agent),
             tool_runs=tool_runs,
             hooks=RunHooks(),
             context_wrapper=context_wrapper,

@@ -24,6 +24,7 @@ from ..items import (
 from ..run_context import RunContextWrapper
 from ..tool import FunctionTool, MCPToolApprovalRequest
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
+from .agent_bindings import AgentBindings
 from .run_steps import (
     ToolRunApplyPatchCall,
     ToolRunComputerAction,
@@ -518,7 +519,7 @@ async def _select_function_tool_runs_for_resume(
 async def _execute_tool_plan(
     *,
     plan: ToolExecutionPlan,
-    agent: Agent[Any],
+    bindings: AgentBindings[Any],
     hooks,
     context_wrapper: RunContextWrapper[Any],
     run_config,
@@ -533,6 +534,7 @@ async def _execute_tool_plan(
     list[RunItem],
 ]:
     """Execute tool runs captured in a ToolExecutionPlan."""
+    public_agent = bindings.public_agent
     isolate_function_tool_failures = len(plan.function_runs) > 1 or (
         parallel
         and (
@@ -551,7 +553,7 @@ async def _execute_tool_plan(
             local_shell_results,
         ) = await asyncio.gather(
             execute_function_tool_calls(
-                agent=agent,
+                bindings=bindings,
                 tool_runs=plan.function_runs,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
@@ -559,28 +561,28 @@ async def _execute_tool_plan(
                 isolate_parallel_failures=isolate_function_tool_failures,
             ),
             execute_computer_actions(
-                agent=agent,
+                public_agent=public_agent,
                 actions=plan.computer_actions,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=run_config,
             ),
             execute_shell_calls(
-                agent=agent,
+                public_agent=public_agent,
                 calls=plan.shell_calls,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=run_config,
             ),
             execute_apply_patch_calls(
-                agent=agent,
+                public_agent=public_agent,
                 calls=plan.apply_patch_calls,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=run_config,
             ),
             execute_local_shell_calls(
-                agent=agent,
+                public_agent=public_agent,
                 calls=plan.local_shell_calls,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
@@ -593,7 +595,7 @@ async def _execute_tool_plan(
             tool_input_guardrail_results,
             tool_output_guardrail_results,
         ) = await execute_function_tool_calls(
-            agent=agent,
+            bindings=bindings,
             tool_runs=plan.function_runs,
             hooks=hooks,
             context_wrapper=context_wrapper,
@@ -601,28 +603,28 @@ async def _execute_tool_plan(
             isolate_parallel_failures=isolate_function_tool_failures,
         )
         computer_results = await execute_computer_actions(
-            agent=agent,
+            public_agent=public_agent,
             actions=plan.computer_actions,
             hooks=hooks,
             context_wrapper=context_wrapper,
             config=run_config,
         )
         shell_results = await execute_shell_calls(
-            agent=agent,
+            public_agent=public_agent,
             calls=plan.shell_calls,
             hooks=hooks,
             context_wrapper=context_wrapper,
             config=run_config,
         )
         apply_patch_results = await execute_apply_patch_calls(
-            agent=agent,
+            public_agent=public_agent,
             calls=plan.apply_patch_calls,
             hooks=hooks,
             context_wrapper=context_wrapper,
             config=run_config,
         )
         local_shell_results = await execute_local_shell_calls(
-            agent=agent,
+            public_agent=public_agent,
             calls=plan.local_shell_calls,
             hooks=hooks,
             context_wrapper=context_wrapper,

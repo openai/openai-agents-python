@@ -1,5 +1,5 @@
 import json
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
@@ -7,11 +7,18 @@ from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessa
 import agents.run as run_module
 from agents import Agent, Runner, function_tool
 from agents.agent import ToolsToFinalOutputResult
-from agents.items import MessageOutputItem, ModelResponse, ToolCallItem, ToolCallOutputItem
+from agents.items import (
+    MessageOutputItem,
+    ModelResponse,
+    ToolApprovalItem,
+    ToolCallItem,
+    ToolCallOutputItem,
+)
 from agents.lifecycle import RunHooks
 from agents.run import RunConfig
 from agents.run_context import RunContextWrapper
 from agents.run_internal import run_loop, turn_resolution
+from agents.run_internal.agent_bindings import bind_public_agent
 from agents.run_internal.run_loop import (
     NextStepFinalOutput,
     NextStepInterruption,
@@ -84,7 +91,7 @@ async def test_resolve_interrupted_turn_final_output_short_circuit(monkeypatch) 
     )
 
     result = await run_loop.resolve_interrupted_turn(
-        agent=agent,
+        bindings=bind_public_agent(agent),
         original_input="input",
         original_pre_step_items=[],
         new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
@@ -266,3 +273,110 @@ async def test_resumed_approval_does_not_duplicate_session_items() -> None:
 
     assert call_count == 1
     assert output_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("schema_version", "expect_execution"),
+    [("1.6", True), ("1.7", False)],
+)
+async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_approval_agents(
+    schema_version: str,
+    expect_execution: bool,
+) -> None:
+    calls: list[str] = []
+
+    @function_tool(name_override="needs_ok", needs_approval=True)
+    async def needs_ok(text: str) -> str:
+        calls.append(text)
+        return text
+
+    base_duplicate = Agent(name="duplicate", instructions="alpha", tools=[needs_ok])
+    resumed_duplicate = Agent(name="duplicate", instructions="zeta", tools=[needs_ok])
+    root = Agent(name="triage", handoffs=[base_duplicate, resumed_duplicate])
+    base_duplicate.handoffs = [root]
+    resumed_duplicate.handoffs = [root]
+
+    state: RunState[dict[str, str], Agent[Any]] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=root,
+        max_turns=2,
+    )
+    state._current_agent = resumed_duplicate
+    state._current_step = NextStepInterruption(
+        interruptions=[
+            ToolApprovalItem(
+                agent=resumed_duplicate,
+                raw_item=cast(
+                    ResponseFunctionToolCall,
+                    get_function_tool_call(
+                        "needs_ok",
+                        json.dumps({"text": "one"}),
+                        call_id="legacy-call",
+                    ),
+                ),
+            )
+        ]
+    )
+    state._last_processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+    state._model_responses = [ModelResponse(output=[], usage=Usage(), response_id="resp")]
+
+    json_data = state.to_json()
+    current_agent_data = cast(dict[str, str], json_data["current_agent"])
+    assert current_agent_data["name"] == "duplicate"
+    assert "identity" in current_agent_data
+
+    interruption_data = cast(
+        dict[str, object],
+        json_data["current_step"]["data"]["interruptions"][0],
+    )
+    interruption_agent_data = cast(dict[str, str], interruption_data["agent"])
+    assert interruption_agent_data["identity"] == current_agent_data["identity"]
+    interruption_agent_data.pop("identity")
+    json_data["$schemaVersion"] = schema_version
+
+    restored = await RunState.from_json(root, json_data)
+    assert restored._schema_version == schema_version
+    assert restored._current_agent is resumed_duplicate
+    restored_approval = restored.get_interruptions()[0]
+    restored.approve(restored_approval)
+    assert restored._context is not None
+    assert restored._last_processed_response is not None
+
+    result = await turn_resolution.resolve_interrupted_turn(
+        bindings=bind_public_agent(cast(Agent[dict[str, str]], restored._current_agent)),
+        original_input=restored._original_input,
+        original_pre_step_items=restored._generated_items,
+        new_response=restored._model_responses[-1],
+        processed_response=restored._last_processed_response,
+        hooks=RunHooks(),
+        context_wrapper=restored._context,
+        run_config=RunConfig(),
+        run_state=restored,
+    )
+
+    if expect_execution:
+        assert isinstance(result.next_step, NextStepRunAgain)
+        assert calls == ["one"]
+        assert any(
+            isinstance(item, ToolCallOutputItem) and item.output == "one"
+            for item in result.new_step_items
+        )
+    else:
+        assert calls == []
+        assert not any(
+            isinstance(item, ToolCallOutputItem) and item.output == "one"
+            for item in result.new_step_items
+        )

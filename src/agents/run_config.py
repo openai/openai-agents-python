@@ -22,6 +22,11 @@ from .util._types import MaybeAwaitable
 if TYPE_CHECKING:
     from .agent import Agent
     from .run_context import RunContextWrapper
+    from .sandbox.manifest import Manifest
+    from .sandbox.session.base_sandbox_session import BaseSandboxSession
+    from .sandbox.session.sandbox_client import BaseSandboxClient
+    from .sandbox.session.sandbox_session_state import SandboxSessionState
+    from .sandbox.snapshot import SnapshotSpec
 
 
 DEFAULT_MAX_TURNS = 10
@@ -78,6 +83,29 @@ class ToolErrorFormatterArgs(Generic[TContext]):
 
 
 ToolErrorFormatter = Callable[[ToolErrorFormatterArgs[Any]], MaybeAwaitable[Optional[str]]]
+
+
+@dataclass
+class SandboxRunConfig:
+    """Grouped sandbox runtime configuration for `Runner`."""
+
+    client: BaseSandboxClient[Any] | None = None
+    """Sandbox client used to create or resume sandbox sessions."""
+
+    options: Any | None = None
+    """Sandbox-client-specific options used when creating a fresh session."""
+
+    session: BaseSandboxSession | None = None
+    """Live sandbox session override for the current process."""
+
+    session_state: SandboxSessionState | None = None
+    """Explicit sandbox session state to resume from when not using `RunState` payloads."""
+
+    manifest: Manifest | None = None
+    """Optional sandbox manifest override for fresh session creation."""
+
+    snapshot: SnapshotSpec | None = None
+    """Optional sandbox snapshot used for fresh session creation."""
 
 
 @dataclass
@@ -191,6 +219,9 @@ class RunConfig:
     - ``"omit"`` strips reasoning item IDs from model input built by the runner.
     """
 
+    sandbox: SandboxRunConfig | None = None
+    """Optional sandbox runtime configuration for `SandboxAgent` execution."""
+
 
 class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
@@ -231,6 +262,7 @@ __all__ = [
     "ReasoningItemIdPolicy",
     "RunConfig",
     "RunOptions",
+    "SandboxRunConfig",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "_default_trace_include_sensitive_data",
