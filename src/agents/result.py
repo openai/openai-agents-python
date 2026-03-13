@@ -222,9 +222,11 @@ class RunResultBase(abc.ABC):
         new_items: list[TResponseInputItem] = []
         reasoning_item_id_policy = getattr(self, "_reasoning_item_id_policy", None)
 
-        # Prefer _model_input_items when populated (after handoffs with nesting)
-        # to avoid orphaned function_call/function_call_output items.
-        source_items = getattr(self, "_model_input_items", None) or self.new_items
+        # Only prefer _model_input_items when handoff nesting actually occurred,
+        # so server-managed conversation runs still use the full new_items transcript.
+        model_input_items = getattr(self, "_model_input_items", None)
+        has_nesting = model_input_items and model_input_items != self.new_items
+        source_items = model_input_items if has_nesting else self.new_items
 
         for item in source_items:
             converted = run_item_to_input_item(item, reasoning_item_id_policy)
