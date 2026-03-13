@@ -118,8 +118,10 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.5"
-SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2", "1.3", "1.4", CURRENT_SCHEMA_VERSION})
+CURRENT_SCHEMA_VERSION = "1.6"
+SUPPORTED_SCHEMA_VERSIONS = frozenset(
+    {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", CURRENT_SCHEMA_VERSION}
+)
 
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
 _COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(ComputerCallOutput)
@@ -271,11 +273,26 @@ class RunState(Generic[TContext, TAgent]):
             raise UserError("Cannot approve tool: RunState has no context")
         self._context.approve_tool(approval_item, always_approve=always_approve)
 
-    def reject(self, approval_item: ToolApprovalItem, always_reject: bool = False) -> None:
-        """Reject a tool call and rerun with this state to continue."""
+    def reject(
+        self,
+        approval_item: ToolApprovalItem,
+        always_reject: bool = False,
+        *,
+        rejection_message: str | None = None,
+    ) -> None:
+        """Reject a tool call and rerun with this state to continue.
+
+        When ``rejection_message`` is provided, that exact text is sent back to the model when the
+        run resumes. Otherwise the run-level tool error formatter or the SDK default message is
+        used.
+        """
         if self._context is None:
             raise UserError("Cannot reject tool: RunState has no context")
-        self._context.reject_tool(approval_item, always_reject=always_reject)
+        self._context.reject_tool(
+            approval_item,
+            always_reject=always_reject,
+            rejection_message=rejection_message,
+        )
 
     def _serialize_approvals(self) -> dict[str, dict[str, Any]]:
         """Serialize approval records into a JSON-friendly mapping."""
@@ -291,6 +308,12 @@ class RunState(Generic[TContext, TAgent]):
                 if isinstance(record.rejected, bool)
                 else list(record.rejected),
             }
+            if record.rejection_messages:
+                approvals_dict[tool_name]["rejection_messages"] = dict(record.rejection_messages)
+            if record.sticky_rejection_message is not None:
+                approvals_dict[tool_name]["sticky_rejection_message"] = (
+                    record.sticky_rejection_message
+                )
         return approvals_dict
 
     def _serialize_model_responses(self) -> list[dict[str, Any]]:

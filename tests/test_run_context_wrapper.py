@@ -61,6 +61,39 @@ def test_run_context_honors_global_approval_and_rejection() -> None:
     assert wrapper.is_tool_approved("tool_call", "call-3") is False
 
 
+def test_run_context_stores_per_call_rejection_messages() -> None:
+    wrapper: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    agent = make_agent()
+    approval = ToolApprovalItem(agent=agent, raw_item={"type": "tool_call", "call_id": "call-1"})
+
+    wrapper.reject_tool(approval, rejection_message="Denied by policy")
+
+    assert wrapper.get_rejection_message("tool_call", "call-1") == "Denied by policy"
+    assert wrapper.get_rejection_message("tool_call", "call-2") is None
+
+
+def test_run_context_stores_sticky_rejection_messages_for_always_reject() -> None:
+    wrapper: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    agent = make_agent()
+    approval = ToolApprovalItem(agent=agent, raw_item={"type": "tool_call", "call_id": "call-1"})
+
+    wrapper.reject_tool(approval, always_reject=True, rejection_message="")
+
+    assert wrapper.get_rejection_message("tool_call", "call-1") == ""
+    assert wrapper.get_rejection_message("tool_call", "call-2") == ""
+
+
+def test_run_context_clears_rejection_message_after_approval() -> None:
+    wrapper: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    agent = make_agent()
+    approval = ToolApprovalItem(agent=agent, raw_item={"type": "tool_call", "call_id": "call-1"})
+
+    wrapper.reject_tool(approval, rejection_message="Denied by policy")
+    wrapper.approve_tool(approval)
+
+    assert wrapper.get_rejection_message("tool_call", "call-1") is None
+
+
 def test_run_context_unknown_tool_name_fallback() -> None:
     agent = make_agent()
     raw: dict[str, Any] = {}

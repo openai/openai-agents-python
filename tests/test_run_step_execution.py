@@ -2853,4 +2853,65 @@ async def test_execute_tools_emits_hosted_mcp_rejection_response():
     assert responses, "Rejection should emit an MCP approval response."
     assert responses[0].raw_item["approve"] is False
     assert responses[0].raw_item["approval_request_id"] == "mcp-approval-reject"
+    assert "reason" not in responses[0].raw_item
     assert not isinstance(result.next_step, NextStepInterruption)
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_emits_hosted_mcp_rejection_reason_from_explicit_message():
+    """Hosted MCP rejections should forward explicit rejection messages as reasons."""
+
+    mcp_tool = HostedMCPTool(
+        tool_config={
+            "type": "mcp",
+            "server_label": "test_mcp_server",
+            "server_url": "https://example.com",
+            "require_approval": "always",
+        },
+        on_approval_request=None,
+    )
+    agent = make_agent(tools=[mcp_tool])
+    request_item = McpApprovalRequest(
+        id="mcp-approval-reject-reason",
+        type="mcp_approval_request",
+        server_label="test_mcp_server",
+        arguments="{}",
+        name="list_repo_languages",
+    )
+    processed_response = make_processed_response(
+        new_items=[MCPApprovalRequestItem(raw_item=request_item, agent=agent)],
+        mcp_approval_requests=[
+            ToolRunMCPApprovalRequest(
+                request_item=request_item,
+                mcp_tool=mcp_tool,
+            )
+        ],
+    )
+    context_wrapper = make_context_wrapper()
+    reject_tool_call(
+        context_wrapper,
+        agent,
+        request_item,
+        tool_name="list_repo_languages",
+        rejection_message="Denied by policy",
+    )
+
+    result = await run_loop.execute_tools_and_side_effects(
+        agent=agent,
+        original_input="test",
+        pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        output_schema=None,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+    )
+
+    responses = [
+        item for item in result.new_step_items if isinstance(item, MCPApprovalResponseItem)
+    ]
+    assert responses, "Rejection should emit an MCP approval response."
+    assert responses[0].raw_item["approve"] is False
+    assert responses[0].raw_item["approval_request_id"] == "mcp-approval-reject-reason"
+    assert responses[0].raw_item["reason"] == "Denied by policy"

@@ -384,6 +384,21 @@ class TestRunState:
         assert state._context is not None
         assert state._context.is_tool_approved(tool_name="toolY", call_id="cid456") is False
 
+    def test_reject_stores_rejection_message(self):
+        """Test that reject() stores the explicit rejection message."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="AgentRejectMessage")
+        state = make_state(agent, context=context, original_input="", max_turns=1)
+
+        approval_item = make_tool_approval_item(
+            agent, call_id="cid456", name="toolY", arguments="arguments"
+        )
+
+        state.reject(approval_item, rejection_message="Denied by reviewer")
+
+        assert state._context is not None
+        assert state._context.get_rejection_message("toolY", "cid456") == "Denied by reviewer"
+
     def test_to_json_non_mapping_context_warns_and_omits(self, caplog):
         """Ensure non-mapping contexts are omitted with a warning during serialization."""
 
@@ -699,6 +714,23 @@ class TestRunState:
         assert state._context is not None
         assert state._context.is_tool_approved(tool_name="toolZ", call_id="cid789") is False
         assert state._context.is_tool_approved(tool_name="toolZ", call_id="cid999") is None
+        assert state._context.get_rejection_message("toolZ", "cid999") is None
+
+    def test_always_reject_reuses_rejection_message_for_future_calls(self):
+        """Test that always_reject stores a sticky rejection message."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="AgentStickyReject")
+        state = make_state(agent, context=context, original_input="", max_turns=1)
+
+        approval_item = make_tool_approval_item(
+            agent, call_id="cid789", name="toolZ", arguments="arguments"
+        )
+
+        state.reject(approval_item, always_reject=True, rejection_message="")
+
+        assert state._context is not None
+        assert state._context.get_rejection_message("toolZ", "cid789") == ""
+        assert state._context.get_rejection_message("toolZ", "cid999") == ""
 
     def test_approve_raises_when_context_is_none(self):
         """Test that approve raises UserError when context is None."""
@@ -1014,6 +1046,94 @@ class TestRunState:
         assert new_state._context is not None
         assert new_state._context.is_tool_approved(tool_name="tool1", call_id="cid1") is True
         assert new_state._context.is_tool_approved(tool_name="tool2", call_id="cid2") is False
+        assert new_state._context.get_rejection_message("tool2", "cid2") is None
+
+    async def test_serializes_and_restores_rejection_messages(self):
+        """Test that rejection messages are preserved through serialization."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ApprovalMessageAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        raw_item = ResponseFunctionToolCall(
+            type="function_call",
+            name="tool2",
+            call_id="cid2",
+            status="completed",
+            arguments="",
+        )
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+        state.reject(approval_item, always_reject=True, rejection_message="Denied by reviewer")
+
+        new_state = await RunState.from_string(agent, state.to_string())
+
+        assert new_state._context is not None
+        assert new_state._context.get_rejection_message("tool2", "cid2") == "Denied by reviewer"
+        assert new_state._context.get_rejection_message("tool2", "cid3") == "Denied by reviewer"
+
+    async def test_from_json_accepts_previous_schema_version_without_rejection_messages(self):
+        """Test that 1.5 snapshots restore even without rejection message fields."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ApprovalLegacyAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        raw_item = ResponseFunctionToolCall(
+            type="function_call",
+            name="tool2",
+            call_id="cid2",
+            status="completed",
+            arguments="",
+        )
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+        state.reject(approval_item, rejection_message="Denied by reviewer")
+
+        json_data = state.to_json()
+        json_data["$schemaVersion"] = "1.5"
+        del json_data["context"]["approvals"]["tool2"]["rejection_messages"]
+
+        restored = await RunState.from_json(agent, json_data)
+
+        assert restored._context is not None
+        assert restored._context.is_tool_approved("tool2", "cid2") is False
+        assert restored._context.get_rejection_message("tool2", "cid2") is None
+
+    async def test_from_json_with_context_override_uses_serialized_rejection_messages(self):
+        """Test that serialized approvals rebuild onto the override context."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={"source": "saved"})
+        agent = Agent(name="ApprovalOverrideAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        approval_item = ToolApprovalItem(
+            agent=agent,
+            raw_item=ResponseFunctionToolCall(
+                type="function_call",
+                name="tool2",
+                call_id="cid2",
+                status="completed",
+                arguments="",
+            ),
+        )
+        state.reject(approval_item, always_reject=True, rejection_message="Denied by reviewer")
+
+        override_context: RunContextWrapper[dict[str, str]] = RunContextWrapper(
+            context={"source": "override"}
+        )
+        override_context.reject_tool(
+            approval_item,
+            always_reject=True,
+            rejection_message="override denial",
+        )
+
+        restored = await RunState.from_json(
+            agent,
+            state.to_json(),
+            context_override=override_context,
+        )
+
+        assert restored._context is override_context
+        assert restored._context is not None
+        assert restored._context.context == {"source": "override"}
+        assert restored._context.get_rejection_message("tool2", "cid2") == "Denied by reviewer"
+        assert restored._context.get_rejection_message("tool2", "cid3") == "Denied by reviewer"
 
 
 class TestBuildAgentMap:
@@ -3849,7 +3969,7 @@ class TestRunStateSerializationEdgeCases:
             await RunState.from_json(agent, state_json)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("schema_version", ["1.6", "1.7", "2.0"])
+    @pytest.mark.parametrize("schema_version", ["1.7", "2.0"])
     async def test_from_json_unsupported_schema_version(self, schema_version: str):
         """Test that from_json raises error when schema version is unsupported."""
         agent = Agent(name="TestAgent")
@@ -3901,7 +4021,7 @@ class TestRunStateSerializationEdgeCases:
     def test_supported_schema_versions_match_released_boundary(self):
         """The support set should include released versions plus the current unreleased writer."""
         assert SUPPORTED_SCHEMA_VERSIONS == frozenset(
-            {"1.0", "1.1", "1.2", "1.3", "1.4", CURRENT_SCHEMA_VERSION}
+            {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", CURRENT_SCHEMA_VERSION}
         )
 
     @pytest.mark.asyncio

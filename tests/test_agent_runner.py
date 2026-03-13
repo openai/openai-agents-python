@@ -5,7 +5,7 @@ import json
 import tempfile
 import warnings
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 from unittest.mock import patch
 
 import httpx
@@ -107,6 +107,7 @@ async def run_execute_approved_tools(
     *,
     approve: bool | None,
     run_config: RunConfig | None = None,
+    mutate_state: Callable[[RunState[Any, Agent[Any]], ToolApprovalItem], None] | None = None,
 ) -> list[RunItem]:
     """Execute approved tools with a consistent setup."""
 
@@ -122,6 +123,8 @@ async def run_execute_approved_tools(
         state.approve(approval_item)
     elif approve is False:
         state.reject(approval_item)
+    if mutate_state is not None:
+        mutate_state(state, approval_item)
 
     generated_items: list[RunItem] = []
 
@@ -3575,6 +3578,36 @@ async def test_execute_approved_tools_with_rejected_tool_uses_run_level_formatte
 
 
 @pytest.mark.asyncio
+async def test_execute_approved_tools_with_rejected_tool_prefers_explicit_message():
+    """Rejected tools should prefer explicit rejection messages over the formatter."""
+
+    async def test_tool() -> str:
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool")
+    _, agent = make_model_and_agent(tools=[tool])
+
+    tool_call = get_function_tool_call("test_tool", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=False,
+        run_config=RunConfig(
+            tool_error_formatter=lambda args: f"run-level {args.tool_name} denied ({args.call_id})"
+        ),
+        mutate_state=lambda state, item: state.reject(
+            item, rejection_message="explicit rejection message"
+        ),
+    )
+
+    assert len(generated_items) == 1
+    assert generated_items[0].output == "explicit rejection message"
+
+
+@pytest.mark.asyncio
 async def test_execute_approved_tools_with_rejected_deferred_tool_uses_display_name():
     """Rejected deferred tools should collapse synthetic namespaces in formatter output."""
 
@@ -3844,6 +3877,57 @@ async def test_execute_approved_tools_uses_internal_lookup_key_for_deferred_top_
     assert generated_items[0].output == "deferred"
     assert visible_calls == []
     assert deferred_calls == ["deferred"]
+
+
+@pytest.mark.asyncio
+async def test_deferred_collision_rejection_prefers_explicit_message() -> None:
+    async def visible_lookup() -> str:
+        return "visible"
+
+    async def deferred_lookup() -> str:
+        return "deferred"
+
+    visible_tool = function_tool(
+        visible_lookup,
+        name_override="lookup_account.lookup_account",
+    )
+    deferred_tool = function_tool(
+        deferred_lookup,
+        name_override="lookup_account",
+        defer_loading=True,
+    )
+    agent = Agent(name="TestAgent", model=FakeModel(), tools=[visible_tool, deferred_tool])
+
+    tool_call = get_function_tool_call(
+        "lookup_account",
+        "{}",
+        call_id="call-deferred",
+        namespace="lookup_account",
+    )
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(
+        agent=agent,
+        raw_item=tool_call,
+        tool_name="lookup_account",
+        tool_namespace="lookup_account",
+        tool_lookup_key=("deferred_top_level", "lookup_account"),
+    )
+
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=False,
+        run_config=RunConfig(
+            tool_error_formatter=lambda args: f"run-level {args.tool_name} denied ({args.call_id})"
+        ),
+        mutate_state=lambda state, item: state.reject(
+            item, rejection_message="explicit rejection message"
+        ),
+    )
+
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert generated_items[0].output == "explicit rejection message"
 
 
 @pytest.mark.asyncio

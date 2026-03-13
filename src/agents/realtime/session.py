@@ -10,6 +10,7 @@ from typing import Any, cast
 from pydantic import BaseModel
 from typing_extensions import assert_never
 
+from .._tool_identity import get_function_tool_lookup_key_for_tool
 from ..agent import Agent
 from ..exceptions import UserError
 from ..handoffs import Handoff
@@ -527,6 +528,14 @@ class RealtimeSession(RealtimeModelListener):
 
     async def _resolve_approval_rejection_message(self, *, tool: FunctionTool, call_id: str) -> str:
         """Resolve model-visible output text for approval rejections."""
+        explicit_message = self._context_wrapper.get_rejection_message(
+            tool.name,
+            call_id,
+            tool_lookup_key=get_function_tool_lookup_key_for_tool(tool),
+        )
+        if explicit_message is not None:
+            return explicit_message
+
         formatter = self._run_config.get("tool_error_formatter")
         if formatter is None:
             return REJECTION_MESSAGE
@@ -574,14 +583,24 @@ class RealtimeSession(RealtimeModelListener):
         else:
             await self._handle_tool_call(tool_call, agent_snapshot=agent_snapshot)
 
-    async def reject_tool_call(self, call_id: str, *, always: bool = False) -> None:
+    async def reject_tool_call(
+        self,
+        call_id: str,
+        *,
+        always: bool = False,
+        rejection_message: str | None = None,
+    ) -> None:
         """Reject a pending tool call and notify the model."""
         pending = self._pending_tool_calls.pop(call_id, None)
         if pending is None:
             return
 
         tool_call, agent_snapshot, function_tool, approval_item = pending
-        self._context_wrapper.reject_tool(approval_item, always_reject=always)
+        self._context_wrapper.reject_tool(
+            approval_item,
+            always_reject=always,
+            rejection_message=rejection_message,
+        )
         await self._send_tool_rejection(tool_call, tool=function_tool, agent=agent_snapshot)
 
     async def _handle_tool_call(

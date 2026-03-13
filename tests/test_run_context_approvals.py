@@ -52,6 +52,31 @@ def test_namespaced_approval_status_does_not_fall_back_to_bare_tool_decisions() 
     )
 
 
+def test_namespaced_rejection_message_does_not_fall_back_to_bare_tool_decisions() -> None:
+    agent = Agent(name="test-agent")
+    context_wrapper = RunContextWrapper(context=None)
+    bare_item = make_tool_approval_item(agent, call_id="call-bare", name="lookup_account")
+    billing_item = make_tool_approval_item(
+        agent,
+        call_id="call-billing",
+        name="lookup_account",
+        namespace="billing",
+    )
+
+    context_wrapper.reject_tool(bare_item, always_reject=True, rejection_message="bare denial")
+
+    assert (
+        context_wrapper.get_rejection_message(
+            "lookup_account",
+            "call-billing-2",
+            tool_namespace="billing",
+            existing_pending=billing_item,
+        )
+        is None
+    )
+    assert context_wrapper.get_rejection_message("lookup_account", "call-bare-2") == "bare denial"
+
+
 def test_deferred_top_level_per_call_approval_keeps_bare_name_lookup() -> None:
     agent = Agent(name="test-agent")
     context_wrapper = RunContextWrapper(context=None)
@@ -66,6 +91,22 @@ def test_deferred_top_level_per_call_approval_keeps_bare_name_lookup() -> None:
     context_wrapper.approve_tool(deferred_item)
 
     assert context_wrapper.is_tool_approved("get_weather", "call-weather") is True
+
+
+def test_deferred_top_level_rejection_message_keeps_bare_name_lookup() -> None:
+    agent = Agent(name="test-agent")
+    context_wrapper = RunContextWrapper(context=None)
+    deferred_item = make_tool_approval_item(
+        agent,
+        call_id="call-weather",
+        name="get_weather",
+        namespace="get_weather",
+        allow_bare_name_alias=True,
+    )
+
+    context_wrapper.reject_tool(deferred_item, rejection_message="weather denied")
+
+    assert context_wrapper.get_rejection_message("get_weather", "call-weather") == "weather denied"
 
 
 def test_deferred_top_level_permanent_approval_does_not_alias_to_bare_name() -> None:

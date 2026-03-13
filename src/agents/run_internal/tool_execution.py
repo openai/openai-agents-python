@@ -1049,8 +1049,21 @@ async def resolve_approval_rejection_message(
     tool_type: Literal["function", "computer", "shell", "apply_patch"],
     tool_name: str,
     call_id: str,
+    tool_namespace: str | None = None,
+    tool_lookup_key: FunctionToolLookupKey | None = None,
+    existing_pending: ToolApprovalItem | None = None,
 ) -> str:
     """Resolve model-visible output text for approval rejections."""
+    explicit_message = context_wrapper.get_rejection_message(
+        tool_name,
+        call_id,
+        tool_namespace=tool_namespace,
+        tool_lookup_key=tool_lookup_key,
+        existing_pending=existing_pending,
+    )
+    if explicit_message is not None:
+        return explicit_message
+
     formatter = run_config.tool_error_formatter
     if formatter is None:
         return REJECTION_MESSAGE
@@ -1150,6 +1163,13 @@ def process_hosted_mcp_approvals(
                 "approval_request_id": request_id,
                 "approve": approved,
             }
+            rejection_message = context_wrapper.get_rejection_message(
+                tool_name=tool_name,
+                call_id=request_id,
+                existing_pending=approval_item,
+            )
+            if approved is False and rejection_message is not None:
+                raw_item["reason"] = rejection_message
             response_item = MCPApprovalResponseItem(raw_item=raw_item, agent=agent)
             append_item(response_item)
             continue
@@ -1199,6 +1219,13 @@ def collect_manual_mcp_approvals(
                 "approval_request_id": request_id,
                 "approve": approval_status,
             }
+            rejection_message = context_wrapper.get_rejection_message(
+                tool_name,
+                request_id,
+                existing_pending=existing_pending,
+            )
+            if approval_status is False and rejection_message is not None:
+                approval_response_raw["reason"] = rejection_message
             approved.append(MCPApprovalResponseItem(raw_item=approval_response_raw, agent=agent))
             continue
 
@@ -1520,6 +1547,8 @@ class _FunctionToolBatchExecutor:
             tool_type="function",
             tool_name=tool_trace_name(func_tool.name, tool_namespace) or func_tool.name,
             call_id=tool_call.call_id,
+            tool_namespace=tool_namespace,
+            tool_lookup_key=tool_lookup_key,
         )
         span_fn.set_error(
             SpanError(
@@ -1988,6 +2017,9 @@ async def execute_approved_tools(
                     tool_type="function",
                     tool_name=display_tool_name,
                     call_id=call_id,
+                    tool_namespace=tool_namespace,
+                    tool_lookup_key=tool_lookup_key,
+                    existing_pending=interruption,
                 )
             _append_error(
                 message=message,

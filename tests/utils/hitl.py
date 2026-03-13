@@ -478,10 +478,12 @@ def reject_tool_call(
     agent: Agent[Any],
     raw_item: Any,
     tool_name: str,
+    *,
+    rejection_message: str | None = None,
 ) -> ToolApprovalItem:
     """Reject a tool call in the context and return the approval item used."""
     approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name=tool_name)
-    context_wrapper.reject_tool(approval_item)
+    context_wrapper.reject_tool(approval_item, rejection_message=rejection_message)
     return approval_item
 
 

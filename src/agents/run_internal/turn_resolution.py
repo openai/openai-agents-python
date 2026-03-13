@@ -32,6 +32,7 @@ from .._tool_identity import (
     build_function_tool_lookup_map,
     get_function_tool_lookup_key,
     get_function_tool_lookup_key_for_call,
+    get_function_tool_lookup_key_for_tool,
     get_tool_call_namespace,
     get_tool_call_qualified_name,
     get_tool_call_trace_name,
@@ -705,12 +706,16 @@ async def resolve_interrupted_turn(
             return
         rejection_message = REJECTION_MESSAGE
         if call_id:
+            tool_namespace = get_tool_call_namespace(tool_call)
             rejection_message = await resolve_approval_rejection_message(
                 context_wrapper=context_wrapper,
                 run_config=run_config,
                 tool_type="function",
                 tool_name=get_tool_call_trace_name(tool_call) or function_tool.name,
                 call_id=call_id,
+                tool_namespace=tool_namespace,
+                tool_lookup_key=get_function_tool_lookup_key_for_tool(function_tool),
+                existing_pending=approval_items_by_call_id.get(call_id),
             )
         rejected_function_outputs.append(
             function_rejection_item(

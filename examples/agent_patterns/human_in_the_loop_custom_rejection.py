@@ -3,8 +3,9 @@
 This example is intentionally minimal:
 1. A single sensitive tool requires human approval.
 2. The first turn always issues that tool call.
-3. Rejection uses a custom message via ``tool_error_formatter``.
-4. The example prints both the formatter output and the assistant's final reply.
+3. ``tool_error_formatter`` defines the universal fallback message shape.
+4. A per-call ``rejection_message`` passed to ``state.reject(...)`` overrides that fallback.
+5. The example prints both the tool output and the assistant's final reply.
 """
 
 import asyncio
@@ -21,7 +22,7 @@ from examples.auto_mode import confirm_with_fallback
 
 
 async def tool_error_formatter(args: ToolErrorFormatterArgs[None]) -> str | None:
-    """Build a simple output message for rejected tool calls."""
+    """Build the universal fallback output message for rejected tool calls."""
     if args.kind != "approval_rejected":
         return None
     # The default message is "Tool execution was not approved."
@@ -60,6 +61,8 @@ async def main() -> None:
         tools=[publish_announcement],
     )
     run_config = RunConfig(tool_error_formatter=tool_error_formatter)
+    # ``tool_error_formatter`` is the universal fallback for approval rejects.
+    # A specific ``rejection_message`` passed to ``state.reject(...)`` below overrides it.
 
     result = await Runner.run(
         agent,
@@ -81,7 +84,13 @@ async def main() -> None:
             if approved:
                 state.approve(interruption)
             else:
-                state.reject(interruption)
+                # This per-call rejection message takes precedence over ``tool_error_formatter``.
+                state.reject(
+                    interruption,
+                    rejection_message=(
+                        "Publish action was canceled because the reviewer denied approval."
+                    ),
+                )
 
         result = await Runner.run(agent, state, run_config=run_config)
 
