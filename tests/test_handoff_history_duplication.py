@@ -392,22 +392,24 @@ class TestToInputListAfterHandoff:
         # - new_items has ALL items (session-oriented, unfiltered)
         # - _model_input_items has only message items (model-oriented, filtered)
         result = RunResult(
-            input=[{
-                "role": "assistant",
-                "content": (
-                    "For context, here is the conversation so far:\n"
-                    "<CONVERSATION HISTORY>\n"
-                    "1. user: What's the weather?\n"
-                    "2. function_call: get_weather\n"
-                    "3. function_call_output: Sunny, 22°C\n"
-                    "</CONVERSATION HISTORY>"
-                ),
-            }],
+            input=[
+                {
+                    "role": "assistant",
+                    "content": (
+                        "For context, here is the conversation so far:\n"
+                        "<CONVERSATION HISTORY>\n"
+                        "1. user: What's the weather?\n"
+                        "2. function_call: get_weather\n"
+                        "3. function_call_output: Sunny, 22°C\n"
+                        "</CONVERSATION HISTORY>"
+                    ),
+                }
+            ],
             new_items=[
-                tool_call,       # would be orphaned in output
-                tool_output,     # would be orphaned in output
+                tool_call,  # would be orphaned in output
+                tool_output,  # would be orphaned in output
                 message,
-                handoff_call,    # would be orphaned in output
+                handoff_call,  # would be orphaned in output
                 handoff_output,  # would be orphaned in output
             ],
             raw_responses=[],
@@ -468,6 +470,4 @@ class TestToInputListAfterHandoff:
         input_list = result.to_input_list()
 
         # Should have: 1 item from input ("Hello") + 1 message item from new_items
-        assert len(input_list) == 2, (
-            f"Expected 2 items, got {len(input_list)}: {input_list}"
-        )
+        assert len(input_list) == 2, f"Expected 2 items, got {len(input_list)}: {input_list}"
