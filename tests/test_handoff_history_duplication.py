@@ -365,3 +365,109 @@ class TestHandoffHistoryDuplicationFix:
         assert len(function_call_outputs) == 0, (
             "No function_call_output items should be in model input"
         )
+
+
+class TestToInputListAfterHandoff:
+    """Tests for Issue #2258: to_input_list() produces unparsable data after handoff.
+
+    When nest_handoff_history=True, to_input_list() should use _model_input_items
+    (filtered) instead of new_items (unfiltered), since self.input has been replaced
+    with the nested summary and the raw function_call/function_call_output items in
+    new_items would be orphaned (no parent assistant message to own them).
+    """
+
+    def test_to_input_list_uses_model_input_items_when_available(self):
+        """to_input_list() should prefer _model_input_items over new_items."""
+        from agents import RunContextWrapper, RunResult
+
+        agent = _create_mock_agent()
+        tool_call = _create_tool_call_item(agent)
+        tool_output = _create_tool_output_item(agent)
+        message = _create_message_item(agent)
+        handoff_call = _create_handoff_call_item(agent)
+        handoff_output = _create_handoff_output_item(agent)
+
+        # Simulate post-handoff state:
+        # - input is the nested summary (replaces original)
+        # - new_items has ALL items (session-oriented, unfiltered)
+        # - _model_input_items has only message items (model-oriented, filtered)
+        result = RunResult(
+            input=[{
+                "role": "assistant",
+                "content": (
+                    "For context, here is the conversation so far:\n"
+                    "<CONVERSATION HISTORY>\n"
+                    "1. user: What's the weather?\n"
+                    "2. function_call: get_weather\n"
+                    "3. function_call_output: Sunny, 22°C\n"
+                    "</CONVERSATION HISTORY>"
+                ),
+            }],
+            new_items=[
+                tool_call,       # would be orphaned in output
+                tool_output,     # would be orphaned in output
+                message,
+                handoff_call,    # would be orphaned in output
+                handoff_output,  # would be orphaned in output
+            ],
+            raw_responses=[],
+            final_output="Done",
+            input_guardrail_results=[],
+            output_guardrail_results=[],
+            tool_input_guardrail_results=[],
+            tool_output_guardrail_results=[],
+            _last_agent=agent,
+            context_wrapper=RunContextWrapper(context=None),
+            interruptions=[],
+        )
+
+        # Set _model_input_items to the filtered set (only the message)
+        result._model_input_items = [message]
+
+        input_list = result.to_input_list()
+
+        # Should have: 1 summary item (from input) + 1 message item (from _model_input_items)
+        assert len(input_list) == 2, (
+            f"Expected 2 items (summary + message), got {len(input_list)}: {input_list}"
+        )
+
+        # Verify no orphaned function_call items
+        types_in_output = [
+            item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+            for item in input_list
+        ]
+        assert "function_call" not in types_in_output, (
+            "function_call items should not appear as orphaned entries"
+        )
+        assert "function_call_output" not in types_in_output, (
+            "function_call_output items should not appear as orphaned entries"
+        )
+
+    def test_to_input_list_falls_back_to_new_items_without_handoff(self):
+        """Without handoff (no _model_input_items), to_input_list() uses new_items."""
+        from agents import RunContextWrapper, RunResult
+
+        agent = _create_mock_agent()
+        message = _create_message_item(agent)
+
+        result = RunResult(
+            input="Hello",
+            new_items=[message],
+            raw_responses=[],
+            final_output="Done",
+            input_guardrail_results=[],
+            output_guardrail_results=[],
+            tool_input_guardrail_results=[],
+            tool_output_guardrail_results=[],
+            _last_agent=agent,
+            context_wrapper=RunContextWrapper(context=None),
+            interruptions=[],
+        )
+
+        # _model_input_items defaults to empty list, so should fall back to new_items
+        input_list = result.to_input_list()
+
+        # Should have: 1 item from input ("Hello") + 1 message item from new_items
+        assert len(input_list) == 2, (
+            f"Expected 2 items, got {len(input_list)}: {input_list}"
+        )

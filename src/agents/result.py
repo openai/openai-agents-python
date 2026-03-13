@@ -209,11 +209,24 @@ class RunResultBase(abc.ABC):
         return cast(T, self.final_output)
 
     def to_input_list(self) -> list[TResponseInputItem]:
-        """Creates a new input list, merging the original input with all the new items generated."""
+        """Creates a new input list, merging the original input with all the new items generated.
+
+        When ``nest_handoff_history=True`` is active, ``self.input`` is replaced
+        with a nested summary that already embeds function_call / function_call_output
+        items as text.  Using the full ``new_items`` would duplicate those items as
+        orphaned structured entries, which the API rejects.  In that case we fall
+        back to ``_model_input_items`` which contains only the filtered items that
+        are consistent with the (possibly nested) ``self.input``.
+        """
         original_items: list[TResponseInputItem] = ItemHelpers.input_to_new_input_list(self.input)
         new_items: list[TResponseInputItem] = []
         reasoning_item_id_policy = getattr(self, "_reasoning_item_id_policy", None)
-        for item in self.new_items:
+
+        # Prefer _model_input_items when populated (after handoffs with nesting)
+        # to avoid orphaned function_call/function_call_output items.
+        source_items = getattr(self, "_model_input_items", None) or self.new_items
+
+        for item in source_items:
             converted = run_item_to_input_item(item, reasoning_item_id_policy)
             if converted is None:
                 continue
