@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import httpx
 import litellm
 import pytest
 from litellm.types.utils import Choices, Message, ModelResponse, Usage
@@ -104,6 +105,32 @@ def _second_turn_input_items_with_message(model_name: str) -> list[TResponseInpu
     )
 
 
+def _second_turn_input_items_with_file_search(model_name: str) -> list[TResponseInputItem]:
+    return cast(
+        list[TResponseInputItem],
+        [
+            {"role": "user", "content": "Find notes about Tokyo weather."},
+            {
+                "id": "__fake_id__",
+                "summary": [
+                    {"text": "I should search the knowledge base first.", "type": "summary_text"}
+                ],
+                "type": "reasoning",
+                "content": None,
+                "encrypted_content": None,
+                "status": None,
+                "provider_data": {"model": model_name, "response_id": "chatcmpl-test"},
+            },
+            {
+                "id": "__fake_file_search_id__",
+                "queries": ["Tokyo weather"],
+                "status": "completed",
+                "type": "file_search_call",
+            },
+        ],
+    )
+
+
 def _assistant_with_tool_calls(messages: list[Any]) -> dict[str, Any]:
     for msg in messages:
         if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("tool_calls"):
@@ -134,6 +161,21 @@ def test_converter_preserves_reasoning_content_across_output_message_with_hook()
     assistant = _assistant_with_tool_calls(messages)
     assert assistant["content"] == "I'll call the weather tool now."
     assert assistant["reasoning_content"] == "I should call the weather tool first."
+
+
+def test_converter_replays_reasoning_content_for_file_search_call_with_hook() -> None:
+    def should_replay_reasoning_content(_context: ReasoningContentReplayContext) -> bool:
+        return True
+
+    messages = Converter.items_to_messages(
+        _second_turn_input_items_with_file_search(REASONING_CONTENT_MODEL_A),
+        model=REASONING_CONTENT_MODEL_A,
+        should_replay_reasoning_content=should_replay_reasoning_content,
+    )
+
+    assistant = _assistant_with_tool_calls(messages)
+    assert assistant["reasoning_content"] == "I should search the knowledge base first."
+    assert assistant["tool_calls"][0]["function"]["name"] == "file_search_call"
 
 
 @pytest.mark.allow_call_model_methods
@@ -167,7 +209,7 @@ async def test_openai_chatcompletions_hook_can_enable_reasoning_content_replay()
     class MockClient:
         def __init__(self):
             self.chat = MockChat()
-            self.base_url = "https://example.com/v1"
+            self.base_url = httpx.URL("https://example.com/v1/")
 
     model = OpenAIChatCompletionsModel(
         model=REASONING_CONTENT_MODEL_B,

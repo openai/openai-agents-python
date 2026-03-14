@@ -478,6 +478,7 @@ class Converter:
         current_assistant_msg: ChatCompletionAssistantMessageParam | None = None
         pending_thinking_blocks: list[dict[str, str]] | None = None
         pending_reasoning_content: str | None = None  # For DeepSeek reasoning_content
+        normalized_base_url = base_url.rstrip("/") if base_url is not None else None
 
         def flush_assistant_message(*, clear_pending_reasoning_content: bool = True) -> None:
             nonlocal current_assistant_msg, pending_reasoning_content
@@ -492,12 +493,21 @@ class Converter:
             elif clear_pending_reasoning_content:
                 pending_reasoning_content = None
 
+        def apply_pending_reasoning_content(
+            assistant_msg: ChatCompletionAssistantMessageParam,
+        ) -> None:
+            nonlocal pending_reasoning_content
+            if pending_reasoning_content:
+                assistant_msg["reasoning_content"] = pending_reasoning_content  # type: ignore[typeddict-unknown-key]
+                pending_reasoning_content = None
+
         def ensure_assistant_message() -> ChatCompletionAssistantMessageParam:
             nonlocal current_assistant_msg, pending_thinking_blocks
             if current_assistant_msg is None:
                 current_assistant_msg = ChatCompletionAssistantMessageParam(role="assistant")
                 current_assistant_msg["content"] = None
                 current_assistant_msg["tool_calls"] = []
+                apply_pending_reasoning_content(current_assistant_msg)
 
             return current_assistant_msg
 
@@ -610,6 +620,7 @@ class Converter:
                     pending_thinking_blocks = None  # Clear after using
 
                 new_asst["tool_calls"] = []
+                apply_pending_reasoning_content(new_asst)
                 current_assistant_msg = new_asst
 
             # 4) function/file-search calls => attach to assistant
@@ -634,11 +645,6 @@ class Converter:
 
             elif func_call := cls.maybe_function_tool_call(item):
                 asst = ensure_assistant_message()
-
-                # If we have pending reasoning content for DeepSeek, add it to the assistant message
-                if pending_reasoning_content:
-                    asst["reasoning_content"] = pending_reasoning_content  # type: ignore[typeddict-unknown-key]
-                    pending_reasoning_content = None  # Clear after using
 
                 # If we have pending thinking blocks, use them as the content
                 # This is required for Anthropic API tool calls with interleaved thinking
@@ -760,7 +766,7 @@ class Converter:
                 elif model is not None:
                     replay_context = ReasoningContentReplayContext(
                         model=model,
-                        base_url=base_url,
+                        base_url=normalized_base_url,
                         reasoning=ReasoningContentSource(
                             item=reasoning_item,
                             origin_model=item_model or None,
