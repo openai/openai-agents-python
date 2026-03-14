@@ -426,9 +426,9 @@ class Converter:
         cls,
         items: str | Iterable[TResponseInputItem],
         model: str | None = None,
-        base_url: str | None = None,
         preserve_thinking_blocks: bool = False,
         preserve_tool_output_all_content: bool = False,
+        base_url: str | None = None,
         should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
     ) -> list[ChatCompletionMessageParam]:
         """
@@ -449,6 +449,12 @@ class Converter:
                 When True, all content types including images are preserved. This is useful
                 for model providers (e.g. Anthropic via LiteLLM) that support processing
                 non-text content in tool results.
+            base_url: The request base URL, if the caller knows the concrete endpoint.
+                This is used by reasoning-content replay hooks to distinguish direct
+                provider calls from proxy or gateway requests.
+            should_replay_reasoning_content: Optional hook that decides whether a
+                reasoning item should be replayed into the next assistant message as
+                `reasoning_content`.
 
         Rules:
         - EasyInputMessage or InputMessage (role=user) => ChatCompletionUserMessageParam
