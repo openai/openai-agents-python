@@ -271,6 +271,7 @@ def build_interruption_result(
     )
     result._current_turn = current_turn
     result._model_input_items = list(generated_items)
+    result._replay_from_model_input_items = list(generated_items) != list(session_items)
     if run_state is not None:
         result._current_turn_persisted_item_count = run_state._current_turn_persisted_item_count
         result._trace_state = run_state._trace_state

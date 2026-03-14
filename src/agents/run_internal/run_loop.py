@@ -483,6 +483,11 @@ async def start_streaming(
         streamed_result._state = run_state
     if run_state is not None:
         streamed_result._model_input_items = list(run_state._generated_items)
+        # Streamed follow-ups need the same normalized replay signal as sync runs when the
+        # runner's continuation differs from the richer session history.
+        streamed_result._replay_from_model_input_items = list(run_state._generated_items) != list(
+            run_state._session_items
+        )
 
     if run_state is not None:
         run_state._conversation_id = conversation_id
@@ -627,6 +632,9 @@ async def start_streaming(
                     )
                     streamed_result._model_input_items = generated_items
                     streamed_result.new_items = base_session_items + list(turn_session_items)
+                    streamed_result._replay_from_model_input_items = list(
+                        streamed_result._model_input_items
+                    ) != list(streamed_result.new_items)
                     if run_state is not None:
                         update_run_state_after_resume(
                             run_state,
@@ -914,6 +922,9 @@ async def start_streaming(
                 )
                 turn_session_items = session_items_for_turn(turn_result)
                 streamed_result.new_items.extend(turn_session_items)
+                streamed_result._replay_from_model_input_items = list(
+                    streamed_result._model_input_items
+                ) != list(streamed_result.new_items)
                 store_setting = current_agent.model_settings.resolve(
                     run_config.model_settings
                 ).store

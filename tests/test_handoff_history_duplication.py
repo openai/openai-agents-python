@@ -5,8 +5,10 @@ function_call and function_call_output items are NOT duplicated
 in the input sent to the next agent.
 """
 
+import json
 from typing import Any, cast
 
+import pytest
 from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputMessage,
@@ -14,7 +16,7 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 
-from agents import Agent
+from agents import Agent, RunConfig, Runner, function_tool, handoff
 from agents.handoffs import HandoffInputData, nest_handoff_history
 from agents.items import (
     HandoffCallItem,
@@ -25,6 +27,9 @@ from agents.items import (
     ToolCallItem,
     ToolCallOutputItem,
 )
+
+from .fake_model import FakeModel
+from .test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
 
 
 def _create_mock_agent() -> Agent:
@@ -365,3 +370,157 @@ class TestHandoffHistoryDuplicationFix:
         assert len(function_call_outputs) == 0, (
             "No function_call_output items should be in model input"
         )
+
+
+@pytest.mark.asyncio
+async def test_to_input_list_normalized_uses_filtered_continuation_after_nested_handoff() -> None:
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+
+    delegate = Agent(name="delegate", model=delegate_model)
+    triage = Agent(name="triage", model=triage_model, handoffs=[delegate])
+
+    triage_model.add_multiple_turn_outputs(
+        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
+    )
+    delegate_model.add_multiple_turn_outputs(
+        [
+            [get_text_message("resolution")],
+            [get_text_message("followup answer")],
+        ]
+    )
+
+    result = await Runner.run(
+        triage,
+        input="user_question",
+        run_config=RunConfig(nest_handoff_history=True),
+    )
+
+    preserve_all_input = result.to_input_list()
+    normalized_input = result.to_input_list(mode="normalized")
+    preserve_all_types = [
+        item.get("type", "message") for item in preserve_all_input if isinstance(item, dict)
+    ]
+    normalized_types = [
+        item.get("type", "message") for item in normalized_input if isinstance(item, dict)
+    ]
+
+    assert len(preserve_all_input) == 5
+    assert "function_call" in preserve_all_types
+    assert "function_call_output" in preserve_all_types
+    assert len(normalized_input) == 3
+    assert "function_call" not in normalized_types
+    assert "function_call_output" not in normalized_types
+
+    follow_up_input = normalized_input + [{"role": "user", "content": "follow up?"}]
+    follow_up_result = await Runner.run(delegate, input=follow_up_input)
+
+    assert follow_up_result.final_output == "followup answer"
+    assert delegate_model.last_turn_args["input"] == follow_up_input
+
+
+@pytest.mark.asyncio
+async def test_to_input_list_normalized_keeps_delegate_tool_items_after_nested_handoff() -> None:
+    async def lookup_weather(city: str) -> str:
+        return f"weather:{city}"
+
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+
+    delegate = Agent(
+        name="delegate",
+        model=delegate_model,
+        tools=[function_tool(lookup_weather, name_override="lookup_weather")],
+    )
+    triage = Agent(name="triage", model=triage_model, handoffs=[delegate])
+
+    triage_model.add_multiple_turn_outputs(
+        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
+    )
+    delegate_model.add_multiple_turn_outputs(
+        [
+            [
+                get_text_message("delegate preamble"),
+                get_function_tool_call("lookup_weather", json.dumps({"city": "Tokyo"})),
+            ],
+            [get_text_message("resolution")],
+        ]
+    )
+
+    result = await Runner.run(
+        triage,
+        input="user_question",
+        run_config=RunConfig(nest_handoff_history=True),
+    )
+
+    preserve_all_input = result.to_input_list()
+    normalized_input = result.to_input_list(mode="normalized")
+    preserve_all_function_calls = [
+        cast(dict[str, Any], item)
+        for item in preserve_all_input
+        if isinstance(item, dict) and item.get("type") == "function_call"
+    ]
+    preserve_all_function_outputs = [
+        cast(dict[str, Any], item)
+        for item in preserve_all_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ]
+    function_calls = [
+        cast(dict[str, Any], item)
+        for item in normalized_input
+        if isinstance(item, dict) and item.get("type") == "function_call"
+    ]
+    function_outputs = [
+        cast(dict[str, Any], item)
+        for item in normalized_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ]
+
+    assert len(preserve_all_function_calls) == 2
+    assert len(preserve_all_function_outputs) == 2
+    assert len(function_calls) == 1
+    assert function_calls[0]["name"] == "lookup_weather"
+    assert len(function_outputs) == 1
+    assert function_outputs[0]["output"] == "weather:Tokyo"
+
+
+@pytest.mark.asyncio
+async def test_to_input_list_normalized_uses_custom_filter_input_items() -> None:
+    def keep_messages_only(data: HandoffInputData) -> HandoffInputData:
+        return data.clone(
+            input_items=tuple(
+                item for item in data.new_items if isinstance(item, MessageOutputItem)
+            )
+        )
+
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+
+    delegate = Agent(name="delegate", model=delegate_model)
+    triage = Agent(
+        name="triage",
+        model=triage_model,
+        handoffs=[handoff(delegate, input_filter=keep_messages_only)],
+    )
+
+    triage_model.add_multiple_turn_outputs(
+        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
+    )
+    delegate_model.add_multiple_turn_outputs([[get_text_message("resolution")]])
+
+    result = await Runner.run(triage, input="user_question")
+    preserve_all_input = result.to_input_list()
+    normalized_input = result.to_input_list(mode="normalized")
+    preserve_all_types = [
+        item.get("type", "message") for item in preserve_all_input if isinstance(item, dict)
+    ]
+    normalized_types = [
+        item.get("type", "message") for item in normalized_input if isinstance(item, dict)
+    ]
+
+    assert len(preserve_all_input) == 5
+    assert "function_call" in preserve_all_types
+    assert "function_call_output" in preserve_all_types
+    assert len(normalized_input) == 3
+    assert "function_call" not in normalized_types
+    assert "function_call_output" not in normalized_types

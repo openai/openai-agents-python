@@ -29,7 +29,7 @@ from .items import (
 )
 from .logger import logger
 from .run_context import RunContextWrapper
-from .run_internal.items import run_item_to_input_item
+from .run_internal.items import run_items_to_input_items
 from .run_internal.run_steps import (
     NextStepInterruption,
     ProcessedResponse,
@@ -110,6 +110,40 @@ def _populate_state_from_result(
     return state
 
 
+ToInputListMode = Literal["preserve_all", "normalized"]
+
+
+def _input_items_for_result(
+    result: RunResultBase,
+    *,
+    mode: ToInputListMode,
+    reasoning_item_id_policy: Literal["preserve", "omit"] | None,
+) -> list[TResponseInputItem]:
+    """Return input items for the requested result view.
+
+    ``preserve_all`` keeps the full converted history from ``new_items``. ``normalized`` returns
+    the canonical continuation input when handoff filtering rewrote model history, otherwise it
+    falls back to the same converted history.
+    """
+    session_items = run_items_to_input_items(result.new_items, reasoning_item_id_policy)
+    if mode == "preserve_all":
+        return session_items
+    if mode != "normalized":
+        raise ValueError(f"Unsupported to_input_list mode: {mode}")
+    if not getattr(result, "_replay_from_model_input_items", False):
+        # Most runs never rewrite continuation history, so normalized stays identical to the
+        # historical preserve-all view unless the runner explicitly marked a divergence.
+        return session_items
+
+    model_input_items = getattr(result, "_model_input_items", None)
+    if not isinstance(model_input_items, list):
+        return session_items
+
+    # When the runner marks a divergence, generated_items already reflect the continuation input
+    # chosen for the next local run after applying handoff/input filtering.
+    return run_items_to_input_items(model_input_items, reasoning_item_id_policy)
+
+
 @dataclass
 class RunResultBase(abc.ABC):
     input: str | list[TResponseInputItem]
@@ -145,6 +179,12 @@ class RunResultBase(abc.ABC):
 
     _trace_state: TraceState | None = field(default=None, init=False, repr=False)
     """Serialized trace metadata captured during the run."""
+    _replay_from_model_input_items: bool = field(default=False, init=False, repr=False)
+    """Whether replay helpers should prefer `_model_input_items` over `new_items`.
+
+    This is only set when the runner preserved extra session history items that should not be
+    replayed into the next local run, such as nested handoff history or filtered handoff input.
+    """
 
     @classmethod
     def __get_pydantic_core_schema__(
@@ -208,18 +248,25 @@ class RunResultBase(abc.ABC):
 
         return cast(T, self.final_output)
 
-    def to_input_list(self) -> list[TResponseInputItem]:
-        """Creates a new input list, merging the original input with all the new items generated."""
-        original_items: list[TResponseInputItem] = ItemHelpers.input_to_new_input_list(self.input)
-        new_items: list[TResponseInputItem] = []
-        reasoning_item_id_policy = getattr(self, "_reasoning_item_id_policy", None)
-        for item in self.new_items:
-            converted = run_item_to_input_item(item, reasoning_item_id_policy)
-            if converted is None:
-                continue
-            new_items.append(converted)
+    def to_input_list(
+        self,
+        *,
+        mode: ToInputListMode = "preserve_all",
+    ) -> list[TResponseInputItem]:
+        """Create an input-item view of this run.
 
-        return original_items + new_items
+        ``mode="preserve_all"`` keeps the historical behavior of converting ``new_items`` into a
+        full plain-item history. ``mode="normalized"`` prefers the canonical continuation input
+        when handoff filtering rewrote model history, while remaining identical for ordinary runs.
+        """
+        original_items: list[TResponseInputItem] = ItemHelpers.input_to_new_input_list(self.input)
+        reasoning_item_id_policy = getattr(self, "_reasoning_item_id_policy", None)
+        replay_items = _input_items_for_result(
+            self,
+            mode=mode,
+            reasoning_item_id_policy=reasoning_item_id_policy,
+        )
+        return original_items + replay_items
 
     @property
     def agent_tool_invocation(self) -> AgentToolInvocation | None:

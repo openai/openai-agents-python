@@ -798,6 +798,11 @@ class AgentRunner:
                                 )
                                 result._current_turn = current_turn
                                 result._model_input_items = list(generated_items)
+                                # Keep normalized replay aligned with the model-facing
+                                # continuation whenever session history preserved extra items.
+                                result._replay_from_model_input_items = list(
+                                    generated_items
+                                ) != list(session_items)
                                 if run_state is not None:
                                     result._trace_state = run_state._trace_state
                                 if session_persistence_enabled:
@@ -932,6 +937,9 @@ class AgentRunner:
                         )
                         result._current_turn = max_turns
                         result._model_input_items = list(generated_items)
+                        result._replay_from_model_input_items = list(generated_items) != list(
+                            session_items
+                        )
                         if run_state is not None:
                             result._trace_state = run_state._trace_state
                         if session_persistence_enabled and include_in_history:
@@ -1200,6 +1208,9 @@ class AgentRunner:
                             )
                             result._current_turn = current_turn
                             result._model_input_items = list(generated_items)
+                            result._replay_from_model_input_items = list(generated_items) != list(
+                                session_items
+                            )
                             if run_state is not None:
                                 result._current_turn_persisted_item_count = (
                                     run_state._current_turn_persisted_item_count
@@ -1590,6 +1601,11 @@ class AgentRunner:
         )
         streamed_result._model_input_items = (
             list(run_state._generated_items) if run_state is not None else []
+        )
+        streamed_result._replay_from_model_input_items = (
+            list(run_state._generated_items) != list(run_state._session_items)
+            if run_state is not None
+            else False
         )
         streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
         if run_state is not None:

@@ -1146,6 +1146,10 @@ async def test_structured_output():
         "should have input: conversation summary, function call, function call result, message, "
         "handoff, handoff output, preamble message, tool call, tool call result, final output"
     )
+    assert len(result.to_input_list(mode="normalized")) == 6, (
+        "should have normalized replay input: conversation summary, carried-forward message, "
+        "preamble message, tool call, tool call result, final output"
+    )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"
     assert result.final_output == Foo(bar="baz"), "should have structured output"
