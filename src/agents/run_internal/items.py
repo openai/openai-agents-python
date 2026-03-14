@@ -278,6 +278,7 @@ def function_rejection_item(
     *,
     rejection_message: str = REJECTION_MESSAGE,
     scope_id: str | None = None,
+    tool_origin: Any = None,
 ) -> ToolCallOutputItem:
     """Build a ToolCallOutputItem representing a rejected function tool call."""
     if isinstance(tool_call, ResponseFunctionToolCall):
@@ -286,6 +287,7 @@ def function_rejection_item(
         output=rejection_message,
         raw_item=ItemHelpers.tool_call_output_item(tool_call, rejection_message),
         agent=agent,
+        tool_origin=tool_origin,
     )
 
 

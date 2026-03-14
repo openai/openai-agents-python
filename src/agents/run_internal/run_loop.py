@@ -11,7 +11,12 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar, cast
 
-from openai.types.responses import Response, ResponseCompletedEvent, ResponseOutputItemDoneEvent
+from openai.types.responses import (
+    Response,
+    ResponseCompletedEvent,
+    ResponseFunctionToolCall,
+    ResponseOutputItemDoneEvent,
+)
 from openai.types.responses.response_output_item import McpCall, McpListTools
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
@@ -62,7 +67,14 @@ from ..stream_events import (
     RawResponsesStreamEvent,
     RunItemStreamEvent,
 )
-from ..tool import FunctionTool, Tool, dispose_resolved_computers
+from ..tool import (
+    FunctionTool,
+    Tool,
+    ToolOrigin,
+    ToolOriginType,
+    dispose_resolved_computers,
+    get_function_tool_origin,
+)
 from ..tracing import Span, SpanError, agent_span, get_current_trace
 from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData
@@ -129,6 +141,7 @@ from .session_persistence import (
 from .streaming import stream_step_items_to_queue, stream_step_result_to_queue
 from .tool_actions import ApplyPatchAction, ComputerAction, LocalShellAction, ShellAction
 from .tool_execution import (
+    build_litellm_json_tool_call,
     coerce_shell_call,
     execute_apply_patch_calls,
     execute_computer_actions,
@@ -1366,8 +1379,16 @@ async def run_single_turn_streamed(
                     matched_tool = (
                         tool_map.get(tool_lookup_key) if tool_lookup_key is not None else None
                     )
+                    if (
+                        matched_tool is None
+                        and output_schema is not None
+                        and isinstance(output_item, ResponseFunctionToolCall)
+                        and output_item.name == "json_tool_call"
+                    ):
+                        matched_tool = build_litellm_json_tool_call(output_item)
                     tool_description: str | None = None
                     tool_title: str | None = None
+                    tool_origin = None
                     if isinstance(output_item, McpCall):
                         metadata = hosted_mcp_tool_metadata.get(
                             (output_item.server_label, output_item.name)
@@ -1375,15 +1396,21 @@ async def run_single_turn_streamed(
                         if metadata is not None:
                             tool_description = metadata.description
                             tool_title = metadata.title
+                        tool_origin = ToolOrigin(
+                            type=ToolOriginType.MCP,
+                            mcp_server_name=output_item.server_label,
+                        )
                     elif matched_tool is not None:
                         tool_description = getattr(matched_tool, "description", None)
                         tool_title = getattr(matched_tool, "_mcp_title", None)
+                        tool_origin = get_function_tool_origin(matched_tool)
 
                     tool_item = ToolCallItem(
                         raw_item=cast(ToolCallItemTypes, output_item),
                         agent=agent,
                         description=tool_description,
                         title=tool_title,
+                        tool_origin=tool_origin,
                     )
                     streamed_result._event_queue.put_nowait(
                         RunItemStreamEvent(item=tool_item, name="tool_called")

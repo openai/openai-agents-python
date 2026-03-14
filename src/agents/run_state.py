@@ -80,6 +80,7 @@ from .tool import (
     HostedMCPTool,
     LocalShellTool,
     ShellTool,
+    ToolOrigin,
 )
 from .tool_guardrails import (
     AllowBehavior,
@@ -133,6 +134,11 @@ _MCP_APPROVAL_RESPONSE_ADAPTER: TypeAdapter[McpApprovalResponse] = TypeAdapter(M
 _HANDOFF_OUTPUT_ADAPTER: TypeAdapter[TResponseInputItem] = TypeAdapter(TResponseInputItem)
 _LOCAL_SHELL_CALL_ADAPTER: TypeAdapter[LocalShellCall] = TypeAdapter(LocalShellCall)
 _MISSING_CONTEXT_SENTINEL = object()
+
+
+def _deserialize_tool_origin(data: Any) -> ToolOrigin | None:
+    """Best-effort deserialization for optional tool origin metadata."""
+    return ToolOrigin.from_json_dict(data)
 
 
 @dataclass
@@ -784,6 +790,9 @@ class RunState(Generic[TContext, TAgent]):
             result["description"] = item.description
         if hasattr(item, "title") and item.title is not None:
             result["title"] = item.title
+        tool_origin = getattr(item, "tool_origin", None)
+        if isinstance(tool_origin, ToolOrigin):
+            result["tool_origin"] = tool_origin.to_json_dict()
 
         return result
 
@@ -1226,6 +1235,8 @@ def _serialize_tool_approval_interruption(
         interruption_dict["tool_name"] = interruption.tool_name
     if interruption.tool_namespace is not None:
         interruption_dict["tool_namespace"] = interruption.tool_namespace
+    if interruption.tool_origin is not None:
+        interruption_dict["tool_origin"] = interruption.tool_origin.to_json_dict()
     tool_lookup_key = serialize_function_tool_lookup_key(
         getattr(interruption, "tool_lookup_key", None)
     )
@@ -1897,6 +1908,7 @@ def _deserialize_tool_approval_item(
 
     tool_name = item_data.get("tool_name")
     tool_namespace = item_data.get("tool_namespace")
+    tool_origin = _deserialize_tool_origin(item_data.get("tool_origin"))
     tool_lookup_key = deserialize_function_tool_lookup_key(item_data.get("tool_lookup_key"))
     allow_bare_name_alias = item_data.get("allow_bare_name_alias") is True
     raw_item = _deserialize_tool_approval_raw_item(raw_item_data)
@@ -1905,6 +1917,7 @@ def _deserialize_tool_approval_item(
         raw_item=raw_item,
         tool_name=tool_name,
         tool_namespace=tool_namespace,
+        tool_origin=tool_origin,
         tool_lookup_key=tool_lookup_key,
         _allow_bare_name_alias=allow_bare_name_alias,
     )
@@ -2505,12 +2518,14 @@ def _deserialize_items(
                 # Preserve display metadata if it was stored with the item.
                 description = item_data.get("description")
                 title = item_data.get("title")
+                tool_origin = _deserialize_tool_origin(item_data.get("tool_origin"))
                 result.append(
                     ToolCallItem(
                         agent=agent,
                         raw_item=raw_item_tool,
                         description=description,
                         title=title,
+                        tool_origin=tool_origin,
                     )
                 )
 
@@ -2525,6 +2540,7 @@ def _deserialize_items(
                         agent=agent,
                         raw_item=raw_item_output,
                         output=item_data.get("output", ""),
+                        tool_origin=_deserialize_tool_origin(item_data.get("tool_origin")),
                     )
                 )
 

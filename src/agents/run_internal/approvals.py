@@ -13,6 +13,7 @@ from openai.types.responses import ResponseFunctionToolCall
 
 from ..agent import Agent
 from ..items import ItemHelpers, RunItem, ToolApprovalItem, ToolCallOutputItem, TResponseInputItem
+from ..tool import ToolOrigin
 from .items import ReasoningItemIdPolicy, run_item_to_input_item
 
 # --------------------------
@@ -28,6 +29,7 @@ def append_approval_error_output(
     tool_name: str,
     call_id: str | None,
     message: str,
+    tool_origin: ToolOrigin | None = None,
 ) -> None:
     """Emit a synthetic tool output so users see why an approval failed."""
     error_tool_call = _build_function_tool_call_for_approval_error(tool_call, tool_name, call_id)
@@ -36,6 +38,7 @@ def append_approval_error_output(
             output=message,
             raw_item=ItemHelpers.tool_call_output_item(error_tool_call, message),
             agent=agent,
+            tool_origin=tool_origin,
         )
     )
 

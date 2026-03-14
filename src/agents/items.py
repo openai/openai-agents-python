@@ -54,6 +54,7 @@ from ._tool_identity import FunctionToolLookupKey, get_function_tool_lookup_key,
 from .exceptions import AgentsException, ModelBehaviorError
 from .logger import logger
 from .tool import (
+    ToolOrigin,
     ToolOutputFileContent,
     ToolOutputImage,
     ToolOutputText,
@@ -358,6 +359,9 @@ class ToolCallItem(RunItemBase[Any]):
     title: str | None = None
     """Optional short display label if known at item creation time."""
 
+    tool_origin: ToolOrigin | None = None
+    """Optional metadata describing the source of a function-tool-backed item."""
+
 
 ToolCallOutputTypes: TypeAlias = Union[
     FunctionCallOutput,
@@ -381,6 +385,9 @@ class ToolCallOutputItem(RunItemBase[Any]):
     """
 
     type: Literal["tool_call_output_item"] = "tool_call_output_item"
+
+    tool_origin: ToolOrigin | None = None
+    """Optional metadata describing the source of a function-tool-backed item."""
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts the tool output into an input item for the next model turn.
@@ -492,6 +499,9 @@ class ToolApprovalItem(RunItemBase[Any]):
 
     tool_namespace: str | None = None
     """Optional Responses API namespace for function-tool approvals."""
+
+    tool_origin: ToolOrigin | None = None
+    """Optional metadata describing where the approved tool call came from."""
 
     tool_lookup_key: FunctionToolLookupKey | None = field(
         default=None,
