@@ -507,7 +507,8 @@ class Converter:
                 current_assistant_msg = ChatCompletionAssistantMessageParam(role="assistant")
                 current_assistant_msg["content"] = None
                 current_assistant_msg["tool_calls"] = []
-                apply_pending_reasoning_content(current_assistant_msg)
+
+            apply_pending_reasoning_content(current_assistant_msg)
 
             return current_assistant_msg
 
@@ -763,7 +764,7 @@ class Converter:
                     # This preserves the original behavior
                     pending_thinking_blocks = reconstructed_thinking_blocks
 
-                elif model is not None:
+                if model is not None:
                     replay_context = ReasoningContentReplayContext(
                         model=model,
                         base_url=normalized_base_url,
