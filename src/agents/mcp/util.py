@@ -380,9 +380,6 @@ class MCPUtil:
                         f"Failed to call tool '{tool.name}' on MCP server '{server.name}': "
                         "tool execution was cancelled."
                     ) from e
-                call_exception = call_task.exception()
-                if call_exception is not None:
-                    raise call_exception from e
                 raise
         except UserError:
             # Re-raise UserError as-is (it already has a good message)

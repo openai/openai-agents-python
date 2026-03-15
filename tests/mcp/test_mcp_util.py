@@ -297,6 +297,29 @@ async def test_mcp_tool_outer_cancellation_after_inner_completion_still_propagat
 
 
 @pytest.mark.asyncio
+async def test_mcp_tool_outer_cancellation_after_inner_exception_still_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    server = CrashingFakeMCPServer()
+    server.add_tool("boom_tool", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="boom_tool", inputSchema={})
+
+    async def fake_shield(task: asyncio.Task[CallToolResult]) -> CallToolResult:
+        try:
+            await task
+        except Exception:
+            pass
+        raise asyncio.CancelledError("synthetic outer cancellation")
+
+    monkeypatch.setattr(asyncio, "shield", fake_shield)
+
+    with pytest.raises(asyncio.CancelledError):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+
+@pytest.mark.asyncio
 async def test_mcp_tool_outer_cancellation_waits_for_inner_cleanup():
     cleanup_finished = asyncio.Event()
     server = CleanupOnCancelFakeMCPServer(cleanup_finished)
