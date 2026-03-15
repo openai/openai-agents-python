@@ -93,6 +93,7 @@ class MCPServer(abc.ABC):
         require_approval: RequireApprovalSetting = None,
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
+        tool_name_prefix: str | None = None,
     ):
         """
         Args:
@@ -110,6 +111,9 @@ class MCPServer(abc.ABC):
                 SDK default) will be used.
             tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
+            tool_name_prefix: Optional prefix to add to tool names from this server. Useful for
+                avoiding name collisions when multiple MCP servers provide tools with the same name.
+                For example, with prefix "filesystem", tool "read_file" becomes "filesystem_read_file".
         """
         self.use_structured_content = use_structured_content
         self._needs_approval_policy = self._normalize_needs_approval(
@@ -117,6 +121,7 @@ class MCPServer(abc.ABC):
         )
         self._failure_error_function = failure_error_function
         self.tool_meta_resolver = tool_meta_resolver
+        self.tool_name_prefix = tool_name_prefix
 
     @abc.abstractmethod
     async def connect(self):
@@ -370,6 +375,23 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 raise UserError("run_context and agent are required for dynamic tool filtering")
             return await self._apply_dynamic_tool_filter(tools, run_context, agent)
 
+    def _apply_tool_name_prefix(self, tools: list[MCPTool]) -> list[MCPTool]:
+        """Apply tool name prefix to avoid collisions between multiple MCP servers."""
+        if not self.tool_name_prefix:
+            return tools
+
+        prefixed_tools = []
+        for tool in tools:
+            # Create a new MCPTool with prefixed name
+            prefixed_tool = MCPTool(
+                name=f"{self.tool_name_prefix}_{tool.name}",
+                description=tool.description,
+                inputSchema=tool.inputSchema,
+            )
+            prefixed_tools.append(prefixed_tool)
+
+        return prefixed_tools
+
     def _apply_static_tool_filter(
         self, tools: list[MCPTool], static_filter: ToolFilterStatic
     ) -> list[MCPTool]:
@@ -582,6 +604,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             filtered_tools = tools
             if self.tool_filter is not None:
                 filtered_tools = await self._apply_tool_filter(filtered_tools, run_context, agent)
+
+            # Apply tool name prefix if configured
+            if self.tool_name_prefix:
+                filtered_tools = self._apply_tool_name_prefix(filtered_tools)
+
             return filtered_tools
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
@@ -606,12 +633,17 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         session = self.session
         assert session is not None
 
+        # Strip prefix if configured and present
+        actual_tool_name = tool_name
+        if self.tool_name_prefix and tool_name.startswith(f"{self.tool_name_prefix}_"):
+            actual_tool_name = tool_name[len(self.tool_name_prefix) + 1:]
+
         try:
-            self._validate_required_parameters(tool_name=tool_name, arguments=arguments)
+            self._validate_required_parameters(tool_name=actual_tool_name, arguments=arguments)
             if meta is None:
-                return await self._run_with_retries(lambda: session.call_tool(tool_name, arguments))
+                return await self._run_with_retries(lambda: session.call_tool(actual_tool_name, arguments))
             return await self._run_with_retries(
-                lambda: session.call_tool(tool_name, arguments, meta=meta)
+                lambda: session.call_tool(actual_tool_name, arguments, meta=meta)
             )
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code

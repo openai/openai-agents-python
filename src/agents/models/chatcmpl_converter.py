@@ -416,6 +416,37 @@ class Converter:
         return out
 
     @classmethod
+    def _supports_reasoning_content(
+        cls,
+        model: str,
+        item_model: str | None,
+        item_provider_data: dict | None,
+    ) -> bool:
+        """Check if the model supports reasoning_content field in assistant messages.
+        
+        Supported models:
+        - DeepSeek: deepseek-*
+        - Zhipu GLM: glm-*, zhipu-*
+        - Moonshot Kimi: kimi-*, moonshot-*
+        """
+        # Models that require/support reasoning_content
+        reasoning_models = ("deepseek", "glm", "zhipu", "kimi", "moonshot")
+        
+        model_lower = model.lower()
+        is_reasoning_model = any(m in model_lower for m in reasoning_models)
+        
+        if not is_reasoning_model:
+            return False
+            
+        # Check if item also from reasoning model
+        if item_provider_data == {}:
+            return True  # Backward compatibility
+        if item_model:
+            item_model_lower = item_model.lower()
+            return any(m in item_model_lower for m in reasoning_models)
+        return True
+
+    @classmethod
     def items_to_messages(
         cls,
         items: str | Iterable[TResponseInputItem],
@@ -740,16 +771,13 @@ class Converter:
                     # This preserves the original behavior
                     pending_thinking_blocks = reconstructed_thinking_blocks
 
-                # DeepSeek requires reasoning_content field in assistant messages with tool calls
-                # Items may not all originate from DeepSeek, so need to check for model match.
+                # DeepSeek/GLM/Kimi require reasoning_content field in assistant messages with tool calls
+                # Items may not all originate from the same model, so need to check for model match.
                 # For backward compatibility, if provider_data is missing, ignore the check.
+                # Supported models: deepseek, zhipu/glm, moonshot/kimi
                 elif (
                     model
-                    and "deepseek" in model.lower()
-                    and (
-                        (item_model and "deepseek" in item_model.lower())
-                        or item_provider_data == {}
-                    )
+                    and self._supports_reasoning_content(model, item_model, item_provider_data)
                 ):
                     summary_items = reasoning_item.get("summary", [])
                     if summary_items:
