@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from agents.sandbox.entries import GCSMount
 from agents.sandbox.errors import InvalidManifestPathError, WorkspaceArchiveWriteError
 from agents.sandbox.files import EntryKind, FileEntry
 from agents.sandbox.manifest import Manifest
@@ -218,6 +219,33 @@ async def test_extract_zip_rejects_symlinked_parent_paths(tmp_path: Path) -> Non
         assert not (outside / "hello.txt").exists()
     finally:
         await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unix_local_persist_workspace_excludes_resolved_mount_path(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    actual_mount_path = workspace_root / "actual"
+    actual_mount_path.mkdir(parents=True)
+    (actual_mount_path / "remote.txt").write_text("remote", encoding="utf-8")
+    (workspace_root / "keep.txt").write_text("keep", encoding="utf-8")
+
+    state = UnixLocalSandboxSessionState(
+        manifest=Manifest(
+            root=str(workspace_root),
+            entries={"logical": GCSMount(bucket="bucket", mount_path=Path("actual"))},
+        ),
+        snapshot=NoopSnapshot(id="noop"),
+    )
+    session = UnixLocalSandboxSession.from_state(state)
+
+    archive = await session.persist_workspace()
+
+    with tarfile.open(fileobj=archive, mode="r:*") as tar:
+        names = set(tar.getnames())
+
+    assert "./keep.txt" in names
+    assert "./actual" not in names
+    assert "./actual/remote.txt" not in names
 
 
 @pytest.mark.asyncio

@@ -52,6 +52,71 @@ def test_manifest_ephemeral_entry_paths_include_nested_children() -> None:
     assert manifest.ephemeral_entry_paths() == {Path("dir/tmp.txt")}
 
 
+def test_manifest_ephemeral_persistence_paths_include_resolved_mount_targets() -> None:
+    manifest = Manifest(
+        root="/workspace",
+        entries={
+            "logical": GCSMount(bucket="bucket", mount_path=Path("actual")),
+            "dir": Dir(
+                children={
+                    "tmp.txt": File(content=b"tmp", ephemeral=True),
+                }
+            ),
+        },
+    )
+
+    assert manifest.ephemeral_persistence_paths() == {
+        Path("logical"),
+        Path("actual"),
+        Path("dir/tmp.txt"),
+    }
+
+
+def test_manifest_ephemeral_mount_targets_sort_by_resolved_depth() -> None:
+    parent = GCSMount(bucket="parent", mount_path=Path("repo"))
+    child = GCSMount(bucket="child", mount_path=Path("repo/sub"))
+    manifest = Manifest(
+        root="/workspace",
+        entries={
+            "parent": parent,
+            "nested": Dir(children={"child": child}),
+        },
+    )
+
+    assert manifest.ephemeral_mount_targets() == [
+        (child, Path("/workspace/repo/sub")),
+        (parent, Path("/workspace/repo")),
+    ]
+
+
+def test_manifest_ephemeral_mount_targets_normalize_non_escaping_mount_paths() -> None:
+    mount = GCSMount(bucket="bucket", mount_path=Path("/workspace/repo/../actual"))
+    manifest = Manifest(root="/workspace", entries={"logical": mount})
+
+    assert manifest.ephemeral_mount_targets() == [
+        (mount, Path("/workspace/actual")),
+    ]
+    assert manifest.ephemeral_persistence_paths() == {
+        Path("logical"),
+        Path("actual"),
+    }
+
+
+def test_manifest_ephemeral_mount_targets_reject_escaping_mount_paths() -> None:
+    manifest = Manifest(
+        root="/workspace",
+        entries={
+            "logical": GCSMount(bucket="bucket", mount_path=Path("/workspace/../../tmp")),
+        },
+    )
+
+    with pytest.raises(InvalidManifestPathError, match="must not escape root"):
+        manifest.ephemeral_mount_targets()
+
+    with pytest.raises(InvalidManifestPathError, match="must not escape root"):
+        manifest.ephemeral_persistence_paths()
+
+
 def test_manifest_describe_preserves_tree_rendering_after_renderer_extract() -> None:
     manifest = Manifest(
         root="/workspace",

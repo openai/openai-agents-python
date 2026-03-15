@@ -5,13 +5,14 @@ import io
 import sys
 import types
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from agents.sandbox import Manifest
-from agents.sandbox.entries import File
-from agents.sandbox.errors import WorkspaceArchiveReadError
+from agents.sandbox.entries import File, GCSMount
+from agents.sandbox.errors import InvalidManifestPathError, WorkspaceArchiveReadError
 from agents.sandbox.manifest import Environment
 from agents.sandbox.types import ExecResult
 
@@ -213,3 +214,196 @@ async def test_modal_snapshot_failure_restores_ephemeral_paths(
 
     assert exc_info.value.context["reason"] == "snapshot_filesystem_failed"
     assert sandbox.restore_payloads == [b"ephemeral-backup"]
+
+
+@pytest.mark.asyncio
+async def test_modal_snapshot_filesystem_uses_resolved_mount_paths_for_backup_and_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _FakeRestoreProcess:
+        def __init__(self) -> None:
+            self.stderr = io.BytesIO(b"")
+            self.stdin = self._FakeStdin()
+
+        class _FakeStdin:
+            def write(self, data: bytes) -> None:
+                _ = data
+
+            def write_eof(self) -> None:
+                return
+
+            def drain(self) -> None:
+                return
+
+        def wait(self) -> int:
+            return 0
+
+    class _FakeSnapshotSandbox:
+        object_id = "sb-123"
+
+        def snapshot_filesystem(self) -> str:
+            return "snap-123"
+
+        def exec(self, *command: object, **kwargs: object) -> _FakeRestoreProcess:
+            _ = kwargs
+            assert command[:3] == ("tar", "xf", "-")
+            return _FakeRestoreProcess()
+
+    sandbox = _FakeSnapshotSandbox()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(
+            root="/workspace",
+            entries={"logical": GCSMount(bucket="bucket", mount_path=Path("actual"))},
+        ),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+        workspace_persistence="snapshot_filesystem",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+    commands: list[list[str]] = []
+
+    async def _fake_exec(
+        *command: object,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: object | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        rendered = [str(part) for part in command]
+        commands.append(rendered)
+        if rendered[:2] == ["sh", "-lc"]:
+            return ExecResult(stdout=b"ephemeral-backup", stderr=b"", exit_code=0)
+        if rendered[:3] == ["rm", "-rf", "--"]:
+            return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+        raise AssertionError(f"unexpected command: {rendered!r}")
+
+    async def _fake_call_modal(
+        fn: Callable[..., object],
+        *args: object,
+        call_timeout: float | None = None,
+        **kwargs: object,
+    ) -> object:
+        _ = call_timeout
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(session, "exec", _fake_exec)
+    monkeypatch.setattr(session, "_call_modal", _fake_call_modal)
+
+    archive = await session.persist_workspace()
+
+    assert archive.read() == modal_module._encode_snapshot_filesystem_ref(snapshot_id="snap-123")
+    assert commands[0][0:2] == ["sh", "-lc"]
+    assert "actual" in commands[0][2]
+    assert "logical" in commands[0][2]
+    assert commands[1] == ["rm", "-rf", "--", "/workspace/actual", "/workspace/logical"]
+
+
+@pytest.mark.asyncio
+async def test_modal_tar_persist_uses_resolved_mount_paths_for_excludes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(
+            root="/workspace",
+            entries={"logical": GCSMount(bucket="bucket", mount_path=Path("actual"))},
+        ),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=None)
+    commands: list[list[str]] = []
+
+    async def _fake_exec(
+        *command: object,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: object | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        rendered = [str(part) for part in command]
+        commands.append(rendered)
+        return ExecResult(stdout=b"tar-bytes", stderr=b"", exit_code=0)
+
+    monkeypatch.setattr(session, "exec", _fake_exec)
+
+    archive = await session.persist_workspace()
+
+    assert archive.read() == b"tar-bytes"
+    assert commands == [
+        [
+            "tar",
+            "cf",
+            "-",
+            "--exclude",
+            "./actual",
+            "--exclude",
+            "./logical",
+            "-C",
+            "/workspace",
+            ".",
+        ]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_modal_snapshot_filesystem_rejects_escaping_mount_paths_before_exec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _FakeSnapshotSandbox:
+        object_id = "sb-123"
+
+        def __init__(self) -> None:
+            self.snapshot_calls = 0
+
+        def snapshot_filesystem(self) -> str:
+            self.snapshot_calls += 1
+            return "snap-123"
+
+    sandbox = _FakeSnapshotSandbox()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(
+            root="/workspace",
+            entries={"logical": GCSMount(bucket="bucket", mount_path=Path("/workspace/../../tmp"))},
+        ),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+        workspace_persistence="snapshot_filesystem",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+    commands: list[list[str]] = []
+
+    async def _fake_exec(
+        *command: object,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: object | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        commands.append([str(part) for part in command])
+        raise AssertionError("exec() should not run for escaping mount paths")
+
+    async def _fake_call_modal(
+        fn: Callable[..., object],
+        *args: object,
+        call_timeout: float | None = None,
+        **kwargs: object,
+    ) -> object:
+        _ = (fn, args, call_timeout, kwargs)
+        raise AssertionError("snapshot_filesystem() should not run for escaping mount paths")
+
+    monkeypatch.setattr(session, "exec", _fake_exec)
+    monkeypatch.setattr(session, "_call_modal", _fake_call_modal)
+
+    with pytest.raises(InvalidManifestPathError, match="must not escape root"):
+        await session.persist_workspace()
+
+    assert commands == []
+    assert sandbox.snapshot_calls == 0

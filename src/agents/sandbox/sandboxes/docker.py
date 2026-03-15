@@ -405,47 +405,106 @@ class DockerSandboxSession(BaseSandboxSession):
         retry_if=lambda exc, self: exception_chain_has_status_code(exc, TRANSIENT_HTTP_STATUS_CODES)
     )
     async def persist_workspace(self) -> io.IOBase:
-        skip = self.state.manifest.ephemeral_entry_paths()
+        def _error_context_summary(error: WorkspaceArchiveReadError) -> dict[str, str]:
+            summary = {"message": error.message}
+            if error.cause is not None:
+                summary["cause_type"] = type(error.cause).__name__
+                summary["cause"] = str(error.cause)
+            return summary
+
+        skip = self.state.manifest.ephemeral_persistence_paths()
         root = Path(self.state.manifest.root)
-        staging_parent, staging_workspace = await self._stage_workspace_copy()
-
-        try:
-            for rel_path in skip:
-                await self._rm_best_effort(staging_workspace / rel_path)
-
-            bits, _ = self._container.get_archive(str(staging_workspace))
-            root_name = root.name or "workspace"
-            if not skip:
-                return IteratorIO(it=bits)
-
-            in_stream = IteratorIO(it=bits)
-            out_stream = tempfile.SpooledTemporaryFile(max_size=16 * 1024 * 1024, mode="w+b")
+        unmounted_mounts: list[tuple[Mount, Path]] = []
+        unmount_error: WorkspaceArchiveReadError | None = None
+        for mount_entry, mount_path in self.state.manifest.ephemeral_mount_targets():
             try:
-                with (
-                    tarfile.open(fileobj=in_stream, mode="r|*") as in_tar,
-                    tarfile.open(fileobj=out_stream, mode="w") as out_tar,
-                ):
-                    for member in in_tar:
-                        if should_skip_tar_member(
-                            member.name, skip_rel_paths=skip, root_name=root_name
-                        ):
-                            continue
-                        fileobj = in_tar.extractfile(member) if member.isreg() else None
-                        out_tar.addfile(member, fileobj)
-                        if fileobj is not None:
-                            fileobj.close()
-            except (tarfile.TarError, OSError) as e:
-                out_stream.close()
-                raise WorkspaceArchiveReadError(path=root, cause=e) from e
+                await mount_entry.unmount_path(self, mount_path)
+            except Exception as e:
+                unmount_error = WorkspaceArchiveReadError(path=root, cause=e)
+                break
+            unmounted_mounts.append((mount_entry, mount_path))
 
-            out_stream.seek(0)
-            return cast(io.IOBase, out_stream)
-        except docker.errors.NotFound as e:
-            raise WorkspaceArchiveReadError(path=root, cause=e) from e
-        except docker.errors.APIError as e:
-            raise WorkspaceArchiveReadError(path=root, cause=e) from e
-        finally:
-            await self._rm_best_effort(staging_parent)
+        snapshot_error: WorkspaceArchiveReadError | None = None
+        archive: io.IOBase | None = None
+        staging_parent: Path | None = None
+        if unmount_error is None:
+            try:
+                try:
+                    staging_parent, staging_workspace = await self._stage_workspace_copy()
+                    for rel_path in skip:
+                        await self._rm_best_effort(staging_workspace / rel_path)
+
+                    bits, _ = self._container.get_archive(str(staging_workspace))
+                    root_name = root.name or "workspace"
+                    if not skip:
+                        archive = IteratorIO(it=bits)
+                    else:
+                        in_stream = IteratorIO(it=bits)
+                        out_stream = tempfile.SpooledTemporaryFile(
+                            max_size=16 * 1024 * 1024, mode="w+b"
+                        )
+                        try:
+                            with (
+                                tarfile.open(fileobj=in_stream, mode="r|*") as in_tar,
+                                tarfile.open(fileobj=out_stream, mode="w") as out_tar,
+                            ):
+                                for member in in_tar:
+                                    if should_skip_tar_member(
+                                        member.name, skip_rel_paths=skip, root_name=root_name
+                                    ):
+                                        continue
+                                    fileobj = in_tar.extractfile(member) if member.isreg() else None
+                                    out_tar.addfile(member, fileobj)
+                                    if fileobj is not None:
+                                        fileobj.close()
+                        except (tarfile.TarError, OSError) as e:
+                            out_stream.close()
+                            raise WorkspaceArchiveReadError(path=root, cause=e) from e
+
+                        out_stream.seek(0)
+                        archive = cast(io.IOBase, out_stream)
+                except docker.errors.NotFound as e:
+                    snapshot_error = WorkspaceArchiveReadError(path=root, cause=e)
+                except docker.errors.APIError as e:
+                    snapshot_error = WorkspaceArchiveReadError(path=root, cause=e)
+                except WorkspaceArchiveReadError as e:
+                    snapshot_error = e
+            finally:
+                if staging_parent is not None:
+                    await self._rm_best_effort(staging_parent)
+
+        remount_error: WorkspaceArchiveReadError | None = None
+        for mount_entry, mount_path in reversed(unmounted_mounts):
+            try:
+                await mount_entry.mount(self, mount_path)
+            except Exception as e:
+                current_error = WorkspaceArchiveReadError(path=root, cause=e)
+                if remount_error is None:
+                    remount_error = current_error
+                    if unmount_error is not None:
+                        remount_error.context["earlier_unmount_error"] = _error_context_summary(
+                            unmount_error
+                        )
+                else:
+                    additional_remount_errors = remount_error.context.setdefault(
+                        "additional_remount_errors", []
+                    )
+                    assert isinstance(additional_remount_errors, list)
+                    additional_remount_errors.append(_error_context_summary(current_error))
+
+        if remount_error is not None:
+            if snapshot_error is not None:
+                remount_error.context["snapshot_error_before_remount_corruption"] = (
+                    _error_context_summary(snapshot_error)
+                )
+            raise remount_error
+        if unmount_error is not None:
+            raise unmount_error
+        if snapshot_error is not None:
+            raise snapshot_error
+
+        assert archive is not None
+        return archive
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
         root = self.state.manifest.root

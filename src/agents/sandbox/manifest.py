@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_serializer, field_validator
 from typing_extensions import assert_never
 
-from .entries import BaseEntry, Dir
+from .entries import BaseEntry, Dir, Mount, resolve_workspace_path
 from .errors import InvalidManifestPathError
 from .manifest_render import render_manifest_description
 from .types import Group, User
@@ -92,6 +92,34 @@ class Manifest(BaseModel):
         _ = depth
         return {path for path, artifact in self.iter_entries() if artifact.ephemeral}
 
+    def ephemeral_mount_targets(self) -> list[tuple[Mount, Path]]:
+        root = Path(self.root)
+        mounts: list[tuple[Mount, Path]] = []
+        for rel_path, artifact in self.iter_entries():
+            if not isinstance(artifact, Mount) or not artifact.ephemeral:
+                continue
+            dest = resolve_workspace_path(root, rel_path)
+            mount_path = artifact._resolve_mount_path_for_root(root, dest)
+            normalized_mount_path = self._normalize_in_workspace_path(root, mount_path)
+            if normalized_mount_path is not None:
+                mount_path = normalized_mount_path
+            mounts.append((artifact, mount_path))
+        mounts.sort(key=lambda item: len(item[1].parts), reverse=True)
+        return mounts
+
+    def ephemeral_persistence_paths(self, depth: int | None = 1) -> set[Path]:
+        _ = depth
+        root = Path(self.root)
+        skip = self.ephemeral_entry_paths(depth=depth)
+        for _mount, mount_path in self.ephemeral_mount_targets():
+            try:
+                rel_mount_path = mount_path.relative_to(root)
+            except ValueError:
+                continue
+            if rel_mount_path.parts:
+                skip.add(rel_mount_path)
+        return skip
+
     @staticmethod
     def _coerce_rel_path(path: str | Path) -> Path:
         return path if isinstance(path, Path) else Path(path)
@@ -102,6 +130,38 @@ class Manifest(BaseModel):
             raise InvalidManifestPathError(rel=rel, reason="absolute")
         if ".." in rel.parts:
             raise InvalidManifestPathError(rel=rel, reason="escape_root")
+
+    @staticmethod
+    def _normalize_rel_path_within_root(rel: Path, *, original: Path) -> Path:
+        if rel.is_absolute():
+            raise InvalidManifestPathError(rel=original, reason="absolute")
+
+        normalized_parts: list[str] = []
+        for part in rel.parts:
+            if part in ("", "."):
+                continue
+            if part == "..":
+                if not normalized_parts:
+                    raise InvalidManifestPathError(rel=original, reason="escape_root")
+                normalized_parts.pop()
+                continue
+            normalized_parts.append(part)
+
+        return Path(*normalized_parts)
+
+    @classmethod
+    def _normalize_in_workspace_path(cls, root: Path, path: Path) -> Path | None:
+        if not path.is_absolute():
+            normalized_rel = cls._normalize_rel_path_within_root(path, original=path)
+            return root / normalized_rel if normalized_rel.parts else root
+
+        try:
+            rel_path = path.relative_to(root)
+        except ValueError:
+            return None
+
+        normalized_rel = cls._normalize_rel_path_within_root(rel_path, original=path)
+        return root / normalized_rel if normalized_rel.parts else root
 
     def iter_entries(self) -> Iterator[tuple[Path, BaseEntry]]:
         stack = [

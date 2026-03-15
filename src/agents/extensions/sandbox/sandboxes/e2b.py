@@ -645,7 +645,9 @@ class E2BSandboxSession(BaseSandboxSession):
 
     def _tar_exclude_args(self) -> list[str]:
         excludes: list[str] = []
-        for rel in sorted(self.state.manifest.ephemeral_entry_paths(), key=lambda p: p.as_posix()):
+        for rel in sorted(
+            self.state.manifest.ephemeral_persistence_paths(), key=lambda p: p.as_posix()
+        ):
             rel_posix = rel.as_posix().lstrip("/")
             if not rel_posix or rel_posix in {".", "/"}:
                 continue
@@ -688,50 +690,71 @@ class E2BSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveReadError(path=Path(self.state.manifest.root), cause=e) from e
 
     async def persist_workspace(self) -> io.IOBase:
+        def _error_context_summary(error: WorkspaceArchiveReadError) -> dict[str, str]:
+            summary = {"message": error.message}
+            if error.cause is not None:
+                summary["cause_type"] = type(error.cause).__name__
+                summary["cause"] = str(error.cause)
+            return summary
+
         root = Path(self.state.manifest.root)
         excludes = " ".join(self._tar_exclude_args())
         tar_cmd = f"tar {excludes} -C {shlex.quote(str(root))} -cf - . | base64 -w0"
-        mounts: list[tuple[Mount, Path]] = []
-        for dest, entry in self.state.manifest.entries.items():
-            if isinstance(entry, Mount):
-                dest_path = dest if isinstance(dest, Path) else Path(dest)
-                mount_path = entry._resolve_mount_path(self, dest_path)
-                mounts.append((entry, mount_path))
         unmounted_mounts: list[tuple[Mount, Path]] = []
-        for mount_entry, mount_path in mounts:
+        unmount_error: WorkspaceArchiveReadError | None = None
+        for mount_entry, mount_path in self.state.manifest.ephemeral_mount_targets():
             try:
                 await mount_entry.unmount_path(self, mount_path)
             except Exception as e:
-                raise WorkspaceArchiveReadError(path=root, cause=e) from e
+                unmount_error = WorkspaceArchiveReadError(path=root, cause=e)
+                break
             unmounted_mounts.append((mount_entry, mount_path))
 
         snapshot_error: WorkspaceArchiveReadError | None = None
         raw: bytes | None = None
-        try:
-            encoded = await self._run_persist_workspace_command(tar_cmd)
+        if unmount_error is None:
             try:
-                raw = base64.b64decode(encoded.encode("utf-8"), validate=True)
-            except (binascii.Error, ValueError) as e:
-                raise WorkspaceArchiveReadError(
-                    path=root,
-                    context={"reason": "snapshot_invalid_base64"},
-                    cause=e,
-                ) from e
-        except WorkspaceArchiveReadError as e:
-            snapshot_error = e
+                encoded = await self._run_persist_workspace_command(tar_cmd)
+                try:
+                    raw = base64.b64decode(encoded.encode("utf-8"), validate=True)
+                except (binascii.Error, ValueError) as e:
+                    raise WorkspaceArchiveReadError(
+                        path=root,
+                        context={"reason": "snapshot_invalid_base64"},
+                        cause=e,
+                    ) from e
+            except WorkspaceArchiveReadError as e:
+                snapshot_error = e
 
         remount_error: WorkspaceArchiveReadError | None = None
         for mount_entry, mount_path in reversed(unmounted_mounts):
             try:
                 await mount_entry.mount(self, mount_path)
             except Exception as e:
-                remount_error = WorkspaceArchiveReadError(path=root, cause=e)
-                break
+                current_error = WorkspaceArchiveReadError(path=root, cause=e)
+                if remount_error is None:
+                    remount_error = current_error
+                    if unmount_error is not None:
+                        remount_error.context["earlier_unmount_error"] = _error_context_summary(
+                            unmount_error
+                        )
+                else:
+                    additional_remount_errors = remount_error.context.setdefault(
+                        "additional_remount_errors", []
+                    )
+                    assert isinstance(additional_remount_errors, list)
+                    additional_remount_errors.append(_error_context_summary(current_error))
 
+        if remount_error is not None:
+            if snapshot_error is not None:
+                remount_error.context["snapshot_error_before_remount_corruption"] = (
+                    _error_context_summary(snapshot_error)
+                )
+            raise remount_error
+        if unmount_error is not None:
+            raise unmount_error
         if snapshot_error is not None:
             raise snapshot_error
-        if remount_error is not None:
-            raise remount_error
 
         assert raw is not None
         return io.BytesIO(raw)

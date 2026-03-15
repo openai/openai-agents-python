@@ -460,7 +460,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 path=root, context={"reason": "workspace_root_not_found"}
             )
 
-        skip = self.state.manifest.ephemeral_entry_paths()
+        skip = self.state.manifest.ephemeral_persistence_paths()
         buf = io.BytesIO()
         try:
             with tarfile.open(fileobj=buf, mode="w") as tar:

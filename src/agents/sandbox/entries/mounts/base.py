@@ -88,6 +88,13 @@ class Mount(BaseEntry):
         dest: Path,
     ) -> Path:
         manifest_root = Path(getattr(session.state.manifest, "root", "/"))
+        return self._resolve_mount_path_for_root(manifest_root, dest)
+
+    def _resolve_mount_path_for_root(
+        self,
+        manifest_root: Path,
+        dest: Path,
+    ) -> Path:
         if self.mount_path is not None:
             mount_path = Path(self.mount_path)
             if mount_path.is_absolute():

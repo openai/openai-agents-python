@@ -4,12 +4,14 @@ import asyncio
 import io
 import shutil
 import tarfile
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
 import docker.errors  # type: ignore[import-untyped]
 import pytest
+from pydantic import PrivateAttr
 
 import agents.sandbox.sandboxes.docker as docker_sandbox
 from agents.sandbox.entries import (
@@ -17,9 +19,14 @@ from agents.sandbox.entries import (
     Dir,
     File,
     FuseMountPattern,
+    Mount,
     RcloneMountPattern,
 )
-from agents.sandbox.errors import ExecTimeoutError, InvalidManifestPathError
+from agents.sandbox.errors import (
+    ExecTimeoutError,
+    InvalidManifestPathError,
+    WorkspaceArchiveReadError,
+)
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.sandboxes.docker import (
     DockerSandboxClient,
@@ -33,16 +40,19 @@ from agents.sandbox.types import ExecResult
 
 
 class _FakeDockerContainer:
-    def __init__(self, host_root: Path) -> None:
+    def __init__(self, host_root: Path, *, archive_error: Exception | None = None) -> None:
         self._host_root = host_root
         self.status = "running"
         self.archive_calls: list[str] = []
+        self.archive_error = archive_error
 
     def reload(self) -> None:
         return
 
     def get_archive(self, path: str) -> tuple[object, dict[str, object]]:
         self.archive_calls.append(path)
+        if self.archive_error is not None:
+            raise self.archive_error
         if path == "/workspace":
             raise docker.errors.APIError("root archive unsupported")
 
@@ -72,8 +82,15 @@ class _FakeDockerClient:
 
 
 class _HostBackedDockerSession(DockerSandboxSession):
-    def __init__(self, *, host_root: Path, manifest: Manifest) -> None:
-        container = _FakeDockerContainer(host_root)
+    def __init__(
+        self,
+        *,
+        host_root: Path,
+        manifest: Manifest,
+        event_log: list[tuple[str, str]] | None = None,
+        archive_error: Exception | None = None,
+    ) -> None:
+        container = _FakeDockerContainer(host_root, archive_error=archive_error)
         state = DockerSandboxSessionState(
             manifest=manifest,
             snapshot=NoopSnapshot(id="snapshot"),
@@ -87,6 +104,7 @@ class _HostBackedDockerSession(DockerSandboxSession):
         )
         self._host_root = host_root
         self._fake_container = container
+        self._event_log = event_log if event_log is not None else []
 
     async def _exec_internal(
         self,
@@ -99,6 +117,7 @@ class _HostBackedDockerSession(DockerSandboxSession):
             self._host_path(cmd[2]).mkdir(parents=True, exist_ok=True)
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
         if cmd[:3] == ["cp", "-R", "--"]:
+            self._event_log.append(("cp", cmd[3]))
             src = self._host_path(cmd[3])
             dst = self._host_path(cmd[4])
             shutil.copytree(src, dst)
@@ -118,6 +137,79 @@ class _HostBackedDockerSession(DockerSandboxSession):
     def _host_path(self, path: str | Path) -> Path:
         container_path = Path(path)
         return self._host_root / container_path.relative_to("/")
+
+
+class _RecordingMount(Mount):
+    type: str = f"recording_mount_{uuid.uuid4().hex}"
+    remove_on_unmount: bool = True
+    remount_marker: str | None = None
+    _events: list[tuple[str, str]] = PrivateAttr(default_factory=list)
+
+    def bind_events(self, events: list[tuple[str, str]]) -> _RecordingMount:
+        self._events = events
+        return self
+
+    async def _mount(self, session: object, path: Path) -> None:
+        host_path = cast(_HostBackedDockerSession, session)._host_path(path)
+        host_path.mkdir(parents=True, exist_ok=True)
+        self._events.append(("mount", str(path)))
+        if self.remount_marker is not None:
+            (host_path / self.remount_marker).write_text("remounted", encoding="utf-8")
+
+    async def _unmount(self, session: object, path: Path) -> None:
+        host_path = cast(_HostBackedDockerSession, session)._host_path(path)
+        self._events.append(("unmount", str(path)))
+        if not self.remove_on_unmount:
+            return
+        shutil.rmtree(host_path, ignore_errors=True)
+
+
+class _FailingUnmountMount(_RecordingMount):
+    type: str = f"failing_unmount_mount_{uuid.uuid4().hex}"
+
+    async def _unmount(self, session: object, path: Path) -> None:
+        self._events.append(("unmount_fail", str(path)))
+        raise RuntimeError("boom while unmounting second mount")
+
+
+class _FailingRemountMount(_RecordingMount):
+    type: str = f"failing_remount_mount_{uuid.uuid4().hex}"
+
+    async def _mount(self, session: object, path: Path) -> None:
+        self._events.append(("mount_fail", str(path)))
+        raise RuntimeError("boom while remounting second mount")
+
+
+class _OrderSensitiveMount(_RecordingMount):
+    type: str = f"order_sensitive_mount_{uuid.uuid4().hex}"
+    require_unmounted_before: str | None = None
+    require_mounted_before: str | None = None
+
+    async def _mount(self, session: object, path: Path) -> None:
+        if (
+            self.require_mounted_before is not None
+            and (
+                "mount",
+                self.require_mounted_before,
+            )
+            not in self._events
+        ):
+            self._events.append(("mount_fail", str(path)))
+            raise RuntimeError("parent mount missing")
+        await super()._mount(session, path)
+
+    async def _unmount(self, session: object, path: Path) -> None:
+        if (
+            self.require_unmounted_before is not None
+            and (
+                "unmount",
+                self.require_unmounted_before,
+            )
+            not in self._events
+        ):
+            self._events.append(("unmount_fail", str(path)))
+            raise RuntimeError("target is busy")
+        await super()._unmount(session, path)
 
 
 def _archive_member_names(archive: io.IOBase) -> list[str]:
@@ -177,6 +269,241 @@ async def test_docker_persist_workspace_prunes_ephemeral_entries_from_staged_cop
 
     assert any(name.endswith("workspace/keep.txt") for name in names)
     assert not any(name.endswith("workspace/skip.txt") for name in names)
+
+
+@pytest.mark.asyncio
+async def test_docker_persist_workspace_unmounts_nested_ephemeral_mounts_before_copy(
+    tmp_path: Path,
+) -> None:
+    host_root = tmp_path / "container"
+    workspace = host_root / "workspace"
+    mount_dir = workspace / "repo" / "mount"
+    mount_dir.mkdir(parents=True)
+    (mount_dir / "remote.txt").write_text("remote", encoding="utf-8")
+
+    events: list[tuple[str, str]] = []
+    mount = _RecordingMount(remount_marker="remounted.txt").bind_events(events)
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(
+            root="/workspace",
+            entries={
+                "repo": Dir(
+                    children={
+                        "mount": mount,
+                    }
+                )
+            },
+        ),
+        event_log=events,
+    )
+
+    archive = await session.persist_workspace()
+
+    names = _archive_member_names(archive)
+
+    assert [kind for kind, _path in events if kind in {"unmount", "cp", "mount"}] == [
+        "unmount",
+        "cp",
+        "mount",
+    ]
+    assert not any(name.endswith("workspace/repo/mount/remote.txt") for name in names)
+    assert (mount_dir / "remounted.txt").read_text(encoding="utf-8") == "remounted"
+
+
+@pytest.mark.asyncio
+async def test_docker_persist_workspace_prunes_explicit_mount_path_from_staged_copy(
+    tmp_path: Path,
+) -> None:
+    host_root = tmp_path / "container"
+    workspace = host_root / "workspace"
+    actual_mount_path = workspace / "actual"
+    actual_mount_path.mkdir(parents=True)
+    (actual_mount_path / "remote.txt").write_text("remote", encoding="utf-8")
+
+    mount = _RecordingMount(mount_path=Path("actual"), remove_on_unmount=False)
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(
+            root="/workspace",
+            entries={
+                "logical": mount,
+            },
+        ),
+    )
+
+    archive = await session.persist_workspace()
+
+    names = _archive_member_names(archive)
+
+    assert not any(name.endswith("workspace/actual/remote.txt") for name in names)
+    assert (actual_mount_path / "remote.txt").read_text(encoding="utf-8") == "remote"
+
+
+@pytest.mark.asyncio
+async def test_docker_persist_workspace_remounts_prior_mounts_after_unmount_failure(
+    tmp_path: Path,
+) -> None:
+    host_root = tmp_path / "container"
+    workspace = host_root / "workspace"
+    first_mount_dir = workspace / "repo" / "mount1"
+    second_mount_dir = workspace / "repo" / "mount2"
+    first_mount_dir.mkdir(parents=True)
+    second_mount_dir.mkdir(parents=True)
+    (first_mount_dir / "remote1.txt").write_text("remote-1", encoding="utf-8")
+    (second_mount_dir / "remote2.txt").write_text("remote-2", encoding="utf-8")
+
+    events: list[tuple[str, str]] = []
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(
+            root="/workspace",
+            entries={
+                "repo": Dir(
+                    children={
+                        "mount1": _RecordingMount(remount_marker="remounted.txt").bind_events(
+                            events
+                        ),
+                        "mount2": _FailingUnmountMount().bind_events(events),
+                    }
+                )
+            },
+        ),
+        event_log=events,
+    )
+
+    with pytest.raises(WorkspaceArchiveReadError):
+        await session.persist_workspace()
+
+    assert [kind for kind, _path in events] == [
+        "unmount",
+        "unmount_fail",
+        "mount",
+    ]
+    assert "cp" not in [kind for kind, _path in events]
+    assert (first_mount_dir / "remounted.txt").read_text(encoding="utf-8") == "remounted"
+    assert (second_mount_dir / "remote2.txt").read_text(encoding="utf-8") == "remote-2"
+
+
+@pytest.mark.asyncio
+async def test_docker_persist_workspace_unmounts_nested_mount_paths_deepest_first(
+    tmp_path: Path,
+) -> None:
+    host_root = tmp_path / "container"
+    workspace = host_root / "workspace"
+    parent_mount_dir = workspace / "repo"
+    child_mount_dir = parent_mount_dir / "sub"
+    child_mount_dir.mkdir(parents=True)
+    (child_mount_dir / "remote.txt").write_text("remote", encoding="utf-8")
+
+    events: list[tuple[str, str]] = []
+    child_path = "/workspace/repo/sub"
+    parent_path = "/workspace/repo"
+    parent_mount = _OrderSensitiveMount(
+        remount_marker="parent-remounted.txt",
+        require_unmounted_before=child_path,
+    ).bind_events(events)
+    child_mount = _OrderSensitiveMount(
+        mount_path=Path("repo/sub"),
+        remount_marker="child-remounted.txt",
+        require_mounted_before=parent_path,
+    ).bind_events(events)
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(
+            root="/workspace",
+            entries={
+                "repo": parent_mount,
+                "child": child_mount,
+            },
+        ),
+        event_log=events,
+    )
+
+    archive = await session.persist_workspace()
+
+    names = _archive_member_names(archive)
+
+    assert [kind for kind, _path in events] == [
+        "unmount",
+        "unmount",
+        "cp",
+        "mount",
+        "mount",
+    ]
+    assert [path for kind, path in events if kind == "unmount"] == [
+        child_path,
+        parent_path,
+    ]
+    assert [path for kind, path in events if kind == "mount"] == [
+        parent_path,
+        child_path,
+    ]
+    assert not any(name.endswith("workspace/repo/remote.txt") for name in names)
+    assert not any(name.endswith("workspace/repo/sub/remote.txt") for name in names)
+    assert (parent_mount_dir / "parent-remounted.txt").read_text(encoding="utf-8") == "remounted"
+    assert (child_mount_dir / "child-remounted.txt").read_text(encoding="utf-8") == "remounted"
+
+
+@pytest.mark.asyncio
+async def test_docker_persist_workspace_keeps_remounting_and_raises_remount_error_first(
+    tmp_path: Path,
+) -> None:
+    host_root = tmp_path / "container"
+    workspace = host_root / "workspace"
+    first_mount_dir = workspace / "repo" / "a"
+    second_mount_dir = workspace / "repo" / "b"
+    first_mount_dir.mkdir(parents=True)
+    second_mount_dir.mkdir(parents=True)
+    (first_mount_dir / "remote1.txt").write_text("remote-1", encoding="utf-8")
+    (second_mount_dir / "remote2.txt").write_text("remote-2", encoding="utf-8")
+
+    events: list[tuple[str, str]] = []
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(
+            root="/workspace",
+            entries={
+                "repo": Dir(
+                    children={
+                        "a": _RecordingMount(remount_marker="a-remounted.txt").bind_events(events),
+                        "b": _FailingRemountMount().bind_events(events),
+                    }
+                )
+            },
+        ),
+        event_log=events,
+        archive_error=docker.errors.APIError("snapshot failed"),
+    )
+
+    with pytest.raises(WorkspaceArchiveReadError) as exc_info:
+        await session.persist_workspace()
+
+    assert isinstance(exc_info.value.cause, RuntimeError)
+    assert str(exc_info.value.cause) == "boom while remounting second mount"
+    snapshot_error = cast(
+        dict[str, str],
+        exc_info.value.context["snapshot_error_before_remount_corruption"],
+    )
+    assert snapshot_error == {
+        "message": "failed to read archive for path: /workspace",
+        "cause_type": "APIError",
+        "cause": "snapshot failed",
+    }
+    assert exc_info.value.context["snapshot_error_before_remount_corruption"] == snapshot_error
+    assert "earlier_unmount_error" not in exc_info.value.context
+    assert "additional_remount_errors" not in exc_info.value.context
+    assert snapshot_error["cause"] == "snapshot failed"
+    assert snapshot_error["cause_type"] == "APIError"
+    assert exc_info.value.context["path"] == "/workspace"
+    assert [kind for kind, _path in events] == [
+        "unmount",
+        "unmount",
+        "cp",
+        "mount_fail",
+        "mount",
+    ]
+    assert (first_mount_dir / "a-remounted.txt").read_text(encoding="utf-8") == "remounted"
 
 
 @pytest.mark.asyncio

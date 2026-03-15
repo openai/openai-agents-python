@@ -493,7 +493,7 @@ class ModalSandboxSession(BaseSandboxSession):
             # Feature not present in this Modal SDK version; fall back to tar implementation.
             return await self._persist_workspace_via_tar()
 
-        skip = self.state.manifest.ephemeral_entry_paths()
+        skip = self.state.manifest.ephemeral_persistence_paths()
 
         # Modal's snapshot_filesystem does not support excluding paths. To
         # preserve the semantics of "ephemeral manifest entries are not
@@ -621,7 +621,7 @@ class ModalSandboxSession(BaseSandboxSession):
     async def _persist_workspace_via_tar(self) -> io.IOBase:
         # Existing tar implementation extracted so snapshot_filesystem mode can fall back cleanly.
         root = Path(self.state.manifest.root)
-        skip = self.state.manifest.ephemeral_entry_paths()
+        skip = self.state.manifest.ephemeral_persistence_paths()
 
         excludes: list[str] = []
         for rel in sorted(skip, key=lambda p: p.as_posix()):
@@ -762,7 +762,7 @@ class ModalSandboxSession(BaseSandboxSession):
                         continue
                     if should_skip_tar_member(
                         name,
-                        skip_rel_paths=self.state.manifest.ephemeral_entry_paths(),
+                        skip_rel_paths=self.state.manifest.ephemeral_persistence_paths(),
                         root_name=None,
                     ):
                         continue

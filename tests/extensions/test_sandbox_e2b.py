@@ -5,14 +5,13 @@ import io
 import tarfile
 import uuid
 from pathlib import Path
-from typing import Literal
 
 import pytest
 from pydantic import PrivateAttr
 
 from agents.extensions.sandbox.sandboxes.e2b import E2BSandboxSession, E2BSandboxSessionState
 from agents.sandbox import Manifest
-from agents.sandbox.entries import Mount
+from agents.sandbox.entries import Dir, Mount
 from agents.sandbox.errors import (
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
@@ -100,17 +99,42 @@ class _FakeE2BSandbox:
 
 
 class _RecordingMount(Mount):
-    type: Literal["recording_mount"] = "recording_mount"
+    type: str = "recording_mount"
     _mounted_paths: list[Path] = PrivateAttr(default_factory=list)
     _unmounted_paths: list[Path] = PrivateAttr(default_factory=list)
+    _events: list[tuple[str, str]] = PrivateAttr(default_factory=list)
+
+    def bind_events(self, events: list[tuple[str, str]]) -> _RecordingMount:
+        self._events = events
+        return self
 
     async def _mount(self, session: object, path: Path) -> None:
         _ = session
+        self._events.append(("mount", str(path)))
         self._mounted_paths.append(path)
 
     async def _unmount(self, session: object, path: Path) -> None:
         _ = session
+        self._events.append(("unmount", str(path)))
         self._unmounted_paths.append(path)
+
+
+class _FailingUnmountMount(_RecordingMount):
+    type: str = "failing_unmount_mount"
+
+    async def _unmount(self, session: object, path: Path) -> None:
+        _ = session
+        self._events.append(("unmount_fail", str(path)))
+        raise RuntimeError("boom while unmounting second mount")
+
+
+class _FailingRemountMount(_RecordingMount):
+    type: str = "failing_remount_mount"
+
+    async def _mount(self, session: object, path: Path) -> None:
+        _ = session
+        self._events.append(("mount_fail", str(path)))
+        raise RuntimeError("boom while remounting second mount")
 
 
 def _session(*, workspace_root_ready: bool = False) -> tuple[E2BSandboxSession, _FakeE2BSandbox]:
@@ -307,3 +331,122 @@ async def test_e2b_persist_workspace_remounts_mounts_after_snapshot() -> None:
     assert archive.read() == b"fake-tar-bytes"
     assert mount._unmounted_paths == [Path("/workspace/mount")]
     assert mount._mounted_paths == [Path("/workspace/mount")]
+
+
+@pytest.mark.asyncio
+async def test_e2b_persist_workspace_uses_nested_mount_targets_and_resolved_excludes() -> None:
+    parent_mount = _RecordingMount(mount_path=Path("repo"))
+    child_mount = _RecordingMount(mount_path=Path("repo/sub"))
+    events: list[tuple[str, str]] = []
+    sandbox = _FakeE2BSandbox()
+    sandbox.commands.exec_root_ready = True
+    sandbox.commands.next_result = _FakeE2BResult(
+        stdout=base64.b64encode(b"fake-tar-bytes").decode("ascii")
+    )
+    state = E2BSandboxSessionState(
+        session_id=uuid.uuid4(),
+        manifest=Manifest(
+            root="/workspace",
+            entries={
+                "parent": parent_mount.bind_events(events),
+                "nested": Dir(children={"child": child_mount.bind_events(events)}),
+            },
+        ),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=sandbox.sandbox_id,
+        workspace_root_ready=True,
+    )
+    session = E2BSandboxSession.from_state(state, sandbox=sandbox)
+
+    archive = await session.persist_workspace()
+
+    assert archive.read() == b"fake-tar-bytes"
+    assert [path for kind, path in events if kind == "unmount"] == [
+        "/workspace/repo/sub",
+        "/workspace/repo",
+    ]
+    assert [path for kind, path in events if kind == "mount"] == [
+        "/workspace/repo",
+        "/workspace/repo/sub",
+    ]
+    tar_command = str(sandbox.commands.calls[-1]["command"])
+    assert "--exclude=repo" in tar_command
+    assert "--exclude=./repo" in tar_command
+    assert "--exclude=repo/sub" in tar_command
+    assert "--exclude=./repo/sub" in tar_command
+
+
+@pytest.mark.asyncio
+async def test_e2b_persist_workspace_remounts_prior_mounts_after_unmount_failure() -> None:
+    events: list[tuple[str, str]] = []
+    sandbox = _FakeE2BSandbox()
+    sandbox.commands.exec_root_ready = True
+    state = E2BSandboxSessionState(
+        session_id=uuid.uuid4(),
+        manifest=Manifest(
+            root="/workspace",
+            entries={
+                "repo": Dir(
+                    children={
+                        "mount1": _RecordingMount().bind_events(events),
+                        "mount2": _FailingUnmountMount().bind_events(events),
+                    }
+                )
+            },
+        ),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=sandbox.sandbox_id,
+        workspace_root_ready=True,
+    )
+    session = E2BSandboxSession.from_state(state, sandbox=sandbox)
+
+    with pytest.raises(WorkspaceArchiveReadError):
+        await session.persist_workspace()
+
+    assert [kind for kind, _path in events] == [
+        "unmount",
+        "unmount_fail",
+        "mount",
+    ]
+    assert sandbox.commands.calls == []
+
+
+@pytest.mark.asyncio
+async def test_e2b_persist_workspace_keeps_remounting_and_raises_remount_error_first() -> None:
+    events: list[tuple[str, str]] = []
+    sandbox = _FakeE2BSandbox()
+    sandbox.commands.exec_root_ready = True
+    sandbox.commands.next_result = _FakeE2BResult(stderr="tar failed", exit_code=2)
+    state = E2BSandboxSessionState(
+        session_id=uuid.uuid4(),
+        manifest=Manifest(
+            root="/workspace",
+            entries={
+                "repo": Dir(
+                    children={
+                        "a": _RecordingMount().bind_events(events),
+                        "b": _FailingRemountMount().bind_events(events),
+                    }
+                )
+            },
+        ),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=sandbox.sandbox_id,
+        workspace_root_ready=True,
+    )
+    session = E2BSandboxSession.from_state(state, sandbox=sandbox)
+
+    with pytest.raises(WorkspaceArchiveReadError) as exc_info:
+        await session.persist_workspace()
+
+    assert isinstance(exc_info.value.cause, RuntimeError)
+    assert str(exc_info.value.cause) == "boom while remounting second mount"
+    assert exc_info.value.context["snapshot_error_before_remount_corruption"] == {
+        "message": "failed to read archive for path: /workspace",
+    }
+    assert [kind for kind, _path in events] == [
+        "unmount",
+        "unmount",
+        "mount_fail",
+        "mount",
+    ]
