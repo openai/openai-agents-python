@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import functools
 import inspect
@@ -359,10 +360,26 @@ class MCPUtil:
         try:
             resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
             merged_meta = cls._merge_mcp_meta(resolved_meta, meta)
-            if merged_meta is None:
-                result = await server.call_tool(tool.name, json_data)
-            else:
-                result = await server.call_tool(tool.name, json_data, meta=merged_meta)
+            call_task = asyncio.create_task(
+                server.call_tool(tool.name, json_data)
+                if merged_meta is None
+                else server.call_tool(tool.name, json_data, meta=merged_meta)
+            )
+            try:
+                result = await asyncio.shield(call_task)
+            except asyncio.CancelledError as e:
+                if not call_task.done():
+                    call_task.cancel()
+                    raise
+                if call_task.cancelled():
+                    raise UserError(
+                        f"Failed to call tool '{tool.name}' on MCP server '{server.name}': "
+                        "tool execution was cancelled."
+                    ) from e
+                call_exception = call_task.exception()
+                if call_exception is not None:
+                    raise call_exception from e
+                result = call_task.result()
         except UserError:
             # Re-raise UserError as-is (it already has a good message)
             raise
