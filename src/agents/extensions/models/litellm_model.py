@@ -133,7 +133,7 @@ class InternalToolCall(ChatCompletionMessageFunctionToolCall):
 
 
 class LitellmModel(Model):
-    """This class enables using any model via LiteLLM. LiteLLM allows you to acess OpenAPI,
+    """This class enables using any model via LiteLLM. LiteLLM allows you to access OpenAPI,
     Anthropic, Gemini, Mistral, and many other models.
     See supported models here: [litellm models](https://docs.litellm.ai/docs/providers).
     """
