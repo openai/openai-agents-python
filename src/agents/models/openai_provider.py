@@ -13,7 +13,7 @@ from .interface import Model, ModelProvider
 from .openai_chatcompletions import OpenAIChatCompletionsModel
 from .openai_responses import OpenAIResponsesModel, OpenAIResponsesWSModel
 
-# This is kept for backward compatiblity but using get_default_model() method is recommended.
+# This is kept for backward compatibility but using get_default_model() method is recommended.
 DEFAULT_MODEL: str = "gpt-4o"
 
 
