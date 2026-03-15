@@ -18,7 +18,9 @@ _GPT_5_DEFAULT_MODEL_SETTINGS: ModelSettings = ModelSettings(
     verbosity="low",
 )
 _GPT_5_NONE_DEFAULT_MODEL_SETTINGS: ModelSettings = ModelSettings(
-    reasoning=Reasoning(effort="none"),
+    # "none" is no longer accepted by the typed Reasoning schema.
+    # Use the lowest supported value to preserve low-effort defaults.
+    reasoning=Reasoning(effort="minimal"),
     verbosity="low",
 )
 

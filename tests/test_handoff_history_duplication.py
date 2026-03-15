@@ -148,9 +148,9 @@ class TestHandoffHistoryDuplicationFix:
         nested = nest_handoff_history(handoff_data)
 
         # pre_handoff_items should be empty (tool items filtered)
-        assert len(nested.pre_handoff_items) == 0, (
-            "ToolCallItem and ToolCallOutputItem should be filtered from pre_handoff_items"
-        )
+        assert (
+            len(nested.pre_handoff_items) == 0
+        ), "ToolCallItem and ToolCallOutputItem should be filtered from pre_handoff_items"
 
         # Summary should contain the conversation
         assert len(nested.input_history) == 1
@@ -300,9 +300,9 @@ class TestHandoffHistoryDuplicationFix:
         summary = str(first_item.get("content", ""))
 
         # Summary should contain function_call reference
-        assert "function_call" in summary or "get_weather" in summary, (
-            "Summary should contain the tool call that was filtered"
-        )
+        assert (
+            "function_call" in summary or "get_weather" in summary
+        ), "Summary should contain the tool call that was filtered"
 
     def test_input_items_field_exists_after_nesting(self):
         """Verify the input_items field is populated after nest_handoff_history.
@@ -319,9 +319,9 @@ class TestHandoffHistoryDuplicationFix:
 
         nested = nest_handoff_history(handoff_data)
 
-        assert nested.input_items is not None, (
-            "input_items should be populated after nest_handoff_history"
-        )
+        assert (
+            nested.input_items is not None
+        ), "input_items should be populated after nest_handoff_history"
 
     def test_full_handoff_scenario_no_duplication(self):
         """Full end-to-end test of the handoff scenario from Issue #2171.
@@ -356,9 +356,9 @@ class TestHandoffHistoryDuplicationFix:
 
         # Before fix: would have 6+ items (summary + raw tool items)
         # After fix: should have ~2 items (summary + message)
-        assert total_model_items <= 3, (
-            f"Model should receive at most 3 items (summary + messages), got {total_model_items}"
-        )
+        assert (
+            total_model_items <= 3
+        ), f"Model should receive at most 3 items (summary + messages), got {total_model_items}"
 
         # Verify no raw function_call_output items in model input
         all_input_items = list(nested.pre_handoff_items) + list(nested.input_items or [])
@@ -367,9 +367,9 @@ class TestHandoffHistoryDuplicationFix:
             for item in all_input_items
             if isinstance(item, (ToolCallOutputItem, HandoffOutputItem))
         ]
-        assert len(function_call_outputs) == 0, (
-            "No function_call_output items should be in model input"
-        )
+        assert (
+            len(function_call_outputs) == 0
+        ), "No function_call_output items should be in model input"
 
 
 @pytest.mark.asyncio
