@@ -39,6 +39,7 @@ from .chatcmpl_stream_handler import ChatCmplStreamHandler
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
 from .openai_responses import Converter as OpenAIResponsesConverter
+from .reasoning_content_replay import ShouldReplayReasoningContent
 
 if TYPE_CHECKING:
     from ..model_settings import ModelSettings
@@ -53,9 +54,11 @@ class OpenAIChatCompletionsModel(Model):
         self,
         model: str | ChatModel,
         openai_client: AsyncOpenAI,
+        should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
     ) -> None:
         self.model = model
         self._client = openai_client
+        self.should_replay_reasoning_content = should_replay_reasoning_content
 
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
@@ -314,7 +317,12 @@ class OpenAIChatCompletionsModel(Model):
         prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
         self._validate_official_openai_input_content_types(input)
-        converted_messages = Converter.items_to_messages(input, model=self.model)
+        converted_messages = Converter.items_to_messages(
+            input,
+            model=self.model,
+            base_url=str(self._client.base_url),
+            should_replay_reasoning_content=self.should_replay_reasoning_content,
+        )
 
         if system_instructions:
             converted_messages.insert(
