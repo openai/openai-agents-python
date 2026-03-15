@@ -123,7 +123,7 @@ class Converter:
         """
         items: list[TResponseOutputItem] = []
 
-        # Check if message is agents.extentions.models.litellm_model.InternalChatCompletionMessage
+        # Check if message is agents.extensions.models.litellm_model.InternalChatCompletionMessage
         # We can't actually import it here because litellm is an optional dependency
         # So we use hasattr to check for reasoning_content and thinking_blocks
         if hasattr(message, "reasoning_content") and message.reasoning_content:
