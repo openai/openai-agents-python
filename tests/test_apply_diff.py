@@ -23,7 +23,7 @@ def test_apply_diff_create_mode_requires_plus_prefix() -> None:
         apply_diff("", diff, mode="create")
 
 
-def test_apply_diff_create_mode_perserves_trailing_newline() -> None:
+def test_apply_diff_create_mode_preserves_trailing_newline() -> None:
     diff = "\n".join(["+hello", "+world", "+"])
     assert apply_diff("", diff, mode="create") == "hello\nworld\n"
 
