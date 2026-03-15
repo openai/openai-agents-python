@@ -370,6 +370,10 @@ class MCPUtil:
             except asyncio.CancelledError as e:
                 if not call_task.done():
                     call_task.cancel()
+                    try:
+                        await call_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
                     raise
                 if call_task.cancelled():
                     raise UserError(
@@ -379,7 +383,7 @@ class MCPUtil:
                 call_exception = call_task.exception()
                 if call_exception is not None:
                     raise call_exception from e
-                result = call_task.result()
+                raise
         except UserError:
             # Re-raise UserError as-is (it already has a good message)
             raise

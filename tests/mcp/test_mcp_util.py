@@ -197,6 +197,25 @@ class SlowFakeMCPServer(FakeMCPServer):
         return await super().call_tool(tool_name, arguments, meta=meta)
 
 
+class CleanupOnCancelFakeMCPServer(FakeMCPServer):
+    def __init__(self, cleanup_finished: asyncio.Event):
+        super().__init__()
+        self.cleanup_finished = cleanup_finished
+
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ):
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)
+            self.cleanup_finished.set()
+            raise
+
+
 @pytest.mark.asyncio
 async def test_mcp_invocation_crash_causes_error(caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.DEBUG)
@@ -255,6 +274,45 @@ async def test_mcp_tool_outer_cancellation_still_propagates():
 
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_outer_cancellation_after_inner_completion_still_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    server = FakeMCPServer()
+    server.add_tool("fast_tool", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="fast_tool", inputSchema={})
+
+    async def fake_shield(task: asyncio.Task[CallToolResult]) -> CallToolResult:
+        await task
+        raise asyncio.CancelledError("synthetic outer cancellation")
+
+    monkeypatch.setattr(asyncio, "shield", fake_shield)
+
+    with pytest.raises(asyncio.CancelledError):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_outer_cancellation_waits_for_inner_cleanup():
+    cleanup_finished = asyncio.Event()
+    server = CleanupOnCancelFakeMCPServer(cleanup_finished)
+    server.add_tool("slow_tool", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="slow_tool", inputSchema={})
+
+    task = asyncio.create_task(MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}"))
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cleanup_finished.is_set()
 
 
 @pytest.mark.asyncio
