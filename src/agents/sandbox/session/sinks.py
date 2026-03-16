@@ -10,7 +10,7 @@ from typing import Callable, Literal, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from ..entries import Dir
+from ..errors import WorkspaceReadNotFoundError
 from .base_sandbox_session import BaseSandboxSession
 from .events import EventPayloadPolicy, UCEvent
 from .utils import event_to_json_line
@@ -180,6 +180,7 @@ class WorkspaceJsonlSink(EventSink):
         self._seen = 0
         self._lock = asyncio.Lock()
         self._flush_every = max(1, int(flush_every))
+        self._existing_outbox_loaded = False
 
     def _resolve_relpath(self) -> Path:
         rel = self.workspace_relpath
@@ -200,16 +201,8 @@ class WorkspaceJsonlSink(EventSink):
         self._session = _unwrap_session_wrapper(session)
         self._resolved_workspace_relpath = self._resolve_relpath()
         if self.ephemeral:
-            # Mark the parent dir as ephemeral so workspace persistence excludes the outbox.
-            relpath = self._resolved_workspace_relpath
-            parent = relpath.parent
-            key = str(parent) if str(parent) not in ("", ".") else str(relpath)
-            manifest = self._session.state.manifest
-            if key not in manifest.entries:
-                manifest.entries[key] = Dir(
-                    ephemeral=True,
-                    description="sandbox workspace events",
-                )
+            relpath = self._resolved_workspace_relpath or self.workspace_relpath
+            self._session._register_persist_workspace_skip_relpath(relpath)
 
     def _buffer_event(self, event: UCEvent) -> bool:
         self._buf.extend(event_to_json_line(event).encode("utf-8"))
@@ -243,8 +236,31 @@ class WorkspaceJsonlSink(EventSink):
         if self._session is None:
             return
 
+        await self._ensure_existing_outbox_loaded()
         relpath = self._resolved_workspace_relpath or self.workspace_relpath
         await self._session.write(relpath, io.BytesIO(bytes(self._buf)))
+
+    async def _ensure_existing_outbox_loaded(self) -> None:
+        if self._session is None or self._existing_outbox_loaded:
+            return
+
+        relpath = self._resolved_workspace_relpath or self.workspace_relpath
+        try:
+            existing = await self._session.read(relpath)
+        except (FileNotFoundError, WorkspaceReadNotFoundError):
+            self._existing_outbox_loaded = True
+            return
+
+        try:
+            payload = existing.read()
+        finally:
+            existing.close()
+
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        if payload:
+            self._buf = bytearray(payload) + self._buf
+        self._existing_outbox_loaded = True
 
     async def handle(self, event: UCEvent) -> None:
         # If unbound (e.g., Instrumentation.emit used without a SandboxSession wrapper),

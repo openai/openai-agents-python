@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from agents.sandbox.entries import Dir, File
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxSession,
@@ -30,11 +31,20 @@ from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.snapshot import LocalSnapshot
 
 
-def _build_unix_local_session(tmp_path: Path) -> UnixLocalSandboxSession:
+def _build_unix_local_session(
+    tmp_path: Path,
+    *,
+    manifest: Manifest | None = None,
+) -> UnixLocalSandboxSession:
     workspace = tmp_path / "workspace"
     snapshot = LocalSnapshot(id=str(uuid.uuid4()), base_path=tmp_path)
+    session_manifest = (
+        manifest.model_copy(update={"root": str(workspace)}, deep=True)
+        if manifest is not None
+        else Manifest(root=str(workspace))
+    )
     state = UnixLocalSandboxSessionState(
-        manifest=Manifest(root=str(workspace)),
+        manifest=session_manifest,
         snapshot=snapshot,
     )
     return UnixLocalSandboxSession.from_state(state)
@@ -192,6 +202,109 @@ async def test_workspace_jsonl_sink_supports_session_id_template(tmp_path: Path)
     outbox_stream = await inner.read(expected_path)
     lines = outbox_stream.read().decode("utf-8").splitlines()
     assert any(json.loads(line)["op"] == "exec" for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_workspace_jsonl_sink_preserves_preexisting_outbox_contents(tmp_path: Path) -> None:
+    inner = _build_unix_local_session(tmp_path)
+    relpath = Path(f"logs/events-{inner.state.session_id}.jsonl")
+    old_line = b'{"old":true}\n'
+
+    async with inner:
+        await inner.write(relpath, io.BytesIO(old_line))
+        sink = WorkspaceJsonlSink(mode="sync", on_error="raise", ephemeral=False)
+        sink.bind(inner)
+
+        start = UCStartEvent(
+            session_id=inner.state.session_id,
+            seq=1,
+            op="write",
+            span_id=uuid.uuid4(),
+        )
+        finish = UCFinishEvent(
+            session_id=inner.state.session_id,
+            seq=2,
+            op="write",
+            span_id=start.span_id,
+            ok=True,
+            duration_ms=0.0,
+        )
+
+        await sink.handle(start)
+        await sink.handle(finish)
+
+        outbox_stream = await inner.read(relpath)
+        lines = outbox_stream.read().decode("utf-8").splitlines()
+
+    assert len(lines) == 3
+    assert json.loads(lines[0]) == {"old": True}
+    assert json.loads(lines[1])["seq"] == 1
+    assert json.loads(lines[2])["seq"] == 2
+
+
+@pytest.mark.asyncio
+async def test_workspace_jsonl_sink_does_not_duplicate_lines_across_flushes(
+    tmp_path: Path,
+) -> None:
+    inner = _build_unix_local_session(tmp_path)
+    relpath = Path(f"logs/events-{inner.state.session_id}.jsonl")
+
+    async with inner:
+        sink = WorkspaceJsonlSink(mode="sync", on_error="raise", ephemeral=False, flush_every=1)
+        sink.bind(inner)
+
+        for seq in (1, 2, 3):
+            await sink.handle(
+                UCStartEvent(
+                    session_id=inner.state.session_id,
+                    seq=seq,
+                    op="write",
+                    span_id=uuid.uuid4(),
+                )
+            )
+
+        outbox_stream = await inner.read(relpath)
+        lines = outbox_stream.read().decode("utf-8").splitlines()
+
+    assert [json.loads(line)["seq"] for line in lines] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_workspace_jsonl_sink_ephemeral_excludes_runtime_outbox_with_existing_parent(
+    tmp_path: Path,
+) -> None:
+    inner = _build_unix_local_session(
+        tmp_path,
+        manifest=Manifest(
+            entries={
+                "logs": Dir(
+                    children={
+                        "keep.txt": File(content=b"keep"),
+                    }
+                )
+            }
+        ),
+    )
+    instrumentation = Instrumentation(
+        sinks=[WorkspaceJsonlSink(mode="sync", on_error="raise", ephemeral=True)]
+    )
+    wrapped = SandboxSession(inner, instrumentation=instrumentation)
+
+    async with wrapped as session:
+        await session.exec("echo hi")
+        relpath = Path(f"logs/events-{inner.state.session_id}.jsonl")
+        outbox_stream = await inner.read(relpath)
+        assert outbox_stream.read()
+
+        logs_entry = inner.state.manifest.entries["logs"]
+        assert isinstance(logs_entry, Dir)
+        assert {str(child) for child in logs_entry.children.keys()} == {"keep.txt"}
+
+    snapshot_path = tmp_path / f"{inner.state.snapshot.id}.tar"
+    with tarfile.open(snapshot_path, mode="r:*") as tar:
+        names = [member.name for member in tar.getmembers()]
+        assert any(name.endswith("logs/keep.txt") for name in names)
+        assert not any(f"logs/events-{inner.state.session_id}.jsonl" in name for name in names)
 
 
 @pytest.mark.asyncio

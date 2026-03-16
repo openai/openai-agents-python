@@ -649,9 +649,7 @@ class E2BSandboxSession(BaseSandboxSession):
 
     def _tar_exclude_args(self) -> list[str]:
         excludes: list[str] = []
-        for rel in sorted(
-            self.state.manifest.ephemeral_persistence_paths(), key=lambda p: p.as_posix()
-        ):
+        for rel in sorted(self._persist_workspace_skip_relpaths(), key=lambda p: p.as_posix()):
             rel_posix = rel.as_posix().lstrip("/")
             if not rel_posix or rel_posix in {".", "/"}:
                 continue

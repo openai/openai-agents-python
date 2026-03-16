@@ -304,6 +304,33 @@ async def test_e2b_persist_workspace_raises_on_nonzero_snapshot_exit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_e2b_persist_workspace_excludes_runtime_skip_paths() -> None:
+    session, sandbox = _session(workspace_root_ready=True)
+    sandbox.commands.exec_root_ready = True
+    session._register_persist_workspace_skip_relpath(Path("logs/events.jsonl"))  # noqa: SLF001
+    sandbox.commands.next_result = _FakeE2BResult(
+        stdout=base64.b64encode(b"fake-tar-bytes").decode("ascii")
+    )
+
+    archive = await session.persist_workspace()
+
+    assert archive.read() == b"fake-tar-bytes"
+    expected_command = (
+        "tar --exclude=logs/events.jsonl --exclude=./logs/events.jsonl "
+        "-C /workspace -cf - . | base64 -w0"
+    )
+    assert sandbox.commands.calls == [
+        {
+            "command": expected_command,
+            "timeout": session.state.timeouts.snapshot_tar_s,
+            "cwd": "/",
+            "envs": {},
+            "user": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_e2b_hydrate_workspace_raises_on_nonzero_extract_exit() -> None:
     session, sandbox = _session(workspace_root_ready=False)
     sandbox.commands.next_result = _FakeE2BResult(stderr="tar failed", exit_code=2)

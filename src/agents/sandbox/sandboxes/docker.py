@@ -516,7 +516,7 @@ class DockerSandboxSession(BaseSandboxSession):
                 summary["cause"] = str(error.cause)
             return summary
 
-        skip = self.state.manifest.ephemeral_persistence_paths()
+        skip = self._persist_workspace_skip_relpaths()
         root = Path(self.state.manifest.root)
         unmounted_mounts: list[tuple[Mount, Path]] = []
         unmount_error: WorkspaceArchiveReadError | None = None

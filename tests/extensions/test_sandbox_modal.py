@@ -127,6 +127,52 @@ async def test_modal_stop_is_persistence_only_and_shutdown_terminates(
 
 
 @pytest.mark.asyncio
+async def test_modal_tar_persist_respects_runtime_skip_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id="sb-123",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state)
+    session._register_persist_workspace_skip_relpath(Path("logs/events.jsonl"))  # noqa: SLF001
+
+    commands: list[list[str]] = []
+
+    async def _fake_exec(
+        *command: object,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: object | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        rendered = [str(part) for part in command]
+        commands.append(rendered)
+        return ExecResult(stdout=b"fake-tar-bytes", stderr=b"", exit_code=0)
+
+    monkeypatch.setattr(session, "exec", _fake_exec)
+
+    archive = await session.persist_workspace()
+
+    assert archive.read() == b"fake-tar-bytes"
+    assert commands == [
+        [
+            "tar",
+            "cf",
+            "-",
+            "--exclude",
+            "./logs/events.jsonl",
+            "-C",
+            "/workspace",
+            ".",
+        ]
+    ]
+
+
+@pytest.mark.asyncio
 async def test_modal_snapshot_failure_restores_ephemeral_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -39,6 +39,7 @@ class BaseSandboxSession(abc.ABC):
     state: SandboxSessionState
     _dependencies: Dependencies | None = None
     _dependencies_closed: bool = False
+    _runtime_persist_workspace_skip_relpaths: set[Path] | None = None
 
     async def start(self) -> None:
         if await self.state.snapshot.restorable():
@@ -122,6 +123,23 @@ class BaseSandboxSession(abc.ABC):
             return
         self._dependencies_closed = True
         await dependencies.aclose()
+
+    def _register_persist_workspace_skip_relpath(self, path: Path | str) -> Path:
+        rel_path = Manifest._coerce_rel_path(path)
+        Manifest._validate_rel_path(rel_path)
+        if rel_path in (Path(""), Path(".")):
+            raise ValueError("Persist workspace skip paths must target a concrete relative path.")
+
+        if self._runtime_persist_workspace_skip_relpaths is None:
+            self._runtime_persist_workspace_skip_relpaths = set()
+        self._runtime_persist_workspace_skip_relpaths.add(rel_path)
+        return rel_path
+
+    def _persist_workspace_skip_relpaths(self) -> set[Path]:
+        skip_paths = set(self.state.manifest.ephemeral_persistence_paths())
+        if self._runtime_persist_workspace_skip_relpaths:
+            skip_paths.update(self._runtime_persist_workspace_skip_relpaths)
+        return skip_paths
 
     async def exec(
         self,

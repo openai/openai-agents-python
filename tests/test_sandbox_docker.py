@@ -312,6 +312,31 @@ async def test_docker_persist_workspace_unmounts_nested_ephemeral_mounts_before_
 
 
 @pytest.mark.asyncio
+async def test_docker_persist_workspace_prunes_runtime_only_skip_paths_from_staged_copy(
+    tmp_path: Path,
+) -> None:
+    host_root = tmp_path / "container"
+    workspace = host_root / "workspace"
+    logs = workspace / "logs"
+    logs.mkdir(parents=True)
+    (logs / "keep.txt").write_text("keep", encoding="utf-8")
+    (logs / "events.jsonl").write_text("skip", encoding="utf-8")
+
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(root="/workspace"),
+    )
+    session._register_persist_workspace_skip_relpath(Path("logs/events.jsonl"))  # noqa: SLF001
+
+    archive = await session.persist_workspace()
+
+    names = _archive_member_names(archive)
+
+    assert any(name.endswith("workspace/logs/keep.txt") for name in names)
+    assert not any(name.endswith("workspace/logs/events.jsonl") for name in names)
+
+
+@pytest.mark.asyncio
 async def test_docker_persist_workspace_prunes_explicit_mount_path_from_staged_copy(
     tmp_path: Path,
 ) -> None:
