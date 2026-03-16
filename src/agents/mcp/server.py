@@ -336,6 +336,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
         self._cleanup_lock: asyncio.Lock = asyncio.Lock()
+        self._request_lock: asyncio.Lock = asyncio.Lock()
         self.cache_tools_list = cache_tools_list
         self.server_initialize_result: InitializeResult | None = None
 
@@ -349,6 +350,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self._tools_list: list[MCPTool] | None = None
 
         self.tool_filter = tool_filter
+        self._serialize_session_requests = False
+
+    async def _maybe_serialize_request(self, func: Callable[[], Awaitable[T]]) -> T:
+        if not self._serialize_session_requests:
+            return await func()
+        async with self._request_lock:
+            return await func()
 
     async def _apply_tool_filter(
         self,
@@ -573,7 +581,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 tools = self._tools_list
             else:
                 # Fetch the tools from the server
-                result = await self._run_with_retries(lambda: session.list_tools())
+                result = await self._run_with_retries(
+                    lambda: self._maybe_serialize_request(lambda: session.list_tools())
+                )
                 self._tools_list = result.tools
                 self._cache_dirty = False
                 tools = self._tools_list
@@ -609,9 +619,15 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         try:
             self._validate_required_parameters(tool_name=tool_name, arguments=arguments)
             if meta is None:
-                return await self._run_with_retries(lambda: session.call_tool(tool_name, arguments))
+                return await self._run_with_retries(
+                    lambda: self._maybe_serialize_request(
+                        lambda: session.call_tool(tool_name, arguments)
+                    )
+                )
             return await self._run_with_retries(
-                lambda: session.call_tool(tool_name, arguments, meta=meta)
+                lambda: self._maybe_serialize_request(
+                    lambda: session.call_tool(tool_name, arguments, meta=meta)
+                )
             )
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
@@ -1084,6 +1100,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
 
         self.params = params
         self._name = name or f"streamable_http: {self.params['url']}"
+        self._serialize_session_requests = True
 
     def create_streams(
         self,

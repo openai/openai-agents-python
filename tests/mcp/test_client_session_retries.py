@@ -1,3 +1,4 @@
+import asyncio
 from typing import cast
 
 import pytest
@@ -29,7 +30,7 @@ class DummySession:
 
 
 class DummyServer(_MCPServerWithClientSession):
-    def __init__(self, session: DummySession, retries: int):
+    def __init__(self, session: DummySession, retries: int, *, serialize_requests: bool = False):
         super().__init__(
             cache_tools_list=False,
             client_session_timeout_seconds=None,
@@ -37,6 +38,7 @@ class DummyServer(_MCPServerWithClientSession):
             retry_backoff_seconds_base=0,
         )
         self.session = cast(ClientSession, session)
+        self._serialize_session_requests = serialize_requests
 
     def create_streams(self):
         raise NotImplementedError
@@ -148,3 +150,39 @@ async def test_call_tool_rejects_non_object_arguments_before_remote_call():
         await server.call_tool("tool", cast(dict[str, object] | None, ["bad"]))
 
     assert session.call_tool_attempts == 0
+
+
+class ConcurrentCancellationSession:
+    def __init__(self):
+        self._slow_task: asyncio.Task[CallToolResult] | None = None
+        self._slow_started = asyncio.Event()
+
+    async def call_tool(self, tool_name, arguments, meta=None):
+        if tool_name == "slow":
+            self._slow_task = cast(asyncio.Task[CallToolResult], asyncio.current_task())
+            self._slow_started.set()
+            await asyncio.sleep(0.1)
+            return CallToolResult(content=[])
+
+        await self._slow_started.wait()
+        assert self._slow_task is not None
+        self._slow_task.cancel()
+        raise RuntimeError("synthetic request failure")
+
+    async def list_tools(self):
+        return ListToolsResult(tools=[MCPTool(name="tool", inputSchema={})])
+
+
+@pytest.mark.asyncio
+async def test_serialized_session_requests_prevent_sibling_cancellation():
+    session = ConcurrentCancellationSession()
+    server = DummyServer(session=cast(DummySession, session), retries=0, serialize_requests=True)
+
+    results = await asyncio.gather(
+        server.call_tool("slow", None),
+        server.call_tool("fail", None),
+        return_exceptions=True,
+    )
+
+    assert isinstance(results[0], CallToolResult)
+    assert isinstance(results[1], RuntimeError)
