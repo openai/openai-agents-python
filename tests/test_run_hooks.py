@@ -10,6 +10,7 @@ from agents.models.interface import Model
 from agents.run import Runner
 from agents.run_context import AgentHookContext, RunContextWrapper, TContext
 from agents.tool import Tool
+from agents.tool_context import ToolContext
 from tests.test_agent_llm_hooks import AgentHooksForTests
 
 from .fake_model import FakeModel
@@ -22,9 +23,11 @@ from .test_responses import (
 class RunHooksForTests(RunHooks):
     def __init__(self):
         self.events: dict[str, int] = defaultdict(int)
+        self.tool_context_ids: list[str] = []
 
     def reset(self):
         self.events.clear()
+        self.tool_context_ids.clear()
 
     async def on_agent_start(
         self, context: AgentHookContext[TContext], agent: Agent[TContext]
@@ -57,6 +60,8 @@ class RunHooksForTests(RunHooks):
         result: str,
     ) -> None:
         self.events["on_tool_end"] += 1
+        if isinstance(context, ToolContext):
+            self.tool_context_ids.append(context.tool_call_id)
 
     async def on_llm_start(
         self,

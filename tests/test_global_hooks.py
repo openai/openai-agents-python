@@ -8,6 +8,7 @@ import pytest
 from typing_extensions import TypedDict
 
 from agents import Agent, RunContextWrapper, RunHooks, Runner, TContext, Tool
+from agents.tool_context import ToolContext
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -22,9 +23,11 @@ from .test_responses import (
 class RunHooksForTests(RunHooks):
     def __init__(self):
         self.events: dict[str, int] = defaultdict(int)
+        self.tool_context_ids: list[str] = []
 
     def reset(self):
         self.events.clear()
+        self.tool_context_ids.clear()
 
     async def on_agent_start(
         self, context: RunContextWrapper[TContext], agent: Agent[TContext]
@@ -54,6 +57,8 @@ class RunHooksForTests(RunHooks):
         tool: Tool,
     ) -> None:
         self.events["on_tool_start"] += 1
+        if isinstance(context, ToolContext):
+            self.tool_context_ids.append(context.tool_call_id)
 
     async def on_tool_end(
         self,
@@ -63,6 +68,8 @@ class RunHooksForTests(RunHooks):
         result: str,
     ) -> None:
         self.events["on_tool_end"] += 1
+        if isinstance(context, ToolContext):
+            self.tool_context_ids.append(context.tool_call_id)
 
 
 @pytest.mark.asyncio
@@ -83,6 +90,17 @@ async def test_non_streamed_agent_hooks():
     model.set_next_output([get_text_message("user_message")])
     output = await Runner.run(agent_3, input="user_message", hooks=hooks)
     assert hooks.events == {"on_agent_start": 1, "on_agent_end": 1}, f"{output}"
+    hooks.reset()
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
+            [get_text_message("done")],
+        ]
+    )
+    await Runner.run(agent_3, input="user_message", hooks=hooks)
+    assert len(hooks.tool_context_ids) == 2
+    assert len(set(hooks.tool_context_ids)) == 1
     hooks.reset()
 
     model.add_multiple_turn_outputs(
