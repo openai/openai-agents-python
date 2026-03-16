@@ -681,8 +681,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         """List the prompts available on the server."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
-
-        return await self.session.list_prompts()
+        session = self.session
+        assert session is not None
+        return await self._maybe_serialize_request(lambda: session.list_prompts())
 
     async def get_prompt(
         self, name: str, arguments: dict[str, Any] | None = None
@@ -690,8 +691,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         """Get a specific prompt from the server."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
-
-        return await self.session.get_prompt(name, arguments)
+        session = self.session
+        assert session is not None
+        return await self._maybe_serialize_request(lambda: session.get_prompt(name, arguments))
 
     async def cleanup(self):
         """Cleanup the server."""

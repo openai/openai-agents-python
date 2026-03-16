@@ -172,6 +172,18 @@ class ConcurrentCancellationSession:
     async def list_tools(self):
         return ListToolsResult(tools=[MCPTool(name="tool", inputSchema={})])
 
+    async def list_prompts(self):
+        await self._slow_started.wait()
+        assert self._slow_task is not None
+        self._slow_task.cancel()
+        raise RuntimeError("synthetic request failure")
+
+    async def get_prompt(self, name, arguments=None):
+        await self._slow_started.wait()
+        assert self._slow_task is not None
+        self._slow_task.cancel()
+        raise RuntimeError("synthetic request failure")
+
 
 @pytest.mark.asyncio
 async def test_serialized_session_requests_prevent_sibling_cancellation():
@@ -181,6 +193,25 @@ async def test_serialized_session_requests_prevent_sibling_cancellation():
     results = await asyncio.gather(
         server.call_tool("slow", None),
         server.call_tool("fail", None),
+        return_exceptions=True,
+    )
+
+    assert isinstance(results[0], CallToolResult)
+    assert isinstance(results[1], RuntimeError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt_method", ["list_prompts", "get_prompt"])
+async def test_serialized_prompt_requests_prevent_tool_cancellation(prompt_method: str):
+    session = ConcurrentCancellationSession()
+    server = DummyServer(session=cast(DummySession, session), retries=0, serialize_requests=True)
+
+    prompt_request = (
+        server.list_prompts() if prompt_method == "list_prompts" else server.get_prompt("prompt")
+    )
+    results = await asyncio.gather(
+        server.call_tool("slow", None),
+        prompt_request,
         return_exceptions=True,
     )
 
