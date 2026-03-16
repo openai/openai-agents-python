@@ -5,12 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from agents.sandbox.entries import Dir, GitRepo, LocalFile
+from agents.sandbox.entries import Dir, File, GitRepo, LocalFile
+from agents.sandbox.errors import ExecNonZeroError
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.sandbox_session_state import SandboxSessionState
 from agents.sandbox.snapshot import NoopSnapshot
-from agents.sandbox.types import ExecResult
+from agents.sandbox.types import ExecResult, User
 
 
 class _RecordingSession(BaseSandboxSession):
@@ -64,6 +65,29 @@ class _GitRefSession(_RecordingSession):
             return ExecResult(stdout=b"/usr/bin/git\n", stderr=b"", exit_code=0)
         if cmd[:2] == ("git", "clone"):
             return ExecResult(stdout=b"", stderr=b"unexpected clone path", exit_code=1)
+        return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+
+class _MetadataFailureSession(_RecordingSession):
+    def __init__(
+        self,
+        manifest: Manifest | None = None,
+        *,
+        fail_commands: set[str],
+    ) -> None:
+        super().__init__(manifest)
+        self.fail_commands = fail_commands
+
+    async def _exec_internal(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        _ = timeout
+        cmd = tuple(str(part) for part in command)
+        self.exec_calls.append(cmd)
+        if cmd and cmd[0] in self.fail_commands:
+            return ExecResult(stdout=b"", stderr=b"metadata failed", exit_code=1)
         return ExecResult(stdout=b"", stderr=b"", exit_code=0)
 
 
@@ -124,3 +148,35 @@ async def test_dir_metadata_strips_file_type_bits_before_chmod() -> None:
     await Dir()._apply_metadata(session, Path("/workspace/dir"))
 
     assert ("chmod", "0755", "/workspace/dir") in session.exec_calls
+
+
+@pytest.mark.asyncio
+async def test_apply_manifest_raises_on_chmod_failure() -> None:
+    session = _MetadataFailureSession(
+        Manifest(entries={"copied.txt": File(content=b"hello")}),
+        fail_commands={"chmod"},
+    )
+
+    with pytest.raises(ExecNonZeroError):
+        await session.apply_manifest()
+
+
+@pytest.mark.asyncio
+async def test_apply_manifest_raises_on_chgrp_failure() -> None:
+    session = _MetadataFailureSession(
+        Manifest(
+            entries={
+                "copied.txt": File(
+                    content=b"hello",
+                    group=User(name="sandbox-user"),
+                )
+            }
+        ),
+        fail_commands={"chgrp"},
+    )
+
+    with pytest.raises(ExecNonZeroError):
+        await session.apply_manifest()
+
+    assert ("chgrp", "sandbox-user", "/workspace/copied.txt") in session.exec_calls
+    assert not any(call[0] == "chmod" for call in session.exec_calls)

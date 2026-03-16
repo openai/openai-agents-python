@@ -132,10 +132,10 @@ class BaseEntry(BaseModel, abc.ABC):
         dest: Path,
     ) -> None:
         if self.group is not None:
-            await session.exec("chgrp", self.group.name, str(dest), shell=False)
+            await session._exec_checked_nonzero("chgrp", self.group.name, str(dest))
 
         chmod_perms = f"{stat.S_IMODE(self.permissions.to_mode()):o}".zfill(4)
-        await session.exec("chmod", chmod_perms, str(dest), shell=False)
+        await session._exec_checked_nonzero("chmod", chmod_perms, str(dest))
 
     @abc.abstractmethod
     async def apply(
