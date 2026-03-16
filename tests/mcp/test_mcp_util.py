@@ -261,6 +261,41 @@ async def test_mcp_tool_inner_cancellation_becomes_tool_error():
 
 
 @pytest.mark.asyncio
+async def test_mcp_tool_inner_cancellation_still_becomes_tool_error_with_prior_cancel_state():
+    current_task = asyncio.current_task()
+    assert current_task is not None
+
+    current_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.sleep(0)
+
+    server = CancelledFakeMCPServer()
+    server.add_tool("cancel_tool", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="cancel_tool", inputSchema={})
+
+    with pytest.raises(UserError, match="tool execution was cancelled"):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_cancellation_paths_work_without_task_cancelling_api(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    server = CancelledFakeMCPServer()
+    server.add_tool("cancel_tool", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="cancel_tool", inputSchema={})
+
+    monkeypatch.setattr(asyncio, "current_task", lambda: object())
+
+    with pytest.raises(UserError, match="tool execution was cancelled"):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+
+@pytest.mark.asyncio
 async def test_mcp_tool_outer_cancellation_still_propagates():
     server = SlowFakeMCPServer()
     server.add_tool("slow_tool", {})
@@ -330,18 +365,24 @@ async def test_mcp_tool_outer_cancellation_after_inner_cancellation_still_propag
     tool = MCPTool(name="slow_tool", inputSchema={})
 
     class CancellingTaskStub:
+        def __init__(self):
+            self.cancel_count = 0
+
         def cancelling(self) -> int:
-            return 1
+            return self.cancel_count
+
+    task_stub = CancellingTaskStub()
 
     async def fake_shield(task: asyncio.Task[CallToolResult]) -> CallToolResult:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
+        task_stub.cancel_count = 1
         raise asyncio.CancelledError("synthetic combined cancellation")
 
     monkeypatch.setattr(asyncio, "shield", fake_shield)
-    monkeypatch.setattr(asyncio, "current_task", lambda: CancellingTaskStub())
+    monkeypatch.setattr(asyncio, "current_task", lambda: task_stub)
 
     with pytest.raises(asyncio.CancelledError):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")

@@ -365,11 +365,24 @@ class MCPUtil:
                 if merged_meta is None
                 else server.call_tool(tool.name, json_data, meta=merged_meta)
             )
+            current_task = asyncio.current_task()
+            cancelling = getattr(current_task, "cancelling", None)
+            cancel_count_before = 0
+            if callable(cancelling):
+                cancel_count_before_raw = cancelling()
+                if isinstance(cancel_count_before_raw, int):
+                    cancel_count_before = cancel_count_before_raw
             try:
                 result = await asyncio.shield(call_task)
             except asyncio.CancelledError as e:
                 current_task = asyncio.current_task()
-                if current_task is not None and current_task.cancelling():
+                cancelling = getattr(current_task, "cancelling", None)
+                cancel_count_after = cancel_count_before
+                if callable(cancelling):
+                    cancel_count_after_raw = cancelling()
+                    if isinstance(cancel_count_after_raw, int):
+                        cancel_count_after = cancel_count_after_raw
+                if current_task is not None and cancel_count_after > cancel_count_before:
                     if not call_task.done():
                         call_task.cancel()
                         try:
