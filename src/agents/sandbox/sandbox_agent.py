@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from ..agent import Agent
 from ..run_context import TContext
 from .capabilities import Capability
+from .codex_config import CodexConfig
 from .manifest import Manifest
 
 
@@ -24,5 +25,8 @@ class SandboxAgent(Agent[TContext]):
 
     capabilities: list[Capability] = field(default_factory=list)
     """Sandbox capabilities that can mutate the manifest, add instructions, and expose tools."""
+
+    codex: bool | CodexConfig = True
+    """Whether to provision Codex for runtime-created or resumed sandbox sessions."""
 
     _sandbox_concurrency_guard: object | None = field(default=None, init=False, repr=False)

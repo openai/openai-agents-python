@@ -30,6 +30,11 @@ from typing import Callable, Literal, TypeVar, cast
 import modal
 from modal.container_process import ContainerProcess
 
+from ....sandbox.codex_config import (
+    CodexConfig,
+    apply_codex_to_manifest,
+    apply_codex_to_session_state,
+)
 from ....sandbox.entries import resolve_workspace_path
 from ....sandbox.errors import (
     ExecTimeoutError,
@@ -836,6 +841,7 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
         *,
         snapshot: SnapshotSpec | None = None,
         manifest: Manifest | None = None,
+        codex: bool | CodexConfig = False,
         options: ModalSandboxClientOptions,
     ) -> SandboxSession:
         """
@@ -896,8 +902,7 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
                 "snapshot_filesystem_restore_timeout_s to be a number"
             )
 
-        if manifest is None:
-            manifest = Manifest()
+        manifest = apply_codex_to_manifest(manifest, codex)
 
         session_id = uuid.uuid4()
         state_image_id: str | None = None
@@ -1001,10 +1006,15 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
 
         return session
 
-    async def resume(self, state: SandboxSessionState) -> SandboxSession:
+    async def resume(
+        self,
+        state: SandboxSessionState,
+        *,
+        codex: bool | CodexConfig = False,
+    ) -> SandboxSession:
         if not isinstance(state, ModalSandboxSessionState):
             raise TypeError("ModalSandboxClient.resume expects a ModalSandboxSessionState")
-        inner = ModalSandboxSession.from_state(state)
+        inner = ModalSandboxSession.from_state(apply_codex_to_session_state(state, codex))
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:

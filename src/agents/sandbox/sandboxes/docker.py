@@ -1,7 +1,9 @@
 import asyncio
 import io
+import queue
 import tarfile
 import tempfile
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -12,7 +14,9 @@ import docker.errors  # type: ignore[import-untyped]
 from docker import DockerClient as DockerSDKClient
 from docker.models.containers import Container  # type: ignore[import-untyped]
 from docker.utils import parse_repository_tag  # type: ignore[import-untyped]
+from typing_extensions import Buffer
 
+from ..codex_config import CodexConfig, apply_codex_to_manifest, apply_codex_to_session_state
 from ..entries import (
     FuseMountPattern,
     Mount,
@@ -48,6 +52,54 @@ _DOCKER_EXECUTOR: Final = ThreadPoolExecutor(
     max_workers=8,
     thread_name_prefix="agents-docker-sandbox",
 )
+
+
+class _QueueWriter(io.RawIOBase):
+    def __init__(self, chunks: queue.Queue[bytes | BaseException | None]) -> None:
+        self._chunks = chunks
+        self._closed = False
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, b: Buffer, /) -> int:
+        if self._closed:
+            raise ValueError("I/O operation on closed file.")
+        payload = bytes(b)
+        if payload:
+            self._chunks.put(payload)
+        return len(payload)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        super().close()
+
+
+class _StreamingTarPipe:
+    def __init__(self) -> None:
+        self._chunks: queue.Queue[bytes | BaseException | None] = queue.Queue()
+        self.writer = _QueueWriter(self._chunks)
+        self.reader = IteratorIO(self._iter_chunks())
+
+    def _iter_chunks(self):
+        while True:
+            item = self._chunks.get()
+            if item is None:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+
+    def set_error(self, error: BaseException) -> None:
+        self._chunks.put(error)
+
+    def close(self) -> None:
+        try:
+            self.writer.close()
+        finally:
+            self._chunks.put(None)
 
 
 class DockerSandboxSessionState(SandboxSessionState):
@@ -309,7 +361,6 @@ class DockerSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveReadError(path=path, cause=e) from e
 
     async def write(self, path: Path, data: io.IOBase) -> None:
-        # Buffer the file first so we can set TarInfo.size correctly.
         payload = coerce_write_payload(path=path, data=data)
 
         path = resolve_workspace_path(
@@ -336,18 +387,27 @@ class DockerSandboxSession(BaseSandboxSession):
             error_path=self._ARCHIVE_STAGING_DIR,
         )
 
-        info = tarfile.TarInfo(name=staging_name)
-        info.size = len(payload)
-
-        tar_buf = io.BytesIO()
-        with tarfile.open(fileobj=tar_buf, mode="w") as tar:
-            tar.addfile(info, io.BytesIO(bytes(payload)))
-
-        tar_buf.seek(0)
         try:
-            self._container.put_archive(str(self._ARCHIVE_STAGING_DIR), tar_buf)
+            tar_stream: io.IOBase
+            if payload.content_length is None:
+                tar_stream = self._buffered_single_file_tar(
+                    staging_name=staging_name,
+                    stream=payload.stream,
+                )
+            else:
+                tar_stream = self._streaming_single_file_tar(
+                    staging_name=staging_name,
+                    stream=payload.stream,
+                    content_length=payload.content_length,
+                )
+            ok = self._container.put_archive(str(self._ARCHIVE_STAGING_DIR), tar_stream)
         except docker.errors.APIError as e:
             raise WorkspaceArchiveWriteError(path=self._ARCHIVE_STAGING_DIR, cause=e) from e
+        if not ok:
+            raise WorkspaceArchiveWriteError(
+                path=self._ARCHIVE_STAGING_DIR,
+                context={"reason": "put_archive_returned_false"},
+            )
 
         # Copy into place using a process inside the container, which can see mounts.
         cp_res = await self.exec("cp", "--", str(staging_path), str(path), shell=False)
@@ -363,6 +423,50 @@ class DockerSandboxSession(BaseSandboxSession):
 
         # Best-effort cleanup. Ignore failures (e.g. concurrent cleanup).
         await self._rm_best_effort(staging_path)
+
+    @staticmethod
+    def _buffered_single_file_tar(*, staging_name: str, stream: io.IOBase) -> io.BytesIO:
+        payload = stream.read()
+        if isinstance(payload, bytearray):
+            payload = bytes(payload)
+        if not isinstance(payload, bytes):
+            raise TypeError(f"expected bytes payload, got {type(payload).__name__}")
+
+        info = tarfile.TarInfo(name=staging_name)
+        info.size = len(payload)
+
+        tar_buf = io.BytesIO()
+        with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+            tar.addfile(info, io.BytesIO(payload))
+        tar_buf.seek(0)
+        return tar_buf
+
+    @staticmethod
+    def _streaming_single_file_tar(
+        *,
+        staging_name: str,
+        stream: io.IOBase,
+        content_length: int,
+    ) -> io.IOBase:
+        pipe = _StreamingTarPipe()
+
+        def _produce() -> None:
+            info = tarfile.TarInfo(name=staging_name)
+            info.size = content_length
+            try:
+                with tarfile.open(fileobj=pipe.writer, mode="w|") as tar:
+                    tar.addfile(info, stream)
+            except BaseException as exc:
+                pipe.set_error(exc)
+            finally:
+                pipe.close()
+
+        threading.Thread(
+            target=_produce,
+            name=f"docker-put-archive-{staging_name}",
+            daemon=True,
+        ).start()
+        return pipe.reader
 
     async def running(self) -> bool:
         # docker-py caches container attributes; refresh to avoid stale status,
@@ -541,8 +645,10 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         *,
         snapshot: SnapshotSpec | None = None,
         manifest: Manifest | None = None,
+        codex: bool | CodexConfig = False,
         options: DockerSandboxClientOptions,
     ) -> SandboxSession:
+        manifest = apply_codex_to_manifest(manifest, codex)
         image = options.image
 
         container = await self._create_container(image, manifest=manifest)
@@ -587,9 +693,15 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
             return session
         return session
 
-    async def resume(self, state: SandboxSessionState) -> SandboxSession:
+    async def resume(
+        self,
+        state: SandboxSessionState,
+        *,
+        codex: bool | CodexConfig = False,
+    ) -> SandboxSession:
         if not isinstance(state, DockerSandboxSessionState):
             raise TypeError("DockerSandboxClient.resume expects a DockerSandboxSessionState")
+        state = apply_codex_to_session_state(state, codex)
         container = self.get_container(state.container_id)
         reused_existing_container = container is not None
         if container is None:

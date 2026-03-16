@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .artifacts import Dir, File, GitRepo, LocalDir, LocalFile
 from .base import BaseEntry, resolve_workspace_path
+from .codex import Codex
 from .mounts import (
     AzureBlobMount,
     FuseMountPattern,
@@ -17,6 +18,7 @@ from .mounts import (
 __all__ = [
     "AzureBlobMount",
     "BaseEntry",
+    "Codex",
     "Dir",
     "File",
     "FuseMountPattern",

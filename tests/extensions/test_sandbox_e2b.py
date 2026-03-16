@@ -28,6 +28,9 @@ class _FakeE2BResult:
 
 
 class _FakeE2BFiles:
+    def __init__(self) -> None:
+        self.make_dir_calls: list[tuple[str, float | None]] = []
+
     def write(
         self,
         path: str,
@@ -38,6 +41,10 @@ class _FakeE2BFiles:
 
     def remove(self, path: str, request_timeout: float | None = None) -> None:
         _ = (path, request_timeout)
+
+    def make_dir(self, path: str, request_timeout: float | None = None) -> bool:
+        self.make_dir_calls.append((path, request_timeout))
+        return True
 
     def read(self, path: str, format: str = "bytes") -> bytes:
         _ = (path, format)
@@ -206,6 +213,7 @@ async def test_e2b_start_prepares_workspace_root_for_command_cwd() -> None:
     assert result.ok()
     assert session.state.workspace_root_ready is True
     assert session._workspace_root_ready is True  # noqa: SLF001
+    assert sandbox.files.make_dir_calls == [("/workspace", 10), ("/workspace", 10)]
     assert sandbox.commands.calls == [
         {
             "command": "mkdir -p -- /workspace",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 from typing import Generic, TypeVar
 
+from ..codex_config import CodexConfig
 from ..manifest import Manifest
 from ..snapshot import SnapshotSpec
 from .base_sandbox_session import BaseSandboxSession
@@ -46,6 +47,7 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
         *,
         snapshot: SnapshotSpec | None = None,
         manifest: Manifest | None = None,
+        codex: bool | CodexConfig = False,
         options: ClientOptionsT,
     ) -> SandboxSession:
         """Create a new session.
@@ -55,6 +57,8 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
                 the session. If omitted, the session uses a no-op snapshot.
             manifest: Optional manifest to materialize into the workspace when
                 the session starts.
+            codex: Whether to provision Codex into the workspace, or a custom
+                Codex provisioning config.
             options: Sandbox-specific settings. For example, Docker expects
                 ``DockerSandboxClientOptions(image="...")``.
         Returns:
@@ -70,6 +74,8 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
     async def resume(
         self,
         state: SandboxSessionState,
+        *,
+        codex: bool | CodexConfig = False,
     ) -> SandboxSession:
         """Resume a session from a previously persisted `SandboxSessionState`.
 

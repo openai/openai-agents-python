@@ -166,6 +166,33 @@ class _NoSeekableZipStream(io.IOBase):
         return self._buffer.read(size)
 
 
+class _ChunkedBinaryStream(io.IOBase):
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+        self.headers = {"Content-Length": str(sum(len(chunk) for chunk in chunks))}
+
+    def read(self, size: int = -1) -> bytes:
+        if not self._chunks:
+            return b""
+        if size < 0:
+            data = b"".join(self._chunks)
+            self._chunks.clear()
+            return data
+
+        remaining = size
+        out = bytearray()
+        while remaining > 0 and self._chunks:
+            chunk = self._chunks[0]
+            if len(chunk) <= remaining:
+                out.extend(self._chunks.pop(0))
+                remaining -= len(chunk)
+                continue
+            out.extend(chunk[:remaining])
+            self._chunks[0] = chunk[remaining:]
+            remaining = 0
+        return bytes(out)
+
+
 def test_zipfile_compatible_stream_wraps_streams_without_seekable() -> None:
     raw_stream = _NoSeekableZipStream(_zip_bytes(members={"file.txt": b"hello"}).getvalue())
 
@@ -173,6 +200,22 @@ def test_zipfile_compatible_stream_wraps_streams_without_seekable() -> None:
 
     with zipfile.ZipFile(compatible) as archive:
         assert archive.read("file.txt") == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_unix_local_write_accepts_chunked_non_seekable_binary_stream(tmp_path: Path) -> None:
+    session = _build_session(tmp_path)
+    await session.start()
+    try:
+        await session.write(
+            Path("streamed.bin"),
+            _ChunkedBinaryStream([b"hello ", b"from ", b"stream"]),
+        )
+    finally:
+        await session.shutdown()
+
+    workspace = Path(session.state.manifest.root)
+    assert (workspace / "streamed.bin").read_bytes() == b"hello from stream"
 
 
 @pytest.mark.asyncio

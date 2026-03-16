@@ -15,6 +15,11 @@ from typing import cast
 
 from pydantic import BaseModel, Field
 
+from ....sandbox.codex_config import (
+    CodexConfig,
+    apply_codex_to_manifest,
+    apply_codex_to_session_state,
+)
 from ....sandbox.entries import Mount, resolve_workspace_path
 from ....sandbox.errors import (
     ExecNonZeroError,
@@ -52,6 +57,9 @@ class _E2BFilesAPI:
         raise NotImplementedError
 
     def remove(self, path: str, request_timeout: float | None = None) -> object:
+        raise NotImplementedError
+
+    def make_dir(self, path: str, request_timeout: float | None = None) -> object:
         raise NotImplementedError
 
     def read(self, path: str, format: str = "bytes") -> object:
@@ -204,6 +212,15 @@ def _sandbox_remove_file(
     request_timeout: float | None = None,
 ) -> object:
     return _as_sandbox_api(sandbox).files.remove(path, request_timeout=request_timeout)
+
+
+def _sandbox_make_dir(
+    sandbox: object,
+    path: str,
+    *,
+    request_timeout: float | None = None,
+) -> object:
+    return _as_sandbox_api(sandbox).files.make_dir(path, request_timeout=request_timeout)
 
 
 def _sandbox_read_file(sandbox: object, path: str, *, format: str = "bytes") -> object:
@@ -370,7 +387,7 @@ class E2BSandboxSession(BaseSandboxSession):
     """E2B-backed sandbox session implementation."""
 
     state: E2BSandboxSessionState
-    _sandbox: object
+    _sandbox: _E2BSandboxAPI
     _skip_start: bool
     _workspace_root_ready: bool
     _resume_preserves_system_state: bool
@@ -382,7 +399,7 @@ class E2BSandboxSession(BaseSandboxSession):
         sandbox: object,
     ) -> None:
         self.state = state
-        self._sandbox = sandbox
+        self._sandbox = _as_sandbox_api(sandbox)
         self._skip_start = False
         self._workspace_root_ready = state.workspace_root_ready
         self._resume_preserves_system_state = False
@@ -414,36 +431,23 @@ class E2BSandboxSession(BaseSandboxSession):
         return float(timeout_s)
 
     async def _ensure_dir(self, path: Path, *, reason: str) -> None:
-        """E2B does not support `mkdir`; write a marker file to create directories."""
+        """Create a directory using the E2B Files API."""
         if path == Path("/"):
             return
-        marker_path = path / ".uc_dir"
         try:
             await _maybe_await(
-                _sandbox_write_file(
+                _sandbox_make_dir(
                     self._sandbox,
-                    str(marker_path),
-                    b"",
-                    request_timeout=self.state.timeouts.file_upload_s,
+                    str(path),
+                    request_timeout=self.state.timeouts.fast_op_s,
                 )
             )
         except Exception as e:  # pragma: no cover - exercised via unit tests with fakes
             raise WorkspaceArchiveWriteError(path=path, context={"reason": reason}, cause=e) from e
-        finally:
-            try:
-                await _maybe_await(
-                    _sandbox_remove_file(
-                        self._sandbox,
-                        str(marker_path),
-                        request_timeout=self.state.timeouts.cleanup_s,
-                    )
-                )
-            except Exception:
-                pass
 
     async def _ensure_workspace_root(self) -> None:
-        """Create the workspace root so file operations can materialize the manifest."""
-        await self._ensure_dir(Path(self.state.manifest.root), reason="root_marker_failed")
+        """Ensure the workspace root exists before materialization starts."""
+        await self._ensure_dir(Path(self.state.manifest.root), reason="root_make_failed")
 
     async def _prepare_workspace_root_for_exec(self) -> None:
         """Create the workspace root through the command API before using it as `cwd`."""
@@ -867,12 +871,13 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
         *,
         snapshot: SnapshotSpec | None = None,
         manifest: Manifest | None = None,
+        codex: bool | CodexConfig = False,
         options: E2BSandboxClientOptions,
     ) -> SandboxSession:
         if options is None:
             raise ValueError("E2BSandboxClient.create requires options")
 
-        manifest = manifest or Manifest()
+        manifest = apply_codex_to_manifest(manifest, codex)
         sandbox_type = _coerce_sandbox_type(options.sandbox_type)
 
         timeouts_in = options.timeouts
@@ -926,9 +931,15 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
             raise TypeError("E2BSandboxClient.delete expects an E2BSandboxSession")
         return session
 
-    async def resume(self, state: SandboxSessionState) -> SandboxSession:
+    async def resume(
+        self,
+        state: SandboxSessionState,
+        *,
+        codex: bool | CodexConfig = False,
+    ) -> SandboxSession:
         if not isinstance(state, E2BSandboxSessionState):
             raise TypeError("E2BSandboxClient.resume expects an E2BSandboxSessionState")
+        state = apply_codex_to_session_state(state, codex)
 
         sandbox_type = _coerce_sandbox_type(state.sandbox_type)
         SandboxClass = _import_sandbox_class(sandbox_type)

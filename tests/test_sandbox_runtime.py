@@ -26,6 +26,11 @@ from agents.run_context import AgentHookContext, RunContextWrapper
 from agents.run_state import RunState, _build_agent_identity_map
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import Capability
+from agents.sandbox.codex_config import (
+    CodexConfig,
+    apply_codex_to_manifest,
+    apply_codex_to_session_state,
+)
 from agents.sandbox.entries import File
 from agents.sandbox.errors import ExecNonZeroError, ExecTransportError, InvalidManifestPathError
 from agents.sandbox.runtime import SandboxRuntime
@@ -259,6 +264,7 @@ def _get_reasoning_item() -> ResponseReasoningItem:
 class _CreateKwargs(TypedDict):
     snapshot: object | None
     manifest: Manifest | None
+    codex: bool | CodexConfig
     options: dict[str, str]
 
 
@@ -277,24 +283,32 @@ class _FakeClient(BaseSandboxClient[dict[str, str]]):
         *,
         snapshot: object | None = None,
         manifest: Manifest | None = None,
+        codex: bool | CodexConfig = False,
         options: dict[str, str],
     ) -> SandboxSession:
+        base_manifest = manifest if manifest is not None else self.inner_session.state.manifest
         self.create_kwargs = {
             "snapshot": snapshot,
-            "manifest": manifest,
+            "manifest": apply_codex_to_manifest(base_manifest, codex),
+            "codex": codex,
             "options": options,
         }
-        if manifest is not None:
-            self.inner_session.state.manifest = manifest
+        if self.create_kwargs["manifest"] is not None:
+            self.inner_session.state.manifest = self.create_kwargs["manifest"]
         return self.session
 
     async def delete(self, session: SandboxSession) -> SandboxSession:
         self.delete_calls += 1
         return session
 
-    async def resume(self, state: SandboxSessionState) -> SandboxSession:
-        self.resume_state = state
-        self.inner_session.state = state
+    async def resume(
+        self,
+        state: SandboxSessionState,
+        *,
+        codex: bool | CodexConfig = False,
+    ) -> SandboxSession:
+        self.resume_state = apply_codex_to_session_state(state, codex)
+        self.inner_session.state = self.resume_state
         return self.session
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
@@ -313,9 +327,11 @@ class _ManifestSessionClient(BaseSandboxClient[None]):
         *,
         snapshot: object | None = None,
         manifest: Manifest | None = None,
+        codex: bool | CodexConfig = False,
         options: None = None,
     ) -> SandboxSession:
         _ = (snapshot, options)
+        manifest = apply_codex_to_manifest(manifest, codex)
         self.created_manifests.append(manifest)
         assert manifest is not None
         session = _FakeSession(manifest)
@@ -324,8 +340,14 @@ class _ManifestSessionClient(BaseSandboxClient[None]):
     async def delete(self, session: SandboxSession) -> SandboxSession:
         return session
 
-    async def resume(self, state: SandboxSessionState) -> SandboxSession:
-        return self._wrap_session(_FakeSession(state.manifest))
+    async def resume(
+        self,
+        state: SandboxSessionState,
+        *,
+        codex: bool | CodexConfig = False,
+    ) -> SandboxSession:
+        resumed_state = apply_codex_to_session_state(state, codex)
+        return self._wrap_session(_FakeSession(resumed_state.manifest))
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
         return SandboxSessionState.model_validate(payload)
@@ -567,6 +589,26 @@ def _sandbox_run_config(client: _FakeClient | None = None) -> RunConfig:
     )
 
 
+def _unix_local_manifest(**kwargs: Any) -> Manifest:
+    return Manifest(**kwargs)
+
+
+def _unix_local_run_config(
+    *,
+    client: UnixLocalSandboxClient | None = None,
+    session_state: SandboxSessionState | None = None,
+    manifest: Manifest | None = None,
+) -> RunConfig:
+    sandbox_kwargs: dict[str, Any] = {
+        "client": client or UnixLocalSandboxClient(),
+    }
+    if session_state is not None:
+        sandbox_kwargs["session_state"] = session_state
+    else:
+        sandbox_kwargs["manifest"] = manifest or _unix_local_manifest()
+    return RunConfig(sandbox=SandboxRunConfig(**sandbox_kwargs))
+
+
 @pytest.mark.asyncio
 async def test_runner_merges_sandbox_instructions_and_tools() -> None:
     model = FakeModel(initial_output=[get_final_output_message("done")])
@@ -691,6 +733,7 @@ async def test_runner_does_not_close_injected_sandbox_session() -> None:
         model=model,
         instructions="Base instructions.",
         default_manifest=default_manifest,
+        codex=False,
     )
 
     result = await Runner.run(
@@ -725,6 +768,7 @@ async def test_runner_does_not_restart_running_injected_sandbox_session() -> Non
         name="sandbox",
         model=model,
         instructions="Base instructions.",
+        codex=False,
     )
 
     result = await Runner.run(
@@ -737,6 +781,44 @@ async def test_runner_does_not_restart_running_injected_sandbox_session() -> Non
     assert injected_session.start_calls == 0
     assert injected_session.stop_calls == 0
     assert injected_session.shutdown_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_passes_codex_requirement_to_client_created_sessions() -> None:
+    session = _FakeSession(Manifest())
+    client = _FakeClient(session)
+    agent = SandboxAgent(
+        name="sandbox",
+        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        instructions="Base instructions.",
+    )
+
+    result = await Runner.run(agent, "hello", run_config=_sandbox_run_config(client))
+
+    assert result.final_output == "done"
+    assert client.create_kwargs is not None
+    assert client.create_kwargs["codex"] is True
+    manifest = client.create_kwargs["manifest"]
+    assert manifest is not None
+    manifest_paths = {manifest._coerce_rel_path(path) for path in manifest.entries}
+    assert Path(".codex/codex") in manifest_paths
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_injected_session_missing_required_codex() -> None:
+    injected_session = _FakeSession(Manifest(entries={"session.txt": File(content=b"session")}))
+    agent = SandboxAgent(
+        name="sandbox",
+        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        instructions="Base instructions.",
+    )
+
+    with pytest.raises(UserError, match="missing Codex"):
+        await Runner.run(
+            agent,
+            "hello",
+            run_config=RunConfig(sandbox=SandboxRunConfig(session=injected_session)),
+        )
 
 
 @pytest.mark.asyncio
@@ -1013,7 +1095,7 @@ async def test_runner_resumed_handoff_materializes_manifest_for_new_sandbox_agen
 @pytest.mark.asyncio
 async def test_unix_local_client_rewrites_default_manifest_root_to_temp_workspace() -> None:
     client = UnixLocalSandboxClient()
-    manifest = Manifest(entries={"default.txt": File(content=b"default")})
+    manifest = _unix_local_manifest(entries={"default.txt": File(content=b"default")})
 
     session = await client.create(manifest=manifest, options=None)
     workspace_root = Path(session.state.manifest.root)
@@ -1039,12 +1121,13 @@ async def test_runner_allows_fresh_unix_local_sessions_without_options() -> None
         name="sandbox",
         model=FakeModel(initial_output=[get_final_output_message("done")]),
         instructions="Base instructions.",
+        codex=False,
     )
 
     result = await Runner.run(
         agent,
         "hello",
-        run_config=RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient())),
+        run_config=_unix_local_run_config(),
     )
 
     assert result.final_output == "done"
@@ -1054,7 +1137,7 @@ async def test_runner_allows_fresh_unix_local_sessions_without_options() -> None
 async def test_unix_local_client_delete_preserves_caller_owned_workspace_root() -> None:
     client = UnixLocalSandboxClient()
     workspace_root = Path(tempfile.mkdtemp(prefix="caller-owned-"))
-    manifest = Manifest(root=str(workspace_root))
+    manifest = _unix_local_manifest(root=str(workspace_root))
 
     session = await client.create(manifest=manifest, options=None)
     assert cast(UnixLocalSandboxSessionState, session.state).workspace_root_owned is False
@@ -1070,25 +1153,21 @@ async def test_unix_local_runner_cleanup_preserves_resumed_caller_owned_workspac
     workspace_root = Path(tempfile.mkdtemp(prefix="resumed-owned-"))
     state = UnixLocalSandboxSessionState(
         session_id=uuid.uuid4(),
-        manifest=Manifest(root=str(workspace_root)),
+        manifest=_unix_local_manifest(root=str(workspace_root)),
         snapshot=NoopSnapshot(id=str(uuid.uuid4())),
     )
     agent = SandboxAgent(
         name="sandbox",
         model=FakeModel(initial_output=[get_final_output_message("done")]),
         instructions="Base instructions.",
+        codex=False,
     )
 
     try:
         result = await Runner.run(
             agent,
             "hello",
-            run_config=RunConfig(
-                sandbox=SandboxRunConfig(
-                    client=UnixLocalSandboxClient(),
-                    session_state=state,
-                )
-            ),
+            run_config=_unix_local_run_config(session_state=state),
         )
     finally:
         assert workspace_root.exists()
@@ -1101,13 +1180,49 @@ async def test_unix_local_runner_cleanup_preserves_resumed_caller_owned_workspac
 async def test_unix_local_read_and_write_reject_paths_outside_workspace_root() -> None:
     client = UnixLocalSandboxClient()
     workspace_root = Path(tempfile.mkdtemp(prefix="workspace-root-"))
-    session = await client.create(manifest=Manifest(root=str(workspace_root)), options=None)
+    session = await client.create(
+        manifest=_unix_local_manifest(root=str(workspace_root)),
+        options=None,
+    )
 
     try:
         with pytest.raises(InvalidManifestPathError, match="must not escape root"):
             await session.write(Path("../secret.txt"), io.BytesIO(b"nope"))
         with pytest.raises(InvalidManifestPathError, match="must not escape root"):
             await session.read(Path("../secret.txt"))
+    finally:
+        await client.delete(session)
+        shutil.rmtree(workspace_root)
+
+
+@pytest.mark.asyncio
+async def test_unix_local_rm_recursive_ignores_missing_paths() -> None:
+    client = UnixLocalSandboxClient()
+    workspace_root = Path(tempfile.mkdtemp(prefix="workspace-root-"))
+    session = await client.create(
+        manifest=_unix_local_manifest(root=str(workspace_root)),
+        options=None,
+    )
+
+    try:
+        await session.rm("missing-dir", recursive=True)
+    finally:
+        await client.delete(session)
+        shutil.rmtree(workspace_root)
+
+
+@pytest.mark.asyncio
+async def test_unix_local_rm_non_recursive_still_errors_for_missing_paths() -> None:
+    client = UnixLocalSandboxClient()
+    workspace_root = Path(tempfile.mkdtemp(prefix="workspace-root-"))
+    session = await client.create(
+        manifest=_unix_local_manifest(root=str(workspace_root)),
+        options=None,
+    )
+
+    try:
+        with pytest.raises(ExecNonZeroError):
+            await session.rm("missing-dir")
     finally:
         await client.delete(session)
         shutil.rmtree(workspace_root)
@@ -1292,7 +1407,7 @@ async def test_runner_streamed_run_loop_task_waits_for_sandbox_cleanup_and_persi
 async def test_runner_rejects_unix_local_manifest_user_and_group_provisioning() -> None:
     workspace_root = Path(tempfile.mkdtemp(prefix="unix-local-users-"))
     session = await UnixLocalSandboxClient().create(
-        manifest=Manifest(
+        manifest=_unix_local_manifest(
             root=str(workspace_root),
             users=[User(name="sandbox-user")],
         ),
@@ -1341,12 +1456,13 @@ async def test_runner_persists_workspace_and_tool_choice_state_across_sandbox_re
         tools=[approval_tool],
         capabilities=[file_capability],
         model_settings=ModelSettings(tool_choice="required"),
+        codex=False,
     )
 
     first_run = await Runner.run(
         agent,
         "hello",
-        run_config=RunConfig(sandbox=SandboxRunConfig(client=client)),
+        run_config=_unix_local_run_config(client=client),
     )
 
     assert len(first_run.interruptions) == 1
@@ -1386,6 +1502,7 @@ async def test_runner_persists_workspace_and_tool_choice_state_across_sandbox_re
         tools=[approval_tool],
         capabilities=[_SessionFileCapability()],
         model_settings=ModelSettings(tool_choice="required"),
+        codex=False,
     )
 
     restored_state = await RunState.from_json(resumed_agent, state_json)
@@ -1393,7 +1510,7 @@ async def test_runner_persists_workspace_and_tool_choice_state_across_sandbox_re
     resumed = await Runner.run(
         resumed_agent,
         restored_state,
-        run_config=RunConfig(sandbox=SandboxRunConfig(client=client)),
+        run_config=_unix_local_run_config(client=client),
     )
 
     assert resumed.final_output == "done"
@@ -1422,6 +1539,7 @@ async def test_runner_restores_all_sandbox_agents_from_run_state_across_handoffs
         model=worker_model,
         instructions="Worker instructions.",
         tools=[approval_tool],
+        codex=False,
     )
     triage = SandboxAgent(
         name="triage",
@@ -1429,6 +1547,7 @@ async def test_runner_restores_all_sandbox_agents_from_run_state_across_handoffs
         instructions="Triage instructions.",
         capabilities=[file_capability],
         handoffs=[worker],
+        codex=False,
     )
     worker.handoffs = [triage]
     triage_model.add_multiple_turn_outputs(
@@ -1452,7 +1571,7 @@ async def test_runner_restores_all_sandbox_agents_from_run_state_across_handoffs
     first_run = await Runner.run(
         triage,
         "hello",
-        run_config=RunConfig(sandbox=SandboxRunConfig(client=client)),
+        run_config=_unix_local_run_config(client=client),
     )
 
     assert len(first_run.interruptions) == 1
@@ -1472,6 +1591,7 @@ async def test_runner_restores_all_sandbox_agents_from_run_state_across_handoffs
         model=resumed_worker_model,
         instructions="Worker instructions.",
         tools=[approval_tool],
+        codex=False,
     )
     resumed_triage = SandboxAgent(
         name="triage",
@@ -1479,6 +1599,7 @@ async def test_runner_restores_all_sandbox_agents_from_run_state_across_handoffs
         instructions="Triage instructions.",
         capabilities=[_SessionFileCapability()],
         handoffs=[resumed_worker],
+        codex=False,
     )
     resumed_worker.handoffs = [resumed_triage]
     resumed_worker_model.add_multiple_turn_outputs([[get_handoff_tool_call(resumed_triage)]])
@@ -1500,7 +1621,7 @@ async def test_runner_restores_all_sandbox_agents_from_run_state_across_handoffs
     resumed = await Runner.run(
         resumed_triage,
         restored_state,
-        run_config=RunConfig(sandbox=SandboxRunConfig(client=client)),
+        run_config=_unix_local_run_config(client=client),
     )
 
     assert resumed.final_output == "done"
@@ -1528,12 +1649,14 @@ async def test_runner_serializes_unique_sandbox_resume_keys_for_duplicate_agent_
         model=first_model,
         instructions="First instructions.",
         capabilities=[file_capability],
+        codex=False,
     )
     second = SandboxAgent(
         name="sandbox",
         model=second_model,
         instructions="Second instructions.",
         tools=[approval_tool],
+        codex=False,
     )
     first.handoffs = [second]
     second.handoffs = [first]
@@ -1567,7 +1690,7 @@ async def test_runner_serializes_unique_sandbox_resume_keys_for_duplicate_agent_
     first_run = await Runner.run(
         first,
         "hello",
-        run_config=RunConfig(sandbox=SandboxRunConfig(client=client)),
+        run_config=_unix_local_run_config(client=client),
     )
 
     state = first_run.to_state()
@@ -1580,7 +1703,7 @@ async def test_runner_serializes_unique_sandbox_resume_keys_for_duplicate_agent_
     resumed = await Runner.run(
         first,
         state,
-        run_config=RunConfig(sandbox=SandboxRunConfig(client=client)),
+        run_config=_unix_local_run_config(client=client),
     )
 
     assert resumed.final_output == "done"
@@ -1704,8 +1827,8 @@ def test_session_manager_generates_collision_free_resume_keys_for_literal_suffix
 async def test_session_manager_preserves_untouched_run_state_sessions_on_cleanup() -> None:
     manifest = Manifest(entries={"README.md": File(content=b"duplicate resume")})
     client = _FakeClient(_FakeSession(manifest))
-    triage = SandboxAgent(name="triage", model=FakeModel(), instructions="Triage.")
-    worker = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    triage = SandboxAgent(name="triage", model=FakeModel(), instructions="Triage.", codex=False)
+    worker = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.", codex=False)
     triage.handoffs = [worker]
     worker.handoffs = [triage]
     triage_session_state = client.serialize_session_state(
@@ -2003,12 +2126,14 @@ async def test_runner_restores_duplicate_name_sandbox_sessions_after_json_roundt
         model=first_model,
         instructions="First instructions.",
         capabilities=[file_capability],
+        codex=False,
     )
     second = SandboxAgent(
         name="sandbox",
         model=second_model,
         instructions="Second instructions.",
         tools=[approval_tool],
+        codex=False,
     )
     first.handoffs = [second]
     second.handoffs = [first]
@@ -2031,7 +2156,7 @@ async def test_runner_restores_duplicate_name_sandbox_sessions_after_json_roundt
     first_run = await Runner.run(
         first,
         "hello",
-        run_config=RunConfig(sandbox=SandboxRunConfig(client=client)),
+        run_config=_unix_local_run_config(client=client),
     )
 
     state = first_run.to_state()
@@ -2044,12 +2169,14 @@ async def test_runner_restores_duplicate_name_sandbox_sessions_after_json_roundt
         model=resumed_first_model,
         instructions="First instructions.",
         capabilities=[_SessionFileCapability()],
+        codex=False,
     )
     resumed_second = SandboxAgent(
         name="sandbox",
         model=resumed_second_model,
         instructions="Second instructions.",
         tools=[approval_tool],
+        codex=False,
     )
     resumed_first.handoffs = [resumed_second]
     resumed_second.handoffs = [resumed_first]
@@ -2072,7 +2199,7 @@ async def test_runner_restores_duplicate_name_sandbox_sessions_after_json_roundt
     resumed = await Runner.run(
         resumed_first,
         restored_state,
-        run_config=RunConfig(sandbox=SandboxRunConfig(client=client)),
+        run_config=_unix_local_run_config(client=client),
     )
 
     assert resumed.final_output == "done"
@@ -2109,12 +2236,13 @@ async def test_runner_restores_legacy_current_sandbox_payload_after_json_roundtr
         instructions="Base instructions.",
         tools=[approval_tool],
         capabilities=[_SessionFileCapability()],
+        codex=False,
     )
 
     first_run = await Runner.run(
         agent,
         "hello",
-        run_config=RunConfig(sandbox=SandboxRunConfig(client=client)),
+        run_config=_unix_local_run_config(client=client),
     )
     state = first_run.to_state()
     assert state._sandbox is not None
@@ -2143,6 +2271,7 @@ async def test_runner_restores_legacy_current_sandbox_payload_after_json_roundtr
         instructions="Base instructions.",
         tools=[approval_tool],
         capabilities=[_SessionFileCapability()],
+        codex=False,
     )
 
     restored_state = await RunState.from_json(resumed_agent, state.to_json())
@@ -2150,7 +2279,7 @@ async def test_runner_restores_legacy_current_sandbox_payload_after_json_roundtr
     resumed = await Runner.run(
         resumed_agent,
         restored_state,
-        run_config=RunConfig(sandbox=SandboxRunConfig(client=client)),
+        run_config=_unix_local_run_config(client=client),
     )
 
     assert resumed.final_output == "done"
@@ -2170,7 +2299,7 @@ async def test_runner_restores_legacy_current_sandbox_payload_after_json_roundtr
 async def test_unix_local_exec_confines_commands_to_workspace_root() -> None:
     workspace_root = Path(tempfile.mkdtemp(prefix="unix-local-exec-"))
     session = await UnixLocalSandboxClient().create(
-        manifest=Manifest(root=str(workspace_root)),
+        manifest=_unix_local_manifest(root=str(workspace_root)),
         options=None,
     )
 
@@ -2201,7 +2330,7 @@ async def test_unix_local_exec_rejects_when_confinement_is_unavailable(
 ) -> None:
     workspace_root = Path(tempfile.mkdtemp(prefix="unix-local-exec-"))
     session = await UnixLocalSandboxClient().create(
-        manifest=Manifest(root=str(workspace_root)),
+        manifest=_unix_local_manifest(root=str(workspace_root)),
         options=None,
     )
     unix_local = cast(Any, unix_local_module)
@@ -2223,7 +2352,7 @@ async def test_unix_local_exec_runs_without_wrapper_on_linux(
 ) -> None:
     workspace_root = Path(tempfile.mkdtemp(prefix="unix-local-exec-"))
     session = await UnixLocalSandboxClient().create(
-        manifest=Manifest(root=str(workspace_root)),
+        manifest=_unix_local_manifest(root=str(workspace_root)),
         options=None,
     )
     unix_local = cast(Any, unix_local_module)
@@ -2246,7 +2375,7 @@ def test_unix_local_confined_exec_command_allows_common_darwin_interpreter_roots
     session = UnixLocalSandboxSession.from_state(
         UnixLocalSandboxSessionState(
             session_id=uuid.uuid4(),
-            manifest=Manifest(root=str(workspace_root)),
+            manifest=_unix_local_manifest(root=str(workspace_root)),
             snapshot=NoopSnapshot(id="darwin"),
             workspace_root_owned=False,
         )

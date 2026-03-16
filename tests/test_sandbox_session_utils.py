@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from agents.sandbox.entries.codex import resolve_codex_target_triple_for_target
+from agents.sandbox.errors import UnsupportedCodexTargetError
 from agents.sandbox.files import EntryKind, FileEntry
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.session import UCStartEvent
@@ -38,6 +40,51 @@ class _CaptureExecSession(BaseSandboxSession):
         _ = timeout
         self.last_command = tuple(str(part) for part in command)
         return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+    async def read(self, path: Path) -> io.IOBase:
+        _ = path
+        raise AssertionError("read() should not be called in this test")
+
+    async def write(self, path: Path, data: io.IOBase) -> None:
+        _ = (path, data)
+        raise AssertionError("write() should not be called in this test")
+
+    async def running(self) -> bool:
+        return True
+
+    async def persist_workspace(self) -> io.IOBase:
+        return io.BytesIO()
+
+    async def hydrate_workspace(self, data: io.IOBase) -> None:
+        _ = data
+
+    async def shutdown(self) -> None:
+        return
+
+
+class _ScriptedExecSession(BaseSandboxSession):
+    def __init__(self, responses: dict[tuple[str, ...], list[ExecResult] | ExecResult]) -> None:
+        self.state = SandboxSessionState(
+            manifest=Manifest(),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+        self.responses: dict[tuple[str, ...], list[ExecResult]] = {}
+        for command, response in responses.items():
+            if isinstance(response, ExecResult):
+                self.responses[command] = [response]
+            else:
+                self.responses[command] = list(response)
+
+    async def _exec_internal(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        _ = timeout
+        key = tuple(str(part) for part in command)
+        if key not in self.responses or not self.responses[key]:
+            return ExecResult(stdout=b"", stderr=b"", exit_code=1)
+        return self.responses[key].pop(0)
 
     async def read(self, path: Path) -> io.IOBase:
         _ = path
@@ -163,3 +210,197 @@ async def test_exec_shell_true_preserves_single_shell_snippet() -> None:
     await session.exec("echo hello && echo goodbye", shell=True)
 
     assert session.last_command == ("sh", "-lc", "echo hello && echo goodbye")
+
+
+@pytest.mark.asyncio
+async def test_resolve_codex_github_asset_name_linux_gnu() -> None:
+    session = _ScriptedExecSession(
+        {
+            ("uname", "-s"): ExecResult(stdout=b"Linux\n", stderr=b"", exit_code=0),
+            ("uname", "-m"): ExecResult(stdout=b"x86_64\n", stderr=b"", exit_code=0),
+            ("getconf", "GNU_LIBC_VERSION"): ExecResult(
+                stdout=b"glibc 2.39\n",
+                stderr=b"",
+                exit_code=0,
+            ),
+        }
+    )
+
+    assert (
+        await session.resolve_codex_github_asset_name() == "codex-x86_64-unknown-linux-gnu.tar.gz"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_codex_github_asset_name_linux_musl() -> None:
+    session = _ScriptedExecSession(
+        {
+            ("uname", "-s"): ExecResult(stdout=b"Linux\n", stderr=b"", exit_code=0),
+            ("uname", "-m"): ExecResult(stdout=b"amd64\n", stderr=b"", exit_code=0),
+            ("getconf", "GNU_LIBC_VERSION"): ExecResult(stdout=b"", stderr=b"", exit_code=1),
+            ("ldd", "--version"): ExecResult(
+                stdout=b"",
+                stderr=b"musl libc (x86_64)\n",
+                exit_code=1,
+            ),
+        }
+    )
+
+    assert (
+        await session.resolve_codex_github_asset_name() == "codex-x86_64-unknown-linux-musl.tar.gz"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_codex_github_asset_name_linux_aarch64_gnu() -> None:
+    session = _ScriptedExecSession(
+        {
+            ("uname", "-s"): ExecResult(stdout=b"Linux\n", stderr=b"", exit_code=0),
+            ("uname", "-m"): ExecResult(stdout=b"aarch64\n", stderr=b"", exit_code=0),
+            ("getconf", "GNU_LIBC_VERSION"): ExecResult(
+                stdout=b"glibc 2.39\n",
+                stderr=b"",
+                exit_code=0,
+            ),
+        }
+    )
+
+    assert (
+        await session.resolve_codex_github_asset_name() == "codex-aarch64-unknown-linux-gnu.tar.gz"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_codex_github_asset_name_darwin() -> None:
+    session = _ScriptedExecSession(
+        {
+            ("uname", "-s"): ExecResult(stdout=b"Darwin\n", stderr=b"", exit_code=0),
+            ("uname", "-m"): ExecResult(stdout=b"x86_64\n", stderr=b"", exit_code=0),
+        }
+    )
+
+    assert await session.resolve_codex_github_asset_name() == "codex-x86_64-apple-darwin.tar.gz"
+
+
+@pytest.mark.asyncio
+async def test_resolve_codex_github_asset_name_darwin_arm64() -> None:
+    session = _ScriptedExecSession(
+        {
+            ("uname", "-s"): ExecResult(stdout=b"Darwin\n", stderr=b"", exit_code=0),
+            ("uname", "-m"): ExecResult(stdout=b"arm64\n", stderr=b"", exit_code=0),
+        }
+    )
+
+    assert await session.resolve_codex_github_asset_name() == "codex-aarch64-apple-darwin.tar.gz"
+
+
+@pytest.mark.asyncio
+async def test_resolve_codex_github_asset_name_windows() -> None:
+    session = _ScriptedExecSession(
+        {
+            ("uname", "-s"): ExecResult(stdout=b"", stderr=b"", exit_code=1),
+            ("cmd", "/c", "echo", "%OS%"): ExecResult(
+                stdout=b"Windows_NT\r\n",
+                stderr=b"",
+                exit_code=0,
+            ),
+            ("cmd", "/c", "echo", "%PROCESSOR_ARCHITECTURE%"): ExecResult(
+                stdout=b"AMD64\r\n",
+                stderr=b"",
+                exit_code=0,
+            ),
+        }
+    )
+
+    assert (
+        await session.resolve_codex_github_asset_name() == "codex-x86_64-pc-windows-msvc.exe.tar.gz"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_codex_github_asset_name_windows_arm64() -> None:
+    session = _ScriptedExecSession(
+        {
+            ("uname", "-s"): ExecResult(stdout=b"", stderr=b"", exit_code=1),
+            ("cmd", "/c", "echo", "%OS%"): ExecResult(
+                stdout=b"Windows_NT\r\n",
+                stderr=b"",
+                exit_code=0,
+            ),
+            ("cmd", "/c", "echo", "%PROCESSOR_ARCHITECTURE%"): ExecResult(
+                stdout=b"ARM64\r\n",
+                stderr=b"",
+                exit_code=0,
+            ),
+        }
+    )
+
+    assert (
+        await session.resolve_codex_github_asset_name()
+        == "codex-aarch64-pc-windows-msvc.exe.tar.gz"
+    )
+
+
+def test_resolve_codex_target_triple_reports_unsupported_os() -> None:
+    with pytest.raises(
+        UnsupportedCodexTargetError,
+        match=(
+            "Unsupported Codex target operating system: freebsd. "
+            "Available operating systems: linux, darwin, windows."
+        ),
+    ) as exc_info:
+        resolve_codex_target_triple_for_target(
+            target_os="freebsd",
+            target_arch="x86_64",
+        )
+
+    assert exc_info.value.reason == "operating_system"
+    assert exc_info.value.target_os == "freebsd"
+    assert exc_info.value.supported_operating_systems == ("linux", "darwin", "windows")
+
+
+def test_resolve_codex_target_triple_reports_unsupported_architecture() -> None:
+    with pytest.raises(
+        UnsupportedCodexTargetError,
+        match=(
+            "Unsupported Codex target architecture for darwin: ppc64le. "
+            "Available architectures: x86_64, aarch64."
+        ),
+    ) as exc_info:
+        resolve_codex_target_triple_for_target(
+            target_os="darwin",
+            target_arch="ppc64le",
+        )
+
+    assert exc_info.value.reason == "architecture"
+    assert exc_info.value.target_arch == "ppc64le"
+    assert exc_info.value.supported_architectures == ("x86_64", "aarch64")
+
+
+def test_resolve_codex_target_triple_normalizes_arm_aliases() -> None:
+    assert (
+        resolve_codex_target_triple_for_target(
+            target_os="darwin",
+            target_arch="arm64",
+        )
+        == "aarch64-apple-darwin"
+    )
+
+
+def test_resolve_codex_target_triple_reports_unsupported_linux_libc() -> None:
+    with pytest.raises(
+        UnsupportedCodexTargetError,
+        match=(
+            "Unsupported Linux libc variant for Codex target resolution: uclibc. "
+            "Available libc variants: gnu, musl."
+        ),
+    ) as exc_info:
+        resolve_codex_target_triple_for_target(
+            target_os="linux",
+            target_arch="x86_64",
+            linux_libc="uclibc",
+        )
+
+    assert exc_info.value.reason == "linux_libc"
+    assert exc_info.value.linux_libc == "uclibc"
+    assert exc_info.value.supported_linux_libc_variants == ("gnu", "musl")

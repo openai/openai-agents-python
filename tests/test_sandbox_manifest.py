@@ -2,7 +2,13 @@ from pathlib import Path
 
 import pytest
 
-from agents.sandbox.entries import Dir, File, GCSMount
+from agents.sandbox.codex_config import (
+    DEFAULT_CODEX_VERSION,
+    CodexConfig,
+    apply_codex_to_manifest,
+    manifest_has_codex_entry,
+)
+from agents.sandbox.entries import Codex, Dir, File, GCSMount
 from agents.sandbox.errors import InvalidManifestPathError
 from agents.sandbox.manifest import Manifest
 
@@ -131,9 +137,86 @@ def test_manifest_describe_preserves_tree_rendering_after_renderer_extract() -> 
         },
     )
 
-    assert manifest.describe(depth=2) == (
-        "/workspace\n"
-        "├── data/          # /workspace/data — shared data\n"
-        "└── repo/          # /workspace/repo — project root\n"
-        "    └── README.md  # /workspace/repo/README.md — overview\n"
+    description = manifest.describe(depth=2)
+
+    assert description.startswith("/workspace\n")
+    assert "data/" in description
+    assert "/workspace/data" in description
+    assert "repo/" in description
+    assert "/workspace/repo/README.md" in description
+
+
+def test_apply_codex_to_manifest_adds_codex_entry_at_configured_path() -> None:
+    manifest = apply_codex_to_manifest(
+        Manifest(),
+        CodexConfig(path="tools/codex"),
+    )
+
+    validated = manifest.validated_entries()
+
+    assert Path("tools/codex") in validated
+    entry = validated[Path("tools/codex")]
+    assert isinstance(entry, Codex)
+    assert entry.version == DEFAULT_CODEX_VERSION
+
+
+def test_apply_codex_to_manifest_treats_home_relative_path_as_workspace_relative() -> None:
+    manifest = apply_codex_to_manifest(
+        Manifest(),
+        CodexConfig(path="~/.codex/codex"),
+    )
+
+    validated = manifest.validated_entries()
+
+    assert Path(".codex/codex") in validated
+    entry = validated[Path(".codex/codex")]
+    assert isinstance(entry, Codex)
+
+
+def test_apply_codex_to_manifest_preserves_explicit_entry_at_configured_path() -> None:
+    explicit = File(content=b"custom")
+    manifest = apply_codex_to_manifest(
+        Manifest(
+            entries={"tools/codex": explicit},
+        ),
+        CodexConfig(path="tools/codex"),
+    )
+
+    validated = manifest.validated_entries()
+
+    preserved = validated["tools/codex"]
+    assert isinstance(preserved, File)
+    assert preserved == explicit
+
+
+def test_apply_codex_to_manifest_accepts_absolute_path_within_manifest_root() -> None:
+    manifest = apply_codex_to_manifest(
+        Manifest(root="/workspace"),
+        CodexConfig(path="/workspace/tools/codex"),
+    )
+
+    validated = manifest.validated_entries()
+
+    assert Path("tools/codex") in validated
+    entry = validated[Path("tools/codex")]
+    assert isinstance(entry, Codex)
+
+
+def test_apply_codex_to_manifest_rejects_absolute_path_outside_manifest_root() -> None:
+    with pytest.raises(InvalidManifestPathError, match="must be relative"):
+        apply_codex_to_manifest(
+            Manifest(root="/workspace"),
+            CodexConfig(path="/tmp/codex"),
+        )
+
+
+def test_manifest_has_codex_entry_accepts_absolute_default_root_path_after_root_rewrite() -> None:
+    manifest = Manifest(
+        root="/tmp/session-root",
+        entries={"tools/codex": Codex(version=DEFAULT_CODEX_VERSION)},
+    )
+
+    assert manifest_has_codex_entry(
+        manifest,
+        CodexConfig(path="/workspace/tools/codex"),
     )

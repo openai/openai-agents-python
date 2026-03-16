@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ..run_config import SandboxRunConfig
 from .capabilities import Capability
+from .codex_config import CodexConfig
 from .entries import Dir, LocalFile
 from .errors import (
     ErrorCode,
@@ -25,6 +26,7 @@ from .types import ExecResult
 
 __all__ = [
     "Capability",
+    "CodexConfig",
     "Dir",
     "ErrorCode",
     "ExecResult",

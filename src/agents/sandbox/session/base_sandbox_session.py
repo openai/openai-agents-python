@@ -10,11 +10,17 @@ from typing import Literal, cast
 from typing_extensions import Self
 
 from ..entries import BaseEntry, resolve_workspace_path
+from ..entries.codex import (
+    Codex,
+    resolve_codex_github_asset_name as resolve_codex_github_asset_name_for_session,
+    resolve_codex_target_triple as resolve_codex_target_triple_for_session,
+)
 from ..errors import (
     ExecNonZeroError,
     InvalidCompressionSchemeError,
 )
 from ..files import FileEntry
+from ..manifest import Manifest
 from ..materialization import MaterializationResult, MaterializedFile
 from ..snapshot import NoopSnapshot
 from ..types import ExecResult, User
@@ -44,6 +50,7 @@ class BaseSandboxSession(abc.ABC):
             # Reapply only ephemeral manifest entries on resume so persisted workspace state wins
             # for durable files while temporary scaffolding is rebuilt for the new process.
             await self.apply_manifest(only_ephemeral=True)
+            await self._materialize_missing_codex_entries_on_resume()
         else:
             await self.apply_manifest()
 
@@ -138,6 +145,16 @@ class BaseSandboxSession(abc.ABC):
 
         sanitized_command = self._prepare_exec_command(*command, shell=shell, user=user)
         return await self._exec_internal(*sanitized_command, timeout=timeout)
+
+    async def resolve_codex_github_asset_name(self) -> str:
+        """Resolve the Codex GitHub release asset filename for the session target."""
+
+        return await resolve_codex_github_asset_name_for_session(session=self)
+
+    async def resolve_codex_target_triple(self) -> str:
+        """Resolve the Codex release target triple for the session target platform."""
+
+        return await resolve_codex_target_triple_for_session(session=self)
 
     def _prepare_exec_command(
         self,
@@ -325,6 +342,29 @@ class BaseSandboxSession(abc.ABC):
 
     def describe(self) -> str:
         return self.state.manifest.describe()
+
+    async def _materialize_missing_codex_entries_on_resume(self) -> None:
+        missing_codex_entries: dict[str | Path, BaseEntry] = {}
+        for rel_path, artifact in self.state.manifest.iter_entries():
+            if not isinstance(artifact, Codex):
+                continue
+            exists = await self.exec("test", "-e", str(self.normalize_path(rel_path)), shell=False)
+            if exists.ok():
+                continue
+            missing_codex_entries[rel_path] = artifact.model_copy(deep=True)
+
+        if not missing_codex_entries:
+            return
+
+        codex_manifest = Manifest(
+            root=self.state.manifest.root,
+            entries=missing_codex_entries,
+        )
+        await ManifestApplier(
+            mkdir=lambda path: self.mkdir(path, parents=True),
+            exec_checked_nonzero=self._exec_checked_nonzero,
+            apply_entry=lambda artifact, dest, base_dir: artifact.apply(self, dest, base_dir),
+        ).apply_manifest(codex_manifest, base_dir=self._manifest_base_dir())
 
     async def _extract_tar_archive(
         self,

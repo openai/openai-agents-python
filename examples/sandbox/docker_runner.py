@@ -18,13 +18,13 @@ from openai.types.responses import ResponseTextDeltaEvent
 
 from agents import ModelSettings, Runner
 from agents.run import RunConfig
-from agents.sandbox import SandboxAgent, SandboxRunConfig
+from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
+from agents.sandbox.entries import File
 from agents.sandbox.sandboxes.docker import DockerSandboxClient, DockerSandboxClientOptions
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from examples.sandbox.misc.example_support import text_manifest
 from examples.sandbox.misc.workspace_shell import WorkspaceShellCapability
 
 DEFAULT_QUESTION = "Summarize this sandbox project in 2 sentences."
@@ -40,20 +40,25 @@ def _stream_event_banner(event_name: str) -> str | None:
 
 async def main(model: str, question: str) -> None:
     # A manifest is the starting file tree for the sandbox workspace.
-    # Each key is a path inside the workspace and each value is the file content.
-    # `text_manifest()` keeps small text examples readable by hiding the bytes boilerplate.
-    manifest = text_manifest(
-        {
-            "README.md": (
-                "# Demo Project\n\n"
-                "This sandbox contains a tiny demo project for the sandbox runner.\n"
-                "The goal is to show how Runner can prepare a Docker-backed workspace.\n"
+    # Each key is a path inside the workspace and each value is a concrete manifest entry.
+    manifest = Manifest(
+        entries={
+            "README.md": File(
+                content=(
+                    b"# Demo Project\n\n"
+                    b"This sandbox contains a tiny demo project for the sandbox runner.\n"
+                    b"The goal is to show how Runner can prepare a Docker-backed workspace.\n"
+                )
             ),
-            "src/app.py": 'def greet(name: str) -> str:\n    return f"Hello, {name}!"\n',
-            "docs/notes.md": (
-                "# Notes\n\n"
-                "- The example is intentionally minimal.\n"
-                "- The model should inspect files through the shell tool.\n"
+            "src/app.py": File(
+                content=b'def greet(name: str) -> str:\n    return f"Hello, {name}!"\n'
+            ),
+            "docs/notes.md": File(
+                content=(
+                    b"# Notes\n\n"
+                    b"- The example is intentionally minimal.\n"
+                    b"- The model should inspect files through the shell tool.\n"
+                )
             ),
         }
     )
@@ -88,8 +93,13 @@ async def main(model: str, question: str) -> None:
     # We pass the same manifest here so the container knows which files to materialize.
     session = await docker_client.create(
         manifest=manifest,
-        options=DockerSandboxClientOptions(image="python:3.11-slim"),
+        codex=agent.codex,
+        options=DockerSandboxClientOptions(image="python:3.14-slim"),
     )
+    await session.start()
+
+    print(await session.ls(".codex/codex"))
+
     try:
         # `async with session` keeps the example on the public session lifecycle API.
         # `Runner` reuses the already-running session without starting it a second time.

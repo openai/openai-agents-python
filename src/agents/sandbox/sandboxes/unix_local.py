@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal, cast
 
+from ..codex_config import CodexConfig, apply_codex_to_manifest, apply_codex_to_session_state
 from ..entries import resolve_workspace_path
 from ..errors import (
     ExecNonZeroError,
@@ -425,11 +426,31 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
     async def mkdir(self, path: Path | str, *, parents: bool = False) -> None:
         normalized = self.normalize_path(path)
-        workspace_root = Path(self.state.manifest.root).resolve()
-        if parents and normalized == workspace_root:
-            workspace_root.mkdir(parents=True, exist_ok=True)
-            return
-        await super().mkdir(normalized, parents=parents)
+        try:
+            normalized.mkdir(parents=parents, exist_ok=True)
+        except OSError as e:
+            raise WorkspaceArchiveWriteError(path=normalized, cause=e) from e
+
+    async def rm(self, path: Path | str, *, recursive: bool = False) -> None:
+        normalized = self.normalize_path(path)
+        try:
+            if normalized.is_dir() and not normalized.is_symlink():
+                if recursive:
+                    shutil.rmtree(normalized)
+                else:
+                    normalized.rmdir()
+            else:
+                normalized.unlink()
+        except FileNotFoundError as e:
+            if recursive:
+                return
+            raise ExecNonZeroError(
+                ExecResult(stdout=b"", stderr=str(e).encode("utf-8"), exit_code=1),
+                command=("rm", "-rf" if recursive else "--", str(normalized)),
+                cause=e,
+            ) from e
+        except OSError as e:
+            raise WorkspaceArchiveWriteError(path=normalized, cause=e) from e
 
     async def read(self, path: Path) -> io.IOBase:
         workspace_path = self._resolve_workspace_path(path)
@@ -446,7 +467,8 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         workspace_path = self._resolve_workspace_path(path)
         try:
             workspace_path.parent.mkdir(parents=True, exist_ok=True)
-            workspace_path.write_bytes(payload)
+            with workspace_path.open("wb") as f:
+                shutil.copyfileobj(payload.stream, f)
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
 
@@ -516,10 +538,12 @@ class UnixLocalSandboxClient(BaseSandboxClient[None]):
         *,
         snapshot: SnapshotSpec | None = None,
         manifest: Manifest | None = None,
+        codex: bool | CodexConfig = False,
         options: None = None,
     ) -> SandboxSession:
         if options is not None:
             raise ValueError("UnixLocalSandboxClient.create does not accept options")
+        manifest = apply_codex_to_manifest(manifest, codex)
         # For local execution, runner-created sessions should always get an isolated temp root
         # unless the caller explicitly chose a custom host path.
         workspace_root_owned = False
@@ -558,10 +582,15 @@ class UnixLocalSandboxClient(BaseSandboxClient[None]):
             pass
         return session
 
-    async def resume(self, state: SandboxSessionState) -> SandboxSession:
+    async def resume(
+        self,
+        state: SandboxSessionState,
+        *,
+        codex: bool | CodexConfig = False,
+    ) -> SandboxSession:
         if not isinstance(state, UnixLocalSandboxSessionState):
             raise TypeError("UnixLocalSandboxClient.resume expects a UnixLocalSandboxSessionState")
-        inner = UnixLocalSandboxSession.from_state(state)
+        inner = UnixLocalSandboxSession.from_state(apply_codex_to_session_state(state, codex))
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:

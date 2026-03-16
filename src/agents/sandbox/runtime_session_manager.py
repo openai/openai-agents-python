@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, cast
 
 from ..agent import Agent
+from ..exceptions import UserError
 from ..run_config import SandboxRunConfig
 from ..run_context import TContext
 from ..run_state import (
@@ -15,6 +16,7 @@ from ..run_state import (
     _build_agent_identity_keys_by_id,
 )
 from .capabilities import Capability
+from .codex_config import manifest_has_codex_entry
 from .manifest import Manifest
 from .sandbox_agent import SandboxAgent
 from .session.base_sandbox_session import BaseSandboxSession
@@ -253,6 +255,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
     ) -> _SandboxSessionResources:
         sandbox_config = self._require_sandbox_config()
         if sandbox_config.session is not None:
+            self._validate_injected_session(agent=agent, session=sandbox_config.session)
             return _SandboxSessionResources(
                 session=sandbox_config.session,
                 client=None,
@@ -277,7 +280,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                 session_state=explicit_state,
             )
             return _SandboxSessionResources(
-                session=await client.resume(explicit_state),
+                session=await client.resume(explicit_state, codex=agent.codex),
                 client=client,
                 owns_session=True,
             )
@@ -298,6 +301,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         session = await client.create(
             snapshot=self._resolve_snapshot_spec(sandbox_config.snapshot),
             manifest=effective_manifest,
+            codex=agent.codex,
             options=options,
         )
         return _SandboxSessionResources(session=session, client=client, owns_session=True)
@@ -423,6 +427,23 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         if processed_manifest is None:
             return session_state
         return session_state.model_copy(update={"manifest": processed_manifest})
+
+    @staticmethod
+    def _validate_injected_session(
+        *,
+        agent: SandboxAgent[TContext],
+        session: BaseSandboxSession,
+    ) -> None:
+        if manifest_has_codex_entry(session.state.manifest, agent.codex):
+            return
+        if not agent.codex:
+            return
+        raise UserError(
+            "Injected sandbox sessions are used as-is and are not auto-provisioned with Codex. "
+            f"Session for SandboxAgent {agent.name!r} is missing Codex. "
+            "Create the session with `client.create(..., codex=True)` or set `codex=False` "
+            "on the SandboxAgent."
+        )
 
     def _release_agents(self) -> None:
         if not self._acquired_agents:

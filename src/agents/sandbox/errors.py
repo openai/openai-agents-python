@@ -36,6 +36,7 @@ class ErrorCode(str, Enum):
     GIT_MISSING_IN_IMAGE = "git_missing_in_image"
     GIT_CLONE_ERROR = "git_clone_error"
     GIT_COPY_ERROR = "git_copy_error"
+    UNSUPPORTED_CODEX_TARGET = "unsupported_codex_target"
 
     MOUNT_MISSING_TOOL = "mount_missing_tool"
     MOUNT_FAILED = "mount_failed"
@@ -114,6 +115,75 @@ def _as_context(context: Mapping[str, object] | None) -> dict[str, object]:
 
 def _format_command(command: Sequence[str | Path]) -> str:
     return " ".join(str(p) for p in command)
+
+
+class UnsupportedCodexTargetError(ArtifactError):
+    """Codex release assets do not support the detected target platform."""
+
+    reason: Literal["operating_system", "architecture", "linux_libc"]
+    target_os: str
+    target_arch: str
+    linux_libc: str | None
+    supported_operating_systems: tuple[str, ...]
+    supported_architectures: tuple[str, ...]
+    supported_linux_libc_variants: tuple[str, ...]
+
+    def __init__(
+        self,
+        *,
+        reason: Literal["operating_system", "architecture", "linux_libc"],
+        target_os: str,
+        target_arch: str,
+        linux_libc: str | None = None,
+        supported_operating_systems: Sequence[str],
+        supported_architectures: Sequence[str],
+        supported_linux_libc_variants: Sequence[str] = (),
+        context: Mapping[str, object] | None = None,
+        cause: BaseException | None = None,
+    ) -> None:
+        supported_os = tuple(supported_operating_systems)
+        supported_arches = tuple(supported_architectures)
+        supported_libc_variants = tuple(supported_linux_libc_variants)
+
+        if reason == "operating_system":
+            message = (
+                f"Unsupported Codex target operating system: {target_os}. "
+                f"Available operating systems: {', '.join(supported_os)}."
+            )
+        elif reason == "architecture":
+            message = (
+                f"Unsupported Codex target architecture for {target_os}: {target_arch}. "
+                f"Available architectures: {', '.join(supported_arches)}."
+            )
+        else:
+            message = (
+                "Unsupported Linux libc variant for Codex target resolution: "
+                f"{linux_libc}. Available libc variants: {', '.join(supported_libc_variants)}."
+            )
+
+        super().__init__(
+            message=message,
+            error_code=ErrorCode.UNSUPPORTED_CODEX_TARGET,
+            op="materialize",
+            context={
+                "reason": reason,
+                "target_os": target_os,
+                "target_arch": target_arch,
+                "linux_libc": linux_libc,
+                "supported_operating_systems": supported_os,
+                "supported_architectures": supported_arches,
+                "supported_linux_libc_variants": supported_libc_variants,
+                **_as_context(context),
+            },
+            cause=cause,
+        )
+        self.reason = reason
+        self.target_os = target_os
+        self.target_arch = target_arch
+        self.linux_libc = linux_libc
+        self.supported_operating_systems = supported_os
+        self.supported_architectures = supported_arches
+        self.supported_linux_libc_variants = supported_libc_variants
 
 
 class InvalidManifestPathError(ConfigurationError):
