@@ -365,43 +365,22 @@ class MCPUtil:
                 if merged_meta is None
                 else server.call_tool(tool.name, json_data, meta=merged_meta)
             )
-            current_task = asyncio.current_task()
-            cancelling = getattr(current_task, "cancelling", None)
-            cancel_count_before = 0
-            if callable(cancelling):
-                cancel_count_before_raw = cancelling()
-                if isinstance(cancel_count_before_raw, int):
-                    cancel_count_before = cancel_count_before_raw
             try:
-                result = await asyncio.shield(call_task)
-            except asyncio.CancelledError as e:
-                current_task = asyncio.current_task()
-                cancelling = getattr(current_task, "cancelling", None)
-                cancel_count_after = cancel_count_before
-                if callable(cancelling):
-                    cancel_count_after_raw = cancelling()
-                    if isinstance(cancel_count_after_raw, int):
-                        cancel_count_after = cancel_count_after_raw
-                if current_task is not None and cancel_count_after > cancel_count_before:
-                    if not call_task.done():
-                        call_task.cancel()
-                        try:
-                            await call_task
-                        except (asyncio.CancelledError, Exception):
-                            pass
-                    raise
-                if not call_task.done():
-                    call_task.cancel()
-                    try:
-                        await call_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                    raise
-                if call_task.cancelled():
+                done, _ = await asyncio.wait({call_task}, return_when=asyncio.FIRST_COMPLETED)
+                finished_task = done.pop()
+                if finished_task.cancelled():
                     raise UserError(
                         f"Failed to call tool '{tool.name}' on MCP server '{server.name}': "
                         "tool execution was cancelled."
-                    ) from e
+                    )
+                result = finished_task.result()
+            except asyncio.CancelledError:
+                if not call_task.done():
+                    call_task.cancel()
+                try:
+                    await call_task
+                except (asyncio.CancelledError, Exception):
+                    pass
                 raise
         except UserError:
             # Re-raise UserError as-is (it already has a good message)
