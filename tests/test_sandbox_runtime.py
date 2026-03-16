@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
@@ -16,8 +17,8 @@ from openai.types.responses.response_output_item import LocalShellCall, LocalShe
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 
 from agents import Agent, AgentHooks, LocalShellTool, RunHooks, Runner, function_tool
-from agents.exceptions import UserError
-from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
+from agents.exceptions import InputGuardrailTripwireTriggered, UserError
+from agents.guardrail import GuardrailFunctionOutput, InputGuardrail, OutputGuardrail
 from agents.items import ModelResponse, ToolCallOutputItem, TResponseInputItem
 from agents.model_settings import ModelSettings
 from agents.prompts import GenerateDynamicPromptData, Prompt
@@ -31,8 +32,9 @@ from agents.sandbox.codex_config import (
     apply_codex_to_manifest,
     apply_codex_to_session_state,
 )
-from agents.sandbox.entries import File
+from agents.sandbox.entries import BaseEntry, File
 from agents.sandbox.errors import ExecNonZeroError, ExecTransportError, InvalidManifestPathError
+from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.runtime import SandboxRuntime
 from agents.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
 from agents.sandbox.sandboxes import unix_local as unix_local_module
@@ -124,6 +126,34 @@ class _FailingStopSession(_FakeSession):
     async def stop(self) -> None:
         await super().stop()
         raise RuntimeError("stop failed")
+
+
+class _LiveSessionDeltaRecorder(_FakeSession):
+    def __init__(self, manifest: Manifest, *, fail_entry_batch_times: int = 0) -> None:
+        super().__init__(manifest)
+        self.apply_manifest_calls = 0
+        self.applied_entry_batches: list[list[tuple[Path, BaseEntry]]] = []
+        self._fail_entry_batch_times = fail_entry_batch_times
+
+    async def apply_manifest(self, *, only_ephemeral: bool = False):
+        _ = only_ephemeral
+        self.apply_manifest_calls += 1
+        raise AssertionError("apply_manifest() should not be used for running injected sessions")
+
+    async def _apply_entry_batch(
+        self,
+        entries: Sequence[tuple[Path, BaseEntry]],
+        *,
+        base_dir: Path,
+    ) -> list[MaterializedFile]:
+        _ = base_dir
+        self.applied_entry_batches.append(
+            [(dest, artifact.model_copy(deep=True)) for dest, artifact in entries]
+        )
+        if self._fail_entry_batch_times > 0:
+            self._fail_entry_batch_times -= 1
+            raise RuntimeError("delta apply failed")
+        return []
 
 
 class _BlockingStopSession(_FakeSession):
@@ -251,6 +281,14 @@ def _extract_user_text(item: dict[str, object]) -> str:
         if isinstance(first, dict):
             return str(first.get("text", ""))
     raise AssertionError(f"Unexpected content payload: {content!r}")
+
+
+def _tripwire_input_guardrail(
+    _context: RunContextWrapper[Any],
+    _agent: Agent[Any],
+    _input: str | list[TResponseInputItem],
+) -> GuardrailFunctionOutput:
+    return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
 
 
 def _get_reasoning_item() -> ResponseReasoningItem:
@@ -723,6 +761,34 @@ async def test_runner_streamed_cleans_runner_owned_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runner_streamed_guardrail_trip_blocks_runner_owned_sandbox_creation() -> None:
+    session = _FakeSession(Manifest())
+    client = _FakeClient(session)
+    agent = SandboxAgent(
+        name="sandbox",
+        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        instructions="Base instructions.",
+        input_guardrails=[
+            InputGuardrail(
+                guardrail_function=_tripwire_input_guardrail,
+                run_in_parallel=False,
+            )
+        ],
+    )
+
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        result = Runner.run_streamed(agent, "hello", run_config=_sandbox_run_config(client))
+        async for _ in result.stream_events():
+            pass
+
+    assert client.create_kwargs is None
+    assert session.start_calls == 0
+    assert session.stop_calls == 0
+    assert session.shutdown_calls == 0
+    assert session.close_dependency_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_runner_does_not_close_injected_sandbox_session() -> None:
     model = FakeModel(initial_output=[get_final_output_message("done")])
     default_manifest = Manifest(entries={"default.txt": File(content=b"default")})
@@ -819,6 +885,96 @@ async def test_runner_rejects_injected_session_missing_required_codex() -> None:
             "hello",
             run_config=RunConfig(sandbox=SandboxRunConfig(session=injected_session)),
         )
+
+
+@pytest.mark.asyncio
+async def test_runner_guardrail_trip_blocks_runner_owned_sandbox_creation() -> None:
+    session = _FakeSession(Manifest())
+    client = _FakeClient(session)
+    agent = SandboxAgent(
+        name="sandbox",
+        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        instructions="Base instructions.",
+        input_guardrails=[
+            InputGuardrail(
+                guardrail_function=_tripwire_input_guardrail,
+                run_in_parallel=False,
+            )
+        ],
+    )
+
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        await Runner.run(agent, "hello", run_config=_sandbox_run_config(client))
+
+    assert client.create_kwargs is None
+    assert session.start_calls == 0
+    assert session.stop_calls == 0
+    assert session.shutdown_calls == 0
+    assert session.close_dependency_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_guardrail_trip_blocks_running_injected_session_mutation() -> None:
+    live_session = _LiveSessionDeltaRecorder(Manifest())
+    live_session._running = True
+    agent = SandboxAgent(
+        name="sandbox",
+        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        instructions="Base instructions.",
+        capabilities=[_ManifestMutationCapability()],
+        input_guardrails=[
+            InputGuardrail(
+                guardrail_function=_tripwire_input_guardrail,
+                run_in_parallel=False,
+            )
+        ],
+    )
+
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        await Runner.run(
+            agent,
+            "hello",
+            run_config=RunConfig(sandbox=SandboxRunConfig(session=live_session)),
+        )
+
+    assert "cap.txt" not in live_session.state.manifest.entries
+    assert live_session.start_calls == 0
+    assert live_session.applied_entry_batches == []
+    assert live_session.stop_calls == 0
+    assert live_session.shutdown_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_streamed_guardrail_trip_blocks_running_injected_session_mutation() -> None:
+    live_session = _LiveSessionDeltaRecorder(Manifest())
+    live_session._running = True
+    agent = SandboxAgent(
+        name="sandbox",
+        model=FakeModel(initial_output=[get_final_output_message("done")]),
+        instructions="Base instructions.",
+        capabilities=[_ManifestMutationCapability()],
+        input_guardrails=[
+            InputGuardrail(
+                guardrail_function=_tripwire_input_guardrail,
+                run_in_parallel=False,
+            )
+        ],
+    )
+
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        result = Runner.run_streamed(
+            agent,
+            "hello",
+            run_config=RunConfig(sandbox=SandboxRunConfig(session=live_session)),
+        )
+        async for _ in result.stream_events():
+            pass
+
+    assert "cap.txt" not in live_session.state.manifest.entries
+    assert live_session.start_calls == 0
+    assert live_session.applied_entry_batches == []
+    assert live_session.stop_calls == 0
+    assert live_session.shutdown_calls == 0
 
 
 @pytest.mark.asyncio

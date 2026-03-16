@@ -601,9 +601,48 @@ async def start_streaming(
 
     try:
         while True:
+            all_input_guardrails = (
+                starting_agent.input_guardrails + (run_config.input_guardrails or [])
+                if current_turn == 0 and not is_resumed_state
+                else []
+            )
+            sequential_guardrails = [g for g in all_input_guardrails if not g.run_in_parallel]
+            parallel_guardrails = [g for g in all_input_guardrails if g.run_in_parallel]
             current_bindings = bind_public_agent(current_agent)
             execution_agent = current_bindings.execution_agent
             prepared_turn_input = copy_input_items(streamed_result.input)
+            if sandbox_runtime is not None and sandbox_runtime.enabled and sequential_guardrails:
+                # Mirror the non-streaming path: a blocking first-turn guardrail should fire
+                # before sandbox prep can create, start, or mutate sandbox state.
+                existing_input_guardrail_count = len(streamed_result.input_guardrail_results)
+                await run_input_guardrails_with_queue(
+                    starting_agent,
+                    sequential_guardrails,
+                    ItemHelpers.input_to_new_input_list(prepared_turn_input),
+                    context_wrapper,
+                    streamed_result,
+                    None,
+                )
+                for result in streamed_result.input_guardrail_results[
+                    existing_input_guardrail_count:
+                ]:
+                    if result.output.tripwire_triggered:
+                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                        session_input_items_for_persistence = (
+                            await persist_session_items_for_guardrail_trip(
+                                session,
+                                server_conversation_tracker,
+                                session_input_items_for_persistence,
+                                starting_input,
+                                run_state,
+                                store=current_agent.model_settings.resolve(
+                                    run_config.model_settings
+                                ).store,
+                            )
+                        )
+                        raise InputGuardrailTripwireTriggered(result)
+                sequential_guardrails = []
+
             if sandbox_runtime is not None:
                 prepared_sandbox = await sandbox_runtime.prepare_agent(
                     current_agent=current_agent,
@@ -848,12 +887,6 @@ async def start_streaming(
                 break
 
             if current_turn == 1:
-                all_input_guardrails = starting_agent.input_guardrails + (
-                    run_config.input_guardrails or []
-                )
-                sequential_guardrails = [g for g in all_input_guardrails if not g.run_in_parallel]
-                parallel_guardrails = [g for g in all_input_guardrails if g.run_in_parallel]
-
                 if sequential_guardrails:
                     await run_input_guardrails_with_queue(
                         starting_agent,

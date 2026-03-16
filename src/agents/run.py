@@ -678,6 +678,40 @@ class AgentRunner:
             try:
                 while True:
                     resuming_turn = is_resumed_state
+                    all_input_guardrails = (
+                        starting_agent.input_guardrails + (run_config.input_guardrails or [])
+                        if current_turn == 0 and not resuming_turn
+                        else []
+                    )
+                    sequential_guardrails = [
+                        g for g in all_input_guardrails if not g.run_in_parallel
+                    ]
+                    parallel_guardrails = [g for g in all_input_guardrails if g.run_in_parallel]
+                    sequential_results: list[InputGuardrailResult] = []
+                    if sandbox_runtime.enabled and sequential_guardrails:
+                        # Blocking first-turn guardrails must run before sandbox prep so a tripwire
+                        # can prevent session creation, startup, or live-session mutation.
+                        try:
+                            sequential_results = await run_input_guardrails(
+                                starting_agent,
+                                sequential_guardrails,
+                                copy_input_items(original_input),
+                                context_wrapper,
+                            )
+                        except InputGuardrailTripwireTriggered:
+                            session_input_items_for_persistence = (
+                                await persist_session_items_for_guardrail_trip(
+                                    session,
+                                    server_conversation_tracker,
+                                    session_input_items_for_persistence,
+                                    original_user_input,
+                                    run_state,
+                                    store=store_setting,
+                                )
+                            )
+                            raise
+                        sequential_guardrails = []
+
                     current_bindings = bind_public_agent(current_agent)
                     execution_agent = current_bindings.execution_agent
                     prepared_sandbox = await sandbox_runtime.prepare_agent(
@@ -1039,16 +1073,7 @@ class AgentRunner:
                     )
 
                     if current_turn <= 1:
-                        all_input_guardrails = starting_agent.input_guardrails + (
-                            run_config.input_guardrails or []
-                        )
-                        sequential_guardrails = [
-                            g for g in all_input_guardrails if not g.run_in_parallel
-                        ]
-                        parallel_guardrails = [g for g in all_input_guardrails if g.run_in_parallel]
-
                         try:
-                            sequential_results = []
                             if sequential_guardrails:
                                 sequential_results = await run_input_guardrails(
                                     starting_agent,
