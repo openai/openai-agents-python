@@ -506,20 +506,6 @@ class ModalSandboxSession(BaseSandboxSession):
         # restore them back into the running session.
         skip_abs = [root / rel for rel in sorted(skip, key=lambda p: p.as_posix())]
         ephemeral_backup: bytes | None = None
-        if skip_abs:
-            # Best-effort: tar up the ephemeral paths (if they exist). We run
-            # via shell so missing paths do not cause a hard failure
-            # (`|| true`).
-            rel_args = " ".join(shlex.quote(p.relative_to(root).as_posix()) for p in skip_abs)
-            cmd = f"cd -- {shlex.quote(str(root))} && (tar cf - -- {rel_args} 2>/dev/null || true)"
-            out = await self.exec("sh", "-lc", cmd, shell=False)
-            ephemeral_backup = out.stdout or b""
-
-            # Remove ephemeral paths before snapshot so they are not captured.
-            rm_cmd = ["rm", "-rf", "--", *[str(p) for p in skip_abs]]
-            _ = await self.exec(*rm_cmd, shell=False)
-
-        restore_error: WorkspaceArchiveReadError | None = None
 
         async def _restore_ephemeral_paths() -> WorkspaceArchiveReadError | None:
             if not ephemeral_backup:
@@ -559,6 +545,36 @@ class ModalSandboxSession(BaseSandboxSession):
                     cause=exc,
                 )
             return None
+
+        if skip_abs:
+            # Best-effort: tar up the ephemeral paths (if they exist). We run
+            # via shell so missing paths do not cause a hard failure
+            # (`|| true`).
+            rel_args = " ".join(shlex.quote(p.relative_to(root).as_posix()) for p in skip_abs)
+            cmd = f"cd -- {shlex.quote(str(root))} && (tar cf - -- {rel_args} 2>/dev/null || true)"
+            out = await self.exec("sh", "-lc", cmd, shell=False)
+            ephemeral_backup = out.stdout or b""
+
+            # Remove ephemeral paths before snapshot so they are not captured.
+            rm_cmd = ["rm", "-rf", "--", *[str(p) for p in skip_abs]]
+            rm_out = await self.exec(*rm_cmd, shell=False)
+            if not rm_out.ok():
+                cleanup_restore_error = await _restore_ephemeral_paths()
+                if cleanup_restore_error is not None:
+                    logger.warning(
+                        "Failed to restore Modal ephemeral paths after cleanup failure: %s",
+                        cleanup_restore_error,
+                    )
+                raise WorkspaceArchiveReadError(
+                    path=root,
+                    context={
+                        "reason": "snapshot_filesystem_ephemeral_remove_failed",
+                        "exit_code": rm_out.exit_code,
+                        "stderr": rm_out.stderr.decode("utf-8", "replace"),
+                    },
+                )
+
+        restore_error: WorkspaceArchiveReadError | None = None
 
         try:
             snap = await self._call_modal(

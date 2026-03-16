@@ -179,13 +179,13 @@ async def test_modal_snapshot_failure_restores_ephemeral_paths(
     modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
 
     class _FakeRestoreProcess:
-        def __init__(self, owner: _FakeSnapshotSandbox) -> None:
+        def __init__(self, owner: Any) -> None:
             self._owner = owner
             self.stderr = io.BytesIO(b"")
             self.stdin = self._FakeStdin(owner)
 
         class _FakeStdin:
-            def __init__(self, owner: _FakeSnapshotSandbox) -> None:
+            def __init__(self, owner: Any) -> None:
                 self._owner = owner
                 self._buffer = bytearray()
 
@@ -259,6 +259,101 @@ async def test_modal_snapshot_failure_restores_ephemeral_paths(
         await session.persist_workspace()
 
     assert exc_info.value.context["reason"] == "snapshot_filesystem_failed"
+    assert sandbox.restore_payloads == [b"ephemeral-backup"]
+
+
+@pytest.mark.asyncio
+async def test_modal_snapshot_cleanup_failure_raises_before_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _FakeRestoreProcess:
+        def __init__(self, owner: Any) -> None:
+            self._owner = owner
+            self.stderr = io.BytesIO(b"")
+            self.stdin = self._FakeStdin(owner)
+
+        class _FakeStdin:
+            def __init__(self, owner: Any) -> None:
+                self._owner = owner
+                self._buffer = bytearray()
+
+            def write(self, data: bytes) -> None:
+                self._buffer.extend(data)
+
+            def write_eof(self) -> None:
+                return
+
+            def drain(self) -> None:
+                return
+
+        def wait(self) -> int:
+            self._owner.restore_payloads.append(bytes(self.stdin._buffer))
+            return 0
+
+    class _FakeSnapshotSandbox:
+        object_id = "sb-123"
+
+        def __init__(self) -> None:
+            self.restore_payloads: list[bytes] = []
+            self.snapshot_calls = 0
+
+        def snapshot_filesystem(self) -> str:
+            self.snapshot_calls += 1
+            return "snap-123"
+
+        def exec(self, *command: object, **kwargs: object) -> _FakeRestoreProcess:
+            _ = kwargs
+            assert command[:3] == ("tar", "xf", "-")
+            return _FakeRestoreProcess(self)
+
+    sandbox = _FakeSnapshotSandbox()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(
+            root="/workspace",
+            entries={"tmp.txt": File(content=b"ephemeral", ephemeral=True)},
+        ),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+        workspace_persistence="snapshot_filesystem",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+
+    async def _fake_exec(
+        *command: object,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: object | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        rendered = [str(part) for part in command]
+        if rendered[:2] == ["sh", "-lc"]:
+            return ExecResult(stdout=b"ephemeral-backup", stderr=b"", exit_code=0)
+        if rendered[:3] == ["rm", "-rf", "--"]:
+            return ExecResult(stdout=b"", stderr=b"rm failed", exit_code=1)
+        raise AssertionError(f"unexpected command: {rendered!r}")
+
+    async def _fake_call_modal(
+        fn: Callable[..., object],
+        *args: object,
+        call_timeout: float | None = None,
+        **kwargs: object,
+    ) -> object:
+        _ = call_timeout
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(session, "exec", _fake_exec)
+    monkeypatch.setattr(session, "_call_modal", _fake_call_modal)
+
+    with pytest.raises(WorkspaceArchiveReadError) as exc_info:
+        await session.persist_workspace()
+
+    assert exc_info.value.context["reason"] == "snapshot_filesystem_ephemeral_remove_failed"
+    assert exc_info.value.context["exit_code"] == 1
+    assert exc_info.value.context["stderr"] == "rm failed"
+    assert sandbox.snapshot_calls == 0
     assert sandbox.restore_payloads == [b"ephemeral-backup"]
 
 
