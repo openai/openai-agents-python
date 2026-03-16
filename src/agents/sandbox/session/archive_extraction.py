@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import io
+import shutil
 import tarfile
+import tempfile
 import zipfile
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
@@ -107,45 +110,46 @@ class WorkspaceArchiveExtractor:
     ) -> None:
         child_entry_cache: dict[Path, dict[str, EntryKind]] = {}
         try:
-            with zipfile.ZipFile(zipfile_compatible_stream(data)) as archive:
-                for member in archive.infolist():
-                    rel_path = safe_zip_member_rel_path(member)
-                    if rel_path is None:
-                        continue
+            with zipfile_compatible_stream(data) as zip_data:
+                with zipfile.ZipFile(zip_data) as archive:
+                    for member in archive.infolist():
+                        rel_path = safe_zip_member_rel_path(member)
+                        if rel_path is None:
+                            continue
 
-                    await self._ensure_no_symlink_extract_parents(
-                        destination_root=destination_root,
-                        rel_path=rel_path,
-                        member_name=member.filename,
-                        error_type="zip",
-                        child_entry_cache=child_entry_cache,
-                    )
-                    dest = destination_root / rel_path
-                    if member.is_dir():
-                        await self._mkdir(dest)
+                        await self._ensure_no_symlink_extract_parents(
+                            destination_root=destination_root,
+                            rel_path=rel_path,
+                            member_name=member.filename,
+                            error_type="zip",
+                            child_entry_cache=child_entry_cache,
+                        )
+                        dest = destination_root / rel_path
+                        if member.is_dir():
+                            await self._mkdir(dest)
+                            self._record_extract_entry(
+                                child_entry_cache=child_entry_cache,
+                                destination_root=destination_root,
+                                path=dest,
+                                kind=EntryKind.DIRECTORY,
+                            )
+                            continue
+
+                        await self._mkdir(dest.parent)
+                        self._record_extract_entry(
+                            child_entry_cache=child_entry_cache,
+                            destination_root=destination_root,
+                            path=dest.parent,
+                            kind=EntryKind.DIRECTORY,
+                        )
+                        with archive.open(member, mode="r") as member_data:
+                            await self._write(dest, cast(io.IOBase, member_data))
                         self._record_extract_entry(
                             child_entry_cache=child_entry_cache,
                             destination_root=destination_root,
                             path=dest,
-                            kind=EntryKind.DIRECTORY,
+                            kind=EntryKind.FILE,
                         )
-                        continue
-
-                    await self._mkdir(dest.parent)
-                    self._record_extract_entry(
-                        child_entry_cache=child_entry_cache,
-                        destination_root=destination_root,
-                        path=dest.parent,
-                        kind=EntryKind.DIRECTORY,
-                    )
-                    with archive.open(member, mode="r") as member_data:
-                        await self._write(dest, cast(io.IOBase, member_data))
-                    self._record_extract_entry(
-                        child_entry_cache=child_entry_cache,
-                        destination_root=destination_root,
-                        path=dest,
-                        kind=EntryKind.FILE,
-                    )
         except UnsafeZipMemberError as e:
             raise WorkspaceArchiveWriteError(
                 path=archive_path,
@@ -249,11 +253,28 @@ class WorkspaceArchiveExtractor:
             current_dir = current_dir / part
 
 
-def zipfile_compatible_stream(stream: io.IOBase) -> io.IOBase:
-    seekable = getattr(stream, "seekable", None)
-    if callable(seekable):
-        return stream
-    return _ZipFileStreamAdapter(stream)
+def _supports_zip_random_access(stream: io.IOBase) -> bool:
+    try:
+        position = stream.tell()
+        stream.seek(position, io.SEEK_SET)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+@contextmanager
+def zipfile_compatible_stream(stream: io.IOBase) -> Iterator[io.IOBase]:
+    if _supports_zip_random_access(stream):
+        yield _ZipFileStreamAdapter(stream)
+        return
+
+    spool = tempfile.SpooledTemporaryFile(max_size=16 * 1024 * 1024, mode="w+b")
+    try:
+        shutil.copyfileobj(stream, spool)
+        spool.seek(0)
+        yield _ZipFileStreamAdapter(cast(io.IOBase, spool))
+    finally:
+        spool.close()
 
 
 def safe_zip_member_rel_path(member: zipfile.ZipInfo) -> Path | None:
@@ -274,6 +295,8 @@ def safe_zip_member_rel_path(member: zipfile.ZipInfo) -> Path | None:
 
 
 class _ZipFileStreamAdapter(io.IOBase):
+    # Python 3.10's zipfile._SharedFile reads `file.seekable` directly, so this
+    # adapter keeps ZIP-compatible random-access streams working across versions.
     def __init__(self, stream: io.IOBase) -> None:
         self._stream = stream
 

@@ -28,7 +28,6 @@ from ..util.parse_utils import parse_ls_la
 from .archive_extraction import (
     WorkspaceArchiveExtractor,
     safe_zip_member_rel_path,
-    zipfile_compatible_stream,
 )
 from .dependencies import Dependencies
 from .manifest_application import ManifestApplier
@@ -419,10 +418,6 @@ class BaseSandboxSession(abc.ABC):
             destination_root=destination_root,
             data=data,
         )
-
-    @staticmethod
-    def _zipfile_compatible_stream(stream: io.IOBase) -> io.IOBase:
-        return zipfile_compatible_stream(stream)
 
     @staticmethod
     def _safe_zip_member_rel_path(member) -> Path | None:

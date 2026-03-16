@@ -16,6 +16,7 @@ from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxSession,
     UnixLocalSandboxSessionState,
 )
+from agents.sandbox.session.archive_extraction import zipfile_compatible_stream
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, Permissions
@@ -193,13 +194,33 @@ class _ChunkedBinaryStream(io.IOBase):
         return bytes(out)
 
 
-def test_zipfile_compatible_stream_wraps_streams_without_seekable() -> None:
+class _SeekableFalseZipStream(io.IOBase):
+    def __init__(self, payload: bytes) -> None:
+        self._buffer = io.BytesIO(payload)
+
+    def seekable(self) -> bool:
+        return False
+
+    def read(self, size: int = -1) -> bytes:
+        return self._buffer.read(size)
+
+
+def test_zipfile_compatible_stream_supports_streams_without_seekable() -> None:
     raw_stream = _NoSeekableZipStream(_zip_bytes(members={"file.txt": b"hello"}).getvalue())
 
-    compatible = BaseSandboxSession._zipfile_compatible_stream(raw_stream)
+    with zipfile_compatible_stream(raw_stream) as compatible:
+        assert compatible.seekable() is True
+        with zipfile.ZipFile(compatible) as archive:
+            assert archive.read("file.txt") == b"hello"
 
-    with zipfile.ZipFile(compatible) as archive:
-        assert archive.read("file.txt") == b"hello"
+
+def test_zipfile_compatible_stream_buffers_streams_with_seekable_false() -> None:
+    raw_stream = _SeekableFalseZipStream(_zip_bytes(members={"file.txt": b"hello"}).getvalue())
+
+    with zipfile_compatible_stream(raw_stream) as compatible:
+        assert compatible.seekable() is True
+        with zipfile.ZipFile(compatible) as archive:
+            assert archive.read("file.txt") == b"hello"
 
 
 @pytest.mark.asyncio
