@@ -94,7 +94,7 @@ def _parse_retry_after(headers: httpx.Headers | Mapping[str, str] | None) -> flo
     if retry_after_ms is not None:
         try:
             parsed_ms = float(retry_after_ms) / 1000.0
-        except (ValueError, OverflowError):
+        except ValueError:
             parsed_ms = None
         if parsed_ms is not None and parsed_ms >= 0:
             return parsed_ms
@@ -105,7 +105,7 @@ def _parse_retry_after(headers: httpx.Headers | Mapping[str, str] | None) -> flo
 
     try:
         parsed_seconds = float(retry_after)
-    except (ValueError, OverflowError):
+    except ValueError:
         parsed_seconds = None
     if parsed_seconds is not None:
         return parsed_seconds if parsed_seconds >= 0 else None
