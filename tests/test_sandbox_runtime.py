@@ -878,7 +878,7 @@ async def test_runner_passes_codex_requirement_to_client_created_sessions() -> N
     manifest = client.create_kwargs["manifest"]
     assert manifest is not None
     manifest_paths = {manifest._coerce_rel_path(path) for path in manifest.entries}
-    assert Path(".codex/codex") in manifest_paths
+    assert Path(".codex_bin/codex") in manifest_paths
 
 
 @pytest.mark.asyncio

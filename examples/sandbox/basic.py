@@ -1,33 +1,30 @@
-"""
-Start here if you are new to Docker-backed sandbox examples.
-
-This file keeps the flow explicit:
-
-1. Build a manifest for the files that should appear in the sandbox workspace.
-2. Create a sandbox agent that can inspect that workspace through one shell tool.
-3. Start a Docker-backed sandbox session, stream the run, and print what happens.
-"""
+from __future__ import annotations
 
 import argparse
 import asyncio
 import sys
 from pathlib import Path
+from typing import Any, Literal, cast
 
-from docker import from_env as docker_from_env  # type: ignore[import-untyped]
 from openai.types.responses import ResponseTextDeltaEvent
 
 from agents import ModelSettings, Runner
 from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
 from agents.sandbox.entries import File
-from agents.sandbox.sandboxes.docker import DockerSandboxClient, DockerSandboxClientOptions
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from examples.sandbox.misc.workspace_shell import WorkspaceShellCapability
 
+Backend = Literal["docker", "modal"]
+WorkspacePersistenceMode = Literal["tar", "snapshot_filesystem"]
+
 DEFAULT_QUESTION = "Summarize this sandbox project in 2 sentences."
+DEFAULT_BACKEND: Backend = "docker"
+DEFAULT_MODAL_APP_NAME = "openai-agents-python-sandbox-example"
+DEFAULT_MODAL_WORKSPACE_PERSISTENCE: WorkspacePersistenceMode = "tar"
 
 
 def _stream_event_banner(event_name: str) -> str | None:
@@ -38,16 +35,18 @@ def _stream_event_banner(event_name: str) -> str | None:
     return None
 
 
-async def main(model: str, question: str) -> None:
-    # A manifest is the starting file tree for the sandbox workspace.
-    # Each key is a path inside the workspace and each value is a concrete manifest entry.
-    manifest = Manifest(
+def _build_manifest(backend: Backend) -> Manifest:
+    backend_label = "Docker" if backend == "docker" else "Modal"
+    return Manifest(
         entries={
             "README.md": File(
                 content=(
                     b"# Demo Project\n\n"
-                    b"This sandbox contains a tiny demo project for the sandbox runner.\n"
-                    b"The goal is to show how Runner can prepare a Docker-backed workspace.\n"
+                    + (
+                        f"This sandbox contains a tiny demo project for the {backend_label} "
+                        "sandbox runner.\n"
+                    ).encode()
+                    + b"The goal is to show how Runner can prepare a sandbox workspace.\n"
                 )
             ),
             "src/app.py": File(
@@ -63,8 +62,11 @@ async def main(model: str, question: str) -> None:
         }
     )
 
-    agent = SandboxAgent(
-        name="Docker Sandbox Assistant",
+
+def _build_agent(*, model: str, manifest: Manifest, backend: Backend) -> SandboxAgent:
+    backend_label = "Docker" if backend == "docker" else "Modal"
+    return SandboxAgent(
+        name=f"{backend_label} Sandbox Assistant",
         model=model,
         # `instructions` is the base agent instructions for this example's task.
         instructions=(
@@ -86,19 +88,79 @@ async def main(model: str, question: str) -> None:
         model_settings=ModelSettings(tool_choice="required"),
     )
 
-    # The Docker client owns the container lifecycle for the sandbox session.
-    docker_client = DockerSandboxClient(docker_from_env())
 
-    # `create()` allocates a fresh sandbox session backed by a Docker container.
-    # We pass the same manifest here so the container knows which files to materialize.
-    session = await docker_client.create(
+def _require_modal_dependency() -> tuple[Any, Any]:
+    try:
+        from agents.extensions.sandbox import ModalSandboxClient, ModalSandboxClientOptions
+    except Exception as exc:  # pragma: no cover - import path depends on optional extras
+        raise SystemExit(
+            "Modal-backed runs require the optional repo extra.\n"
+            "Install it with: uv sync --extra modal"
+        ) from exc
+
+    return ModalSandboxClient, ModalSandboxClientOptions
+
+
+def _require_docker_dependency() -> tuple[Any, Any, Any]:
+    try:
+        from docker import from_env as docker_from_env  # type: ignore[import-untyped]
+    except Exception as exc:  # pragma: no cover - import path depends on local Docker setup
+        raise SystemExit(
+            "Docker-backed runs require the Docker SDK.\n"
+            "Install the repo dependencies with: make sync"
+        ) from exc
+
+    from agents.sandbox.sandboxes.docker import DockerSandboxClient, DockerSandboxClientOptions
+
+    return docker_from_env, DockerSandboxClient, DockerSandboxClientOptions
+
+
+async def _create_session(
+    *,
+    backend: Backend,
+    manifest: Manifest,
+    agent: SandboxAgent,
+):
+    if backend == "docker":
+        docker_from_env, DockerSandboxClient, DockerSandboxClientOptions = (
+            _require_docker_dependency()
+        )
+        client = DockerSandboxClient(docker_from_env())
+        session = await client.create(
+            manifest=manifest,
+            codex=agent.codex,
+            options=DockerSandboxClientOptions(image="python:3.14-slim"),
+        )
+        return client, session
+
+    ModalSandboxClient, ModalSandboxClientOptions = _require_modal_dependency()
+    client = ModalSandboxClient()
+    session = await client.create(
         manifest=manifest,
         codex=agent.codex,
-        options=DockerSandboxClientOptions(image="python:3.14-slim"),
+        options=ModalSandboxClientOptions(
+            app_name=DEFAULT_MODAL_APP_NAME,
+            workspace_persistence=DEFAULT_MODAL_WORKSPACE_PERSISTENCE,
+        ),
     )
-    await session.start()
+    return client, session
 
-    print(await session.ls(".codex/codex"))
+
+async def main(
+    model: str,
+    question: str,
+    backend: Backend,
+) -> None:
+    manifest = _build_manifest(backend)
+    agent = _build_agent(model=model, manifest=manifest, backend=backend)
+    client, session = await _create_session(
+        backend=backend,
+        manifest=manifest,
+        agent=agent,
+    )
+
+    await session.start()
+    print(await session.ls(".codex_bin/codex"))
 
     try:
         # `async with session` keeps the example on the public session lifecycle API.
@@ -108,7 +170,10 @@ async def main(model: str, question: str) -> None:
             result = Runner.run_streamed(
                 agent,
                 question,
-                run_config=RunConfig(sandbox=SandboxRunConfig(session=session)),
+                run_config=RunConfig(
+                    sandbox=SandboxRunConfig(session=session),
+                    workflow_name=f"{backend.title()} sandbox example",
+                ),
             )
             saw_text_delta = False
             saw_any_text = False
@@ -140,13 +205,24 @@ async def main(model: str, question: str) -> None:
             if not saw_any_text:
                 print(result.final_output)
     finally:
-        # The client still owns deleting the underlying Docker container.
-        await docker_client.delete(session)
+        await client.delete(session)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="gpt-5.4", help="Model name to use.")
     parser.add_argument("--question", default=DEFAULT_QUESTION, help="Prompt to send to the agent.")
+    parser.add_argument(
+        "--backend",
+        default=DEFAULT_BACKEND,
+        choices=["docker", "modal"],
+        help="Sandbox backend to use for this example.",
+    )
     args = parser.parse_args()
-    asyncio.run(main(args.model, args.question))
+    asyncio.run(
+        main(
+            args.model,
+            args.question,
+            cast(Backend, args.backend),
+        )
+    )

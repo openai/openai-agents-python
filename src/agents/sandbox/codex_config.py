@@ -9,7 +9,7 @@ from .errors import InvalidManifestPathError
 from .manifest import Manifest
 from .session.sandbox_session_state import SandboxSessionState
 
-DEFAULT_CODEX_PATH = "~/.codex/codex"
+DEFAULT_CODEX_PATH = ".codex_bin/codex"
 # TODO: this should eventually be sourced from the pinned version of codex-python-sdk
 DEFAULT_CODEX_VERSION = "0.114.0"
 SandboxSessionStateT = TypeVar("SandboxSessionStateT", bound=SandboxSessionState)

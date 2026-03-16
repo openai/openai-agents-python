@@ -41,6 +41,7 @@ class ErrorCode(str, Enum):
     MOUNT_MISSING_TOOL = "mount_missing_tool"
     MOUNT_FAILED = "mount_failed"
     MOUNT_CONFIG_INVALID = "mount_config_invalid"
+    SKILLS_CONFIG_INVALID = "skills_config_invalid"
 
     SNAPSHOT_PERSIST_ERROR = "snapshot_persist_error"
     SNAPSHOT_RESTORE_ERROR = "snapshot_restore_error"
@@ -657,6 +658,25 @@ class MountCommandError(MountArtifactError):
             error_code=ErrorCode.MOUNT_FAILED,
             op="materialize",
             context={"command": command, "stderr": stderr, **_as_context(context)},
+            cause=cause,
+        )
+
+
+class SkillsConfigError(ConfigurationError):
+    """Skills capability configuration was invalid."""
+
+    def __init__(
+        self,
+        *,
+        message: str,
+        context: Mapping[str, object] | None = None,
+        cause: BaseException | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            error_code=ErrorCode.SKILLS_CONFIG_INVALID,
+            op="materialize",
+            context=_as_context(context),
             cause=cause,
         )
 

@@ -65,6 +65,7 @@ from ....sandbox.util.tar_utils import UnsafeTarMemberError, should_skip_tar_mem
 _DEFAULT_TIMEOUT_S = 30.0
 _DEFAULT_IMAGE_TAG = "python:3.11-slim"
 _DEFAULT_SNAPSHOT_FILESYSTEM_TIMEOUT_S = 60.0
+_MODAL_STDIN_CHUNK_SIZE = 8 * 1024 * 1024
 
 WorkspacePersistenceMode = Literal["tar", "snapshot_filesystem"]
 
@@ -76,6 +77,19 @@ _UC_MODAL_SNAPSHOT_FS_MAGIC = b"UC_MODAL_SNAPSHOT_FS_V1\n"
 
 logger = logging.getLogger(__name__)
 R = TypeVar("R")
+
+
+def _write_process_stdin(proc: ContainerProcess[bytes], data: bytes | bytearray) -> None:
+    """
+    Stream stdin to Modal in bounded chunks so command-router backed writers do not overflow.
+    """
+
+    view = memoryview(data)
+    for start in range(0, len(view), _MODAL_STDIN_CHUNK_SIZE):
+        proc.stdin.write(view[start : start + _MODAL_STDIN_CHUNK_SIZE])
+        proc.stdin.drain()
+    proc.stdin.write_eof()
+    proc.stdin.drain()
 
 
 @dataclass(frozen=True)
@@ -436,9 +450,7 @@ class ModalSandboxSession(BaseSandboxSession):
             # Stream bytes into `cat > file` to avoid quoting/binary issues.
             cmd = ["sh", "-lc", f"cat > {shlex.quote(str(workspace_path))}"]
             proc = self._sandbox.exec(*cmd, text=False)
-            proc.stdin.write(bytes(payload))
-            proc.stdin.write_eof()
-            proc.stdin.drain()
+            _write_process_stdin(proc, payload)
             exit_code = proc.wait()
             if exit_code != 0:
                 stderr: bytes = proc.stderr.read()
@@ -516,9 +528,7 @@ class ModalSandboxSession(BaseSandboxSession):
             def _restore_ephemeral() -> None:
                 assert self._sandbox is not None
                 proc = self._sandbox.exec("tar", "xf", "-", "-C", str(root), text=False)
-                proc.stdin.write(backup)
-                proc.stdin.write_eof()
-                proc.stdin.drain()
+                _write_process_stdin(proc, backup)
                 exit_code = proc.wait()
                 if exit_code != 0:
                     stderr: bytes = proc.stderr.read()
@@ -810,9 +820,7 @@ class ModalSandboxSession(BaseSandboxSession):
             assert self._sandbox is not None
             self._sandbox.exec("mkdir", "-p", "--", str(root), text=False).wait()
             proc = self._sandbox.exec("tar", "xf", "-", "-C", str(root), text=False)
-            proc.stdin.write(bytes(raw))
-            proc.stdin.write_eof()
-            proc.stdin.drain()
+            _write_process_stdin(proc, raw)
             exit_code = proc.wait()
             if exit_code != 0:
                 stderr: bytes = proc.stderr.read()

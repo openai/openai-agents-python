@@ -53,6 +53,17 @@ Code Interpreter backend supported by this repo.
 
 ## Modal
 
+If you want the same explicit session lifecycle shown in
+`examples/sandbox/basic.py`, that example now accepts
+`--backend modal` and reuses the same streamed tool-output flow:
+
+```bash
+uv run python examples/sandbox/basic.py \
+  --backend modal
+```
+
+The dedicated script below stays as the smaller extension-specific example.
+
 ### Setup
 
 Install the repo extra:

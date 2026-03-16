@@ -158,6 +158,16 @@ def test_apply_codex_to_manifest_adds_codex_entry_at_configured_path() -> None:
     entry = validated[Path("tools/codex")]
     assert isinstance(entry, Codex)
     assert entry.version == DEFAULT_CODEX_VERSION
+    assert entry.ephemeral is True
+
+
+def test_apply_codex_to_manifest_uses_reserved_default_codex_path() -> None:
+    manifest = apply_codex_to_manifest(Manifest(), True)
+
+    validated = manifest.validated_entries()
+
+    assert Path(".codex_bin/codex") in validated
+    assert manifest.ephemeral_persistence_paths() == {Path(".codex_bin/codex")}
 
 
 def test_apply_codex_to_manifest_treats_home_relative_path_as_workspace_relative() -> None:

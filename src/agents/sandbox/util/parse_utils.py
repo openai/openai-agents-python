@@ -45,9 +45,14 @@ def parse_ls_la(output: str, *, base: str) -> list[FileEntry]:
             continue
 
         permissions = Permissions.from_str(permissions_str)
+        entry_path = (
+            name
+            if name.startswith("/")
+            else (f"{base.rstrip('/')}/{name}" if base != "/" else f"/{name}")
+        )
         entries.append(
             FileEntry(
-                path=f"{base.rstrip('/')}/{name}" if base != "/" else f"/{name}",
+                path=entry_path,
                 permissions=permissions,
                 owner=owner,
                 group=group,

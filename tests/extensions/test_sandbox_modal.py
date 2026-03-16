@@ -548,3 +548,190 @@ async def test_modal_snapshot_filesystem_rejects_escaping_mount_paths_before_exe
 
     assert commands == []
     assert sandbox.snapshot_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_modal_write_chunks_large_payload_before_draining(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _FakeWaitResult:
+        def wait(self) -> int:
+            return 0
+
+    class _FakeStdin:
+        def __init__(self, *, limit: int) -> None:
+            self._limit = limit
+            self._buffer = bytearray()
+            self.chunks: list[bytes] = []
+            self.write_eof_calls = 0
+            self.drain_calls = 0
+
+        def write(self, data: bytes | bytearray | memoryview) -> None:
+            rendered = bytes(data)
+            if len(self._buffer) + len(rendered) > self._limit:
+                raise BufferError("Buffer size exceed limit. Call drain to flush the buffer.")
+            self._buffer.extend(rendered)
+
+        def write_eof(self) -> None:
+            self.write_eof_calls += 1
+
+        def drain(self) -> None:
+            self.chunks.append(bytes(self._buffer))
+            self._buffer.clear()
+            self.drain_calls += 1
+
+    class _FakeProcess:
+        def __init__(self, *, limit: int) -> None:
+            self.stdin = _FakeStdin(limit=limit)
+            self.stderr = io.BytesIO(b"")
+
+        def wait(self) -> int:
+            return 0
+
+    class _FakeSandbox:
+        object_id = "sb-123"
+
+        def __init__(self) -> None:
+            self.processes: list[_FakeProcess] = []
+            self.commands: list[tuple[object, ...]] = []
+
+        def exec(self, *command: object, **kwargs: object) -> object:
+            _ = kwargs
+            self.commands.append(command)
+            if command[:3] == ("mkdir", "-p", "--"):
+                return _FakeWaitResult()
+            process = _FakeProcess(limit=5)
+            self.processes.append(process)
+            return process
+
+    sandbox = _FakeSandbox()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+    monkeypatch.setattr(modal_module, "_MODAL_STDIN_CHUNK_SIZE", 5)
+
+    async def _fake_call_modal(
+        fn: Callable[..., object],
+        *args: object,
+        call_timeout: float | None = None,
+        **kwargs: object,
+    ) -> object:
+        _ = call_timeout
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(session, "_call_modal", _fake_call_modal)
+
+    payload = b"abcdefghijklm"
+    await session.write(Path("nested/file.bin"), io.BytesIO(payload))
+
+    assert sandbox.commands == [
+        ("mkdir", "-p", "--", "/workspace/nested"),
+        ("sh", "-lc", "cat > /workspace/nested/file.bin"),
+    ]
+    assert len(sandbox.processes) == 1
+    assert sandbox.processes[0].stdin.chunks == [b"abcde", b"fghij", b"klm", b""]
+    assert sandbox.processes[0].stdin.write_eof_calls == 1
+    assert sandbox.processes[0].stdin.drain_calls == 4
+
+
+@pytest.mark.asyncio
+async def test_modal_hydrate_tar_chunks_large_payload_before_draining(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _FakeWaitResult:
+        def wait(self) -> int:
+            return 0
+
+    class _FakeStdin:
+        def __init__(self, *, limit: int) -> None:
+            self._limit = limit
+            self._buffer = bytearray()
+            self.chunks: list[bytes] = []
+            self.write_eof_calls = 0
+            self.drain_calls = 0
+
+        def write(self, data: bytes | bytearray | memoryview) -> None:
+            rendered = bytes(data)
+            if len(self._buffer) + len(rendered) > self._limit:
+                raise BufferError("Buffer size exceed limit. Call drain to flush the buffer.")
+            self._buffer.extend(rendered)
+
+        def write_eof(self) -> None:
+            self.write_eof_calls += 1
+
+        def drain(self) -> None:
+            self.chunks.append(bytes(self._buffer))
+            self._buffer.clear()
+            self.drain_calls += 1
+
+    class _FakeProcess:
+        def __init__(self, *, limit: int) -> None:
+            self.stdin = _FakeStdin(limit=limit)
+            self.stderr = io.BytesIO(b"")
+
+        def wait(self) -> int:
+            return 0
+
+    class _FakeSandbox:
+        object_id = "sb-123"
+
+        def __init__(self) -> None:
+            self.processes: list[_FakeProcess] = []
+            self.commands: list[tuple[object, ...]] = []
+
+        def exec(self, *command: object, **kwargs: object) -> object:
+            _ = kwargs
+            self.commands.append(command)
+            if command[:3] == ("mkdir", "-p", "--"):
+                return _FakeWaitResult()
+            process = _FakeProcess(limit=7)
+            self.processes.append(process)
+            return process
+
+    sandbox = _FakeSandbox()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+    monkeypatch.setattr(modal_module, "_MODAL_STDIN_CHUNK_SIZE", 7)
+
+    async def _fake_call_modal(
+        fn: Callable[..., object],
+        *args: object,
+        call_timeout: float | None = None,
+        **kwargs: object,
+    ) -> object:
+        _ = call_timeout
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(session, "_call_modal", _fake_call_modal)
+
+    tar_payload = io.BytesIO()
+    with modal_module.tarfile.open(fileobj=tar_payload, mode="w") as tar:
+        info = modal_module.tarfile.TarInfo(name="large.txt")
+        contents = b"abcdefghijklmno"
+        info.size = len(contents)
+        tar.addfile(info, io.BytesIO(contents))
+    tar_payload.seek(0)
+
+    await session.hydrate_workspace(tar_payload)
+
+    assert sandbox.commands == [
+        ("mkdir", "-p", "--", "/workspace"),
+        ("tar", "xf", "-", "-C", "/workspace"),
+    ]
+    assert len(sandbox.processes) == 1
+    assert b"".join(sandbox.processes[0].stdin.chunks[:-1]) == tar_payload.getvalue()
+    assert sandbox.processes[0].stdin.write_eof_calls == 1
+    assert sandbox.processes[0].stdin.drain_calls >= 2

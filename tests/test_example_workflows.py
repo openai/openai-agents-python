@@ -28,7 +28,7 @@ from agents import (
 from agents.agent import ToolsToFinalOutputResult
 from agents.items import TResponseInputItem
 from agents.tool import FunctionToolResult, function_tool
-from examples.sandbox.docker_runner import _stream_event_banner
+from examples.sandbox.basic import _stream_event_banner
 from examples.sandbox.sandbox_agents_as_tools import (
     PricingPacketReview,
     RolloutRiskReview,

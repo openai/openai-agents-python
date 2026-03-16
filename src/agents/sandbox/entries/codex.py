@@ -27,6 +27,7 @@ _CODEX_ARCH_ALIASES = {
 
 class Codex(BaseEntry):
     type: Literal["codex"] = "codex"
+    ephemeral: bool = True
     version: str = "latest"
 
     async def apply(
