@@ -511,6 +511,17 @@ class _ManifestMutationCapability(Capability):
         return manifest
 
 
+class _ManifestUsersCapability(Capability):
+    type: str = "manifest-users"
+
+    def __init__(self) -> None:
+        super().__init__(type="manifest-users")
+
+    def process_manifest(self, manifest: Manifest) -> Manifest:
+        manifest.users.append(User(name="sandbox-user"))
+        return manifest
+
+
 class _SessionFileCapability(Capability):
     type: str = "session-files"
     bound_session: BaseSandboxSession | None = None
@@ -2096,6 +2107,214 @@ async def test_session_manager_reapplies_capability_manifest_mutations_on_resume
     assert session.state.manifest.entries["cap.txt"] == File(content=b"capability")
     assert client.resume_state is not None
     assert client.resume_state.manifest.entries["cap.txt"] == File(content=b"capability")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["live_session", "session_state", "create"])
+async def test_session_manager_applies_capability_manifest_mutations_with_session_parity(
+    source: str,
+) -> None:
+    capability = _ManifestMutationCapability()
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.", codex=False)
+    run_state: RunState[Any, Agent[Any]] | None = None
+
+    if source == "live_session":
+        live_session = _FakeSession(Manifest())
+        sandbox_config = SandboxRunConfig(session=live_session)
+    else:
+        client = _FakeClient(_FakeSession(Manifest()))
+        if source == "session_state":
+            sandbox_config = SandboxRunConfig(
+                client=client,
+                session_state=SandboxSessionState(
+                    manifest=Manifest(),
+                    snapshot=NoopSnapshot(id="resume"),
+                ),
+                options={"image": "sandbox"},
+            )
+        else:
+            sandbox_config = SandboxRunConfig(
+                client=client,
+                manifest=Manifest(),
+                options={"image": "sandbox"},
+            )
+
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=sandbox_config,
+        run_state=run_state,
+    )
+
+    manager.acquire_agent(agent)
+    session = await manager.ensure_session(
+        agent=agent,
+        capabilities=[capability],
+        is_resumed_state=False,
+    )
+
+    assert session.state.manifest.entries["cap.txt"] == File(content=b"capability")
+    if source == "session_state":
+        assert client.resume_state is not None
+        assert client.resume_state.manifest.entries["cap.txt"] == File(content=b"capability")
+    if source == "create":
+        assert client.create_kwargs is not None
+        manifest = client.create_kwargs["manifest"]
+        assert manifest is not None
+        assert manifest.entries["cap.txt"] == File(content=b"capability")
+
+
+@pytest.mark.asyncio
+async def test_session_manager_starts_stopped_injected_session_with_manifest_mutation() -> None:
+    live_session = _LiveSessionDeltaRecorder(Manifest())
+    capability = _ManifestMutationCapability()
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.", codex=False)
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=live_session),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    session = await manager.ensure_session(
+        agent=agent,
+        capabilities=[capability],
+        is_resumed_state=False,
+    )
+    payload = await manager.cleanup()
+
+    assert session is live_session
+    assert live_session.start_calls == 1
+    assert live_session.apply_manifest_calls == 0
+    assert live_session.stop_calls == 0
+    assert live_session.shutdown_calls == 0
+    assert session.state.manifest.entries["cap.txt"] == File(content=b"capability")
+    assert payload is None
+
+
+@pytest.mark.asyncio
+async def test_session_manager_materializes_running_injected_session_manifest_mutation() -> None:
+    live_session = _LiveSessionDeltaRecorder(Manifest())
+    live_session._running = True
+    capability = _ManifestMutationCapability()
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.", codex=False)
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=live_session),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    session = await manager.ensure_session(
+        agent=agent,
+        capabilities=[capability],
+        is_resumed_state=False,
+    )
+    payload = await manager.cleanup()
+
+    assert session is live_session
+    assert live_session.start_calls == 0
+    assert live_session.apply_manifest_calls == 0
+    assert live_session.applied_entry_batches == [
+        [(Path("/workspace/cap.txt"), File(content=b"capability"))]
+    ]
+    assert session.state.manifest.entries["cap.txt"] == File(content=b"capability")
+    assert live_session.stop_calls == 0
+    assert live_session.shutdown_calls == 0
+    assert payload is None
+
+
+@pytest.mark.asyncio
+async def test_session_manager_retries_running_injected_session_delta_apply_after_failure() -> None:
+    live_session = _LiveSessionDeltaRecorder(Manifest(), fail_entry_batch_times=1)
+    live_session._running = True
+    capability = _ManifestMutationCapability()
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.", codex=False)
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=live_session),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    with pytest.raises(RuntimeError, match="delta apply failed"):
+        await manager.ensure_session(
+            agent=agent,
+            capabilities=[capability],
+            is_resumed_state=False,
+        )
+
+    assert live_session.state.manifest.entries == {}
+    assert live_session.applied_entry_batches == [
+        [(Path("/workspace/cap.txt"), File(content=b"capability"))]
+    ]
+
+    session = await manager.ensure_session(
+        agent=agent,
+        capabilities=[capability],
+        is_resumed_state=False,
+    )
+    payload = await manager.cleanup()
+
+    assert session is live_session
+    assert live_session.state.manifest.entries["cap.txt"] == File(content=b"capability")
+    assert live_session.applied_entry_batches == [
+        [(Path("/workspace/cap.txt"), File(content=b"capability"))],
+        [(Path("/workspace/cap.txt"), File(content=b"capability"))],
+    ]
+    assert payload is None
+
+
+@pytest.mark.asyncio
+async def test_session_manager_skips_rematerialization_for_unchanged_running_session() -> None:
+    live_session = _LiveSessionDeltaRecorder(Manifest())
+    live_session._running = True
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.", codex=False)
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=live_session),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    session = await manager.ensure_session(
+        agent=agent,
+        capabilities=[Capability(type="noop")],
+        is_resumed_state=False,
+    )
+    payload = await manager.cleanup()
+
+    assert session is live_session
+    assert live_session.start_calls == 0
+    assert live_session.apply_manifest_calls == 0
+    assert live_session.applied_entry_batches == []
+    assert session.state.manifest.entries == {}
+    assert live_session.stop_calls == 0
+    assert live_session.shutdown_calls == 0
+    assert payload is None
+
+
+@pytest.mark.asyncio
+async def test_session_manager_rejects_running_injected_session_account_mutation() -> None:
+    live_session = _LiveSessionDeltaRecorder(Manifest())
+    live_session._running = True
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.", codex=False)
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=live_session),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    with pytest.raises(ValueError, match="manifest.users` or `manifest.groups"):
+        await manager.ensure_session(
+            agent=agent,
+            capabilities=[_ManifestUsersCapability()],
+            is_resumed_state=False,
+        )
+
+    assert live_session.apply_manifest_calls == 0
+    assert live_session.applied_entry_batches == []
+    assert live_session.state.manifest.users == []
 
 
 @pytest.mark.asyncio
