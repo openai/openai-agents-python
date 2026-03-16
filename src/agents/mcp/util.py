@@ -368,6 +368,15 @@ class MCPUtil:
             try:
                 result = await asyncio.shield(call_task)
             except asyncio.CancelledError as e:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    if not call_task.done():
+                        call_task.cancel()
+                        try:
+                            await call_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    raise
                 if not call_task.done():
                     call_task.cancel()
                     try:
