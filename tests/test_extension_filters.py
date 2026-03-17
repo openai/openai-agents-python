@@ -907,11 +907,14 @@ def _get_mcp_approval_response_run_item() -> MCPApprovalResponseItem:
 
     return MCPApprovalResponseItem(
         agent=fake_agent(),
-        raw_item=cast(McpApprovalResponse, {
-            "approval_request_id": "ma1",
-            "approve": True,
-            "type": "mcp_approval_response",
-        }),
+        raw_item=cast(
+            McpApprovalResponse,
+            {
+                "approval_request_id": "ma1",
+                "approve": True,
+                "type": "mcp_approval_response",
+            },
+        ),
     )
 
 
