@@ -1,11 +1,14 @@
+import asyncio
+from contextlib import asynccontextmanager
 from typing import cast
 
+import httpx
 import pytest
 from mcp import ClientSession, Tool as MCPTool
 from mcp.types import CallToolResult, ListToolsResult
 
 from agents.exceptions import UserError
-from agents.mcp.server import _MCPServerWithClientSession
+from agents.mcp.server import MCPServerStreamableHttp, _MCPServerWithClientSession
 
 
 class DummySession:
@@ -148,3 +151,122 @@ async def test_call_tool_rejects_non_object_arguments_before_remote_call():
         await server.call_tool("tool", cast(dict[str, object] | None, ["bad"]))
 
     assert session.call_tool_attempts == 0
+
+
+class ConcurrentCancellationSession:
+    def __init__(self):
+        self._slow_task: asyncio.Task[CallToolResult] | None = None
+        self._slow_started = asyncio.Event()
+
+    async def call_tool(self, tool_name, arguments, meta=None):
+        if tool_name == "slow":
+            self._slow_task = cast(asyncio.Task[CallToolResult], asyncio.current_task())
+            self._slow_started.set()
+            await asyncio.sleep(0.1)
+            return CallToolResult(content=[])
+
+        await self._slow_started.wait()
+        assert self._slow_task is not None
+        self._slow_task.cancel()
+        raise RuntimeError("synthetic request failure")
+
+
+class SharedHttpStatusSession:
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+
+    async def call_tool(self, tool_name, arguments, meta=None):
+        req = httpx.Request("POST", "https://example.test/mcp")
+        resp = httpx.Response(self.status_code, request=req)
+        raise httpx.HTTPStatusError(
+            f"HTTP error {self.status_code}",
+            request=req,
+            response=resp,
+        )
+
+
+class IsolatedRetrySession:
+    def __init__(self):
+        self.call_tool_attempts = 0
+
+    async def call_tool(self, tool_name, arguments, meta=None):
+        self.call_tool_attempts += 1
+        return CallToolResult(content=[])
+
+
+class HangingSession:
+    async def call_tool(self, tool_name, arguments, meta=None):
+        await asyncio.sleep(10)
+
+
+class DummyStreamableHttpServer(MCPServerStreamableHttp):
+    def __init__(self, shared_session: object, isolated_session: IsolatedRetrySession):
+        super().__init__(
+            params={"url": "https://example.test/mcp"},
+            client_session_timeout_seconds=None,
+            max_retry_attempts=0,
+        )
+        self.session = cast(ClientSession, shared_session)
+        self._isolated_session = cast(ClientSession, isolated_session)
+
+    def create_streams(self):
+        raise NotImplementedError
+
+    @asynccontextmanager
+    async def _isolated_client_session(self):
+        yield self._isolated_session
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_retries_cancelled_request_on_isolated_session():
+    shared_session = ConcurrentCancellationSession()
+    isolated_session = IsolatedRetrySession()
+    server = DummyStreamableHttpServer(shared_session, isolated_session)
+
+    results = await asyncio.gather(
+        server.call_tool("slow", None),
+        server.call_tool("fail", None),
+        return_exceptions=True,
+    )
+
+    assert isinstance(results[0], CallToolResult)
+    assert isinstance(results[1], RuntimeError)
+    assert shared_session._slow_task is not None
+    assert isolated_session.call_tool_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_retries_5xx_on_isolated_session():
+    isolated_session = IsolatedRetrySession()
+    server = DummyStreamableHttpServer(SharedHttpStatusSession(504), isolated_session)
+
+    result = await server.call_tool("tool", None)
+
+    assert isinstance(result, CallToolResult)
+    assert isolated_session.call_tool_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_does_not_retry_4xx_on_isolated_session():
+    isolated_session = IsolatedRetrySession()
+    server = DummyStreamableHttpServer(SharedHttpStatusSession(401), isolated_session)
+
+    with pytest.raises(UserError, match="HTTP error 401"):
+        await server.call_tool("tool", None)
+
+    assert isolated_session.call_tool_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_preserves_outer_cancellation():
+    isolated_session = IsolatedRetrySession()
+    server = DummyStreamableHttpServer(HangingSession(), isolated_session)
+
+    task = asyncio.create_task(server.call_tool("slow", None))
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert isolated_session.call_tool_attempts == 0
