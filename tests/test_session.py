@@ -10,6 +10,7 @@ import pytest
 from agents import Agent, RunConfig, Runner, SQLiteSession, TResponseInputItem
 from agents.memory.session import SessionABC
 from agents.run_context import RunContextWrapper
+from agents.run_internal.session_persistence import prepare_input_with_session
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
@@ -124,6 +125,27 @@ class LegacyNoLimitKeywordSession:
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         self.add_call_count += 1
+        self.items.extend(items)
+
+    async def pop_item(self) -> TResponseInputItem | None:
+        return self.items.pop() if self.items else None
+
+    async def clear_session(self) -> None:
+        self.items.clear()
+
+
+class DefaultLimitedSession:
+    session_id = "default-limited"
+
+    def __init__(self) -> None:
+        self.items: list[TResponseInputItem] = []
+        self.get_call_count = 0
+
+    async def get_items(self, limit: int = 1) -> list[TResponseInputItem]:
+        self.get_call_count += 1
+        return list(self.items[-limit:]) if limit > 0 else []
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
         self.items.extend(items)
 
     async def pop_item(self) -> TResponseInputItem | None:
@@ -294,6 +316,26 @@ async def test_legacy_session_without_limit_keyword_remains_compatible(runner_me
     assert session.get_call_count > 0
     assert session.add_call_count > 0
     assert session.items
+
+
+@pytest.mark.asyncio
+async def test_get_items_preserves_default_limit_when_none_is_unset() -> None:
+    session = DefaultLimitedSession()
+    session.items = [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+    ]
+
+    prepared_input, _ = await prepare_input_with_session(
+        "new",
+        session,
+        session_input_callback=None,
+    )
+
+    assert isinstance(prepared_input, list)
+    assert prepared_input[0]["content"] == "two"
+    assert prepared_input[1]["content"] == "new"
+    assert session.get_call_count == 1
 
 
 @pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])

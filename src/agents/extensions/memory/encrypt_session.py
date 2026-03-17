@@ -206,10 +206,16 @@ class EncryptedSession(SessionABC):
         limit: int | None = None,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> list[TResponseInputItem]:
-        if wrapper is not None and _method_accepts_wrapper(self.underlying_session.get_items):
+        accepts_wrapper = wrapper is not None and _method_accepts_wrapper(
+            self.underlying_session.get_items
+        )
+        if limit is None:
+            if accepts_wrapper:
+                encrypted_items = await self.underlying_session.get_items(wrapper=wrapper)
+            else:
+                encrypted_items = await self.underlying_session.get_items()
+        elif accepts_wrapper:
             encrypted_items = await self.underlying_session.get_items(limit, wrapper=wrapper)
-        elif limit is None and not _method_accepts_limit(self.underlying_session.get_items):
-            encrypted_items = await self.underlying_session.get_items()
         else:
             encrypted_items = await self.underlying_session.get_items(limit)
         valid_items: list[TResponseInputItem] = []

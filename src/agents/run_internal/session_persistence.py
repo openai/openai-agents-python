@@ -82,10 +82,15 @@ async def _session_get_items(
     *,
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> list[TResponseInputItem]:
-    if wrapper is not None and _session_method_accepts_wrapper(session.get_items):
-        return await session.get_items(limit=limit, wrapper=wrapper)
-    if limit is None and not _session_method_accepts_limit(session.get_items):
+    accepts_wrapper = wrapper is not None and _session_method_accepts_wrapper(session.get_items)
+
+    if limit is None:
+        if accepts_wrapper:
+            return await session.get_items(wrapper=wrapper)
         return await session.get_items()
+
+    if accepts_wrapper:
+        return await session.get_items(limit=limit, wrapper=wrapper)
     return await session.get_items(limit=limit)
 
 

@@ -143,8 +143,8 @@ class AdvancedSQLiteSession(SQLiteSession):
     async def get_items(
         self,
         limit: int | None = None,
-        wrapper: RunContextWrapper[Any] | None = None,
         branch_id: str | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
     ) -> list[TResponseInputItem]:
         """Get items from current or specified branch.
 
