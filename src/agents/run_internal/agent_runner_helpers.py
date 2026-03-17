@@ -43,6 +43,7 @@ __all__ = [
     "ensure_context_wrapper",
     "finalize_conversation_tracking",
     "input_guardrails_triggered",
+    "resolve_trace_include_sensitive_data",
     "validate_session_conversation_settings",
     "resolve_trace_settings",
     "resolve_processed_response",
@@ -176,6 +177,18 @@ def resolve_trace_settings(
             tracing = {"api_key": trace_state.tracing_api_key}
 
     return workflow_name, trace_id, group_id, metadata, tracing
+
+
+def resolve_trace_include_sensitive_data(
+    *,
+    run_state: RunState[TContext] | None,
+    run_config: RunConfig,
+    run_config_was_supplied: bool,
+) -> bool:
+    """Resolve whether traces may include sensitive data for this run."""
+    if run_state is None or run_config_was_supplied:
+        return run_config.trace_include_sensitive_data
+    return run_state._trace_include_sensitive_data
 
 
 def resolve_resumed_context(

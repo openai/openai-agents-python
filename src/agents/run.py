@@ -55,6 +55,7 @@ from .run_internal.agent_runner_helpers import (
     input_guardrails_triggered,
     resolve_processed_response,
     resolve_resumed_context,
+    resolve_trace_include_sensitive_data,
     resolve_trace_settings,
     save_turn_items_if_needed,
     should_cancel_parallel_model_task_on_input_guardrail_trip,
@@ -412,6 +413,7 @@ class AgentRunner:
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
+        run_config_was_supplied = run_config is not None
 
         if run_config is None:
             run_config = RunConfig()
@@ -511,10 +513,15 @@ class AgentRunner:
             history_is_server_managed=history_is_server_managed,
         )
 
-        if is_resumed_state and run_state is not None:
+        resolved_trace_include_sensitive_data = resolve_trace_include_sensitive_data(
+            run_state=run_state,
+            run_config=run_config,
+            run_config_was_supplied=run_config_was_supplied,
+        )
+        if resolved_trace_include_sensitive_data != run_config.trace_include_sensitive_data:
             run_config = dataclasses.replace(
                 run_config,
-                trace_include_sensitive_data=run_state._trace_include_sensitive_data,
+                trace_include_sensitive_data=resolved_trace_include_sensitive_data,
             )
 
         resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
@@ -1462,6 +1469,7 @@ class AgentRunner:
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
+        run_config_was_supplied = run_config is not None
 
         if run_config is None:
             run_config = RunConfig()
@@ -1553,10 +1561,15 @@ class AgentRunner:
             session=session,
             history_is_server_managed=history_is_server_managed,
         )
-        if is_resumed_state and run_state is not None:
+        resolved_trace_include_sensitive_data = resolve_trace_include_sensitive_data(
+            run_state=run_state,
+            run_config=run_config,
+            run_config_was_supplied=run_config_was_supplied,
+        )
+        if resolved_trace_include_sensitive_data != run_config.trace_include_sensitive_data:
             run_config = dataclasses.replace(
                 run_config,
-                trace_include_sensitive_data=run_state._trace_include_sensitive_data,
+                trace_include_sensitive_data=resolved_trace_include_sensitive_data,
             )
 
         resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (

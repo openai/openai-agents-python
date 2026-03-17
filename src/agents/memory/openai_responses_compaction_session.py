@@ -169,15 +169,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if not self._has_pending_local_history_rewrite:
             return resolved_mode
 
-        if (
-            self._local_history_rewrite_response_id is not None
-            and response_id is not None
-            and response_id != self._local_history_rewrite_response_id
-        ):
-            self._has_pending_local_history_rewrite = False
-            self._local_history_rewrite_response_id = None
-            return resolved_mode
-
         if resolved_mode == "previous_response_id":
             if self._local_history_rewrite_response_id is None and response_id is not None:
                 self._local_history_rewrite_response_id = response_id
@@ -324,6 +315,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         self._compaction_candidate_items = select_compaction_candidate_items(output_items)
         self._session_items = output_items
+        if resolved_mode == "input":
+            self._clear_pending_local_history_rewrite()
 
         logger.debug(
             f"compact: done for {self._response_id} "
@@ -438,6 +431,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     def _mark_local_history_rewrite(self) -> None:
         self._has_pending_local_history_rewrite = True
         self._local_history_rewrite_response_id = self._response_id
+
+    def _clear_pending_local_history_rewrite(self) -> None:
+        self._has_pending_local_history_rewrite = False
+        self._local_history_rewrite_response_id = None
 
 
 def _strip_orphaned_assistant_ids(
