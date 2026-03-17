@@ -138,3 +138,18 @@ def test_trace_include_sensitive_data_explicit_override_takes_precedence(monkeyp
     monkeypatch.setenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "true")
     config = RunConfig(trace_include_sensitive_data=False)
     assert config.trace_include_sensitive_data is False
+
+
+def test_trace_include_sensitive_data_tracks_explicit_overrides(monkeypatch):
+    """RunConfig should distinguish explicit trace flag overrides from unrelated options."""
+    monkeypatch.setenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "true")
+
+    default_config = RunConfig()
+    unrelated_config = RunConfig(workflow_name="custom-workflow")
+    explicit_true_config = RunConfig(trace_include_sensitive_data=True)
+    explicit_false_config = RunConfig(trace_include_sensitive_data=False)
+
+    assert default_config._trace_include_sensitive_data_was_explicit is False
+    assert unrelated_config._trace_include_sensitive_data_was_explicit is False
+    assert explicit_true_config._trace_include_sensitive_data_was_explicit is True
+    assert explicit_false_config._trace_include_sensitive_data_was_explicit is True

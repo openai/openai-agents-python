@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, Optional, cast
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -31,6 +31,14 @@ def _default_trace_include_sensitive_data() -> bool:
     """Return the default for trace_include_sensitive_data based on environment."""
     val = os.getenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "true")
     return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+_TRACE_INCLUDE_SENSITIVE_DATA_UNSET = cast(bool, object())
+
+
+def _unset_trace_include_sensitive_data() -> bool:
+    """Return a sentinel so RunConfig can detect explicit trace flag overrides."""
+    return _TRACE_INCLUDE_SENSITIVE_DATA_UNSET
 
 
 @dataclass
@@ -129,9 +137,7 @@ class RunConfig:
     tracing: TracingConfig | None = None
     """Tracing configuration for this run."""
 
-    trace_include_sensitive_data: bool = field(
-        default_factory=_default_trace_include_sensitive_data
-    )
+    trace_include_sensitive_data: bool = field(default_factory=_unset_trace_include_sensitive_data)
     """Whether we include potentially sensitive data (for example: inputs/outputs of tool calls or
     LLM generations) in traces. If False, we'll still create spans for these events, but the
     sensitive data will not be included.
@@ -190,6 +196,21 @@ class RunConfig:
     - ``None`` / ``"preserve"`` keeps reasoning item IDs as-is.
     - ``"omit"`` strips reasoning item IDs from model input built by the runner.
     """
+
+    _trace_include_sensitive_data_was_explicit: bool = field(
+        init=False,
+        repr=False,
+        compare=False,
+        default=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self.trace_include_sensitive_data is _TRACE_INCLUDE_SENSITIVE_DATA_UNSET:
+            self.trace_include_sensitive_data = _default_trace_include_sensitive_data()
+            self._trace_include_sensitive_data_was_explicit = False
+            return
+
+        self._trace_include_sensitive_data_was_explicit = True
 
 
 class RunOptions(TypedDict, Generic[TContext]):

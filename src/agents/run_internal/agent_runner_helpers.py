@@ -115,23 +115,26 @@ def validate_override_history_persistence_support(
     *,
     input: str | list[TResponseInputItem] | RunState[Any],
     session: Session | None,
-    history_is_server_managed: bool,
+    response_history_is_server_managed: bool,
 ) -> None:
     """Fail fast when approval override persistence requirements are not satisfied."""
     if not isinstance(input, RunState):
         return
 
-    if input.has_pending_execution_only_approval_overrides() and not history_is_server_managed:
+    if (
+        input.has_pending_execution_only_approval_overrides()
+        and not response_history_is_server_managed
+    ):
         raise UserError(
             "save_override_arguments=False is only supported when using conversation_id, "
-            "previous_response_id, auto_previous_response_id, or a server-managed session."
+            "previous_response_id, or auto_previous_response_id."
         )
 
     mutations = input.get_session_history_mutations()
     if not mutations:
         return
 
-    if history_is_server_managed:
+    if response_history_is_server_managed:
         raise UserError(
             "save_override_arguments requires local canonical history. "
             "Server-managed conversations cannot persist corrected function_call arguments. "
@@ -184,18 +187,14 @@ def resolve_trace_include_sensitive_data(
     *,
     run_state: RunState[TContext] | None,
     run_config: RunConfig,
-    run_config_was_supplied: bool,
 ) -> bool:
-    """Resolve whether traces may include sensitive data for this run.
-
-    Resumed runs preserve the stored setting unless the new RunConfig explicitly narrows it by
-    setting `trace_include_sensitive_data=False`.
-    """
-    del run_config_was_supplied
+    """Resolve whether traces may include sensitive data for this run."""
     if run_state is None:
         return run_config.trace_include_sensitive_data
-    if run_config.trace_include_sensitive_data is False:
-        return False
+
+    if getattr(run_config, "_trace_include_sensitive_data_was_explicit", True):
+        return run_config.trace_include_sensitive_data
+
     return run_state._trace_include_sensitive_data
 
 

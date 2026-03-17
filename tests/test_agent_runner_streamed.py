@@ -1676,9 +1676,7 @@ async def test_streaming_resume_with_durable_override_rewrites_session_history()
 
 
 @pytest.mark.asyncio
-async def test_streaming_resume_supports_execution_only_override_with_server_managed_session() -> (
-    None
-):
+async def test_streaming_resume_rejects_execution_only_override_with_marker_session() -> None:
     async def test_tool(test: str) -> str:
         return f"result:{test}"
 
@@ -1707,7 +1705,42 @@ async def test_streaming_resume_supports_execution_only_override_with_server_man
         save_override_arguments=False,
     )
 
-    resumed = Runner.run_streamed(agent, state, session=session)
+    with pytest.raises(UserError, match="save_override_arguments=False is only supported"):
+        Runner.run_streamed(agent, state, session=session)
+
+
+@pytest.mark.asyncio
+async def test_streaming_resume_supports_execution_only_override_with_previous_response_id() -> (
+    None
+):
+    async def test_tool(test: str) -> str:
+        return f"result:{test}"
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+
+    model.add_multiple_turn_outputs(
+        [[get_function_tool_call("test_tool", json.dumps({"test": "foo"}), call_id="call-resume")]]
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool", previous_response_id="resp-root")
+    await consume_stream(first)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(
+        first.interruptions[0],
+        override_arguments={"test": "bar"},
+        save_override_arguments=False,
+    )
+
+    resumed = Runner.run_streamed(agent, state)
     await consume_stream(resumed)
 
     assert resumed.final_output == "result:bar"

@@ -29,7 +29,7 @@ from .items import (
 )
 from .lifecycle import RunHooks
 from .logger import logger
-from .memory import Session, is_server_managed_conversation_session
+from .memory import Session
 from .result import RunResult, RunResultStreaming
 from .run_config import (
     DEFAULT_MAX_TURNS,
@@ -413,7 +413,6 @@ class AgentRunner:
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
-        run_config_was_supplied = run_config is not None
 
         if run_config is None:
             run_config = RunConfig()
@@ -504,19 +503,15 @@ class AgentRunner:
             or previous_response_id is not None
             or auto_previous_response_id
         )
-        history_is_server_managed = (
-            server_manages_conversation or is_server_managed_conversation_session(session)
-        )
         validate_override_history_persistence_support(
             input=input,
             session=session,
-            history_is_server_managed=history_is_server_managed,
+            response_history_is_server_managed=server_manages_conversation,
         )
 
         resolved_trace_include_sensitive_data = resolve_trace_include_sensitive_data(
             run_state=run_state,
             run_config=run_config,
-            run_config_was_supplied=run_config_was_supplied,
         )
         if resolved_trace_include_sensitive_data != run_config.trace_include_sensitive_data:
             run_config = dataclasses.replace(
@@ -1469,7 +1464,6 @@ class AgentRunner:
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
-        run_config_was_supplied = run_config is not None
 
         if run_config is None:
             run_config = RunConfig()
@@ -1553,18 +1547,14 @@ class AgentRunner:
             or previous_response_id is not None
             or auto_previous_response_id
         )
-        history_is_server_managed = (
-            server_manages_conversation or is_server_managed_conversation_session(session)
-        )
         validate_override_history_persistence_support(
             input=input,
             session=session,
-            history_is_server_managed=history_is_server_managed,
+            response_history_is_server_managed=server_manages_conversation,
         )
         resolved_trace_include_sensitive_data = resolve_trace_include_sensitive_data(
             run_state=run_state,
             run_config=run_config,
-            run_config_was_supplied=run_config_was_supplied,
         )
         if resolved_trace_include_sensitive_data != run_config.trace_include_sensitive_data:
             run_config = dataclasses.replace(

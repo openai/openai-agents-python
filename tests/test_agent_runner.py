@@ -1215,7 +1215,7 @@ async def test_resume_rejects_execution_only_override_without_server_managed_his
 
 
 @pytest.mark.asyncio
-async def test_resume_supports_execution_only_override_with_server_managed_session() -> None:
+async def test_resume_rejects_execution_only_override_with_marker_session() -> None:
     model = FakeModel()
 
     @function_tool(name_override="approval_tool", needs_approval=True)
@@ -1249,12 +1249,47 @@ async def test_resume_supports_execution_only_override_with_server_managed_sessi
         save_override_arguments=False,
     )
 
-    resumed = await Runner.run(agent, state, session=session)
+    with pytest.raises(UserError, match="save_override_arguments=False is only supported"):
+        await Runner.run(agent, state, session=session)
+
+
+@pytest.mark.asyncio
+async def test_resume_supports_execution_only_override_with_previous_response_id() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        return f"result:{test}"
+
+    agent = Agent(
+        name="approval_agent",
+        model=model,
+        tools=[approval_tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "approval_tool", json.dumps({"test": "foo"}), call_id="call-1"
+                )
+            ],
+        ]
+    )
+
+    first = await Runner.run(agent, input="user_message", previous_response_id="resp-root")
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(
+        first.interruptions[0],
+        override_arguments={"test": "bar"},
+        save_override_arguments=False,
+    )
+
+    resumed = await Runner.run(agent, state)
 
     assert resumed.final_output == "result:bar"
-    saved_items = await session.get_items()
-    assert cast(dict[str, Any], saved_items[1])["arguments"] == json.dumps({"test": "foo"})
-    assert saved_items[2]["type"] == "function_call_output"
 
 
 @pytest.mark.asyncio
