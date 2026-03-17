@@ -108,6 +108,42 @@ class TestOpenAIResponsesCompactionSession:
         assert session.model == "gpt-4.1"
 
     @pytest.mark.asyncio
+    async def test_get_items_preserves_legacy_wrapper_only_delegate_shape(self) -> None:
+        class WrapperOnlySession:
+            session_id = "test-session"
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[int | None, Any]] = []
+
+            async def get_items(
+                self,
+                wrapper: Any = None,
+            ) -> list[TResponseInputItem]:
+                self.calls.append((None, wrapper))
+                return []
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                return None
+
+            async def pop_item(self) -> TResponseInputItem | None:
+                return None
+
+            async def clear_session(self) -> None:
+                return None
+
+        underlying = cast(Session, WrapperOnlySession())
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+        )
+
+        wrapper = SimpleNamespace(context={"request_id": "abc"})
+        items = await session.get_items(wrapper=wrapper)
+
+        assert items == []
+        assert underlying.calls == [(None, wrapper)]
+
+    @pytest.mark.asyncio
     async def test_add_items_delegates(self) -> None:
         mock_session = self.create_mock_session()
         session = OpenAIResponsesCompactionSession(

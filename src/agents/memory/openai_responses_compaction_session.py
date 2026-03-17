@@ -26,14 +26,32 @@ DEFAULT_COMPACTION_THRESHOLD = 10
 OpenAIResponsesCompactionMode = Literal["previous_response_id", "input", "auto"]
 
 
-def _method_accepts_wrapper(method: Any) -> bool:
+def _method_signature(method: Any) -> tuple[inspect.Parameter, ...]:
     try:
-        parameters = tuple(inspect.signature(method).parameters.values())
+        return tuple(inspect.signature(method).parameters.values())
     except (TypeError, ValueError):
-        return False
+        return ()
 
+
+
+def _method_accepts_wrapper(method: Any) -> bool:
+    parameters = _method_signature(method)
     return any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD or parameter.name == "wrapper"
+        for parameter in parameters
+    )
+
+
+
+def _method_accepts_limit(method: Any) -> bool:
+    parameters = _method_signature(method)
+    return any(
+        (
+            parameter.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            and parameter.name == "limit"
+        )
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in parameters
     )
 
@@ -255,8 +273,17 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         limit: int | None = None,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> list[TResponseInputItem]:
-        if wrapper is not None and _method_accepts_wrapper(self.underlying_session.get_items):
-            return await self.underlying_session.get_items(limit, wrapper=wrapper)
+        accepts_wrapper = wrapper is not None and _method_accepts_wrapper(
+            self.underlying_session.get_items
+        )
+
+        if limit is None:
+            if accepts_wrapper:
+                return await self.underlying_session.get_items(wrapper=wrapper)
+            return await self.underlying_session.get_items()
+
+        if accepts_wrapper and _method_accepts_limit(self.underlying_session.get_items):
+            return await self.underlying_session.get_items(limit=limit, wrapper=wrapper)
         return await self.underlying_session.get_items(limit)
 
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
