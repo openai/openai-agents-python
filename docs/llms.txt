@@ -52,8 +52,7 @@ The SDK focuses on a concise set of primitives so you can orchestrate multi-agen
 - [Extensions](https://openai.github.io/openai-agents-python/ref/extensions/handoff_filters/): Extend the SDK with custom handoff filters, prompts, LiteLLM integration, and SQLAlchemy session memory.
 
 ## Models and Providers
-- [Model catalog](https://openai.github.io/openai-agents-python/models/): Overview of supported model families and configuration guidance.
-- [LiteLLM integration](https://openai.github.io/openai-agents-python/models/litellm/): Configure LiteLLM as a provider to fan out across multiple model backends.
+- [Model catalog](https://openai.github.io/openai-agents-python/models/): Overview of OpenAI models, non-OpenAI provider patterns, websocket transport, and the SDK's best-effort LiteLLM guidance.
 
 ## Optional
 - [Release notes](https://openai.github.io/openai-agents-python/release/): Track SDK changes, migration notes, and deprecations.

@@ -31,7 +31,7 @@ Usage is aggregated across all model calls during the run (including tool calls 
 
 ### Enabling usage with LiteLLM models
 
-LiteLLM providers do not report usage metrics by default. When you are using [`LitellmModel`](models/litellm.md), pass `ModelSettings(include_usage=True)` to your agent so that LiteLLM responses populate `result.context_wrapper.usage`.
+LiteLLM providers do not report usage metrics by default. When you are using [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel], pass `ModelSettings(include_usage=True)` to your agent so that LiteLLM responses populate `result.context_wrapper.usage`. See the [LiteLLM note](models/index.md#litellm) in the Models guide for setup guidance and examples.
 
 ```python
 from agents import Agent, ModelSettings, Runner

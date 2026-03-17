@@ -2,24 +2,24 @@
 search:
   exclude: true
 ---
-# 사용량
+# 사용법
 
-Agents SDK는 모든 실행의 토큰 사용량을 자동으로 추적합니다. 실행 컨텍스트에서 이를 확인하여 비용 모니터링, 제한 적용, 분석 기록에 활용할 수 있습니다.
+Agents SDK는 모든 실행의 토큰 사용량을 자동으로 추적합니다. 실행 컨텍스트에서 이를 확인하고 비용 모니터링, 한도 적용, 분석 기록에 활용할 수 있습니다
 
 ## 추적 항목
 
 - **requests**: 수행된 LLM API 호출 수
-- **input_tokens**: 전송된 전체 입력 토큰 수
-- **output_tokens**: 수신된 전체 출력 토큰 수
+- **input_tokens**: 전송된 총 입력 토큰 수
+- **output_tokens**: 수신된 총 출력 토큰 수
 - **total_tokens**: 입력 + 출력
-- **request_usage_entries**: 요청별 사용량 상세 내역 목록
+- **request_usage_entries**: 요청별 사용량 세부 내역 목록
 - **details**:
   - `input_tokens_details.cached_tokens`
   - `output_tokens_details.reasoning_tokens`
 
-## 실행에서 사용량 접근
+## 실행에서 사용량 액세스
 
-`Runner.run(...)` 이후 `result.context_wrapper.usage`를 통해 사용량에 접근할 수 있습니다.
+`Runner.run(...)` 이후 `result.context_wrapper.usage`로 사용량에 액세스합니다
 
 ```python
 result = await Runner.run(agent, "What's the weather in Tokyo?")
@@ -31,11 +31,11 @@ print("Output tokens:", usage.output_tokens)
 print("Total tokens:", usage.total_tokens)
 ```
 
-사용량은 실행 중 발생한 모든 모델 호출(도구 호출 및 핸드오프 포함)에 대해 집계됩니다.
+사용량은 실행 중 발생한 모든 모델 호출(도구 호출 및 핸드오프 포함)에 대해 집계됩니다
 
 ### LiteLLM 모델에서 사용량 활성화
 
-LiteLLM provider는 기본적으로 사용량 메트릭을 보고하지 않습니다. [`LitellmModel`](models/litellm.md)을 사용하는 경우, 에이전트에 `ModelSettings(include_usage=True)`를 전달하여 LiteLLM 응답이 `result.context_wrapper.usage`를 채우도록 하세요.
+LiteLLM 제공자는 기본적으로 사용량 지표를 보고하지 않습니다. [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel]을 사용하는 경우, LiteLLM 응답이 `result.context_wrapper.usage`를 채우도록 에이전트에 `ModelSettings(include_usage=True)`를 전달하세요. 설정 안내와 코드 예제는 Models 가이드의 [LiteLLM note](models/index.md#litellm)를 참고하세요
 
 ```python
 from agents import Agent, ModelSettings, Runner
@@ -53,7 +53,7 @@ print(result.context_wrapper.usage.total_tokens)
 
 ## 요청별 사용량 추적
 
-SDK는 각 API 요청의 사용량을 `request_usage_entries`에서 자동으로 추적하므로, 상세한 비용 계산과 컨텍스트 윈도우 소비량 모니터링에 유용합니다.
+SDK는 `request_usage_entries`에서 각 API 요청의 사용량을 자동으로 추적하며, 이는 상세 비용 계산과 컨텍스트 윈도우 사용량 모니터링에 유용합니다
 
 ```python
 result = await Runner.run(agent, "What's the weather in Tokyo?")
@@ -62,9 +62,9 @@ for i, request in enumerate(result.context_wrapper.usage.request_usage_entries):
     print(f"Request {i + 1}: {request.input_tokens} in, {request.output_tokens} out")
 ```
 
-## 세션에서 사용량 접근
+## 세션에서 사용량 액세스
 
-`Session`(예: `SQLiteSession`)을 사용할 때 `Runner.run(...)`를 호출할 때마다 해당 실행에 대한 사용량이 반환됩니다. 세션은 컨텍스트를 위해 대화 기록을 유지하지만, 각 실행의 사용량은 서로 독립적입니다.
+`Session`(예: `SQLiteSession`)을 사용할 때 `Runner.run(...)`을 호출할 때마다 해당 실행에 대한 사용량이 반환됩니다. 세션은 컨텍스트를 위해 대화 기록을 유지하지만, 각 실행의 사용량은 서로 독립적입니다
 
 ```python
 session = SQLiteSession("my_conversation")
@@ -76,11 +76,11 @@ second = await Runner.run(agent, "Can you elaborate?", session=session)
 print(second.context_wrapper.usage.total_tokens)  # Usage for second run
 ```
 
-세션은 실행 간 대화 컨텍스트를 유지하지만, 각 `Runner.run()` 호출에서 반환되는 사용량 메트릭은 해당 실행만을 나타냅니다. 세션에서는 이전 메시지가 각 실행의 입력으로 다시 제공될 수 있으며, 이는 이후 턴의 입력 토큰 수에 영향을 줍니다.
+세션은 실행 간 대화 컨텍스트를 보존하지만, 각 `Runner.run()` 호출에서 반환되는 사용량 지표는 해당 실행만을 나타냅니다. 세션에서는 이전 메시지가 각 실행의 입력으로 다시 전달될 수 있으며, 이는 이후 턴의 입력 토큰 수에 영향을 줍니다
 
-## 훅에서 사용량 사용
+## 훅에서 사용량 활용
 
-`RunHooks`를 사용하는 경우, 각 훅에 전달되는 `context` 객체에 `usage`가 포함됩니다. 이를 통해 라이프사이클의 주요 시점에서 사용량을 로깅할 수 있습니다.
+`RunHooks`를 사용하는 경우 각 훅에 전달되는 `context` 객체에 `usage`가 포함됩니다. 이를 통해 주요 라이프사이클 시점에 사용량을 기록할 수 있습니다
 
 ```python
 class MyHooks(RunHooks):
@@ -91,9 +91,9 @@ class MyHooks(RunHooks):
 
 ## API 레퍼런스
 
-자세한 API 문서는 다음을 참조하세요:
+자세한 API 문서는 다음을 참고하세요:
 
 -   [`Usage`][agents.usage.Usage] - 사용량 추적 데이터 구조
 -   [`RequestUsage`][agents.usage.RequestUsage] - 요청별 사용량 세부 정보
--   [`RunContextWrapper`][agents.run.RunContextWrapper] - 실행 컨텍스트에서 사용량 접근
+-   [`RunContextWrapper`][agents.run.RunContextWrapper] - 실행 컨텍스트에서 사용량 액세스
 -   [`RunHooks`][agents.run.RunHooks] - 사용량 추적 라이프사이클에 훅 연결

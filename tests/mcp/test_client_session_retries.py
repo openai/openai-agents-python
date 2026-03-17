@@ -5,7 +5,7 @@ from typing import cast
 import httpx
 import pytest
 from mcp import ClientSession, Tool as MCPTool
-from mcp.types import CallToolResult, ListToolsResult
+from mcp.types import CallToolResult, ListPromptsResult, ListToolsResult
 
 from agents.exceptions import UserError
 from agents.mcp.server import MCPServerStreamableHttp, _MCPServerWithClientSession
@@ -32,7 +32,7 @@ class DummySession:
 
 
 class DummyServer(_MCPServerWithClientSession):
-    def __init__(self, session: DummySession, retries: int):
+    def __init__(self, session: DummySession, retries: int, *, serialize_requests: bool = False):
         super().__init__(
             cache_tools_list=False,
             client_session_timeout_seconds=None,
@@ -40,6 +40,7 @@ class DummyServer(_MCPServerWithClientSession):
             retry_backoff_seconds_base=0,
         )
         self.session = cast(ClientSession, session)
+        self._serialize_session_requests = serialize_requests
 
     def create_streams(self):
         raise NotImplementedError
@@ -213,6 +214,15 @@ class DummyStreamableHttpServer(MCPServerStreamableHttp):
     async def _isolated_client_session(self):
         yield self._isolated_session
 
+    async def list_tools(self):
+        return ListToolsResult(tools=[MCPTool(name="tool", inputSchema={})])
+
+    async def list_prompts(self):
+        return ListPromptsResult(prompts=[])
+
+    async def get_prompt(self, name, arguments=None):
+        raise NotImplementedError
+
 
 @pytest.mark.asyncio
 async def test_streamable_http_retries_cancelled_request_on_isolated_session():
@@ -267,3 +277,54 @@ async def test_streamable_http_preserves_outer_cancellation():
         await task
 
     assert isolated_session.call_tool_attempts == 0
+
+
+class ConcurrentPromptCancellationSession(ConcurrentCancellationSession):
+    async def list_tools(self):
+        return ListToolsResult(tools=[MCPTool(name="tool", inputSchema={})])
+
+    async def list_prompts(self):
+        await self._slow_started.wait()
+        assert self._slow_task is not None
+        self._slow_task.cancel()
+        raise RuntimeError("synthetic request failure")
+
+    async def get_prompt(self, name, arguments=None):
+        await self._slow_started.wait()
+        assert self._slow_task is not None
+        self._slow_task.cancel()
+        raise RuntimeError("synthetic request failure")
+
+
+@pytest.mark.asyncio
+async def test_serialized_session_requests_prevent_sibling_cancellation():
+    session = ConcurrentPromptCancellationSession()
+    server = DummyServer(session=cast(DummySession, session), retries=0, serialize_requests=True)
+
+    results = await asyncio.gather(
+        server.call_tool("slow", None),
+        server.call_tool("fail", None),
+        return_exceptions=True,
+    )
+
+    assert isinstance(results[0], CallToolResult)
+    assert isinstance(results[1], RuntimeError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt_method", ["list_prompts", "get_prompt"])
+async def test_serialized_prompt_requests_prevent_tool_cancellation(prompt_method: str):
+    session = ConcurrentPromptCancellationSession()
+    server = DummyServer(session=cast(DummySession, session), retries=0, serialize_requests=True)
+
+    prompt_request = (
+        server.list_prompts() if prompt_method == "list_prompts" else server.get_prompt("prompt")
+    )
+    results = await asyncio.gather(
+        server.call_tool("slow", None),
+        prompt_request,
+        return_exceptions=True,
+    )
+
+    assert isinstance(results[0], CallToolResult)
+    assert isinstance(results[1], RuntimeError)

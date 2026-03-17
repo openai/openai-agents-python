@@ -170,6 +170,32 @@
     font-size: 14px;
 }
 
+.md-typeset .field-table {
+    overflow-x: auto;
+}
+
+.md-typeset .field-table table:not([class]) {
+    display: table;
+    table-layout: fixed;
+    width: 100%;
+}
+
+.md-typeset .field-table table:not([class]) th:first-child,
+.md-typeset .field-table table:not([class]) td:first-child {
+    width: 11rem;
+}
+
+.md-typeset .field-table table:not([class]) th:nth-child(2),
+.md-typeset .field-table table:not([class]) td:nth-child(2) {
+    width: 18rem;
+}
+
+.md-typeset .field-table table:not([class]) th:first-child code,
+.md-typeset .field-table table:not([class]) td:first-child code {
+    white-space: nowrap;
+    word-break: normal;
+}
+
 /* Custom link styling */
 .md-content a {
     text-decoration: none;
@@ -202,4 +228,11 @@
 /* Reset scrollbar styling to browser default with high priority */
 .md-sidebar__scrollwrap {
     scrollbar-color: auto !important;
+}
+
+/* Let the docs layout use more of large viewports without becoming fully fluid. */
+@media screen and (min-width: 76.25em) {
+    .md-grid {
+        max-width: clamp(76rem, 92vw, 92rem);
+    }
 }
