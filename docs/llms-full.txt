@@ -38,8 +38,7 @@ The Agents SDK delivers a focused set of Python primitives—agents, tools, guar
 - [Realtime guide](https://openai.github.io/openai-agents-python/realtime/guide/): Deep dive into realtime session lifecycle, structured input, approvals, interruptions, and low-level transport control.
 
 ## Models and Provider Integrations
-- [Model catalog](https://openai.github.io/openai-agents-python/models/): Lists supported OpenAI and partner models with guidance on selecting capabilities for different workloads.
-- [LiteLLM integration](https://openai.github.io/openai-agents-python/models/litellm/): Configure LiteLLM as a provider, map model aliases, and route requests across heterogeneous backends.
+- [Model catalog](https://openai.github.io/openai-agents-python/models/): Covers OpenAI model selection, non-OpenAI provider patterns, websocket transport, and the SDK's best-effort LiteLLM guidance in one place.
 
 ## API Reference – Agents SDK Core
 - [API index](https://openai.github.io/openai-agents-python/ref/index/): Directory of all documented modules, classes, and functions in the SDK.
