@@ -7,13 +7,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, cast
 
-from ...run_context import RunContextWrapper
-
 import aiosqlite
 
 from ...items import TResponseInputItem
 from ...memory import SessionABC
 from ...memory.session_settings import SessionSettings
+from ...run_context import RunContextWrapper
 
 
 class AsyncSQLiteSession(SessionABC):

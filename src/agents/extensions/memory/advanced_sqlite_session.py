@@ -8,8 +8,6 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Union, cast
 
-from ...run_context import RunContextWrapper
-
 from agents.result import RunResult
 from agents.usage import Usage
 
@@ -17,6 +15,7 @@ from ..._tool_identity import is_reserved_synthetic_tool_namespace, tool_qualifi
 from ...items import TResponseInputItem
 from ...memory import SQLiteSession
 from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...run_context import RunContextWrapper
 
 
 class AdvancedSQLiteSession(SQLiteSession):

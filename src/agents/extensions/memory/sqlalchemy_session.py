@@ -27,8 +27,6 @@ import asyncio
 import json
 from typing import Any
 
-from ...run_context import RunContextWrapper
-
 from sqlalchemy import (
     TIMESTAMP,
     Column,
@@ -50,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
 from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...run_context import RunContextWrapper
 
 
 class SQLAlchemySession(SessionABC):

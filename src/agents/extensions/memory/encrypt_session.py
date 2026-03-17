@@ -31,8 +31,6 @@ import base64
 import json
 from typing import Any, cast
 
-from ...run_context import RunContextWrapper
-
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -41,6 +39,7 @@ from typing_extensions import Literal, TypedDict, TypeGuard
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
 from ...memory.session_settings import SessionSettings
+from ...run_context import RunContextWrapper
 
 
 class EncryptedEnvelope(TypedDict):
@@ -194,10 +193,14 @@ class EncryptedSession(SessionABC):
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> None:
         wrapped: list[EncryptedEnvelope] = [self._wrap(it) for it in items]
+        wrapped_items = cast(list[TResponseInputItem], wrapped)
         if wrapper is not None:
-            await self.underlying_session.add_items(cast(list[TResponseInputItem], wrapped), wrapper=wrapper)
+            await self.underlying_session.add_items(
+                wrapped_items,
+                wrapper=wrapper,
+            )
         else:
-            await self.underlying_session.add_items(cast(list[TResponseInputItem], wrapped))
+            await self.underlying_session.add_items(wrapped_items)
 
     async def pop_item(self) -> TResponseInputItem | None:
         while True:

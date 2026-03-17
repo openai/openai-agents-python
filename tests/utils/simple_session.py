@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Any, cast
 
 from agents.items import TResponseInputItem
-from agents.run_context import RunContextWrapper
 from agents.memory.session import Session
 from agents.memory.session_settings import SessionSettings
+from agents.run_context import RunContextWrapper
 
 
 class SimpleListSession(Session):
