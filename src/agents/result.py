@@ -489,6 +489,7 @@ class RunResultStreaming(RunResultBase):
     # Store the asyncio tasks that we're waiting on
     run_loop_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _input_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
+    _triggered_input_guardrail_result: InputGuardrailResult | None = field(default=None, repr=False)
     _output_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _stored_exception: Exception | None = field(default=None, repr=False)
     _cancel_mode: Literal["none", "immediate", "after_turn"] = field(default="none", repr=False)

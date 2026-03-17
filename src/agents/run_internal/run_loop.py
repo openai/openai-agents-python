@@ -1237,6 +1237,24 @@ async def run_single_turn_streamed(
     """Run a single streamed turn and emit events as results arrive."""
     public_agent = bindings.public_agent
     execution_agent = bindings.execution_agent
+
+    async def raise_if_input_guardrail_tripwire_known() -> None:
+        tripwire_result = streamed_result._triggered_input_guardrail_result
+        if tripwire_result is not None:
+            raise InputGuardrailTripwireTriggered(tripwire_result)
+
+        task = streamed_result._input_guardrails_task
+        if task is None or not task.done():
+            return
+
+        guardrail_exception = task.exception()
+        if guardrail_exception is not None:
+            raise guardrail_exception
+
+        tripwire_result = streamed_result._triggered_input_guardrail_result
+        if tripwire_result is not None:
+            raise InputGuardrailTripwireTriggered(tripwire_result)
+
     emitted_tool_call_ids: set[str] = set()
     emitted_reasoning_item_ids: set[str] = set()
     emitted_tool_search_fingerprints: set[str] = set()
@@ -1590,6 +1608,7 @@ async def run_single_turn_streamed(
         tool_use_tracker=tool_use_tracker,
         server_manages_conversation=server_conversation_tracker is not None,
         event_queue=streamed_result._event_queue,
+        before_side_effects=raise_if_input_guardrail_tripwire_known,
     )
 
     items_to_filter = session_items_for_turn(single_step_result)
