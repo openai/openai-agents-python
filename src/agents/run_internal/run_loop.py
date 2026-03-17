@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses as _dc
+import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar, cast
@@ -264,6 +265,18 @@ def _complete_stream_interruption(
     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
 
 
+def _call_supports_wrapper(callable_obj: Any) -> bool:
+    try:
+        parameters = tuple(inspect.signature(callable_obj).parameters.values())
+    except (TypeError, ValueError):
+        return False
+
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD or parameter.name == "wrapper"
+        for parameter in parameters
+    )
+
+
 async def _save_resumed_stream_items(
     *,
     session: Session | None,
@@ -273,6 +286,7 @@ async def _save_resumed_stream_items(
     items: list[RunItem],
     response_id: str | None,
     store: bool | None = None,
+    wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
@@ -280,13 +294,18 @@ async def _save_resumed_stream_items(
         streamed_result=streamed_result,
     ):
         return
+    save_kwargs: dict[str, Any] = {
+        "session": session,
+        "items": items,
+        "persisted_count": streamed_result._current_turn_persisted_item_count,
+        "response_id": response_id,
+        "reasoning_item_id_policy": streamed_result._reasoning_item_id_policy,
+        "store": store,
+    }
+    if wrapper is not None and _call_supports_wrapper(save_resumed_turn_items):
+        save_kwargs["wrapper"] = wrapper
     streamed_result._current_turn_persisted_item_count = await save_resumed_turn_items(
-        session=session,
-        items=items,
-        persisted_count=streamed_result._current_turn_persisted_item_count,
-        response_id=response_id,
-        reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
-        store=store,
+        **save_kwargs,
     )
     if run_state is not None:
         run_state._current_turn_persisted_item_count = (
@@ -304,6 +323,7 @@ async def _save_stream_items(
     response_id: str | None,
     update_persisted_count: bool,
     store: bool | None = None,
+    wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
@@ -311,13 +331,18 @@ async def _save_stream_items(
         streamed_result=streamed_result,
     ):
         return
+    save_kwargs: dict[str, Any] = {
+        "response_id": response_id,
+        "store": store,
+    }
+    if wrapper is not None and _call_supports_wrapper(save_result_to_session):
+        save_kwargs["wrapper"] = wrapper
     await save_result_to_session(
         session,
         [],
         list(items),
         run_state,
-        response_id=response_id,
-        store=store,
+        **save_kwargs,
     )
     if update_persisted_count and streamed_result._state is not None:
         streamed_result._current_turn_persisted_item_count = (
@@ -545,6 +570,7 @@ async def start_streaming(
             run_config.session_settings,
             include_history_in_prepared_input=not server_manages_conversation,
             preserve_dropped_new_items=True,
+            wrapper=context_wrapper,
         )
         streamed_result.input = prepared_input
         streamed_result._original_input = copy_input_items(prepared_input)
@@ -566,6 +592,7 @@ async def start_streaming(
             items=items,
             response_id=response_id,
             store=store_setting,
+            wrapper=context_wrapper,
         )
 
     async def _save_stream_items_with_count(
@@ -580,6 +607,7 @@ async def start_streaming(
             response_id=response_id,
             update_persisted_count=True,
             store=store_setting,
+            wrapper=context_wrapper,
         )
 
     async def _save_stream_items_without_count(
@@ -594,6 +622,7 @@ async def start_streaming(
             response_id=response_id,
             update_persisted_count=False,
             store=store_setting,
+            wrapper=context_wrapper,
         )
 
     try:
@@ -1237,7 +1266,13 @@ async def run_single_turn_streamed(
             )
         ]
         if input_items_to_save:
-            await save_result_to_session(session, input_items_to_save, [], streamed_result._state)
+            await save_result_to_session(
+                session,
+                input_items_to_save,
+                [],
+                streamed_result._state,
+                wrapper=context_wrapper,
+            )
 
     previous_response_id = (
         server_conversation_tracker.previous_response_id

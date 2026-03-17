@@ -3,10 +3,13 @@
 import asyncio
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from agents import Agent, RunConfig, Runner, SQLiteSession, TResponseInputItem
+from agents.memory.session import SessionABC
+from agents.run_context import RunContextWrapper
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
@@ -47,6 +50,64 @@ async def run_agent_async(runner_method: str, agent, input_data, **kwargs):
         return result
     else:
         raise ValueError(f"Unknown runner method: {runner_method}")
+
+
+class WrapperAwareSession(SessionABC):
+    session_id = "wrapper-aware"
+
+    def __init__(self) -> None:
+        self.items: list[TResponseInputItem] = []
+        self.get_wrappers: list[RunContextWrapper[Any] | None] = []
+        self.add_wrappers: list[RunContextWrapper[Any] | None] = []
+
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
+        self.get_wrappers.append(wrapper)
+        if limit is None:
+            return list(self.items)
+        return list(self.items[-limit:]) if limit > 0 else []
+
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        self.add_wrappers.append(wrapper)
+        self.items.extend(items)
+
+    async def pop_item(self) -> TResponseInputItem | None:
+        return self.items.pop() if self.items else None
+
+    async def clear_session(self) -> None:
+        self.items.clear()
+
+
+class LegacyCompatibleSession(SessionABC):
+    session_id = "legacy-compatible"
+
+    def __init__(self) -> None:
+        self.items: list[TResponseInputItem] = []
+        self.get_call_count = 0
+        self.add_call_count = 0
+
+    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        self.get_call_count += 1
+        if limit is None:
+            return list(self.items)
+        return list(self.items[-limit:]) if limit > 0 else []
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        self.add_call_count += 1
+        self.items.extend(items)
+
+    async def pop_item(self) -> TResponseInputItem | None:
+        return self.items.pop() if self.items else None
+
+    async def clear_session(self) -> None:
+        self.items.clear()
 
 
 # Parametrized tests for different runner methods
@@ -140,6 +201,54 @@ async def test_session_memory_disabled_parametrized(runner_method):
     # Verify that the input to the second turn is just the current message
     last_input = model.last_turn_args["input"]
     assert len(last_input) == 1  # Should only have the current message
+
+
+@pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
+@pytest.mark.asyncio
+async def test_session_history_paths_receive_context_wrapper_when_supported(runner_method):
+    session = WrapperAwareSession()
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    context = {"request_id": "ctx-123"}
+
+    model.set_next_output([get_text_message("Hello")])
+    result = await run_agent_async(
+        runner_method,
+        agent,
+        "Hi there",
+        session=session,
+        context=context,
+    )
+
+    assert result.final_output == "Hello"
+    assert session.get_wrappers
+    assert any(wrapper is not None for wrapper in session.add_wrappers)
+    assert session.get_wrappers[0] is not None
+    assert session.get_wrappers[0].context == context
+    assert session.add_wrappers[0] is not None
+    assert session.add_wrappers[0].context == context
+
+
+@pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
+@pytest.mark.asyncio
+async def test_legacy_session_signatures_remain_compatible(runner_method):
+    session = LegacyCompatibleSession()
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+
+    model.set_next_output([get_text_message("Hello")])
+    result = await run_agent_async(
+        runner_method,
+        agent,
+        "Hi there",
+        session=session,
+        context={"request_id": "legacy"},
+    )
+
+    assert result.final_output == "Hello"
+    assert session.get_call_count > 0
+    assert session.add_call_count > 0
+    assert session.items
 
 
 @pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])

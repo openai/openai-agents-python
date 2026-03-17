@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from openai import AsyncOpenAI
 
 from ..models._openai_shared import get_default_openai_client
+from ..run_context import RunContextWrapper
 from .openai_conversations_session import OpenAIConversationsSession
 from .session import (
     OpenAIResponsesCompactionArgs,
@@ -22,6 +24,18 @@ logger = logging.getLogger("openai-agents.openai.compaction")
 DEFAULT_COMPACTION_THRESHOLD = 10
 
 OpenAIResponsesCompactionMode = Literal["previous_response_id", "input", "auto"]
+
+
+def _method_accepts_wrapper(method: Any) -> bool:
+    try:
+        parameters = tuple(inspect.signature(method).parameters.values())
+    except (TypeError, ValueError):
+        return False
+
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD or parameter.name == "wrapper"
+        for parameter in parameters
+    )
 
 
 def select_compaction_candidate_items(
@@ -236,7 +250,13 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             f"candidates={len(self._compaction_candidate_items)})"
         )
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
+        if wrapper is not None and _method_accepts_wrapper(self.underlying_session.get_items):
+            return await self.underlying_session.get_items(limit, wrapper=wrapper)
         return await self.underlying_session.get_items(limit)
 
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
@@ -265,8 +285,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     def _clear_deferred_compaction(self) -> None:
         self._deferred_response_id = None
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
-        await self.underlying_session.add_items(items)
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        if wrapper is not None and _method_accepts_wrapper(self.underlying_session.add_items):
+            await self.underlying_session.add_items(items, wrapper=wrapper)
+        else:
+            await self.underlying_session.add_items(items)
         if self._compaction_candidate_items is not None:
             new_candidates = select_compaction_candidate_items(items)
             if new_candidates:

@@ -5,8 +5,10 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
+from typing import Any
 
 from ..items import TResponseInputItem
+from ..run_context import RunContextWrapper
 from .session import SessionABC
 from .session_settings import SessionSettings, resolve_session_limit
 
@@ -114,7 +116,11 @@ class SQLiteSession(SessionABC):
 
         conn.commit()
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -170,7 +176,11 @@ class SQLiteSession(SessionABC):
 
         return await asyncio.to_thread(_get_items_sync)
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:

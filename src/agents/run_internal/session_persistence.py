@@ -23,6 +23,7 @@ from ..memory import (
     is_openai_responses_compaction_aware_session,
 )
 from ..memory.openai_conversations_session import OpenAIConversationsSession
+from ..run_context import RunContextWrapper
 from ..run_state import RunState
 from .items import (
     ReasoningItemIdPolicy,
@@ -50,6 +51,41 @@ __all__ = [
 ]
 
 
+def _session_method_accepts_wrapper(method: Any) -> bool:
+    try:
+        parameters = tuple(inspect.signature(method).parameters.values())
+    except (TypeError, ValueError):
+        return False
+
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD or parameter.name == "wrapper"
+        for parameter in parameters
+    )
+
+
+async def _session_get_items(
+    session: Session,
+    limit: int | None = None,
+    *,
+    wrapper: RunContextWrapper[Any] | None = None,
+) -> list[TResponseInputItem]:
+    if wrapper is not None and _session_method_accepts_wrapper(session.get_items):
+        return await session.get_items(limit=limit, wrapper=wrapper)
+    return await session.get_items(limit=limit)
+
+
+async def _session_add_items(
+    session: Session,
+    items: list[TResponseInputItem],
+    *,
+    wrapper: RunContextWrapper[Any] | None = None,
+) -> None:
+    if wrapper is not None and _session_method_accepts_wrapper(session.add_items):
+        await session.add_items(items, wrapper=wrapper)
+        return
+    await session.add_items(items)
+
+
 async def prepare_input_with_session(
     input: str | list[TResponseInputItem],
     session: Session | None,
@@ -58,6 +94,7 @@ async def prepare_input_with_session(
     *,
     include_history_in_prepared_input: bool = True,
     preserve_dropped_new_items: bool = False,
+    wrapper: RunContextWrapper[Any] | None = None,
 ) -> tuple[str | list[TResponseInputItem], list[TResponseInputItem]]:
     """Prepare model input from session history plus the new turn input.
 
@@ -82,9 +119,13 @@ async def prepare_input_with_session(
         resolved_settings = resolved_settings.resolve(session_settings)
 
     if resolved_settings.limit is not None:
-        history = await session.get_items(limit=resolved_settings.limit)
+        history = await _session_get_items(
+            session,
+            limit=resolved_settings.limit,
+            wrapper=wrapper,
+        )
     else:
-        history = await session.get_items()
+        history = await _session_get_items(session, wrapper=wrapper)
     converted_history = [ensure_input_item_format(item) for item in history]
 
     new_input_list = [
@@ -233,6 +274,7 @@ async def save_result_to_session(
     response_id: str | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
+    wrapper: RunContextWrapper[Any] | None = None,
 ) -> int:
     """
     Persist a turn to the session store, keeping track of what was already saved so retries
@@ -316,7 +358,7 @@ async def save_result_to_session(
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
         return saved_run_items_count
 
-    await session.add_items(items_to_save)
+    await _session_add_items(session, items_to_save, wrapper=wrapper)
 
     if run_state:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
@@ -367,6 +409,7 @@ async def save_resumed_turn_items(
     response_id: str | None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
+    wrapper: RunContextWrapper[Any] | None = None,
 ) -> int:
     """Persist resumed turn items and return the updated persisted count."""
     if session is None or not items:
@@ -379,6 +422,7 @@ async def save_resumed_turn_items(
         response_id=response_id,
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
+        wrapper=wrapper,
     )
     return persisted_count + saved_count
 

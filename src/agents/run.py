@@ -454,6 +454,8 @@ class AgentRunner:
 
             max_turns = run_state._max_turns
         else:
+            context_wrapper = ensure_context_wrapper(context)
+            context = context_wrapper.context
             raw_input = cast(Union[str, list[TResponseInputItem]], input)
             original_user_input = raw_input
 
@@ -478,6 +480,7 @@ class AgentRunner:
                     run_config.session_settings,
                     include_history_in_prepared_input=False,
                     preserve_dropped_new_items=True,
+                    wrapper=context_wrapper,
                 )
                 original_input_for_state = raw_input
                 session_input_items_for_persistence = []
@@ -490,6 +493,7 @@ class AgentRunner:
                     session,
                     run_config.session_input_callback,
                     run_config.session_settings,
+                    wrapper=context_wrapper,
                 )
                 original_input_for_state = prepared_input
 
@@ -569,7 +573,6 @@ class AgentRunner:
                 generated_items = []
                 session_items = []
                 model_responses = []
-                context_wrapper = ensure_context_wrapper(context)
                 set_agent_tool_state_scope(context_wrapper, None)
                 run_state = RunState(
                     context=context_wrapper,
@@ -631,6 +634,7 @@ class AgentRunner:
                     [],
                     run_state,
                     store=store_setting,
+                    wrapper=context_wrapper,
                 )
                 session_input_items_for_persistence = []
 
@@ -700,6 +704,7 @@ class AgentRunner:
                                             run_state._reasoning_item_id_policy
                                         ),
                                         store=store_setting,
+                                        wrapper=context_wrapper,
                                     )
                                 )
 
@@ -818,6 +823,7 @@ class AgentRunner:
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
+                                        wrapper=context_wrapper,
                                     )
                                 result._original_input = copy_input_items(original_input)
                                 return finalize_conversation_tracking(
@@ -955,6 +961,7 @@ class AgentRunner:
                                 run_state,
                                 response_id=None,
                                 store=store_setting,
+                                wrapper=context_wrapper,
                             )
                         result._original_input = copy_input_items(original_input)
                         return finalize_conversation_tracking(
@@ -1159,6 +1166,7 @@ class AgentRunner:
                                             run_state._reasoning_item_id_policy
                                         ),
                                         store=store_setting,
+                                        wrapper=context_wrapper,
                                     )
                                     run_state._current_turn_persisted_item_count += saved_count
                                 else:
@@ -1169,6 +1177,7 @@ class AgentRunner:
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
+                                        wrapper=context_wrapper,
                                     )
 
                     # After the first resumed turn, treat subsequent turns as fresh
@@ -1223,6 +1232,7 @@ class AgentRunner:
                                 items=session_items_for_turn(turn_result),
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
+                                wrapper=context_wrapper,
                             )
                             result._original_input = copy_input_items(original_input)
                             return finalize_conversation_tracking(
@@ -1246,6 +1256,7 @@ class AgentRunner:
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
+                                        wrapper=context_wrapper,
                                     )
                             append_model_response_if_new(
                                 model_responses, turn_result.model_response
@@ -1311,6 +1322,7 @@ class AgentRunner:
                                 items=session_items_for_turn(turn_result),
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
+                                wrapper=context_wrapper,
                             )
                             continue
                         else:
