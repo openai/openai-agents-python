@@ -1,5 +1,6 @@
 {
   "include": ["src", "tests"],
+  "exclude": ["src/agents/sandbox/app_server/generated"],
   "extraPaths": ["."],
   "pythonVersion": "3.10",
   "typeCheckingMode": "basic",

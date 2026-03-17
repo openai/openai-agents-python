@@ -13,6 +13,7 @@ dependencies = [
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
     "types-requests>=2.0, <3",
+    "websockets>=15.0, <16",
     "mcp>=1.19.0, <2; python_version >= '3.10'",
 ]
 classifiers = [
@@ -115,6 +116,7 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "examples/**/*.py" = ["E501"]
+"src/agents/sandbox/app_server/generated/v2_all.py" = ["E501"]
 
 [tool.mypy]
 strict = true
@@ -125,6 +127,10 @@ disallow_untyped_calls = false
 [[tool.mypy.overrides]]
 module = "sounddevice.*"
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "agents.sandbox.app_server.generated.*"
+ignore_errors = true
 
 [tool.coverage.run]
 source = ["src/agents"]
