@@ -33,6 +33,7 @@ from .session_persistence import save_result_to_session
 from .tool_use_tracker import AgentToolUseTracker, serialize_tool_use_tracker
 
 __all__ = [
+    "attach_run_state_metadata",
     "apply_resumed_conversation_settings",
     "append_model_response_if_new",
     "build_generated_items_details",
@@ -276,6 +277,17 @@ def finalize_conversation_tracking(
     return result
 
 
+def attach_run_state_metadata(result: RunResult, *, run_state: RunState | None) -> RunResult:
+    """Copy resumable state metadata from the current RunState onto a RunResult."""
+    if run_state is None:
+        return result
+
+    result._state = run_state
+    result._current_turn_persisted_item_count = run_state._current_turn_persisted_item_count
+    result._trace_state = run_state._trace_state
+    return result
+
+
 def build_interruption_result(
     *,
     result_input: str | list[TResponseInputItem],
@@ -315,10 +327,7 @@ def build_interruption_result(
     result._current_turn = current_turn
     result._model_input_items = list(generated_items)
     result._replay_from_model_input_items = list(generated_items) != list(session_items)
-    if run_state is not None:
-        result._state = run_state
-        result._current_turn_persisted_item_count = run_state._current_turn_persisted_item_count
-        result._trace_state = run_state._trace_state
+    attach_run_state_metadata(result, run_state=run_state)
     result._original_input = copy_input_items(original_input)
     return result
 

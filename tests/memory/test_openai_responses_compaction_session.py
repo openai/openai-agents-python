@@ -551,8 +551,8 @@ class TestOpenAIResponsesCompactionSession:
         first_kwargs = mock_client.responses.compact.call_args_list[0].kwargs
         second_kwargs = mock_client.responses.compact.call_args_list[1].kwargs
         assert "previous_response_id" not in first_kwargs
-        assert "previous_response_id" not in second_kwargs
-        assert second_kwargs.get("input") == []
+        assert second_kwargs.get("previous_response_id") == "resp-stored"
+        assert "input" not in second_kwargs
 
     @pytest.mark.asyncio
     async def test_run_compaction_auto_uses_input_when_last_response_unstored(self) -> None:

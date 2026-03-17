@@ -186,17 +186,58 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         return resolved_mode
 
+    def _resolve_store_tracking(
+        self,
+        *,
+        response_id: str | None,
+        previous_response_id: str | None,
+        store: bool | None,
+        store_was_provided: bool,
+    ) -> bool | None:
+        """Resolve the effective store setting for the current response id.
+
+        Reuse `_last_store` only while compaction still refers to the same response. A new
+        response id with no explicit `store` falls back to the Responses API default behavior.
+        """
+        if store_was_provided:
+            self._last_store = store
+            return store
+
+        if response_id is not None and response_id != previous_response_id:
+            self._last_store = None
+            return None
+
+        return self._last_store
+
+    def _get_effective_store_for_response_id(
+        self,
+        *,
+        response_id: str | None,
+        store: bool | None,
+    ) -> bool | None:
+        """Return the effective store setting without mutating response tracking."""
+        if store is not None:
+            return store
+        if response_id is not None and response_id != self._response_id:
+            return None
+        return self._last_store
+
     async def run_compaction(self, args: OpenAIResponsesCompactionArgs | None = None) -> None:
         """Run compaction using responses.compact API."""
         previous_response_id = self._response_id
         if args and args.get("response_id"):
             self._response_id = args["response_id"]
         requested_mode = args.get("compaction_mode") if args else None
-        if args and "store" in args:
-            store: bool | None = args["store"]
-            self._last_store = store
-        else:
-            store = self._last_store
+        store_was_provided = bool(args and "store" in args)
+        requested_store: bool | None = (
+            args["store"] if args is not None and "store" in args else None
+        )
+        store = self._resolve_store_tracking(
+            response_id=self._response_id,
+            previous_response_id=previous_response_id,
+            store=requested_store,
+            store_was_provided=store_was_provided,
+        )
         turn_has_local_adds_without_new_response_id = (
             self._has_unacknowledged_local_session_adds
             and (args is None or args.get("response_id") in {None, previous_response_id})
@@ -323,7 +364,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         resolved_mode = _resolve_compaction_mode(
             self.compaction_mode,
             response_id=response_id,
-            store=store if store is not None else self._last_store,
+            store=self._get_effective_store_for_response_id(response_id=response_id, store=store),
         )
         should_compact = self.should_trigger_compaction(
             {

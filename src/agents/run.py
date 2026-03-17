@@ -47,6 +47,7 @@ from .run_error_handlers import RunErrorHandlers
 from .run_internal.agent_runner_helpers import (
     append_model_response_if_new,
     apply_resumed_conversation_settings,
+    attach_run_state_metadata,
     build_interruption_result,
     build_resumed_stream_debug_extra,
     ensure_context_wrapper,
@@ -828,8 +829,6 @@ class AgentRunner:
                                 result._replay_from_model_input_items = list(
                                     generated_items
                                 ) != list(session_items)
-                                if run_state is not None:
-                                    result._trace_state = run_state._trace_state
                                 if session_persistence_enabled:
                                     input_items_for_save_1: list[TResponseInputItem] = (
                                         session_input_items_for_persistence
@@ -844,6 +843,7 @@ class AgentRunner:
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
                                     )
+                                attach_run_state_metadata(result, run_state=run_state)
                                 result._original_input = copy_input_items(original_input)
                                 return finalize_conversation_tracking(
                                     _with_reasoning_item_id_policy(result),
@@ -965,8 +965,6 @@ class AgentRunner:
                         result._replay_from_model_input_items = list(generated_items) != list(
                             session_items
                         )
-                        if run_state is not None:
-                            result._trace_state = run_state._trace_state
                         if session_persistence_enabled and include_in_history:
                             handler_input_items_for_save: list[TResponseInputItem] = (
                                 session_input_items_for_persistence
@@ -981,6 +979,7 @@ class AgentRunner:
                                 response_id=None,
                                 store=store_setting,
                             )
+                        attach_run_state_metadata(result, run_state=run_state)
                         result._original_input = copy_input_items(original_input)
                         return finalize_conversation_tracking(
                             _with_reasoning_item_id_policy(result),
@@ -1236,10 +1235,6 @@ class AgentRunner:
                             result._replay_from_model_input_items = list(generated_items) != list(
                                 session_items
                             )
-                            if run_state is not None:
-                                result._current_turn_persisted_item_count = (
-                                    run_state._current_turn_persisted_item_count
-                                )
                             await save_turn_items_if_needed(
                                 session=session,
                                 run_state=run_state,
@@ -1249,6 +1244,7 @@ class AgentRunner:
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
                             )
+                            attach_run_state_metadata(result, run_state=run_state)
                             result._original_input = copy_input_items(original_input)
                             return finalize_conversation_tracking(
                                 _with_reasoning_item_id_policy(result),

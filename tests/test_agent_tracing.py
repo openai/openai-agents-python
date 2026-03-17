@@ -342,6 +342,23 @@ async def test_approval_override_respects_restored_sensitive_trace_flag() -> Non
 
 
 @pytest.mark.asyncio
+async def test_completed_result_to_state_preserves_sensitive_trace_flag() -> None:
+    model = FakeModel()
+    model.add_multiple_turn_outputs([[get_text_message("done")]])
+    agent = Agent(name="trace_agent", model=model)
+
+    result = await Runner.run(
+        agent,
+        input="first_test",
+        run_config=RunConfig(trace_include_sensitive_data=False),
+    )
+
+    state = result.to_state()
+
+    assert state._trace_include_sensitive_data is False
+
+
+@pytest.mark.asyncio
 async def test_wrapped_trace_is_single_trace():
     model = FakeModel()
     model.add_multiple_turn_outputs(
