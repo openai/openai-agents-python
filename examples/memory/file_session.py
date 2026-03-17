@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from agents.memory.session import Session
+from agents.run_context import RunContextWrapper
 from agents.memory.session_settings import SessionSettings
 
 
@@ -43,14 +44,22 @@ class FileSession(Session):
         """Return the session id, creating one if needed."""
         return await self._ensure_session_id()
 
-    async def get_items(self, limit: int | None = None) -> list[Any]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[Any]:
         session_id = await self._ensure_session_id()
         items = await self._read_items(session_id)
         if limit is not None and limit >= 0:
             return items[-limit:]
         return items
 
-    async def add_items(self, items: list[Any]) -> None:
+    async def add_items(
+        self,
+        items: list[Any],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         if not items:
             return
         session_id = await self._ensure_session_id()

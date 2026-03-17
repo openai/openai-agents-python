@@ -85,7 +85,7 @@ class WrapperAwareSession(SessionABC):
         self.items.clear()
 
 
-class LegacyCompatibleSession(SessionABC):
+class LegacyCompatibleSession:
     session_id = "legacy-compatible"
 
     def __init__(self) -> None:
@@ -654,7 +654,7 @@ async def test_session_add_items_exception_propagates_in_streamed():
     """
     session = SQLiteSession("test_exception_session")
 
-    async def _failing_add_items(_items):
+    async def _failing_add_items(_items, wrapper=None):
         raise RuntimeError("Simulated session.add_items failure")
 
     session.add_items = _failing_add_items  # type: ignore[method-assign]

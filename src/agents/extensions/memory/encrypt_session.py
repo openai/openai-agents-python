@@ -31,6 +31,8 @@ import base64
 import json
 from typing import Any, cast
 
+from ...run_context import RunContextWrapper
+
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -170,8 +172,15 @@ class EncryptedSession(SessionABC):
         except (InvalidToken, KeyError):
             return None
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
-        encrypted_items = await self.underlying_session.get_items(limit)
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
+        if wrapper is not None:
+            encrypted_items = await self.underlying_session.get_items(limit, wrapper=wrapper)
+        else:
+            encrypted_items = await self.underlying_session.get_items(limit)
         valid_items: list[TResponseInputItem] = []
         for enc in encrypted_items:
             item = self._unwrap(enc)
@@ -179,9 +188,16 @@ class EncryptedSession(SessionABC):
                 valid_items.append(item)
         return valid_items
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         wrapped: list[EncryptedEnvelope] = [self._wrap(it) for it in items]
-        await self.underlying_session.add_items(cast(list[TResponseInputItem], wrapped))
+        if wrapper is not None:
+            await self.underlying_session.add_items(cast(list[TResponseInputItem], wrapped), wrapper=wrapper)
+        else:
+            await self.underlying_session.add_items(cast(list[TResponseInputItem], wrapped))
 
     async def pop_item(self) -> TResponseInputItem | None:
         while True:

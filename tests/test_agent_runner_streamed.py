@@ -1126,7 +1126,11 @@ async def test_stream_input_persistence_strips_ids_for_openai_conversation_sessi
         async def _get_session_id(self) -> str:
             return "conv_test"
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(
+            self,
+            items: list[TResponseInputItem],
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> None:
             for item in items:
                 if isinstance(item, dict):
                     assert "id" not in item, "IDs should be stripped before saving"
@@ -1135,7 +1139,11 @@ async def test_stream_input_persistence_strips_ids_for_openai_conversation_sessi
                     )
             self.saved.append(items)
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self,
+            limit: int | None = None,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> list[TResponseInputItem]:
             return []
 
         async def pop_item(self) -> TResponseInputItem | None:

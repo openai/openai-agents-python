@@ -319,10 +319,18 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
         session_id = "sess_123"
         session_settings = SessionSettings()
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self,
+            limit: int | None = None,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> list[TResponseInputItem]:
             return []
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(
+            self,
+            items: list[TResponseInputItem],
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> None:
             return None
 
         async def pop_item(self) -> TResponseInputItem | None:

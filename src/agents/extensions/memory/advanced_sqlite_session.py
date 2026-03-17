@@ -8,6 +8,8 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Union, cast
 
+from ...run_context import RunContextWrapper
+
 from agents.result import RunResult
 from agents.usage import Usage
 
@@ -122,14 +124,18 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         conn.commit()
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Add items to the session.
 
         Args:
             items: The items to add to the session
         """
         # Add to base table first
-        await super().add_items(items)
+        await super().add_items(items, wrapper=wrapper)
 
         # Extract structure metadata with precise sequencing
         if items:
@@ -138,6 +144,7 @@ class AdvancedSQLiteSession(SQLiteSession):
     async def get_items(
         self,
         limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
         branch_id: str | None = None,
     ) -> list[TResponseInputItem]:
         """Get items from current or specified branch.

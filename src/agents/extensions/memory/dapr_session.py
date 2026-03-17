@@ -29,6 +29,8 @@ import random
 import time
 from typing import Any, Final, Literal
 
+from ...run_context import RunContextWrapper
+
 try:
     from dapr.aio.clients import DaprClient
     from dapr.clients.grpc._state import Concurrency, Consistency, StateOptions
@@ -232,7 +234,11 @@ class DaprSession(SessionABC):
     # Session protocol implementation
     # ------------------------------------------------------------------
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -271,7 +277,11 @@ class DaprSession(SessionABC):
                     continue
             return items
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:

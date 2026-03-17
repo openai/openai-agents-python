@@ -27,6 +27,8 @@ import asyncio
 import json
 from typing import Any
 
+from ...run_context import RunContextWrapper
+
 from sqlalchemy import (
     TIMESTAMP,
     Column,
@@ -187,7 +189,11 @@ class SQLAlchemySession(SessionABC):
                 await conn.run_sync(self._metadata.create_all)
             self._create_tables = False  # Only create once
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -239,7 +245,11 @@ class SQLAlchemySession(SessionABC):
                     continue
             return items
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:

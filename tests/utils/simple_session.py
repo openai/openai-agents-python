@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 from agents.items import TResponseInputItem
+from agents.run_context import RunContextWrapper
 from agents.memory.session import Session
 from agents.memory.session_settings import SessionSettings
 
@@ -24,14 +25,22 @@ class SimpleListSession(Session):
         # Mirror saved_items used by some tests for inspection.
         self.saved_items: list[TResponseInputItem] = self._items
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         if limit is None:
             return list(self._items)
         if limit <= 0:
             return []
         return self._items[-limit:]
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         self._items.extend(items)
 
     async def pop_item(self) -> TResponseInputItem | None:
@@ -70,7 +79,11 @@ class IdStrippingSession(CountingSession):
         super().__init__(session_id=session_id, history=history)
         self._ignore_ids_for_matching = True
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         sanitized: list[TResponseInputItem] = []
         for item in items:
             if isinstance(item, dict):
@@ -79,4 +92,4 @@ class IdStrippingSession(CountingSession):
                 sanitized.append(cast(TResponseInputItem, clean))
             else:
                 sanitized.append(item)
-        await super().add_items(sanitized)
+        await super().add_items(sanitized, wrapper=wrapper)
