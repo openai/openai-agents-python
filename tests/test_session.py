@@ -110,6 +110,29 @@ class LegacyCompatibleSession:
         self.items.clear()
 
 
+class LegacyNoLimitKeywordSession:
+    session_id = "legacy-no-limit-keyword"
+
+    def __init__(self) -> None:
+        self.items: list[TResponseInputItem] = []
+        self.get_call_count = 0
+        self.add_call_count = 0
+
+    async def get_items(self) -> list[TResponseInputItem]:
+        self.get_call_count += 1
+        return list(self.items)
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        self.add_call_count += 1
+        self.items.extend(items)
+
+    async def pop_item(self) -> TResponseInputItem | None:
+        return self.items.pop() if self.items else None
+
+    async def clear_session(self) -> None:
+        self.items.clear()
+
+
 # Parametrized tests for different runner methods
 @pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
 @pytest.mark.asyncio
@@ -243,6 +266,28 @@ async def test_legacy_session_signatures_remain_compatible(runner_method):
         "Hi there",
         session=session,
         context={"request_id": "legacy"},
+    )
+
+    assert result.final_output == "Hello"
+    assert session.get_call_count > 0
+    assert session.add_call_count > 0
+    assert session.items
+
+
+@pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
+@pytest.mark.asyncio
+async def test_legacy_session_without_limit_keyword_remains_compatible(runner_method):
+    session = LegacyNoLimitKeywordSession()
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+
+    model.set_next_output([get_text_message("Hello")])
+    result = await run_agent_async(
+        runner_method,
+        agent,
+        "Hi there",
+        session=session,
+        context={"request_id": "legacy-no-limit"},
     )
 
     assert result.final_output == "Hello"

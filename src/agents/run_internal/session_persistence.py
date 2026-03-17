@@ -51,14 +51,27 @@ __all__ = [
 ]
 
 
-def _session_method_accepts_wrapper(method: Any) -> bool:
+def _session_method_signature(method: Any) -> tuple[inspect.Parameter, ...]:
     try:
-        parameters = tuple(inspect.signature(method).parameters.values())
+        return tuple(inspect.signature(method).parameters.values())
     except (TypeError, ValueError):
-        return False
+        return ()
 
+
+def _session_method_accepts_wrapper(method: Any) -> bool:
+    parameters = _session_method_signature(method)
     return any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD or parameter.name == "wrapper"
+        for parameter in parameters
+    )
+
+
+def _session_method_accepts_limit(method: Any) -> bool:
+    parameters = _session_method_signature(method)
+    return any(
+        parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        and parameter.name == "limit"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in parameters
     )
 
@@ -71,6 +84,8 @@ async def _session_get_items(
 ) -> list[TResponseInputItem]:
     if wrapper is not None and _session_method_accepts_wrapper(session.get_items):
         return await session.get_items(limit=limit, wrapper=wrapper)
+    if limit is None and not _session_method_accepts_limit(session.get_items):
+        return await session.get_items()
     return await session.get_items(limit=limit)
 
 
