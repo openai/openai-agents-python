@@ -59,7 +59,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         conn = self._get_connection()
 
         # Message structure with branch support
-        conn.execute("""
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS message_structure (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -71,13 +71,15 @@ class AdvancedSQLiteSession(SQLiteSession):
                 branch_turn_number INTEGER,
                 tool_name TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id) ON DELETE CASCADE,
-                FOREIGN KEY (message_id) REFERENCES agent_messages(id) ON DELETE CASCADE
+                FOREIGN KEY (session_id)
+                    REFERENCES {self.sessions_table}(session_id) ON DELETE CASCADE,
+                FOREIGN KEY (message_id)
+                    REFERENCES {self.messages_table}(id) ON DELETE CASCADE
             )
         """)
 
         # Turn-level usage tracking with branch support and full JSON details
-        conn.execute("""
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS turn_usage (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -90,7 +92,8 @@ class AdvancedSQLiteSession(SQLiteSession):
                 input_tokens_details JSON,
                 output_tokens_details JSON,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id) ON DELETE CASCADE,
+                FOREIGN KEY (session_id)
+                    REFERENCES {self.sessions_table}(session_id) ON DELETE CASCADE,
                 UNIQUE(session_id, branch_id, user_turn_number)
             )
         """)
@@ -160,9 +163,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                     with closing(conn.cursor()) as cursor:
                         if session_limit is None:
                             cursor.execute(
-                                """
+                                f"""
                                 SELECT m.message_data
-                                FROM agent_messages m
+                                FROM {self.messages_table} m
                                 JOIN message_structure s ON m.id = s.message_id
                                 WHERE m.session_id = ? AND s.branch_id = ?
                                 ORDER BY s.sequence_number ASC
@@ -171,9 +174,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                             )
                         else:
                             cursor.execute(
-                                """
+                                f"""
                                 SELECT m.message_data
-                                FROM agent_messages m
+                                FROM {self.messages_table} m
                                 JOIN message_structure s ON m.id = s.message_id
                                 WHERE m.session_id = ? AND s.branch_id = ?
                                 ORDER BY s.sequence_number DESC
@@ -206,9 +209,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                     # Get message IDs in correct order for this branch
                     if session_limit is None:
                         cursor.execute(
-                            """
+                            f"""
                             SELECT m.message_data
-                            FROM agent_messages m
+                            FROM {self.messages_table} m
                             JOIN message_structure s ON m.id = s.message_id
                             WHERE m.session_id = ? AND s.branch_id = ?
                             ORDER BY s.sequence_number ASC
@@ -217,9 +220,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                         )
                     else:
                         cursor.execute(
-                            """
+                            f"""
                             SELECT m.message_data
-                            FROM agent_messages m
+                            FROM {self.messages_table} m
                             JOIN message_structure s ON m.id = s.message_id
                             WHERE m.session_id = ? AND s.branch_id = ?
                             ORDER BY s.sequence_number DESC
@@ -439,7 +442,7 @@ class AdvancedSQLiteSession(SQLiteSession):
             # Don't re-raise - structure metadata is supplementary
 
     async def _cleanup_orphaned_messages(self) -> int:
-        """Remove messages that exist in agent_messages but not in message_structure.
+        """Remove messages that exist in the configured message table but not in message_structure.
 
         This can happen if _add_structure_metadata fails after super().add_items() succeeds.
         Used for maintaining data consistency.
@@ -453,9 +456,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                 with closing(conn.cursor()) as cursor:
                     # Find messages without structure metadata
                     cursor.execute(
-                        """
+                        f"""
                         SELECT am.id
-                        FROM agent_messages am
+                        FROM {self.messages_table} am
                         LEFT JOIN message_structure ms ON am.id = ms.message_id
                         WHERE am.session_id = ? AND ms.message_id IS NULL
                     """,
@@ -468,7 +471,8 @@ class AdvancedSQLiteSession(SQLiteSession):
                         # Delete orphaned messages
                         placeholders = ",".join("?" * len(orphaned_ids))
                         cursor.execute(
-                            f"DELETE FROM agent_messages WHERE id IN ({placeholders})", orphaned_ids
+                            f"DELETE FROM {self.messages_table} WHERE id IN ({placeholders})",
+                            orphaned_ids,
                         )
 
                         deleted_count = cursor.rowcount
@@ -587,10 +591,10 @@ class AdvancedSQLiteSession(SQLiteSession):
             conn = self._get_connection()
             with closing(conn.cursor()) as cursor:
                 cursor.execute(
-                    """
+                    f"""
                     SELECT am.message_data
                     FROM message_structure ms
-                    JOIN agent_messages am ON ms.message_id = am.id
+                    JOIN {self.messages_table} am ON ms.message_id = am.id
                     WHERE ms.session_id = ? AND ms.branch_id = ?
                     AND ms.branch_turn_number = ? AND ms.message_type = 'user'
                     """,
@@ -920,13 +924,13 @@ class AdvancedSQLiteSession(SQLiteSession):
             conn = self._get_connection()
             with closing(conn.cursor()) as cursor:
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         ms.branch_turn_number,
                         am.message_data,
                         ms.created_at
                     FROM message_structure ms
-                    JOIN agent_messages am ON ms.message_id = am.id
+                    JOIN {self.messages_table} am ON ms.message_id = am.id
                     WHERE ms.session_id = ? AND ms.branch_id = ?
                     AND ms.message_type = 'user'
                     ORDER BY ms.branch_turn_number
@@ -975,13 +979,13 @@ class AdvancedSQLiteSession(SQLiteSession):
             conn = self._get_connection()
             with closing(conn.cursor()) as cursor:
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         ms.branch_turn_number,
                         am.message_data,
                         ms.created_at
                     FROM message_structure ms
-                    JOIN agent_messages am ON ms.message_id = am.id
+                    JOIN {self.messages_table} am ON ms.message_id = am.id
                     WHERE ms.session_id = ? AND ms.branch_id = ?
                     AND ms.message_type = 'user'
                     AND am.message_data LIKE ?
