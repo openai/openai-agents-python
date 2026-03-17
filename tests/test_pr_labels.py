@@ -43,9 +43,32 @@ def test_compute_desired_labels_removes_stale_fallback_labels() -> None:
         changed_files=["src/agents/models/chatcmpl_converter.py"],
         diff_text="",
         codex_ran=False,
+        codex_output_valid=False,
         codex_labels=[],
         base_sha=None,
         head_sha=None,
     )
 
     assert desired == {"feature:chat-completions"}
+
+
+def test_compute_desired_labels_falls_back_when_codex_output_is_invalid() -> None:
+    desired = pr_labels.compute_desired_labels(
+        changed_files=["src/agents/run_internal/approvals.py"],
+        diff_text="",
+        codex_ran=True,
+        codex_output_valid=False,
+        codex_labels=[],
+        base_sha=None,
+        head_sha=None,
+    )
+
+    assert desired == {"feature:core"}
+
+
+def test_compute_managed_labels_preserves_model_only_labels_without_valid_codex_output() -> None:
+    managed = pr_labels.compute_managed_labels(codex_ran=True, codex_output_valid=False)
+
+    assert "bug" not in managed
+    assert "enhancement" not in managed
+    assert "feature:core" in managed

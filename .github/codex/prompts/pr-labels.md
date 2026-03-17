@@ -3,11 +3,12 @@
 You are Codex running in CI to propose labels for a pull request in the openai-agents-python repository.
 
 Inputs:
+- PR context: .tmp/pr-labels/pr-context.json
 - PR diff: .tmp/pr-labels/changes.diff
 - Changed files: .tmp/pr-labels/changed-files.txt
 
 Task:
-- Inspect the diff and changed files.
+- Inspect the PR context, diff, and changed files.
 - Output JSON with a single top-level key: "labels" (array of strings).
 - Only use labels from the allowed list.
 - Prefer false negatives over false positives. If you are unsure, leave the label out.
@@ -53,7 +54,7 @@ Label rules:
 - feature:voice: Voice pipeline behavior is a primary deliverable of the PR.
 
 Decision process:
-1. Determine the PR's primary intent in one sentence from the title and dominant runtime diff.
+1. Determine the PR's primary intent in one sentence from the PR title/body and dominant runtime diff.
 2. Start with zero labels.
 3. Add `bug` or `enhancement` conservatively.
 4. Add only the minimum `feature:*` labels needed to describe the primary surface area.

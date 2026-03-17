@@ -26,6 +26,19 @@ ALLOWED_LABELS: Final[set[str]] = {
     "feature:voice",
 }
 
+DETERMINISTIC_LABELS: Final[set[str]] = {
+    "documentation",
+    "project",
+    "dependencies",
+}
+
+MODEL_ONLY_LABELS: Final[set[str]] = {
+    "bug",
+    "enhancement",
+}
+
+FEATURE_LABELS: Final[set[str]] = ALLOWED_LABELS - DETERMINISTIC_LABELS - MODEL_ONLY_LABELS
+
 SOURCE_FEATURE_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
     "feature:realtime": ("src/agents/realtime/",),
     "feature:voice": ("src/agents/voice/",),
@@ -201,27 +214,30 @@ def load_json(path: pathlib.Path) -> Any:
     return json.loads(path.read_text())
 
 
-def load_codex_labels(path: pathlib.Path) -> list[str]:
+def load_codex_labels(path: pathlib.Path) -> tuple[list[str], bool]:
     if not path.exists():
-        return []
+        return [], False
 
     raw = path.read_text().strip()
     if not raw:
-        return []
+        return [], False
 
     try:
         payload = load_json(path)
     except json.JSONDecodeError:
-        return []
+        return [], False
 
     if not isinstance(payload, dict):
-        return []
+        return [], False
 
-    labels = payload.get("labels", [])
+    labels = payload.get("labels")
     if not isinstance(labels, list):
-        return []
+        return [], False
 
-    return [label for label in labels if isinstance(label, str)]
+    if not all(isinstance(label, str) for label in labels):
+        return [], False
+
+    return list(labels), True
 
 
 def fetch_existing_labels(pr_number: str) -> set[str]:
@@ -237,6 +253,7 @@ def compute_desired_labels(
     changed_files: Sequence[str],
     diff_text: str,
     codex_ran: bool,
+    codex_output_valid: bool,
     codex_labels: Sequence[str],
     base_sha: str | None,
     head_sha: str | None,
@@ -257,7 +274,7 @@ def compute_desired_labels(
     if dependencies_allowed:
         desired.add("dependencies")
 
-    if codex_ran:
+    if codex_ran and codex_output_valid:
         for label in codex_labels:
             if label == "dependencies" and not dependencies_allowed:
                 continue
@@ -267,6 +284,13 @@ def compute_desired_labels(
 
     desired.update(infer_fallback_labels(changed_files))
     return desired
+
+
+def compute_managed_labels(*, codex_ran: bool, codex_output_valid: bool) -> set[str]:
+    managed = DETERMINISTIC_LABELS | FEATURE_LABELS
+    if codex_ran and codex_output_valid:
+        managed |= MODEL_ONLY_LABELS
+    return managed
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -308,18 +332,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         ]
 
     diff_text = changes_diff_path.read_text() if changes_diff_path.exists() else ""
+    codex_labels, codex_output_valid = load_codex_labels(codex_output_path)
+    if codex_ran and not codex_output_valid:
+        print(
+            "Codex output missing or invalid; using fallback feature labels and preserving "
+            "model-only labels."
+        )
     desired = compute_desired_labels(
         changed_files=changed_files,
         diff_text=diff_text,
         codex_ran=codex_ran,
-        codex_labels=load_codex_labels(codex_output_path),
+        codex_output_valid=codex_output_valid,
+        codex_labels=codex_labels,
         base_sha=args.base_sha or None,
         head_sha=args.head_sha or None,
     )
 
     existing = fetch_existing_labels(args.pr_number)
+    managed_labels = compute_managed_labels(
+        codex_ran=codex_ran,
+        codex_output_valid=codex_output_valid,
+    )
     to_add = sorted(desired - existing)
-    to_remove = sorted((existing & ALLOWED_LABELS) - desired)
+    to_remove = sorted((existing & managed_labels) - desired)
 
     if not to_add and not to_remove:
         print("Labels already up to date.")
