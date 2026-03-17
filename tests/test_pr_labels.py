@@ -40,6 +40,14 @@ def test_infer_fallback_labels_marks_core_for_runtime_changes() -> None:
     assert labels == {"feature:core"}
 
 
+def test_infer_fallback_labels_marks_sessions_for_extensions_memory_changes() -> None:
+    labels = pr_labels.infer_fallback_labels(
+        ["src/agents/extensions/memory/advanced_sqlite_session.py"]
+    )
+
+    assert labels == {"feature:sessions"}
+
+
 def test_compute_desired_labels_removes_stale_fallback_labels() -> None:
     desired = pr_labels.compute_desired_labels(
         pr_context=pr_labels.PRContext(),
@@ -98,6 +106,24 @@ def test_compute_desired_labels_infers_bug_from_fix_title() -> None:
     )
 
     assert desired == {"bug", "feature:core"}
+
+
+def test_compute_desired_labels_infers_sessions_for_extensions_memory_fix() -> None:
+    desired = pr_labels.compute_desired_labels(
+        pr_context=pr_labels.PRContext(title="fix(memory): honor custom table names"),
+        changed_files=[
+            "src/agents/extensions/memory/advanced_sqlite_session.py",
+            "tests/extensions/memory/test_advanced_sqlite_session.py",
+        ],
+        diff_text="",
+        codex_ran=True,
+        codex_output_valid=True,
+        codex_labels=[],
+        base_sha=None,
+        head_sha=None,
+    )
+
+    assert desired == {"bug", "feature:sessions"}
 
 
 def test_compute_managed_labels_preserves_model_only_labels_without_signal() -> None:

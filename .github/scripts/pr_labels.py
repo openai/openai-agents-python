@@ -45,7 +45,7 @@ SOURCE_FEATURE_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
     "feature:voice": ("src/agents/voice/",),
     "feature:mcp": ("src/agents/mcp/",),
     "feature:tracing": ("src/agents/tracing/",),
-    "feature:sessions": ("src/agents/memory/",),
+    "feature:sessions": ("src/agents/memory/", "src/agents/extensions/memory/"),
 }
 
 CORE_EXCLUDED_PREFIXES: Final[tuple[str, ...]] = (
