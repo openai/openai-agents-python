@@ -78,6 +78,7 @@ def _populate_state_from_result(
     auto_previous_response_id: bool = False,
 ) -> RunState[Any]:
     """Populate a RunState with common fields from a RunResult."""
+    source_state = getattr(result, "_state", None)
     model_input_items = getattr(result, "_model_input_items", None)
     if isinstance(model_input_items, list):
         state._generated_items = list(model_input_items)
@@ -106,6 +107,19 @@ def _populate_state_from_result(
     if trace_state is None:
         trace_state = TraceState.from_trace(getattr(result, "trace", None))
     state._trace_state = copy.deepcopy(trace_state) if trace_state else None
+    state._trace_include_sensitive_data = getattr(
+        source_state,
+        "_trace_include_sensitive_data",
+        True,
+    )
+    if isinstance(source_state, RunState):
+        state._session_history_mutations = source_state.get_session_history_mutations()
+        state._execution_only_approval_override_call_ids = list(
+            source_state._execution_only_approval_override_call_ids
+        )
+    else:
+        state._session_history_mutations = []
+        state._execution_only_approval_override_call_ids = []
 
     return state
 
@@ -316,6 +330,8 @@ class RunResult(RunResultBase):
     """The original input for the current run segment.
     This is updated when handoffs or resume logic replace the input history, and used by to_state()
     to preserve the correct originalInput when serializing state."""
+    _state: Any = field(default=None, repr=False)
+    """Internal reference to the originating RunState when available."""
     _conversation_id: str | None = field(default=None, repr=False)
     """Conversation identifier for server-managed runs."""
     _previous_response_id: str | None = field(default=None, repr=False)

@@ -12,6 +12,9 @@ from .session import (
     OpenAIResponsesCompactionArgs,
     OpenAIResponsesCompactionAwareSession,
     SessionABC,
+    SessionHistoryRewriteArgs,
+    apply_session_history_mutations,
+    is_session_history_rewrite_aware_session,
 )
 
 if TYPE_CHECKING:
@@ -130,7 +133,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._session_items: list[TResponseInputItem] | None = None
         self._response_id: str | None = None
         self._deferred_response_id: str | None = None
-        self._last_unstored_response_id: str | None = None
+        self._last_store: bool | None = None
+        self._has_pending_local_history_rewrite = False
+        self._local_history_rewrite_response_id: str | None = None
+        self._has_unacknowledged_local_session_adds = False
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -138,40 +144,76 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             self._client = get_default_openai_client() or AsyncOpenAI()
         return self._client
 
-    def _resolve_compaction_mode_for_response(
+    def _resolve_compaction_mode(
         self,
         *,
+        requested_mode: OpenAIResponsesCompactionMode,
         response_id: str | None,
         store: bool | None,
-        requested_mode: OpenAIResponsesCompactionMode | None,
+        turn_has_local_adds_without_new_response_id: bool,
     ) -> _ResolvedCompactionMode:
-        mode = requested_mode or self.compaction_mode
-        if (
-            mode == "auto"
-            and store is None
-            and response_id is not None
-            and response_id == self._last_unstored_response_id
-        ):
+        resolved_mode = _resolve_compaction_mode(
+            requested_mode,
+            response_id=response_id,
+            store=store,
+        )
+
+        if turn_has_local_adds_without_new_response_id and resolved_mode == "previous_response_id":
+            self._has_unacknowledged_local_session_adds = False
+            self._mark_local_history_rewrite()
+            logger.debug(
+                "compact: forcing input mode after local session delta without new response id"
+            )
             return "input"
-        return _resolve_compaction_mode(mode, response_id=response_id, store=store)
+
+        if not self._has_pending_local_history_rewrite:
+            return resolved_mode
+
+        if (
+            self._local_history_rewrite_response_id is not None
+            and response_id is not None
+            and response_id != self._local_history_rewrite_response_id
+        ):
+            self._has_pending_local_history_rewrite = False
+            self._local_history_rewrite_response_id = None
+            return resolved_mode
+
+        if resolved_mode == "previous_response_id":
+            if self._local_history_rewrite_response_id is None and response_id is not None:
+                self._local_history_rewrite_response_id = response_id
+            logger.debug("compact: forcing input mode after local history rewrite")
+            return "input"
+
+        return resolved_mode
 
     async def run_compaction(self, args: OpenAIResponsesCompactionArgs | None = None) -> None:
         """Run compaction using responses.compact API."""
+        previous_response_id = self._response_id
         if args and args.get("response_id"):
             self._response_id = args["response_id"]
         requested_mode = args.get("compaction_mode") if args else None
         if args and "store" in args:
-            store = args["store"]
-            if store is False and self._response_id:
-                self._last_unstored_response_id = self._response_id
-            elif store is True and self._response_id == self._last_unstored_response_id:
-                self._last_unstored_response_id = None
+            store: bool | None = args["store"]
+            self._last_store = store
         else:
-            store = None
-        resolved_mode = self._resolve_compaction_mode_for_response(
+            store = self._last_store
+        turn_has_local_adds_without_new_response_id = (
+            self._has_unacknowledged_local_session_adds
+            and (args is None or args.get("response_id") in {None, previous_response_id})
+        )
+        if (
+            args
+            and args.get("response_id") is not None
+            and args["response_id"] != previous_response_id
+        ):
+            self._has_unacknowledged_local_session_adds = False
+        resolved_mode = self._resolve_compaction_mode(
             response_id=self._response_id,
             store=store,
-            requested_mode=requested_mode,
+            requested_mode=requested_mode or self.compaction_mode,
+            turn_has_local_adds_without_new_response_id=(
+                turn_has_local_adds_without_new_response_id
+            ),
         )
 
         if resolved_mode == "previous_response_id" and not self._response_id:
@@ -196,6 +238,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             logger.debug(
                 f"skip: decision hook declined compaction for {self._response_id} "
                 f"(mode={resolved_mode})"
+            )
+            return
+
+        unresolved_function_calls = _find_unresolved_function_calls_without_results(session_items)
+        if unresolved_function_calls:
+            logger.debug(
+                "compact: blocked unresolved function calls for %s: %s",
+                self._response_id,
+                unresolved_function_calls,
             )
             return
 
@@ -242,14 +293,37 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit)
 
+    async def apply_history_mutations(self, args: SessionHistoryRewriteArgs) -> None:
+        """Rewrite persisted history and keep compaction caches aligned with the new transcript."""
+        mutations = list(args.get("mutations", []))
+        if not mutations:
+            return
+
+        if is_session_history_rewrite_aware_session(self.underlying_session):
+            await self.underlying_session.apply_history_mutations({"mutations": mutations})
+            await self._refresh_caches_from_underlying_session()
+            self._mark_local_history_rewrite()
+            return
+
+        rewritten_items = apply_session_history_mutations(
+            await self.underlying_session.get_items(),
+            mutations,
+        )
+        await self.underlying_session.clear_session()
+        if rewritten_items:
+            await self.underlying_session.add_items(rewritten_items)
+        self._session_items = rewritten_items
+        self._compaction_candidate_items = select_compaction_candidate_items(rewritten_items)
+        self._mark_local_history_rewrite()
+
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         if self._deferred_response_id is not None:
             return
         compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
-        resolved_mode = self._resolve_compaction_mode_for_response(
+        resolved_mode = _resolve_compaction_mode(
+            self.compaction_mode,
             response_id=response_id,
-            store=store,
-            requested_mode=None,
+            store=store if store is not None else self._last_store,
         )
         should_compact = self.should_trigger_compaction(
             {
@@ -269,7 +343,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._deferred_response_id = None
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
+        if not items:
+            return
         await self.underlying_session.add_items(items)
+        self._has_unacknowledged_local_session_adds = True
         if self._compaction_candidate_items is not None:
             new_items = _normalize_compaction_session_items(items)
             new_candidates = select_compaction_candidate_items(new_items)
@@ -290,6 +367,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._compaction_candidate_items = []
         self._session_items = []
         self._deferred_response_id = None
+        self._has_pending_local_history_rewrite = False
+        self._local_history_rewrite_response_id = None
+        self._has_unacknowledged_local_session_adds = False
+        self._last_store = None
+
+    async def _refresh_caches_from_underlying_session(self) -> None:
+        history = await self.underlying_session.get_items()
+        self._session_items = history
+        self._compaction_candidate_items = select_compaction_candidate_items(history)
 
     async def _ensure_compaction_candidates(
         self,
@@ -307,6 +393,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             f"candidates: initialized (history={len(history)}, candidates={len(candidates)})"
         )
         return (candidates[:], history[:])
+
+    def _mark_local_history_rewrite(self) -> None:
+        self._has_pending_local_history_rewrite = True
+        self._local_history_rewrite_response_id = self._response_id
 
 
 def _strip_orphaned_assistant_ids(
@@ -346,6 +436,29 @@ def _normalize_compaction_session_items(
 
 
 _ResolvedCompactionMode = Literal["previous_response_id", "input"]
+
+
+def _find_unresolved_function_calls_without_results(items: list[TResponseInputItem]) -> list[str]:
+    """Return function-call ids that do not yet have matching outputs."""
+    function_calls: dict[str, TResponseInputItem] = {}
+    resolved_call_ids: set[str] = set()
+
+    for item in items:
+        if isinstance(item, dict):
+            item_type = item.get("type")
+            call_id = item.get("call_id")
+        else:
+            item_type = getattr(item, "type", None)
+            call_id = getattr(item, "call_id", None)
+
+        if not isinstance(call_id, str):
+            continue
+        if item_type == "function_call":
+            function_calls[call_id] = item
+        elif item_type == "function_call_output":
+            resolved_call_ids.add(call_id)
+
+    return [call_id for call_id in function_calls if call_id not in resolved_call_ids]
 
 
 def _resolve_compaction_mode(

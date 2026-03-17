@@ -21,6 +21,7 @@ async def start_openai_conversations_session(openai_client: AsyncOpenAI | None =
 
 
 class OpenAIConversationsSession(SessionABC):
+    _server_managed_conversation_session = True
     session_settings: SessionSettings | None = None
 
     def __init__(

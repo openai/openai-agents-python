@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import warnings
 from typing import Union, cast
 
@@ -28,7 +29,7 @@ from .items import (
 )
 from .lifecycle import RunHooks
 from .logger import logger
-from .memory import Session
+from .memory import Session, is_server_managed_conversation_session
 from .result import RunResult, RunResultStreaming
 from .run_config import (
     DEFAULT_MAX_TURNS,
@@ -57,6 +58,7 @@ from .run_internal.agent_runner_helpers import (
     save_turn_items_if_needed,
     should_cancel_parallel_model_task_on_input_guardrail_trip,
     update_run_state_for_interruption,
+    validate_override_history_persistence_support,
     validate_session_conversation_settings,
 )
 from .run_internal.approvals import approvals_from_step
@@ -420,6 +422,7 @@ class AgentRunner:
         session_input_items_for_persistence: list[TResponseInputItem] | None = (
             [] if (session is not None and is_resumed_state) else None
         )
+        server_manages_conversation = False
         # Track the most recent input batch we persisted so conversation-lock retries can rewind
         # exactly those items (and not the full history).
         last_saved_input_snapshot_for_rewind: list[TResponseInputItem] | None = None
@@ -493,6 +496,26 @@ class AgentRunner:
                 )
                 original_input_for_state = prepared_input
 
+        server_manages_conversation = (
+            conversation_id is not None
+            or previous_response_id is not None
+            or auto_previous_response_id
+        )
+        history_is_server_managed = (
+            server_manages_conversation or is_server_managed_conversation_session(session)
+        )
+        validate_override_history_persistence_support(
+            input=input,
+            session=session,
+            history_is_server_managed=history_is_server_managed,
+        )
+
+        if is_resumed_state and run_state is not None:
+            run_config = dataclasses.replace(
+                run_config,
+                trace_include_sensitive_data=run_state._trace_include_sensitive_data,
+            )
+
         resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
             run_config.reasoning_item_id_policy
             if run_config.reasoning_item_id_policy is not None
@@ -554,6 +577,7 @@ class AgentRunner:
             reattach_resumed_trace=is_resumed_state,
         ):
             if is_resumed_state and run_state is not None:
+                run_state.set_trace_include_sensitive_data(run_config.trace_include_sensitive_data)
                 run_state.set_trace(get_current_trace())
                 current_turn = run_state._current_turn
                 raw_original_input = run_state._original_input
@@ -581,6 +605,7 @@ class AgentRunner:
                     auto_previous_response_id=auto_previous_response_id,
                 )
                 run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+                run_state.set_trace_include_sensitive_data(run_config.trace_include_sensitive_data)
                 run_state.set_trace(get_current_trace())
 
             def _with_reasoning_item_id_policy(result: RunResult) -> RunResult:
@@ -1450,6 +1475,7 @@ class AgentRunner:
         run_state: RunState[TContext] | None = None
         input_for_result: str | list[TResponseInputItem]
         starting_input = input if not is_resumed_state else None
+        server_manages_conversation = False
 
         if is_resumed_state:
             run_state = cast(RunState[TContext], input)
@@ -1518,6 +1544,25 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
             )
 
+        server_manages_conversation = (
+            conversation_id is not None
+            or previous_response_id is not None
+            or auto_previous_response_id
+        )
+        history_is_server_managed = (
+            server_manages_conversation or is_server_managed_conversation_session(session)
+        )
+        validate_override_history_persistence_support(
+            input=input,
+            session=session,
+            history_is_server_managed=history_is_server_managed,
+        )
+        if is_resumed_state and run_state is not None:
+            run_config = dataclasses.replace(
+                run_config,
+                trace_include_sensitive_data=run_state._trace_include_sensitive_data,
+            )
+
         resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
             run_config.reasoning_item_id_policy
             if run_config.reasoning_item_id_policy is not None
@@ -1548,6 +1593,7 @@ class AgentRunner:
             reattach_resumed_trace=is_resumed_state,
         )
         if run_state is not None:
+            run_state.set_trace_include_sensitive_data(run_config.trace_include_sensitive_data)
             run_state.set_trace(new_trace or get_current_trace())
 
         schema_agent = (

@@ -59,7 +59,11 @@ from .utils.hitl import (
     queue_function_call_and_text,
     resume_streamed_after_first_approval,
 )
-from .utils.simple_session import SimpleListSession
+from .utils.simple_session import (
+    RewriteAwareSimpleSession,
+    ServerManagedSimpleSession,
+    SimpleListSession,
+)
 
 
 def _conversation_locked_error() -> BadRequestError:
@@ -1639,6 +1643,74 @@ async def test_streaming_resume_with_session_does_not_duplicate_items():
 
     assert call_count == 1
     assert output_count == 1
+
+
+@pytest.mark.asyncio
+async def test_streaming_resume_with_durable_override_rewrites_session_history() -> None:
+    async def test_tool(test: str) -> str:
+        return f"result:{test}"
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model, agent = make_model_and_agent(name="test", tools=[tool])
+    session = RewriteAwareSimpleSession()
+
+    queue_function_call_and_text(
+        model,
+        get_function_tool_call("test_tool", json.dumps({"test": "foo"}), call_id="call-resume"),
+        followup=[get_text_message("done")],
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool", session=session)
+    await consume_stream(first)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+
+    resumed = Runner.run_streamed(agent, state, session=session)
+    await consume_stream(resumed)
+
+    assert resumed.final_output == "done"
+    saved_items = await session.get_items()
+    assert cast(dict[str, Any], saved_items[1])["arguments"] == json.dumps({"test": "bar"})
+
+
+@pytest.mark.asyncio
+async def test_streaming_resume_supports_execution_only_override_with_server_managed_session() -> (
+    None
+):
+    async def test_tool(test: str) -> str:
+        return f"result:{test}"
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    session = ServerManagedSimpleSession()
+
+    model.add_multiple_turn_outputs(
+        [[get_function_tool_call("test_tool", json.dumps({"test": "foo"}), call_id="call-resume")]]
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool", session=session)
+    await consume_stream(first)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(
+        first.interruptions[0],
+        override_arguments={"test": "bar"},
+        save_override_arguments=False,
+    )
+
+    resumed = Runner.run_streamed(agent, state, session=session)
+    await consume_stream(resumed)
+
+    assert resumed.final_output == "result:bar"
 
 
 @pytest.mark.asyncio

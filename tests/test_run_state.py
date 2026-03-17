@@ -177,6 +177,56 @@ def set_last_processed_response(
     state._last_processed_response = make_processed_response(new_items=new_items)
 
 
+def build_overrideable_approval_state(
+    *,
+    conversation_id: str | None = None,
+    previous_response_id: str | None = None,
+    auto_previous_response_id: bool = False,
+) -> tuple[RunState[Any, Agent[Any]], ToolApprovalItem, ResponseFunctionToolCall]:
+    """Build a RunState whose interruption can override function-call arguments."""
+
+    @function_tool(name_override="send_email")
+    def send_email(recipient: str) -> str:
+        return f"sent:{recipient}"
+
+    context: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    agent = Agent(name="OverrideAgent", tools=[send_email])
+    raw_item = ResponseFunctionToolCall(
+        type="function_call",
+        id="fc_override",
+        call_id="call-override",
+        name="send_email",
+        arguments=json.dumps({"recipient": "alice@example.com"}),
+    )
+    tool_call_item = ToolCallItem(agent=agent, raw_item=raw_item)
+    approval_item = ToolApprovalItem(
+        agent=agent,
+        raw_item=raw_item,
+        tool_name="send_email",
+    )
+    state = make_state(agent, context=context, original_input="input", max_turns=2)
+    state._conversation_id = conversation_id
+    state._previous_response_id = previous_response_id
+    state._auto_previous_response_id = auto_previous_response_id
+    state._generated_items = [tool_call_item]
+    state._session_items = [ToolCallItem(agent=agent, raw_item=raw_item)]
+    state._current_step = NextStepInterruption(interruptions=[approval_item])
+    state._model_responses = [
+        ModelResponse(
+            output=[raw_item],
+            usage=Usage(),
+            response_id="resp-override",
+        )
+    ]
+    state._last_processed_response = make_processed_response(
+        new_items=[ToolCallItem(agent=agent, raw_item=raw_item)],
+        functions=[ToolRunFunction(tool_call=raw_item, function_tool=send_email)],
+        interruptions=[approval_item],
+    )
+    state._mark_generated_items_merged_with_last_processed()
+    return state, approval_item, raw_item
+
+
 class TestRunState:
     """Test RunState initialization, serialization, and core functionality."""
 
@@ -363,6 +413,107 @@ class TestRunState:
         # Check that the tool is approved
         assert state._context is not None
         assert state._context.is_tool_approved(tool_name="toolX", call_id="cid123") is True
+
+    def test_approve_with_override_arguments_updates_durable_replay_state(self):
+        """approve() should update replay history and record a session history mutation."""
+        state, approval_item, _ = build_overrideable_approval_state()
+
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+
+        assert approval_item.arguments == json.dumps({"recipient": "bob@example.com"})
+        assert cast(Any, state._generated_items[0].raw_item).arguments == json.dumps(
+            {"recipient": "bob@example.com"}
+        )
+        assert cast(Any, state._session_items[0].raw_item).arguments == json.dumps(
+            {"recipient": "bob@example.com"}
+        )
+        assert (
+            state._last_processed_response is not None
+            and state._last_processed_response.functions[0].tool_call.arguments
+            == json.dumps({"recipient": "bob@example.com"})
+        )
+        assert cast(Any, state._model_responses[0].output[0]).arguments == json.dumps(
+            {"recipient": "bob@example.com"}
+        )
+        assert state.get_session_history_mutations() == [
+            {
+                "type": "replace_function_call",
+                "call_id": "call-override",
+                "replacement": {
+                    "type": "function_call",
+                    "id": "fc_override",
+                    "call_id": "call-override",
+                    "name": "send_email",
+                    "arguments": json.dumps({"recipient": "bob@example.com"}),
+                },
+            }
+        ]
+        assert state.has_pending_execution_only_approval_overrides() is False
+
+    def test_approve_with_execution_only_override_keeps_replay_history_unchanged(self):
+        """Execution-only overrides should only affect the pending execution surface."""
+        state, approval_item, raw_item = build_overrideable_approval_state()
+
+        state.approve(
+            approval_item,
+            override_arguments={"recipient": "bob@example.com"},
+            save_override_arguments=False,
+        )
+
+        assert approval_item.arguments == json.dumps({"recipient": "bob@example.com"})
+        assert cast(Any, state._generated_items[0].raw_item).arguments == json.dumps(
+            {"recipient": "alice@example.com"}
+        )
+        assert cast(Any, state._session_items[0].raw_item).arguments == json.dumps(
+            {"recipient": "alice@example.com"}
+        )
+        assert state._last_processed_response is not None
+        assert state._last_processed_response.functions[0].tool_call.arguments == json.dumps(
+            {"recipient": "bob@example.com"}
+        )
+        assert state._model_responses[0].output[0] == raw_item
+        assert state.get_session_history_mutations() == []
+        assert state.has_pending_execution_only_approval_overrides() is True
+
+    def test_approve_with_override_arguments_rejects_server_managed_conversation_defaults(self):
+        """Durable overrides should fail fast for server-managed conversations."""
+        state, approval_item, _ = build_overrideable_approval_state(previous_response_id="resp-1")
+
+        with pytest.raises(
+            UserError, match="save_override_arguments requires local canonical history"
+        ):
+            state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+
+    def test_approve_with_override_arguments_validates_options(self):
+        """approve() should reject invalid override option combinations."""
+        state, approval_item, _ = build_overrideable_approval_state()
+
+        with pytest.raises(UserError, match="save_override_arguments can only be used"):
+            state.approve(approval_item, save_override_arguments=False)
+        with pytest.raises(UserError, match="cannot be used together with always_approve"):
+            state.approve(
+                approval_item,
+                always_approve=True,
+                override_arguments={"recipient": "bob@example.com"},
+            )
+        with pytest.raises(UserError, match="plain JSON object"):
+            state.approve(approval_item, override_arguments=cast(Any, ["not", "a", "dict"]))
+
+    async def test_override_state_roundtrips_through_serialization(self):
+        """Override-specific bookkeeping should survive RunState serialization."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.set_trace_include_sensitive_data(False)
+        state.approve(
+            approval_item,
+            override_arguments={"recipient": "bob@example.com"},
+            save_override_arguments=False,
+        )
+
+        restored = await RunState.from_string(state._current_agent, state.to_string())  # type: ignore[arg-type]
+
+        assert restored._trace_include_sensitive_data is False
+        assert restored.has_pending_execution_only_approval_overrides() is True
+        assert restored.get_session_history_mutations() == []
 
     def test_returns_undefined_when_approval_status_is_unknown(self):
         """Test that isToolApproved returns None for unknown tools."""
@@ -3969,7 +4120,7 @@ class TestRunStateSerializationEdgeCases:
             await RunState.from_json(agent, state_json)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("schema_version", ["1.7", "2.0"])
+    @pytest.mark.parametrize("schema_version", ["1.8", "2.0"])
     async def test_from_json_unsupported_schema_version(self, schema_version: str):
         """Test that from_json raises error when schema version is unsupported."""
         agent = Agent(name="TestAgent")
@@ -4021,7 +4172,7 @@ class TestRunStateSerializationEdgeCases:
     def test_supported_schema_versions_match_released_boundary(self):
         """The support set should include released versions plus the current unreleased writer."""
         assert SUPPORTED_SCHEMA_VERSIONS == frozenset(
-            {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", CURRENT_SCHEMA_VERSION}
+            {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", CURRENT_SCHEMA_VERSION}
         )
 
     @pytest.mark.asyncio

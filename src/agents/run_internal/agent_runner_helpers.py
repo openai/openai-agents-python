@@ -9,7 +9,10 @@ from ..agent_tool_state import set_agent_tool_state_scope
 from ..exceptions import UserError
 from ..guardrail import InputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
-from ..memory import Session
+from ..memory import (
+    Session,
+    is_session_history_rewrite_aware_session,
+)
 from ..result import RunResult
 from ..run_config import RunConfig
 from ..run_context import RunContextWrapper, TContext
@@ -46,6 +49,7 @@ __all__ = [
     "save_turn_items_if_needed",
     "should_cancel_parallel_model_task_on_input_guardrail_trip",
     "update_run_state_for_interruption",
+    "validate_override_history_persistence_support",
 ]
 
 _PARALLEL_INPUT_GUARDRAIL_CANCEL_PATCH_ID = (
@@ -101,6 +105,45 @@ def validate_session_conversation_settings(
     raise UserError(
         "Session persistence cannot be combined with conversation_id, "
         "previous_response_id, or auto_previous_response_id."
+    )
+
+
+def validate_override_history_persistence_support(
+    *,
+    input: str | list[TResponseInputItem] | RunState[Any],
+    session: Session | None,
+    history_is_server_managed: bool,
+) -> None:
+    """Fail fast when approval override persistence requirements are not satisfied."""
+    if not isinstance(input, RunState):
+        return
+
+    if input.has_pending_execution_only_approval_overrides() and not history_is_server_managed:
+        raise UserError(
+            "save_override_arguments=False is only supported when using conversation_id, "
+            "previous_response_id, auto_previous_response_id, or a server-managed session."
+        )
+
+    mutations = input.get_session_history_mutations()
+    if not mutations:
+        return
+
+    if history_is_server_managed:
+        raise UserError(
+            "save_override_arguments requires local canonical history. "
+            "Server-managed conversations cannot persist corrected function_call arguments. "
+            "Pass save_override_arguments=False to apply the override only to the current "
+            "execution."
+        )
+
+    if session is None or is_session_history_rewrite_aware_session(session):
+        return
+
+    raise UserError(
+        "save_override_arguments requires a session that supports persisted-history rewrites. "
+        "Use SQLiteSession, OpenAIResponsesCompactionSession, or another "
+        "SessionHistoryRewriteAwareSession, or pass save_override_arguments=False to apply "
+        "the override only to the current execution."
     )
 
 
@@ -273,6 +316,7 @@ def build_interruption_result(
     result._model_input_items = list(generated_items)
     result._replay_from_model_input_items = list(generated_items) != list(session_items)
     if run_state is not None:
+        result._state = run_state
         result._current_turn_persisted_item_count = run_state._current_turn_persisted_item_count
         result._trace_state = run_state._trace_state
     result._original_input = copy_input_items(original_input)

@@ -246,6 +246,102 @@ async def test_resumed_run_with_workflow_override_starts_new_trace() -> None:
 
 
 @pytest.mark.asyncio
+async def test_approval_override_records_custom_trace_span() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="send_email", needs_approval=True)
+    def send_email(recipient: str) -> str:
+        return recipient
+
+    agent = Agent(name="trace_agent", model=model, tools=[send_email])
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "send_email", '{"recipient":"alice@example.com"}', call_id="call-1"
+                )
+            ]
+        ]
+    )
+
+    first = await Runner.run(agent, input="first_test")
+    assert first.interruptions
+
+    state = first.to_state()
+    before_custom_spans = [
+        span
+        for span in fetch_ordered_spans()
+        if getattr(getattr(span, "span_data", None), "type", None) == "custom"
+    ]
+
+    state.approve(first.interruptions[0], override_arguments={"recipient": "bob@example.com"})
+
+    after_custom_spans = [
+        span
+        for span in fetch_ordered_spans()
+        if getattr(getattr(span, "span_data", None), "type", None) == "custom"
+    ]
+
+    assert len(after_custom_spans) == len(before_custom_spans) + 1
+    override_span = after_custom_spans[-1].export()
+    assert override_span is not None
+    assert override_span["span_data"]["name"] == "approval override: send_email"
+    assert override_span["span_data"]["data"] == {
+        "tool_name": "send_email",
+        "call_id": "call-1",
+        "original_arguments": {"recipient": "alice@example.com"},
+        "override_arguments": {"recipient": "bob@example.com"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_approval_override_respects_restored_sensitive_trace_flag() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="send_email", needs_approval=True)
+    def send_email(recipient: str) -> str:
+        return recipient
+
+    agent = Agent(name="trace_agent", model=model, tools=[send_email])
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "send_email", '{"recipient":"alice@example.com"}', call_id="call-1"
+                )
+            ]
+        ]
+    )
+
+    first = await Runner.run(agent, input="first_test")
+    assert first.interruptions
+
+    state = first.to_state()
+    state.set_trace_include_sensitive_data(False)
+    restored_state = await RunState.from_string(agent, state.to_string())
+    restored_interruptions = restored_state.get_interruptions()
+    assert restored_interruptions
+
+    before_custom_spans = [
+        span
+        for span in fetch_ordered_spans()
+        if getattr(getattr(span, "span_data", None), "type", None) == "custom"
+    ]
+
+    restored_state.approve(
+        restored_interruptions[0],
+        override_arguments={"recipient": "bob@example.com"},
+    )
+
+    after_custom_spans = [
+        span
+        for span in fetch_ordered_spans()
+        if getattr(getattr(span, "span_data", None), "type", None) == "custom"
+    ]
+    assert len(after_custom_spans) == len(before_custom_spans)
+
+
+@pytest.mark.asyncio
 async def test_wrapped_trace_is_single_trace():
     model = FakeModel()
     model.add_multiple_turn_outputs(

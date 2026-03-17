@@ -18,9 +18,11 @@ from ..logger import logger
 from ..memory import (
     OpenAIResponsesCompactionArgs,
     Session,
+    SessionHistoryMutation,
     SessionInputCallback,
     SessionSettings,
     is_openai_responses_compaction_aware_session,
+    is_session_history_rewrite_aware_session,
 )
 from ..memory.openai_conversations_session import OpenAIConversationsSession
 from ..run_state import RunState
@@ -226,6 +228,7 @@ def update_run_state_after_resume(
     if session_items is not None:
         run_state._session_items = list(session_items)
     run_state._current_step = turn_result.next_step  # type: ignore[assignment]
+    run_state.clear_execution_only_approval_overrides()
 
 
 async def save_result_to_session(
@@ -248,6 +251,8 @@ async def save_result_to_session(
     already_persisted = run_state._current_turn_persisted_item_count if run_state else 0
 
     if session is None:
+        if run_state is not None:
+            run_state.clear_session_history_mutations()
         return 0
 
     new_run_items: list[RunItem]
@@ -318,51 +323,96 @@ async def save_result_to_session(
             saved_run_items_count += 1
 
     if len(items_to_save) == 0:
+        await _apply_session_history_mutations_on_session(session, run_state)
+        await _run_compaction_on_session(
+            session=session,
+            response_id=response_id,
+            new_items=new_items,
+            store=store,
+        )
         if run_state:
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
         return saved_run_items_count
 
     await session.add_items(items_to_save)
+    await _apply_session_history_mutations_on_session(session, run_state)
 
     if run_state:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
 
-    if response_id and is_openai_responses_compaction_aware_session(session):
-        has_local_tool_outputs = any(
-            isinstance(item, (ToolCallOutputItem, HandoffOutputItem)) for item in new_items
-        )
-        if has_local_tool_outputs:
-            defer_compaction = getattr(session, "_defer_compaction", None)
-            if callable(defer_compaction):
-                result = defer_compaction(response_id, store=store)
-                if inspect.isawaitable(result):
-                    await result
-            logger.debug(
-                "skip: deferring compaction for response %s due to local tool outputs",
-                response_id,
-            )
-            return saved_run_items_count
-
-        deferred_response_id = None
-        get_deferred = getattr(session, "_get_deferred_compaction_response_id", None)
-        if callable(get_deferred):
-            deferred_response_id = get_deferred()
-        force_compaction = deferred_response_id is not None
-        if force_compaction:
-            logger.debug(
-                "compact: forcing for response %s after deferred %s",
-                response_id,
-                deferred_response_id,
-            )
-        compaction_args: OpenAIResponsesCompactionArgs = {
-            "response_id": response_id,
-            "force": force_compaction,
-        }
-        if store is not None:
-            compaction_args["store"] = store
-        await session.run_compaction(compaction_args)
+    await _run_compaction_on_session(
+        session=session,
+        response_id=response_id,
+        new_items=new_items,
+        store=store,
+    )
 
     return saved_run_items_count
+
+
+async def _apply_session_history_mutations_on_session(
+    session: Session,
+    run_state: RunState | None,
+) -> None:
+    """Apply pending history rewrites to the persisted session if supported."""
+    if run_state is None:
+        return
+
+    mutations = run_state.get_session_history_mutations()
+    if not mutations:
+        return
+
+    normalized_mutations = _normalize_history_mutations_for_session_persistence(session, mutations)
+
+    if is_session_history_rewrite_aware_session(session):
+        await session.apply_history_mutations({"mutations": normalized_mutations})
+
+    run_state.clear_session_history_mutations()
+
+
+async def _run_compaction_on_session(
+    *,
+    session: Session,
+    response_id: str | None,
+    new_items: list[RunItem],
+    store: bool | None,
+) -> None:
+    """Run session compaction hooks after persistence or approval-only mutation cycles."""
+    if not response_id or not is_openai_responses_compaction_aware_session(session):
+        return
+
+    has_local_tool_outputs = any(
+        isinstance(item, (ToolCallOutputItem, HandoffOutputItem)) for item in new_items
+    )
+    if has_local_tool_outputs:
+        defer_compaction = getattr(session, "_defer_compaction", None)
+        if callable(defer_compaction):
+            result = defer_compaction(response_id, store=store)
+            if inspect.isawaitable(result):
+                await result
+        logger.debug(
+            "skip: deferring compaction for response %s due to local tool outputs", response_id
+        )
+        return
+
+    deferred_response_id = None
+    get_deferred = getattr(session, "_get_deferred_compaction_response_id", None)
+    if callable(get_deferred):
+        deferred_response_id = get_deferred()
+    force_compaction = deferred_response_id is not None
+    if force_compaction:
+        logger.debug(
+            "compact: forcing for response %s after deferred %s",
+            response_id,
+            deferred_response_id,
+        )
+    compaction_args: OpenAIResponsesCompactionArgs = {
+        "response_id": response_id,
+        "force": force_compaction,
+    }
+    if store is not None:
+        compaction_args["store"] = store
+    await session.run_compaction(compaction_args)
 
 
 async def save_resumed_turn_items(
@@ -580,6 +630,28 @@ def _fingerprint_or_repr(item: TResponseInputItem, *, ignore_ids_for_matching: b
     return fingerprint_input_item(item, ignore_ids_for_matching=ignore_ids_for_matching) or repr(
         item
     )
+
+
+def _normalize_history_mutations_for_session_persistence(
+    session: Session,
+    mutations: list[SessionHistoryMutation],
+) -> list[SessionHistoryMutation]:
+    """Normalize persisted-history mutations to the same session-safe item shape used on writes."""
+    normalized: list[SessionHistoryMutation] = []
+    for mutation in mutations:
+        if mutation["type"] != "replace_function_call":
+            continue
+        replacement = ensure_input_item_format(mutation["replacement"])
+        if isinstance(session, OpenAIConversationsSession):
+            replacement = _sanitize_openai_conversation_item(replacement)
+        normalized.append(
+            {
+                "type": "replace_function_call",
+                "call_id": mutation["call_id"],
+                "replacement": replacement,
+            }
+        )
+    return normalized
 
 
 def _session_item_key(item: Any) -> str:

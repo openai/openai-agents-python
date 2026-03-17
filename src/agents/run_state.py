@@ -72,6 +72,7 @@ from .items import (
     coerce_tool_search_output_raw_item,
 )
 from .logger import logger
+from .memory import SessionHistoryMutation
 from .run_context import RunContextWrapper
 from .tool import (
     ApplyPatchTool,
@@ -91,7 +92,9 @@ from .tool_guardrails import (
     ToolOutputGuardrail,
     ToolOutputGuardrailResult,
 )
-from .tracing.traces import Trace, TraceState
+from .tracing import custom_span, get_current_span, get_current_trace
+from .tracing.spans import Span
+from .tracing.traces import Trace, TraceState, reattach_trace
 from .usage import deserialize_usage, serialize_usage
 from .util._json import _to_dump_compatible
 
@@ -103,6 +106,8 @@ if TYPE_CHECKING:
         NextStepInterruption,
         ProcessedResponse,
     )
+
+from .run_internal.items import ensure_input_item_format
 
 TContext = TypeVar("TContext", default=Any)
 TAgent = TypeVar("TAgent", bound="Agent[Any]", default="Agent[Any]")
@@ -118,9 +123,9 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.6"
+CURRENT_SCHEMA_VERSION = "1.7"
 SUPPORTED_SCHEMA_VERSIONS = frozenset(
-    {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", CURRENT_SCHEMA_VERSION}
+    {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", CURRENT_SCHEMA_VERSION}
 )
 
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
@@ -214,6 +219,15 @@ class RunState(Generic[TContext, TAgent]):
     _tool_use_tracker_snapshot: dict[str, list[str]] = field(default_factory=dict)
     """Serialized snapshot of the AgentToolUseTracker (agent name -> tools used)."""
 
+    _session_history_mutations: list[SessionHistoryMutation] = field(default_factory=list)
+    """Pending session history rewrites that must be applied after persistence."""
+
+    _execution_only_approval_override_call_ids: list[str] = field(default_factory=list)
+    """Function call ids whose approved argument overrides are execution-only."""
+
+    _trace_include_sensitive_data: bool = True
+    """Whether approval-override traces may include sensitive argument payloads."""
+
     _trace_state: TraceState | None = field(default=None, repr=False)
     """Serialized trace metadata for resuming tracing context."""
 
@@ -253,6 +267,9 @@ class RunState(Generic[TContext, TAgent]):
         self._generated_items_last_processed_marker = None
         self._current_turn_persisted_item_count = 0
         self._tool_use_tracker_snapshot = {}
+        self._session_history_mutations = []
+        self._execution_only_approval_override_call_ids = []
+        self._trace_include_sensitive_data = True
         self._trace_state = None
         from .agent_tool_state import get_agent_tool_state_scope
 
@@ -267,11 +284,245 @@ class RunState(Generic[TContext, TAgent]):
             return []
         return self._current_step.interruptions
 
-    def approve(self, approval_item: ToolApprovalItem, always_approve: bool = False) -> None:
+    def approve(
+        self,
+        approval_item: ToolApprovalItem,
+        always_approve: bool = False,
+        *,
+        override_arguments: dict[str, Any] | None = None,
+        save_override_arguments: bool | None = None,
+    ) -> None:
         """Approve a tool call and rerun with this state to continue."""
         if self._context is None:
             raise UserError("Cannot approve tool: RunState has no context")
+
+        if save_override_arguments is not None and override_arguments is None:
+            raise UserError(
+                "save_override_arguments can only be used together with override_arguments."
+            )
+
+        if override_arguments is not None:
+            self._apply_approval_argument_override(
+                approval_item=approval_item,
+                override_arguments=override_arguments,
+                always_approve=always_approve,
+                save_override_arguments=save_override_arguments,
+            )
+
         self._context.approve_tool(approval_item, always_approve=always_approve)
+
+    def get_session_history_mutations(self) -> list[SessionHistoryMutation]:
+        """Return a defensive copy of pending persisted-history mutations."""
+        return copy.deepcopy(self._session_history_mutations)
+
+    def has_pending_execution_only_approval_overrides(self) -> bool:
+        """Return whether execution-only argument overrides still need a server-managed resume."""
+        return len(self._execution_only_approval_override_call_ids) > 0
+
+    def clear_execution_only_approval_overrides(self) -> None:
+        """Clear execution-only override bookkeeping after the resumed execution completes."""
+        self._execution_only_approval_override_call_ids = []
+
+    def clear_session_history_mutations(self) -> None:
+        """Clear pending persisted-history mutations after they are applied."""
+        self._session_history_mutations = []
+
+    def _apply_approval_argument_override(
+        self,
+        *,
+        approval_item: ToolApprovalItem,
+        override_arguments: dict[str, Any],
+        always_approve: bool,
+        save_override_arguments: bool | None,
+    ) -> None:
+        if always_approve:
+            raise UserError("override_arguments cannot be used together with always_approve.")
+
+        if not _is_function_call_raw_item(approval_item.raw_item):
+            raise UserError("override_arguments is only supported for function_call approvals.")
+
+        if not isinstance(override_arguments, dict):
+            raise UserError("override_arguments must be a plain JSON object.")
+
+        try:
+            serialized_arguments = json.dumps(override_arguments)
+        except Exception as exc:
+            raise UserError(f"override_arguments must be JSON serializable. {exc}") from exc
+
+        if not isinstance(serialized_arguments, str):
+            raise UserError("override_arguments could not be serialized to JSON.")
+
+        should_save_override_arguments = save_override_arguments is not False
+        has_server_managed_conversation = bool(
+            self._conversation_id or self._previous_response_id or self._auto_previous_response_id
+        )
+        if should_save_override_arguments and has_server_managed_conversation:
+            raise UserError(
+                "save_override_arguments requires local canonical history. "
+                "Server-managed conversations cannot persist corrected function_call arguments. "
+                "Pass save_override_arguments=False to apply the override only to the current "
+                "execution."
+            )
+
+        original_arguments = _get_raw_item_arguments(approval_item.raw_item)
+        call_id = _get_raw_item_call_id(approval_item.raw_item)
+        if not isinstance(call_id, str):
+            raise UserError("override_arguments requires a function_call with a call_id.")
+
+        updated_tool_call = _create_function_call_override(
+            approval_item.raw_item,
+            serialized_arguments,
+        )
+        approval_item.raw_item = updated_tool_call
+        self._replace_function_call_in_interruptions(call_id, updated_tool_call)
+        if self._last_processed_response is not None:
+            for interruption in self._last_processed_response.interruptions:
+                if not _is_function_call_raw_item(interruption.raw_item):
+                    continue
+                if _get_raw_item_call_id(interruption.raw_item) != call_id:
+                    continue
+                interruption.raw_item = updated_tool_call
+
+        if should_save_override_arguments:
+            self._clear_execution_only_approval_override_call_id(call_id)
+        else:
+            self._record_execution_only_approval_override(call_id)
+
+        if self._last_processed_response is not None:
+            for function_run in self._last_processed_response.functions:
+                if _get_raw_item_call_id(function_run.tool_call) != call_id:
+                    continue
+                function_run.tool_call = updated_tool_call
+
+            if should_save_override_arguments:
+                self._replace_function_call_in_run_items(
+                    self._last_processed_response.new_items,
+                    call_id,
+                    updated_tool_call,
+                )
+
+        if should_save_override_arguments:
+            self._replace_function_call_in_run_items(
+                self._generated_items, call_id, updated_tool_call
+            )
+            self._replace_function_call_in_run_items(
+                self._session_items, call_id, updated_tool_call
+            )
+            self._replace_function_call_in_model_responses(call_id, updated_tool_call)
+            self._record_session_history_mutation(
+                {
+                    "type": "replace_function_call",
+                    "call_id": call_id,
+                    "replacement": ensure_input_item_format(updated_tool_call),
+                }
+            )
+            self._mark_generated_items_merged_with_last_processed()
+
+        self._record_approval_argument_override_trace(
+            tool_name=approval_item.name or _get_raw_item_name(updated_tool_call),
+            call_id=call_id,
+            original_arguments=original_arguments,
+            serialized_arguments=serialized_arguments,
+        )
+
+    def _replace_function_call_in_interruptions(self, call_id: str, tool_call: Any) -> None:
+        """Replace a function call inside pending approval interruptions."""
+        for interruption in self.get_interruptions():
+            if not _is_function_call_raw_item(interruption.raw_item):
+                continue
+            if _get_raw_item_call_id(interruption.raw_item) != call_id:
+                continue
+            interruption.raw_item = tool_call
+
+    def _replace_function_call_in_run_items(
+        self,
+        items: list[RunItem],
+        call_id: str,
+        tool_call: Any,
+    ) -> None:
+        """Replace matching function-call raw items inside serialized run item history."""
+        for item in items:
+            if not _is_function_call_raw_item(getattr(item, "raw_item", None)):
+                continue
+            if _get_raw_item_call_id(item.raw_item) != call_id:
+                continue
+            item.raw_item = tool_call
+
+    def _replace_function_call_in_model_responses(self, call_id: str, tool_call: Any) -> None:
+        """Replace matching function calls in stored raw model responses."""
+        for response in self._model_responses:
+            for index, item in enumerate(response.output):
+                if not _is_function_call_raw_item(item):
+                    continue
+                if _get_raw_item_call_id(item) != call_id:
+                    continue
+                response.output[index] = tool_call
+
+    def _record_session_history_mutation(self, mutation: SessionHistoryMutation) -> None:
+        """Record or replace a pending persisted-history mutation for the same call id."""
+        for index, existing in enumerate(self._session_history_mutations):
+            if existing["type"] != mutation["type"] or existing["call_id"] != mutation["call_id"]:
+                continue
+            self._session_history_mutations[index] = copy.deepcopy(mutation)
+            return
+        self._session_history_mutations.append(copy.deepcopy(mutation))
+
+    def _record_execution_only_approval_override(self, call_id: str) -> None:
+        """Remember that this call id was approved with execution-only argument overrides."""
+        if call_id in self._execution_only_approval_override_call_ids:
+            return
+        self._execution_only_approval_override_call_ids.append(call_id)
+
+    def _clear_execution_only_approval_override_call_id(self, call_id: str) -> None:
+        """Forget execution-only bookkeeping for a call id once durable history wins."""
+        self._execution_only_approval_override_call_ids = [
+            existing_call_id
+            for existing_call_id in self._execution_only_approval_override_call_ids
+            if existing_call_id != call_id
+        ]
+
+    def _record_approval_argument_override_trace(
+        self,
+        *,
+        tool_name: str | None,
+        call_id: str,
+        original_arguments: Any,
+        serialized_arguments: str,
+    ) -> None:
+        """Emit an audit span describing the approval-time argument override."""
+        if not self._trace_include_sensitive_data:
+            return
+
+        parent: Trace | Span[Any] | None = get_current_span() or get_current_trace()
+        if parent is None and self._trace_state is not None:
+            parent = reattach_trace(self._trace_state)
+        if parent is None:
+            return
+
+        resolved_tool_name = tool_name or "function_call"
+        try:
+            span = custom_span(
+                name=f"approval override: {resolved_tool_name}",
+                data={
+                    "tool_name": resolved_tool_name,
+                    "call_id": call_id,
+                    "original_arguments": _deserialize_function_call_arguments_for_trace(
+                        original_arguments
+                    ),
+                    "override_arguments": _deserialize_function_call_arguments_for_trace(
+                        serialized_arguments
+                    ),
+                },
+                parent=parent,
+            )
+            span.start()
+            span.finish()
+        except Exception as exc:
+            logger.warning(
+                "Failed to record approval override trace for %s: %s",
+                resolved_tool_name,
+                exc,
+            )
 
     def reject(
         self,
@@ -657,6 +908,14 @@ class RunState(Generic[TContext, TAgent]):
             "previous_response_id": self._previous_response_id,
             "auto_previous_response_id": self._auto_previous_response_id,
             "reasoning_item_id_policy": self._reasoning_item_id_policy,
+            "execution_only_approval_override_call_ids": list(
+                self._execution_only_approval_override_call_ids
+            ),
+            "session_history_mutations": [
+                _serialize_session_history_mutation(mutation)
+                for mutation in self._session_history_mutations
+            ],
+            "trace_include_sensitive_data": self._trace_include_sensitive_data,
         }
 
         generated_items = self._merge_generated_items_with_processed()
@@ -863,6 +1122,10 @@ class RunState(Generic[TContext, TAgent]):
     def set_trace(self, trace: Trace | None) -> None:
         """Capture trace metadata for serialization/resumption."""
         self._trace_state = TraceState.from_trace(trace)
+
+    def set_trace_include_sensitive_data(self, include_sensitive_data: bool) -> None:
+        """Store whether resumed traces may include sensitive approval override data."""
+        self._trace_include_sensitive_data = include_sensitive_data
 
     def _serialize_trace_data(self, *, include_tracing_api_key: bool) -> dict[str, Any] | None:
         if not self._trace_state:
@@ -1088,6 +1351,118 @@ def _serialize_raw_item_value(raw_item: Any) -> Any:
     if isinstance(raw_item, dict):
         return dict(raw_item)
     return raw_item
+
+
+def _serialize_session_history_mutation(mutation: SessionHistoryMutation) -> dict[str, Any]:
+    """Serialize a session history mutation into a JSON-compatible dictionary."""
+    return {
+        "type": mutation["type"],
+        "call_id": mutation["call_id"],
+        "replacement": _serialize_raw_item_value(mutation["replacement"]),
+    }
+
+
+def _deserialize_session_history_mutations(
+    serialized_mutations: Any,
+) -> list[SessionHistoryMutation]:
+    """Deserialize persisted session history mutations from JSON data."""
+    if not isinstance(serialized_mutations, Sequence) or isinstance(
+        serialized_mutations, (str, bytes)
+    ):
+        return []
+
+    mutations: list[SessionHistoryMutation] = []
+    for mutation in serialized_mutations:
+        if not isinstance(mutation, Mapping):
+            continue
+        if mutation.get("type") != "replace_function_call":
+            continue
+        call_id = mutation.get("call_id")
+        replacement = mutation.get("replacement")
+        if not isinstance(call_id, str):
+            continue
+        normalized_replacement: Any
+        if isinstance(replacement, Mapping):
+            normalized_replacement = dict(replacement)
+        else:
+            normalized_replacement = replacement
+        mutations.append(
+            {
+                "type": "replace_function_call",
+                "call_id": call_id,
+                "replacement": cast(TResponseInputItem, normalized_replacement),
+            }
+        )
+    return mutations
+
+
+def _is_function_call_raw_item(raw_item: Any) -> bool:
+    """Return whether the raw item represents a function call."""
+    if isinstance(raw_item, dict):
+        return raw_item.get("type") == "function_call"
+    return getattr(raw_item, "type", None) == "function_call"
+
+
+def _get_raw_item_call_id(raw_item: Any) -> str | None:
+    """Return the call_id for a raw tool item when available."""
+    if isinstance(raw_item, dict):
+        call_id = raw_item.get("call_id") or raw_item.get("callId") or raw_item.get("id")
+        return call_id if isinstance(call_id, str) else None
+    for attr in ("call_id", "callId", "id"):
+        value = getattr(raw_item, attr, None)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _get_raw_item_name(raw_item: Any) -> str | None:
+    """Return the tool name for a raw tool item when available."""
+    if isinstance(raw_item, dict):
+        name = raw_item.get("name")
+        return name if isinstance(name, str) else None
+    name = getattr(raw_item, "name", None)
+    return name if isinstance(name, str) else None
+
+
+def _get_raw_item_arguments(raw_item: Any) -> Any:
+    """Return the serialized arguments field for a raw function call when available."""
+    if isinstance(raw_item, dict):
+        return raw_item.get("arguments")
+    return getattr(raw_item, "arguments", None)
+
+
+def _create_function_call_override(raw_item: Any, serialized_arguments: str) -> Any:
+    """Return a copy of a function call raw item with corrected arguments."""
+    if isinstance(raw_item, ResponseFunctionToolCall):
+        return raw_item.model_copy(update={"arguments": serialized_arguments})
+    if isinstance(raw_item, dict):
+        updated = dict(raw_item)
+        updated["arguments"] = serialized_arguments
+        return updated
+    if hasattr(raw_item, "model_dump"):
+        try:
+            payload = raw_item.model_dump(exclude_unset=True)
+        except TypeError:
+            payload = raw_item.model_dump()
+        payload = dict(payload)
+        payload["arguments"] = serialized_arguments
+        try:
+            return ResponseFunctionToolCall(**payload)
+        except Exception:
+            return payload
+    raise UserError("override_arguments is only supported for function_call approvals.")
+
+
+def _deserialize_function_call_arguments_for_trace(arguments: Any) -> Any:
+    """Decode serialized function-call arguments for trace payloads when possible."""
+    if arguments is None:
+        return None
+    if not isinstance(arguments, str):
+        return arguments
+    try:
+        return json.loads(arguments)
+    except Exception:
+        return arguments
 
 
 def _ensure_json_compatible(value: Any) -> Any:
@@ -2288,6 +2663,21 @@ async def _build_run_state_from_json(
         state._reasoning_item_id_policy = cast(Literal["preserve", "omit"], serialized_policy)
     else:
         state._reasoning_item_id_policy = None
+    serialized_execution_only_call_ids = state_json.get(
+        "execution_only_approval_override_call_ids", []
+    )
+    if isinstance(serialized_execution_only_call_ids, Sequence) and not isinstance(
+        serialized_execution_only_call_ids, (str, bytes)
+    ):
+        state._execution_only_approval_override_call_ids = [
+            call_id for call_id in serialized_execution_only_call_ids if isinstance(call_id, str)
+        ]
+    else:
+        state._execution_only_approval_override_call_ids = []
+    state._session_history_mutations = _deserialize_session_history_mutations(
+        state_json.get("session_history_mutations", [])
+    )
+    state._trace_include_sensitive_data = bool(state_json.get("trace_include_sensitive_data", True))
     state.set_tool_use_tracker_snapshot(state_json.get("tool_use_tracker", {}))
     trace_data = state_json.get("trace")
     if isinstance(trace_data, Mapping):
