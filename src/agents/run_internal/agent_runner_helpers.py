@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any, cast
 
 from ..agent import Agent
@@ -185,9 +186,16 @@ def resolve_trace_include_sensitive_data(
     run_config: RunConfig,
     run_config_was_supplied: bool,
 ) -> bool:
-    """Resolve whether traces may include sensitive data for this run."""
-    if run_state is None or run_config_was_supplied:
+    """Resolve whether traces may include sensitive data for this run.
+
+    Resumed runs preserve the stored setting unless the new RunConfig explicitly narrows it by
+    setting `trace_include_sensitive_data=False`.
+    """
+    del run_config_was_supplied
+    if run_state is None:
         return run_config.trace_include_sensitive_data
+    if run_config.trace_include_sensitive_data is False:
+        return False
     return run_state._trace_include_sensitive_data
 
 
@@ -295,9 +303,15 @@ def attach_run_state_metadata(result: RunResult, *, run_state: RunState | None) 
     if run_state is None:
         return result
 
-    result._state = run_state
     result._current_turn_persisted_item_count = run_state._current_turn_persisted_item_count
     result._trace_state = run_state._trace_state
+    result._trace_include_sensitive_data_snapshot = run_state._trace_include_sensitive_data
+    result._session_history_mutations_snapshot = copy.deepcopy(
+        run_state.get_session_history_mutations()
+    )
+    result._execution_only_approval_override_call_ids_snapshot = list(
+        run_state._execution_only_approval_override_call_ids
+    )
     return result
 
 

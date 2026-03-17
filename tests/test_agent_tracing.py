@@ -411,6 +411,45 @@ async def test_resumed_run_honors_explicit_trace_include_sensitive_data() -> Non
 
 
 @pytest.mark.asyncio
+async def test_resumed_run_preserves_sensitive_trace_flag_for_unrelated_run_config() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="send_email", needs_approval=True)
+    def send_email(recipient: str) -> str:
+        return recipient
+
+    agent = Agent(name="trace_agent", model=model, tools=[send_email])
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "send_email", '{"recipient":"alice@example.com"}', call_id="call-1"
+                )
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = await Runner.run(agent, input="first_test")
+    assert first.interruptions
+
+    state = first.to_state()
+    state.set_trace_include_sensitive_data(False)
+    state.approve(first.interruptions[0], override_arguments={"recipient": "bob@example.com"})
+
+    resumed = await Runner.run(
+        agent,
+        state,
+        run_config=RunConfig(workflow_name="override_workflow"),
+    )
+
+    assert resumed.final_output == "done"
+    function_span = _get_last_function_span_export("send_email")
+    assert function_span["span_data"]["input"] is None
+    assert function_span["span_data"]["output"] is None
+
+
+@pytest.mark.asyncio
 async def test_wrapped_trace_is_single_trace():
     model = FakeModel()
     model.add_multiple_turn_outputs(

@@ -624,6 +624,81 @@ class TestOpenAIResponsesCompactionSession:
         assert "input" not in second_kwargs
 
     @pytest.mark.asyncio
+    async def test_run_compaction_ignores_abandoned_unresolved_function_calls(self) -> None:
+        mock_session = self.create_mock_session()
+        items: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "first"}),
+            cast(
+                TResponseInputItem,
+                {
+                    "type": "function_call",
+                    "call_id": "call-abandoned",
+                    "id": "fc_1",
+                    "name": "test_tool",
+                    "arguments": "{}",
+                },
+            ),
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "followup"}),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "latest response"},
+            ),
+        ]
+        mock_session.get_items.return_value = items
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = []
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            compaction_mode="auto",
+        )
+
+        await session.run_compaction({"response_id": "resp-latest", "force": True})
+
+        mock_client.responses.compact.assert_called_once_with(
+            previous_response_id="resp-latest",
+            model="gpt-4.1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_still_blocks_active_unresolved_function_calls(self) -> None:
+        mock_session = self.create_mock_session()
+        items: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "hello"}),
+            cast(
+                TResponseInputItem,
+                {
+                    "type": "function_call",
+                    "call_id": "call-pending",
+                    "id": "fc_1",
+                    "name": "test_tool",
+                    "arguments": "{}",
+                },
+            ),
+        ]
+        mock_session.get_items.return_value = items
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            compaction_mode="auto",
+        )
+
+        await session.run_compaction({"response_id": "resp-pending", "force": True})
+
+        mock_client.responses.compact.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_run_compaction_auto_uses_input_when_last_response_unstored(self) -> None:
         mock_session = self.create_mock_session()
         items: list[TResponseInputItem] = [

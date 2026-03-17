@@ -107,12 +107,36 @@ def _populate_state_from_result(
     if trace_state is None:
         trace_state = TraceState.from_trace(getattr(result, "trace", None))
     state._trace_state = copy.deepcopy(trace_state) if trace_state else None
-    state._trace_include_sensitive_data = getattr(
-        source_state,
-        "_trace_include_sensitive_data",
-        True,
+    trace_include_sensitive_data_snapshot = getattr(
+        result,
+        "_trace_include_sensitive_data_snapshot",
+        None,
     )
-    if isinstance(source_state, RunState):
+    if trace_include_sensitive_data_snapshot is not None:
+        state._trace_include_sensitive_data = trace_include_sensitive_data_snapshot
+    else:
+        state._trace_include_sensitive_data = getattr(
+            source_state,
+            "_trace_include_sensitive_data",
+            True,
+        )
+
+    session_history_mutations_snapshot = getattr(
+        result,
+        "_session_history_mutations_snapshot",
+        None,
+    )
+    execution_only_approval_override_call_ids_snapshot = getattr(
+        result,
+        "_execution_only_approval_override_call_ids_snapshot",
+        None,
+    )
+    if session_history_mutations_snapshot is not None:
+        state._session_history_mutations = copy.deepcopy(session_history_mutations_snapshot)
+        state._execution_only_approval_override_call_ids = list(
+            execution_only_approval_override_call_ids_snapshot or []
+        )
+    elif isinstance(source_state, RunState):
         state._session_history_mutations = source_state.get_session_history_mutations()
         state._execution_only_approval_override_call_ids = list(
             source_state._execution_only_approval_override_call_ids
@@ -332,6 +356,15 @@ class RunResult(RunResultBase):
     to preserve the correct originalInput when serializing state."""
     _state: Any = field(default=None, repr=False)
     """Internal reference to the originating RunState when available."""
+    _trace_include_sensitive_data_snapshot: bool | None = field(default=None, repr=False)
+    """Snapshot of the trace redaction setting used when rebuilding state from a completed
+    result."""
+    _session_history_mutations_snapshot: list[Any] | None = field(default=None, repr=False)
+    """Snapshot of pending session-history rewrites needed by `to_state()`."""
+    _execution_only_approval_override_call_ids_snapshot: list[str] | None = field(
+        default=None, repr=False
+    )
+    """Snapshot of execution-only approval overrides needed by `to_state()`."""
     _conversation_id: str | None = field(default=None, repr=False)
     """Conversation identifier for server-managed runs."""
     _previous_response_id: str | None = field(default=None, repr=False)

@@ -28,6 +28,14 @@ DEFAULT_COMPACTION_THRESHOLD = 10
 OpenAIResponsesCompactionMode = Literal["previous_response_id", "input", "auto"]
 
 
+def _is_user_message_item(item: TResponseInputItem) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("type") == "message":
+        return item.get("role") == "user"
+    return item.get("role") == "user" and "content" in item
+
+
 def select_compaction_candidate_items(
     items: list[TResponseInputItem],
 ) -> list[TResponseInputItem]:
@@ -36,18 +44,12 @@ def select_compaction_candidate_items(
     Excludes user messages and compaction items.
     """
 
-    def _is_user_message(item: TResponseInputItem) -> bool:
-        if not isinstance(item, dict):
-            return False
-        if item.get("type") == "message":
-            return item.get("role") == "user"
-        return item.get("role") == "user" and "content" in item
-
     return [
         item
         for item in items
         if not (
-            _is_user_message(item) or (isinstance(item, dict) and item.get("type") == "compaction")
+            _is_user_message_item(item)
+            or (isinstance(item, dict) and item.get("type") == "compaction")
         )
     ]
 
@@ -273,12 +275,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             )
             return
 
-        unresolved_function_calls = _find_unresolved_function_calls_without_results(session_items)
-        if unresolved_function_calls:
+        frontier_unresolved_function_calls = _find_frontier_unresolved_function_calls(session_items)
+        if frontier_unresolved_function_calls:
             logger.debug(
                 "compact: blocked unresolved function calls for %s: %s",
                 self._response_id,
-                unresolved_function_calls,
+                frontier_unresolved_function_calls,
             )
             return
 
@@ -476,12 +478,19 @@ def _normalize_compaction_session_items(
 _ResolvedCompactionMode = Literal["previous_response_id", "input"]
 
 
-def _find_unresolved_function_calls_without_results(items: list[TResponseInputItem]) -> list[str]:
-    """Return function-call ids that do not yet have matching outputs."""
-    function_calls: dict[str, TResponseInputItem] = {}
-    resolved_call_ids: set[str] = set()
+def _find_frontier_unresolved_function_calls(items: list[TResponseInputItem]) -> list[str]:
+    """Return unresolved function-call ids that remain in the active conversation frontier.
 
-    for item in items:
+    Once a later user message appears, earlier unresolved tool calls are considered abandoned and
+    should no longer block future compaction for the session.
+    """
+    function_call_indices: dict[str, int] = {}
+    resolved_call_ids: set[str] = set()
+    last_user_message_index = -1
+
+    for index, item in enumerate(items):
+        if _is_user_message_item(item):
+            last_user_message_index = index
         if isinstance(item, dict):
             item_type = item.get("type")
             call_id = item.get("call_id")
@@ -492,11 +501,15 @@ def _find_unresolved_function_calls_without_results(items: list[TResponseInputIt
         if not isinstance(call_id, str):
             continue
         if item_type == "function_call":
-            function_calls[call_id] = item
+            function_call_indices[call_id] = index
         elif item_type == "function_call_output":
             resolved_call_ids.add(call_id)
 
-    return [call_id for call_id in function_calls if call_id not in resolved_call_ids]
+    return [
+        call_id
+        for call_id, index in function_call_indices.items()
+        if call_id not in resolved_call_ids and index > last_user_message_index
+    ]
 
 
 def _resolve_compaction_mode(
