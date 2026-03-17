@@ -11,6 +11,7 @@ from cryptography.fernet import Fernet
 
 from agents import Agent, Runner, SQLiteSession, TResponseInputItem
 from agents.extensions.memory.encrypt_session import EncryptedSession
+from agents.memory.session import SessionABC
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 
@@ -109,6 +110,46 @@ async def test_encrypted_session_with_runner(
     assert any("Golden Gate Bridge" in str(item.get("content", "")) for item in last_input)
 
     underlying_session.close()
+
+
+async def test_encrypted_session_preserves_legacy_underlying_signatures(
+    agent: Agent,
+    encryption_key: str,
+):
+    class LegacyUnderlyingSession(SessionABC):
+        def __init__(self) -> None:
+            self.session_id = "test_session"
+            self.items: list[TResponseInputItem] = []
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            if limit is None:
+                return list(self.items)
+            return list(self.items[-limit:]) if limit > 0 else []
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.items.extend(items)
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            if not self.items:
+                return None
+            return self.items.pop()
+
+        async def clear_session(self) -> None:
+            self.items.clear()
+
+    legacy_underlying = LegacyUnderlyingSession()
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=legacy_underlying,
+        encryption_key=encryption_key,
+    )
+
+    assert isinstance(agent.model, FakeModel)
+    agent.model.set_next_output([get_text_message("Hello")])
+    result = await Runner.run(agent, "Hi there", session=session)
+
+    assert result.final_output == "Hello"
+    assert legacy_underlying.items
 
 
 async def test_encrypted_session_pop_item(encryption_key: str, underlying_session: SQLiteSession):

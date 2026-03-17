@@ -28,6 +28,7 @@ Usage::
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 from typing import Any, cast
 
@@ -94,6 +95,35 @@ def _is_encrypted_envelope(item: object) -> TypeGuard[EncryptedEnvelope]:
         and "payload" in item
         and "kid" in item
         and "v" in item
+    )
+
+
+def _method_accepts_wrapper(method: Any) -> bool:
+    try:
+        parameters = tuple(inspect.signature(method).parameters.values())
+    except (TypeError, ValueError):
+        return False
+
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD or parameter.name == "wrapper"
+        for parameter in parameters
+    )
+
+
+def _method_accepts_limit(method: Any) -> bool:
+    try:
+        parameters = tuple(inspect.signature(method).parameters.values())
+    except (TypeError, ValueError):
+        return False
+
+    return any(
+        (
+            parameter.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            and parameter.name == "limit"
+        )
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
     )
 
 
@@ -176,8 +206,10 @@ class EncryptedSession(SessionABC):
         limit: int | None = None,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> list[TResponseInputItem]:
-        if wrapper is not None:
+        if wrapper is not None and _method_accepts_wrapper(self.underlying_session.get_items):
             encrypted_items = await self.underlying_session.get_items(limit, wrapper=wrapper)
+        elif limit is None and not _method_accepts_limit(self.underlying_session.get_items):
+            encrypted_items = await self.underlying_session.get_items()
         else:
             encrypted_items = await self.underlying_session.get_items(limit)
         valid_items: list[TResponseInputItem] = []
@@ -194,7 +226,7 @@ class EncryptedSession(SessionABC):
     ) -> None:
         wrapped: list[EncryptedEnvelope] = [self._wrap(it) for it in items]
         wrapped_items = cast(list[TResponseInputItem], wrapped)
-        if wrapper is not None:
+        if wrapper is not None and _method_accepts_wrapper(self.underlying_session.add_items):
             await self.underlying_session.add_items(
                 wrapped_items,
                 wrapper=wrapper,
