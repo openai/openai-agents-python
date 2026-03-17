@@ -14,7 +14,7 @@ from typing_extensions import NotRequired, TypedDict
 
 from .. import _debug
 from .._mcp_tool_metadata import resolve_mcp_tool_description_for_model, resolve_mcp_tool_title
-from ..exceptions import AgentsException, ModelBehaviorError, UserError
+from ..exceptions import AgentsException, MCPToolCancellationError, ModelBehaviorError, UserError
 
 try:
     from mcp.shared.exceptions import McpError as _McpError
@@ -360,17 +360,31 @@ class MCPUtil:
         try:
             resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
             merged_meta = cls._merge_mcp_meta(resolved_meta, meta)
-            if merged_meta is None:
-                result = await server.call_tool(tool.name, json_data)
-            else:
-                result = await server.call_tool(tool.name, json_data, meta=merged_meta)
-        except asyncio.CancelledError:
-            raise UserError(
-                f"Failed to call tool '{tool.name}' on MCP server '{server.name}': "
-                "tool execution was cancelled."
-            ) from None
-        except UserError:
-            # Re-raise UserError as-is (it already has a good message)
+            call_task = asyncio.create_task(
+                server.call_tool(tool.name, json_data)
+                if merged_meta is None
+                else server.call_tool(tool.name, json_data, meta=merged_meta)
+            )
+            try:
+                done, _ = await asyncio.wait({call_task}, return_when=asyncio.FIRST_COMPLETED)
+                finished_task = done.pop()
+                if finished_task.cancelled():
+                    raise MCPToolCancellationError(
+                        f"Failed to call tool '{tool.name}' on MCP server '{server.name}': "
+                        "tool execution was cancelled."
+                    )
+                result = finished_task.result()
+            except asyncio.CancelledError:
+                if not call_task.done():
+                    call_task.cancel()
+                try:
+                    await call_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                raise
+        except (UserError, MCPToolCancellationError):
+            # Re-raise handled tool-call errors as-is; the FunctionTool failure pipeline
+            # will format them into model-visible tool errors when appropriate.
             raise
         except Exception as e:
             if _McpError is not None and isinstance(e, _McpError):

@@ -75,6 +75,16 @@ class UserError(AgentsException):
         super().__init__(message)
 
 
+class MCPToolCancellationError(AgentsException):
+    """Exception raised when an MCP tool call is internally cancelled."""
+
+    message: str
+
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)
+
+
 class ToolTimeoutError(AgentsException):
     """Exception raised when a function tool invocation exceeds its timeout."""
 

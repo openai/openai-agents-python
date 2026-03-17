@@ -65,6 +65,8 @@ jobs:
             core.setOutput('head_sha', pr.head.sha);
             core.setOutput('head_repo', headRepo);
             core.setOutput('is_fork', headRepo !== repoFullName);
+            core.setOutput('title', pr.title || '');
+            core.setOutput('body', pr.body || '');
 
       - name: Checkout base
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -81,14 +83,36 @@ jobs:
             "https://github.com/${PR_HEAD_REPO}.git" \
             "${PR_HEAD_SHA}"
       - name: Collect PR diff
+        id: diff
         env:
           PR_BASE_SHA: ${{ steps.pr.outputs.base_sha }}
           PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          PR_TITLE: ${{ steps.pr.outputs.title }}
+          PR_BODY: ${{ steps.pr.outputs.body }}
         run: |
           set -euo pipefail
           mkdir -p .tmp/pr-labels
-          git diff --name-only "$PR_BASE_SHA" "$PR_HEAD_SHA" > .tmp/pr-labels/changed-files.txt
-          git diff "$PR_BASE_SHA" "$PR_HEAD_SHA" > .tmp/pr-labels/changes.diff
+          diff_base_sha="$(git merge-base "$PR_BASE_SHA" "$PR_HEAD_SHA")"
+          echo "diff_base_sha=${diff_base_sha}" >> "$GITHUB_OUTPUT"
+          git diff --name-only "$diff_base_sha" "$PR_HEAD_SHA" > .tmp/pr-labels/changed-files.txt
+          git diff "$diff_base_sha" "$PR_HEAD_SHA" > .tmp/pr-labels/changes.diff
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          pathlib.Path(".tmp/pr-labels/pr-context.json").write_text(
+              json.dumps(
+                  {
+                      "title": os.environ.get("PR_TITLE", ""),
+                      "body": os.environ.get("PR_BODY", ""),
+                  },
+                  ensure_ascii=False,
+                  indent=2,
+              )
+              + "\n"
+          )
+          PY
       - name: Prepare Codex output
         id: codex-output
         run: |
@@ -105,13 +129,14 @@ jobs:
           openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
           prompt-file: .github/codex/prompts/pr-labels.md
           output-file: ${{ steps.codex-output.outputs.output_file }}
+          output-schema-file: .github/codex/schemas/pr-labels.json
           safety-strategy: drop-sudo
           sandbox: read-only
       - name: Apply labels
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
-          PR_BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          PR_BASE_SHA: ${{ steps.diff.outputs.diff_base_sha }}
           PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
           CODEX_OUTPUT_PATH: ${{ steps.codex-output.outputs.output_file }}
           CODEX_CONCLUSION: ${{ steps.run_codex.conclusion }}
