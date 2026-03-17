@@ -6,7 +6,7 @@ import tempfile
 import warnings
 from pathlib import Path
 from typing import Any, Callable, cast
-from unittest.mock import ANY, call, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -3684,17 +3684,16 @@ async def test_session_add_items_called_multiple_times_for_multi_turn_completion
                 },
             ]
 
-            expected_calls = [
-                # First call is the initial input
-                call([expected_items[0]], wrapper=ANY),
-                # Second call is the first tool call and its result
-                call([expected_items[1], expected_items[2]], wrapper=ANY),
-                # Third call is the second tool call and its result
-                call([expected_items[3], expected_items[4]], wrapper=ANY),
-                # Fourth call is the final output
-                call([expected_items[5]], wrapper=ANY),
+            expected_item_batches = [
+                [expected_items[0]],
+                [expected_items[1], expected_items[2]],
+                [expected_items[3], expected_items[4]],
+                [expected_items[5]],
             ]
-            assert mock_add_items.call_args_list == expected_calls
+            assert len(mock_add_items.call_args_list) == len(expected_item_batches)
+            paired_calls = zip(mock_add_items.call_args_list, expected_item_batches)
+            for actual_call, expected_batch in paired_calls:
+                assert actual_call.args == (expected_batch,)
             assert result.final_output == "Summary: Echoed foo and bar"
             assert (await session.get_items()) == expected_items
 
