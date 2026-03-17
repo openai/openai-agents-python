@@ -33,14 +33,12 @@ def _method_signature(method: Any) -> tuple[inspect.Parameter, ...]:
         return ()
 
 
-
 def _method_accepts_wrapper(method: Any) -> bool:
     parameters = _method_signature(method)
     return any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD or parameter.name == "wrapper"
         for parameter in parameters
     )
-
 
 
 def _method_accepts_limit(method: Any) -> bool:
