@@ -9,6 +9,7 @@ import pytest
 
 from agents import Agent, RunConfig, Runner, SQLiteSession, TResponseInputItem
 from agents.memory.session import SessionABC
+from agents.memory.session_settings import SessionSettings
 from agents.run_context import RunContextWrapper
 from agents.run_internal.session_persistence import prepare_input_with_session
 
@@ -136,16 +137,26 @@ class LegacyNoLimitKeywordSession:
 
 class DefaultLimitedSession:
     session_id = "default-limited"
+    session_settings: SessionSettings | None = None
 
     def __init__(self) -> None:
         self.items: list[TResponseInputItem] = []
         self.get_call_count = 0
 
-    async def get_items(self, limit: int = 1) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         self.get_call_count += 1
-        return list(self.items[-limit:]) if limit > 0 else []
+        effective_limit = 1 if limit is None else limit
+        return list(self.items[-effective_limit:]) if effective_limit > 0 else []
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         self.items.extend(items)
 
     async def pop_item(self) -> TResponseInputItem | None:
@@ -333,8 +344,10 @@ async def test_get_items_preserves_default_limit_when_none_is_unset() -> None:
     )
 
     assert isinstance(prepared_input, list)
-    assert prepared_input[0]["content"] == "two"
-    assert prepared_input[1]["content"] == "new"
+    first = prepared_input[0]
+    second = prepared_input[1]
+    assert isinstance(first, dict) and first.get("content") == "two"
+    assert isinstance(second, dict) and second.get("content") == "new"
     assert session.get_call_count == 1
 
 

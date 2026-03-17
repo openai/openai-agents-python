@@ -7,6 +7,8 @@ import pytest
 
 pytest.importorskip("cryptography")  # Skip tests if cryptography is not installed
 
+from typing import cast
+
 from cryptography.fernet import Fernet
 
 from agents import Agent, Runner, SQLiteSession, TResponseInputItem
@@ -116,7 +118,7 @@ async def test_encrypted_session_preserves_legacy_underlying_signatures(
     agent: Agent,
     encryption_key: str,
 ):
-    class LegacyUnderlyingSession(SessionABC):
+    class LegacyUnderlyingSession:
         def __init__(self) -> None:
             self.session_id = "test_session"
             self.items: list[TResponseInputItem] = []
@@ -140,7 +142,7 @@ async def test_encrypted_session_preserves_legacy_underlying_signatures(
     legacy_underlying = LegacyUnderlyingSession()
     session = EncryptedSession(
         session_id="test_session",
-        underlying_session=legacy_underlying,
+        underlying_session=cast(SessionABC, legacy_underlying),
         encryption_key=encryption_key,
     )
 
