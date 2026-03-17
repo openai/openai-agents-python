@@ -71,6 +71,7 @@ async def run_input_guardrails_with_queue(
         for done in asyncio.as_completed(guardrail_tasks):
             result = await done
             if result.output.tripwire_triggered:
+                streamed_result._triggered_input_guardrail_result = result
                 for t in guardrail_tasks:
                     t.cancel()
                 await asyncio.gather(*guardrail_tasks, return_exceptions=True)
@@ -86,7 +87,6 @@ async def run_input_guardrails_with_queue(
                 else:
                     # Early first-turn streamed guardrails can run before the agent span exists.
                     _error_tracing.attach_error_to_current_span(span_error)
-                streamed_result._triggered_input_guardrail_result = result
                 queue.put_nowait(result)
                 guardrail_results.append(result)
                 break

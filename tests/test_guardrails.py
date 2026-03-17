@@ -715,6 +715,82 @@ async def test_parallel_guardrail_trip_before_tool_execution_stops_streaming_tur
 
 
 @pytest.mark.asyncio
+async def test_parallel_guardrail_trip_with_slow_cancel_sibling_stops_streaming_turn():
+    tool_was_executed = False
+    model_started = asyncio.Event()
+    guardrail_tripped = asyncio.Event()
+    slow_cancel_started = asyncio.Event()
+    slow_cancel_finished = asyncio.Event()
+
+    @function_tool
+    def dangerous_tool() -> str:
+        nonlocal tool_was_executed
+        tool_was_executed = True
+        return "tool_executed"
+
+    @input_guardrail(run_in_parallel=True)
+    async def tripwire_before_tool_execution(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await asyncio.wait_for(model_started.wait(), timeout=1)
+        guardrail_tripped.set()
+        return GuardrailFunctionOutput(
+            output_info="parallel_trip_before_tool_execution_with_slow_cancel",
+            tripwire_triggered=True,
+        )
+
+    @input_guardrail(run_in_parallel=True)
+    async def slow_to_cancel_guardrail(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        try:
+            await asyncio.Event().wait()
+            return GuardrailFunctionOutput(
+                output_info="slow_to_cancel_guardrail_completed",
+                tripwire_triggered=False,
+            )
+        except asyncio.CancelledError:
+            slow_cancel_started.set()
+            await asyncio.sleep(SHORT_DELAY)
+            slow_cancel_finished.set()
+            raise
+
+    model = FakeModel()
+    original_stream_response = model.stream_response
+
+    async def delayed_stream_response(*args, **kwargs):
+        model_started.set()
+        await asyncio.wait_for(guardrail_tripped.wait(), timeout=1)
+        await asyncio.wait_for(slow_cancel_started.wait(), timeout=1)
+        async for event in original_stream_response(*args, **kwargs):
+            yield event
+
+    agent = Agent(
+        name="streaming_guardrail_slow_cancel_agent",
+        instructions="Call the dangerous_tool immediately",
+        tools=[dangerous_tool],
+        input_guardrails=[tripwire_before_tool_execution, slow_to_cancel_guardrail],
+        model=model,
+    )
+    model.set_next_output([get_function_tool_call("dangerous_tool", arguments="{}")])
+    model.set_next_output([get_text_message("done")])
+
+    with patch.object(model, "stream_response", side_effect=delayed_stream_response):
+        result = Runner.run_streamed(agent, "trigger guardrail")
+
+        with pytest.raises(InputGuardrailTripwireTriggered):
+            async for _event in result.stream_events():
+                pass
+
+    assert model_started.is_set() is True
+    assert guardrail_tripped.is_set() is True
+    assert slow_cancel_started.is_set() is True
+    assert slow_cancel_finished.is_set() is True
+    assert tool_was_executed is False
+    assert model.first_turn_args is not None, "Model should have been called in parallel mode"
+
+
+@pytest.mark.asyncio
 async def test_blocking_guardrail_prevents_tool_execution():
     tool_was_executed = False
     guardrail_executed = False
