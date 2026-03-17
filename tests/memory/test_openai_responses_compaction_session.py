@@ -19,6 +19,7 @@ from agents.memory.openai_responses_compaction_session import (
     is_openai_model_name,
     select_compaction_candidate_items,
 )
+from agents.run_context import RunContextWrapper
 from tests.fake_model import FakeModel
 from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
 from tests.utils.simple_session import SimpleListSession
@@ -131,16 +132,57 @@ class TestOpenAIResponsesCompactionSession:
             async def clear_session(self) -> None:
                 return None
 
-        underlying = cast(Session, WrapperOnlySession())
+        underlying = WrapperOnlySession()
         session = OpenAIResponsesCompactionSession(
             session_id="test",
-            underlying_session=underlying,
+            underlying_session=cast(Session, underlying),
         )
 
-        wrapper = SimpleNamespace(context={"request_id": "abc"})
+        wrapper = RunContextWrapper(context={"request_id": "abc"})
         items = await session.get_items(wrapper=wrapper)
 
         assert items == []
+        assert underlying.calls == [(None, wrapper)]
+
+    @pytest.mark.asyncio
+    async def test_get_items_with_limit_preserves_wrapper_only_delegate_shape(self) -> None:
+        class WrapperOnlySession:
+            session_id = "test-session"
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[int | None, Any]] = []
+                self.items: list[TResponseInputItem] = [
+                    cast(TResponseInputItem, {"role": "user", "content": "one"}),
+                    cast(TResponseInputItem, {"role": "assistant", "content": "two"}),
+                ]
+
+            async def get_items(
+                self,
+                wrapper: Any = None,
+            ) -> list[TResponseInputItem]:
+                self.calls.append((None, wrapper))
+                return list(self.items)
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                return None
+
+            async def pop_item(self) -> TResponseInputItem | None:
+                return None
+
+            async def clear_session(self) -> None:
+                return None
+
+        underlying = WrapperOnlySession()
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=cast(Session, underlying),
+        )
+
+        wrapper = RunContextWrapper(context={"request_id": "abc"})
+        items = await session.get_items(limit=1, wrapper=wrapper)
+
+        assert len(items) == 1
+        assert items[0].get("content") == "two"
         assert underlying.calls == [(None, wrapper)]
 
     @pytest.mark.asyncio

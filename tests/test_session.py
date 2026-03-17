@@ -3,7 +3,7 @@
 import asyncio
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -151,6 +151,35 @@ class DefaultLimitedSession:
         self.get_call_count += 1
         effective_limit = 1 if limit is None else limit
         return list(self.items[-effective_limit:]) if effective_limit > 0 else []
+
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        self.items.extend(items)
+
+    async def pop_item(self) -> TResponseInputItem | None:
+        return self.items.pop() if self.items else None
+
+    async def clear_session(self) -> None:
+        self.items.clear()
+
+
+class WrapperOnlySession:
+    session_id = "wrapper-only"
+    session_settings: SessionSettings | None = None
+
+    def __init__(self) -> None:
+        self.items: list[TResponseInputItem] = []
+        self.get_wrappers: list[RunContextWrapper[Any] | None] = []
+
+    async def get_items(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
+        self.get_wrappers.append(wrapper)
+        return list(self.items)
 
     async def add_items(
         self,
@@ -349,6 +378,31 @@ async def test_get_items_preserves_default_limit_when_none_is_unset() -> None:
     assert isinstance(first, dict) and first.get("content") == "two"
     assert isinstance(second, dict) and second.get("content") == "new"
     assert session.get_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_items_with_limit_preserves_wrapper_only_delegate_shape() -> None:
+    session = WrapperOnlySession()
+    session.items = [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+    ]
+    wrapper = RunContextWrapper(context={"request_id": "wrapper-only"})
+
+    prepared_input, _ = await prepare_input_with_session(
+        "new",
+        cast(SessionABC, session),
+        session_input_callback=None,
+        session_settings=SessionSettings(limit=1),
+        wrapper=wrapper,
+    )
+
+    assert isinstance(prepared_input, list)
+    first = prepared_input[0]
+    second = prepared_input[1]
+    assert isinstance(first, dict) and first.get("content") == "two"
+    assert isinstance(second, dict) and second.get("content") == "new"
+    assert session.get_wrappers == [wrapper]
 
 
 @pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])

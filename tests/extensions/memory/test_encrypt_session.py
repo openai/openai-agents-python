@@ -14,6 +14,7 @@ from cryptography.fernet import Fernet
 from agents import Agent, Runner, SQLiteSession, TResponseInputItem
 from agents.extensions.memory.encrypt_session import EncryptedSession
 from agents.memory.session import SessionABC
+from agents.run_context import RunContextWrapper
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 
@@ -112,6 +113,46 @@ async def test_encrypted_session_with_runner(
     assert any("Golden Gate Bridge" in str(item.get("content", "")) for item in last_input)
 
     underlying_session.close()
+
+
+async def test_encrypted_session_preserves_wrapper_only_underlying_with_limit(
+    encryption_key: str,
+):
+    class WrapperOnlyUnderlyingSession:
+        def __init__(self) -> None:
+            self.session_id = "test_session"
+            self.items: list[TResponseInputItem] = []
+            self.get_wrappers: list[object | None] = []
+
+        async def get_items(self, wrapper: object = None) -> list[TResponseInputItem]:
+            self.get_wrappers.append(wrapper)
+            return list(self.items)
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.items.extend(items)
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            self.items.clear()
+
+    underlying = WrapperOnlyUnderlyingSession()
+    underlying.items = [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+    ]
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=cast(SessionABC, underlying),
+        encryption_key=encryption_key,
+    )
+
+    wrapper = RunContextWrapper(context={"request_id": "encrypt"})
+    items = await session.get_items(limit=1, wrapper=wrapper)
+
+    assert items[-1].get("content") == "two"
+    assert underlying.get_wrappers == [wrapper]
 
 
 async def test_encrypted_session_preserves_legacy_underlying_signatures(

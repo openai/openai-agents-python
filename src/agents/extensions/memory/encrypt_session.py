@@ -127,6 +127,33 @@ def _method_accepts_limit(method: Any) -> bool:
     )
 
 
+async def _delegate_get_items(
+    session: SessionABC,
+    limit: int | None = None,
+    *,
+    wrapper: RunContextWrapper[Any] | None = None,
+) -> list[TResponseInputItem]:
+    accepts_wrapper = wrapper is not None and _method_accepts_wrapper(session.get_items)
+    accepts_limit = _method_accepts_limit(session.get_items)
+
+    if limit is None:
+        if accepts_wrapper:
+            return await session.get_items(wrapper=wrapper)
+        return await session.get_items()
+
+    if accepts_limit:
+        if accepts_wrapper:
+            return await session.get_items(limit=limit, wrapper=wrapper)
+        return await session.get_items(limit=limit)
+
+    if accepts_wrapper:
+        items = await session.get_items(wrapper=wrapper)
+    else:
+        items = await session.get_items()
+
+    return items[-limit:] if limit > 0 else []
+
+
 class EncryptedSession(SessionABC):
     """Encrypted wrapper for Session implementations with TTL-based expiration.
 
@@ -206,18 +233,11 @@ class EncryptedSession(SessionABC):
         limit: int | None = None,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> list[TResponseInputItem]:
-        accepts_wrapper = wrapper is not None and _method_accepts_wrapper(
-            self.underlying_session.get_items
+        encrypted_items = await _delegate_get_items(
+            self.underlying_session,
+            limit=limit,
+            wrapper=wrapper,
         )
-        if limit is None:
-            if accepts_wrapper:
-                encrypted_items = await self.underlying_session.get_items(wrapper=wrapper)
-            else:
-                encrypted_items = await self.underlying_session.get_items()
-        elif accepts_wrapper:
-            encrypted_items = await self.underlying_session.get_items(limit, wrapper=wrapper)
-        else:
-            encrypted_items = await self.underlying_session.get_items(limit)
         valid_items: list[TResponseInputItem] = []
         for enc in encrypted_items:
             item = self._unwrap(enc)

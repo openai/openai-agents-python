@@ -83,15 +83,24 @@ async def _session_get_items(
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> list[TResponseInputItem]:
     accepts_wrapper = wrapper is not None and _session_method_accepts_wrapper(session.get_items)
+    accepts_limit = _session_method_accepts_limit(session.get_items)
 
     if limit is None:
         if accepts_wrapper:
             return await session.get_items(wrapper=wrapper)
         return await session.get_items()
 
+    if accepts_limit:
+        if accepts_wrapper:
+            return await session.get_items(limit=limit, wrapper=wrapper)
+        return await session.get_items(limit=limit)
+
     if accepts_wrapper:
-        return await session.get_items(limit=limit, wrapper=wrapper)
-    return await session.get_items(limit=limit)
+        items = await session.get_items(wrapper=wrapper)
+    else:
+        items = await session.get_items()
+
+    return items[-limit:] if limit > 0 else []
 
 
 async def _session_add_items(
@@ -539,7 +548,7 @@ async def rewind_session_items(
         return
 
     try:
-        latest_items = await session.get_items(limit=1)
+        latest_items = await _session_get_items(session, limit=1)
     except Exception as exc:
         logger.debug("Failed to peek session items while rewinding: %s", exc)
         return
@@ -587,7 +596,7 @@ async def wait_for_session_cleanup(
 
     for attempt in range(max_attempts):
         try:
-            tail_items = await session.get_items(limit=window)
+            tail_items = await _session_get_items(session, limit=window)
         except Exception as exc:
             logger.debug("Failed to verify session cleanup (attempt %d): %s", attempt + 1, exc)
             await asyncio.sleep(0.1 * (attempt + 1))
