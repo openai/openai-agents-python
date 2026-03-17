@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import functools
 import inspect
@@ -363,6 +364,11 @@ class MCPUtil:
                 result = await server.call_tool(tool.name, json_data)
             else:
                 result = await server.call_tool(tool.name, json_data, meta=merged_meta)
+        except asyncio.CancelledError:
+            raise UserError(
+                f"Failed to call tool '{tool.name}' on MCP server '{server.name}': "
+                "tool execution was cancelled."
+            ) from None
         except UserError:
             # Re-raise UserError as-is (it already has a good message)
             raise

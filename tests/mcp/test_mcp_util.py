@@ -1,3 +1,4 @@
+import asyncio
 import dataclasses
 import json
 import logging
@@ -171,8 +172,18 @@ class CrashingFakeMCPServer(FakeMCPServer):
         tool_name: str,
         arguments: dict[str, Any] | None,
         meta: dict[str, Any] | None = None,
+        ):
+            raise Exception("Crash!")
+
+
+class CancelledFakeMCPServer(FakeMCPServer):
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
     ):
-        raise Exception("Crash!")
+        raise asyncio.CancelledError("synthetic cancellation")
 
 
 @pytest.mark.asyncio
@@ -343,6 +354,30 @@ async def test_mcp_tool_timeout_handling():
     assert isinstance(result, str)
     assert "error" in result.lower() or "occurred" in result.lower()
     assert "Timed out" in result
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_cancellation_returns_error_message():
+    server = CancelledFakeMCPServer()
+    server.add_tool("cancelled_tool", {})
+
+    mcp_tool = MCPTool(name="cancelled_tool", inputSchema={})
+    agent = Agent(name="test-agent")
+    function_tool = MCPUtil.to_function_tool(
+        mcp_tool, server, convert_schemas_to_strict=False, agent=agent
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="cancelled_tool",
+        tool_call_id="test_call_cancelled",
+        tool_arguments="{}",
+    )
+
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+
+    assert isinstance(result, str)
+    assert "cancelled" in result.lower()
 
 
 @pytest.mark.asyncio
