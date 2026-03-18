@@ -223,7 +223,7 @@ class HangingSession:
 
 
 class DummyStreamableHttpServer(MCPServerStreamableHttp):
-    def __init__(self, shared_session: object, isolated_session: IsolatedRetrySession):
+    def __init__(self, shared_session: object, isolated_session: object):
         super().__init__(
             params={"url": "https://example.test/mcp"},
             client_session_timeout_seconds=None,
@@ -319,6 +319,19 @@ async def test_streamable_http_preserves_outer_cancellation():
         await task
 
     assert isolated_session.call_tool_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_preserves_outer_cancellation_during_isolated_retry():
+    server = DummyStreamableHttpServer(CancelledToolSession(), HangingSession())
+    server.max_retry_attempts = 1
+
+    task = asyncio.create_task(server.call_tool("tool", None))
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 class ConcurrentPromptCancellationSession(ConcurrentCancellationSession):

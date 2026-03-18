@@ -1216,6 +1216,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             async with self._isolated_client_session() as session:
                 try:
                     return await self._call_tool_with_session(session, tool_name, arguments, meta)
+                except asyncio.CancelledError:
+                    raise
                 except BaseException as exc:
                     raise _IsolatedSessionRetryFailed() from exc
         except asyncio.CancelledError:
