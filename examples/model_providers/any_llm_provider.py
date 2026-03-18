@@ -4,15 +4,14 @@ import asyncio
 import os
 
 from agents import Agent, Runner, function_tool, set_tracing_disabled
-from agents.extensions.models.litellm_model import LitellmModel
+from agents.extensions.models.any_llm_model import AnyLLMModel
 
-"""This example uses the LitellmModel directly, to hit any model provider.
+"""This example uses the AnyLLMModel directly.
+
 You can run it like this:
-uv run examples/model_providers/litellm_provider.py --model openrouter/openai/gpt-5.4-mini
+uv run examples/model_providers/any_llm_provider.py --model openrouter/openai/gpt-5.4-mini
 or
-uv run examples/model_providers/litellm_provider.py --model openrouter/anthropic/claude-4.5-sonnet
-
-Find more providers here: https://docs.litellm.ai/docs/providers
+uv run examples/model_providers/any_llm_provider.py --model openrouter/anthropic/claude-4.5-sonnet
 """
 
 set_tracing_disabled(disabled=True)
@@ -28,10 +27,11 @@ async def main(model: str, api_key: str):
     if api_key == "dummy":
         print("Skipping run because no valid OPENROUTER_API_KEY was provided.")
         return
+
     agent = Agent(
         name="Assistant",
         instructions="You only respond in haikus.",
-        model=LitellmModel(model=model, api_key=api_key),
+        model=AnyLLMModel(model=model, api_key=api_key),
         tools=[get_weather],
     )
 
@@ -40,7 +40,6 @@ async def main(model: str, api_key: str):
 
 
 if __name__ == "__main__":
-    # Prefer non-interactive defaults in auto mode to avoid blocking.
     import argparse
 
     parser = argparse.ArgumentParser()
@@ -48,7 +47,7 @@ if __name__ == "__main__":
     parser.add_argument("--api-key", type=str, required=False)
     args = parser.parse_args()
 
-    model = args.model or os.environ.get("LITELLM_MODEL", "openrouter/openai/gpt-5.4-mini")
+    model = args.model or os.environ.get("ANY_LLM_MODEL", "openrouter/openai/gpt-5.4-mini")
     api_key = args.api_key or os.environ.get("OPENROUTER_API_KEY", "dummy")
 
     if not args.model:

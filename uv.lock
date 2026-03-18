@@ -137,6 +137,23 @@ wheels = [
 ]
 
 [[package]]
+name = "any-llm-sdk"
+version = "1.11.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx", marker = "python_full_version >= '3.11'" },
+    { name = "openai", marker = "python_full_version >= '3.11'" },
+    { name = "openresponses-types", marker = "python_full_version >= '3.11'" },
+    { name = "pydantic", marker = "python_full_version >= '3.11'" },
+    { name = "rich", marker = "python_full_version >= '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f3/18/161747c16bbe4b15122ac690e7941f3c58f24b3df382189fdbadf0624595/any_llm_sdk-1.11.0.tar.gz", hash = "sha256:cabda4135041127e728d6d6fe6a3c0d77f45c0dd50b38a8f0bc132a2ad948a6a", size = 148392, upload-time = "2026-03-12T13:18:29.74Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3c/d7/3d89d25e08e7bef70565b8af1872407a636308ba5fa203c667134157344b/any_llm_sdk-1.11.0-py3-none-any.whl", hash = "sha256:1329bfb7c5fea68918ff0a8f47ecde876bb2e2a8cf990500adb6ec119339010f", size = 206124, upload-time = "2026-03-12T13:18:28.116Z" },
+]
+
+[[package]]
 name = "anyio"
 version = "4.10.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1901,6 +1918,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+any-llm = [
+    { name = "any-llm-sdk", marker = "python_full_version >= '3.11'" },
+]
 dapr = [
     { name = "dapr" },
     { name = "grpcio" },
@@ -1965,6 +1985,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "any-llm-sdk", marker = "python_full_version >= '3.11' and extra == 'any-llm'", specifier = ">=1.11.0,<2" },
     { name = "asyncpg", marker = "extra == 'sqlalchemy'", specifier = ">=0.29.0" },
     { name = "cryptography", marker = "extra == 'encrypt'", specifier = ">=45.0,<46" },
     { name = "dapr", marker = "extra == 'dapr'", specifier = ">=1.16.0" },
@@ -1984,7 +2005,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<16" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<16" },
 ]
-provides-extras = ["voice", "viz", "litellm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr"]
+provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2018,6 +2039,18 @@ dev = [
     { name = "textual" },
     { name = "types-pynput" },
     { name = "websockets" },
+]
+
+[[package]]
+name = "openresponses-types"
+version = "2.3.0.post1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic", marker = "python_full_version >= '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d9/26/b612c3215f5599714fa94d63eb5ee59b4eb66dbdeeaf86bb4d848359484d/openresponses_types-2.3.0.post1.tar.gz", hash = "sha256:11b8896d3621d2ac2439f6ff106f34ddcb1bbd517c317a6c852a9df2e98a0753", size = 19254, upload-time = "2026-01-22T20:02:03.933Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b2/5f/e16dad89ed24f586da5b01b9b206d3adbf21fe1af8e4dc55d5b93158fde6/openresponses_types-2.3.0.post1-py3-none-any.whl", hash = "sha256:88f6abcef9cad839203abff420dd080978bf6eb33cc06ddc5d78da4ccdba7613", size = 13847, upload-time = "2026-01-22T20:02:02.582Z" },
 ]
 
 [[package]]

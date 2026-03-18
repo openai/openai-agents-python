@@ -6,15 +6,12 @@ from pydantic import BaseModel
 
 from agents import Agent, ModelSettings, Runner, function_tool, set_tracing_disabled
 
-"""This example uses the built-in support for LiteLLM through OpenRouter.
+"""This example uses the built-in any-llm routing through OpenRouter.
 
 Set OPENROUTER_API_KEY before running it.
 """
 
 set_tracing_disabled(disabled=True)
-
-# import logging
-# logging.basicConfig(level=logging.DEBUG)
 
 
 @function_tool
@@ -32,8 +29,7 @@ async def main():
     agent = Agent(
         name="Assistant",
         instructions="You only respond in haikus.",
-        # We prefix with litellm/ to tell the Runner to use the LitellmModel
-        model="litellm/openrouter/openai/gpt-5.4-mini",
+        model="any-llm/openrouter/openai/gpt-5.4-mini",
         tools=[get_weather],
         model_settings=ModelSettings(tool_choice="required"),
         output_type=Result,

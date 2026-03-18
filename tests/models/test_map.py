@@ -33,6 +33,30 @@ def test_litellm_prefix_is_litellm():
     assert isinstance(model, LitellmModel)
 
 
+def test_any_llm_prefix_uses_any_llm_provider(monkeypatch):
+    import sys
+    import types as pytypes
+
+    captured_model: dict[str, Any] = {}
+
+    class FakeAnyLLMModel:
+        pass
+
+    class FakeAnyLLMProvider:
+        def get_model(self, model_name):
+            captured_model["value"] = model_name
+            return FakeAnyLLMModel()
+
+    fake_module: Any = pytypes.ModuleType("agents.extensions.models.any_llm_provider")
+    fake_module.AnyLLMProvider = FakeAnyLLMProvider
+    monkeypatch.setitem(sys.modules, "agents.extensions.models.any_llm_provider", fake_module)
+
+    agent = Agent(model="any-llm/openrouter/openai/gpt-5.4-mini", instructions="", name="test")
+    model = get_model(agent, RunConfig())
+    assert isinstance(model, FakeAnyLLMModel)
+    assert captured_model["value"] == "openrouter/openai/gpt-5.4-mini"
+
+
 def test_no_prefix_can_use_openai_responses_websocket():
     agent = Agent(model="gpt-4o", instructions="", name="test")
     model = get_model(
