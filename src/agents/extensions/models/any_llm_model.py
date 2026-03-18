@@ -17,7 +17,6 @@ from openai.types.chat import (
     ChatCompletionMessageParam,
 )
 from openai.types.chat.chat_completion import Choice
-from openai.types.chat.chat_completion_message_function_tool_call import Function
 from openai.types.responses import Response, ResponseCompletedEvent, ResponseStreamEvent
 from pydantic import BaseModel
 
@@ -49,7 +48,7 @@ from ...usage import Usage
 from ...util._json import _to_dump_compatible
 
 try:
-    from any_llm import AnyLLM
+    from any_llm import AnyLLM  # type: ignore[import-not-found]
 except ImportError as _e:
     raise ImportError(
         "`any-llm-sdk` is required to use the AnyLLMModel. Install it via the optional "
@@ -118,21 +117,38 @@ _ANY_LLM_RESPONSES_PARAM_FIELDS = {
 def _convert_any_llm_tool_call_to_openai(
     tool_call: Any,
 ) -> ChatCompletionMessageFunctionToolCall | ChatCompletionMessageCustomToolCall:
+    tool_call_payload: dict[str, Any] | None = None
+    if isinstance(tool_call, BaseModel):
+        dumped = tool_call.model_dump()
+        if isinstance(dumped, dict):
+            tool_call_payload = dumped
+    elif isinstance(tool_call, dict):
+        tool_call_payload = dict(tool_call)
+
     tool_call_type = getattr(tool_call, "type", None)
+    if tool_call_type is None and tool_call_payload is not None:
+        tool_call_type = tool_call_payload.get("type")
     if tool_call_type == "custom":
-        if isinstance(tool_call, BaseModel):
-            return ChatCompletionMessageCustomToolCall.model_validate(tool_call.model_dump())
+        if tool_call_payload is not None:
+            return ChatCompletionMessageCustomToolCall.model_validate(tool_call_payload)
         return ChatCompletionMessageCustomToolCall.model_validate(tool_call)
 
+    if tool_call_payload is not None:
+        return ChatCompletionMessageFunctionToolCall.model_validate(tool_call_payload)
+
     function = getattr(tool_call, "function", None)
-    return ChatCompletionMessageFunctionToolCall(
-        id=str(getattr(tool_call, "id", "")),
-        type="function",
-        function=Function(
-            name=str(getattr(function, "name", "") or ""),
-            arguments=str(getattr(function, "arguments", "") or ""),
-        ),
-    )
+    payload: dict[str, Any] = {
+        "id": str(getattr(tool_call, "id", "")),
+        "type": "function",
+        "function": {
+            "name": str(getattr(function, "name", "") or ""),
+            "arguments": str(getattr(function, "arguments", "") or ""),
+        },
+    }
+    extra_content = getattr(tool_call, "extra_content", None)
+    if extra_content is not None:
+        payload["extra_content"] = extra_content
+    return ChatCompletionMessageFunctionToolCall.model_validate(payload)
 
 
 def _flatten_any_llm_reasoning_value(value: Any) -> str:
@@ -718,7 +734,7 @@ class AnyLLMModel(Model):
             **extra_kwargs,
         )
 
-        if isinstance(ret, ChatCompletion):
+        if not stream:
             return self._normalize_chat_completion_response(ret)
 
         responses_tool_choice = OpenAIResponsesConverter.convert_tool_choice(
@@ -1071,7 +1087,9 @@ class AnyLLMModel(Model):
     @staticmethod
     def _make_any_llm_responses_params(payload: dict[str, Any]) -> Any:
         try:
-            from any_llm.types.responses import ResponsesParams as AnyLLMResponsesParams
+            from any_llm.types.responses import (  # type: ignore[import-not-found]
+                ResponsesParams as AnyLLMResponsesParams,
+            )
         except ImportError:
             return _AnyLLMResponsesParamsShim(**payload)
 

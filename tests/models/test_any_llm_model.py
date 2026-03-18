@@ -7,7 +7,12 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionChunk,
+    ChatCompletionMessage,
+    ChatCompletionMessageFunctionToolCall,
+)
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_chunk import ChoiceDelta
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
@@ -18,6 +23,7 @@ from openai.types.responses.response_usage import (
     OutputTokensDetails,
     ResponseUsage,
 )
+from pydantic import BaseModel
 
 from agents import ModelSettings, ModelTracing, __version__
 from agents.exceptions import UserError
@@ -142,6 +148,55 @@ def _response(text: str, response_id: str = "resp_123") -> Response:
     )
 
 
+def _chat_completion_with_tool_call(*, thought_signature: str) -> ChatCompletion:
+    return ChatCompletion(
+        id="chatcmpl_tool_123",
+        created=0,
+        model="fake-model",
+        object="chat.completion",
+        choices=[
+            Choice(
+                index=0,
+                finish_reason="tool_calls",
+                message=ChatCompletionMessage(
+                    role="assistant",
+                    content="Calling a tool.",
+                    tool_calls=[
+                        ChatCompletionMessageFunctionToolCall.model_validate(
+                            {
+                                "id": "call_123",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": '{"city":"Paris"}',
+                                },
+                                "extra_content": {
+                                    "google": {"thought_signature": thought_signature}
+                                },
+                            }
+                        )
+                    ],
+                ),
+            )
+        ],
+        usage=CompletionUsage(
+            completion_tokens=5,
+            prompt_tokens=7,
+            total_tokens=12,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
+        ),
+    )
+
+
+class GenericChatCompletionPayload(BaseModel):
+    id: str
+    created: int
+    model: str
+    object: str
+    choices: list[Any]
+    usage: Any
+
+
 async def _empty_chat_stream() -> AsyncIterator[ChatCompletionChunk]:
     if False:
         yield ChatCompletionChunk(
@@ -221,6 +276,78 @@ async def test_any_llm_chat_path_is_used_when_responses_are_unsupported(monkeypa
     assert provider.chat_calls[0]["model"] == "openai/gpt-5.4-mini"
     assert response.response_id is None
     assert response.output[0].content[0].text == "Hello"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "chat_response",
+    [
+        pytest.param(_chat_completion("Hello").model_dump(), id="dict"),
+        pytest.param(
+            GenericChatCompletionPayload.model_validate(_chat_completion("Hello").model_dump()),
+            id="basemodel",
+        ),
+    ],
+)
+async def test_any_llm_chat_path_normalizes_non_stream_payloads(
+    monkeypatch,
+    chat_response: Any,
+) -> None:
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=chat_response)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    model = AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    response = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert response.response_id is None
+    assert response.output[0].content[0].text == "Hello"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_path_preserves_gemini_tool_call_metadata(monkeypatch) -> None:
+    provider = FakeAnyLLMProvider(
+        supports_responses=False,
+        chat_response=_chat_completion_with_tool_call(thought_signature="sig_123"),
+    )
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    model = AnyLLMModel(model="gemini/gemini-2.0-flash")
+    response = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    function_calls = [
+        item for item in response.output if getattr(item, "type", None) == "function_call"
+    ]
+    assert len(function_calls) == 1
+    provider_data = function_calls[0].model_dump()["provider_data"]
+    assert provider_data["model"] == "gemini/gemini-2.0-flash"
+    assert provider_data["response_id"] == "chatcmpl_tool_123"
+    assert provider_data["thought_signature"] == "sig_123"
 
 
 @pytest.mark.allow_call_model_methods
@@ -457,6 +584,10 @@ async def test_any_llm_prompt_requests_fail_fast(monkeypatch) -> None:
 
 
 def test_any_llm_provider_passes_api_override() -> None:
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
     from agents.extensions.models.any_llm_model import AnyLLMModel
     from agents.extensions.models.any_llm_provider import AnyLLMProvider
 
