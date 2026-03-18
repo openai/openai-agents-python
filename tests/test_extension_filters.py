@@ -936,6 +936,7 @@ def test_removes_reasoning_from_input_history() -> None:
     # reasoning and function_call_output should both be removed, leaving 2 messages
     assert len(filtered_data.input_history) == 2
     for item in filtered_data.input_history:
+        assert not isinstance(item, str)
         assert item.get("type") != "reasoning"
         assert item.get("type") != "function_call_output"
 
@@ -956,6 +957,7 @@ def test_removes_mcp_items_from_input_history() -> None:
     # All MCP items should be removed, leaving only the 2 message items
     assert len(filtered_data.input_history) == 2
     for item in filtered_data.input_history:
+        assert not isinstance(item, str)
         itype = item.get("type")
         assert itype not in {
             "mcp_call",
