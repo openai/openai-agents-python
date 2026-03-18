@@ -361,6 +361,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         self.tool_filter = tool_filter
         self._serialize_session_requests = False
+        self._get_session_id: GetSessionIdCallback | None = None
 
     async def _maybe_serialize_request(self, func: Callable[[], Awaitable[T]]) -> T:
         if not self._serialize_session_requests:
@@ -515,7 +516,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             # streamablehttp_client returns (read, write, get_session_id)
             # sse_client returns (read, write)
 
-            read, write, *_ = transport
+            read, write, *rest = transport
+            # Capture the session-id callback when present (streamablehttp_client only).
+            self._get_session_id = rest[0] if rest and callable(rest[0]) else None
 
             session = await self.exit_stack.enter_async_context(
                 ClientSession(
@@ -1348,3 +1351,29 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
     def name(self) -> str:
         """A readable name for the server."""
         return self._name
+
+    @property
+    def session_id(self) -> str | None:
+        """The MCP session ID assigned by the server, or None if not yet connected
+        or if the server did not issue a session ID.
+
+        The session ID is stable for the lifetime of this server instance's connection.
+        You can persist it and pass it back via the Mcp-Session-Id request header
+        (params["headers"]) on a new MCPServerStreamableHttp instance to resume
+        the same server-side session across process restarts or stateless workers.
+
+        Example::
+
+            async with MCPServerStreamableHttp(params={"url": url}) as server:
+                session_id = server.session_id
+
+            # In a new worker / process:
+            async with MCPServerStreamableHttp(
+                params={"url": url, "headers": {"Mcp-Session-Id": session_id}}
+            ) as server:
+                # Resumes the same server-side session.
+                ...
+        """
+        if self._get_session_id is None:
+            return None
+        return self._get_session_id()
