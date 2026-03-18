@@ -209,12 +209,13 @@ class SharedHttpStatusSession:
 
 
 class TimeoutSession:
-    def __init__(self):
+    def __init__(self, message: str = "timed out"):
         self.call_tool_attempts = 0
+        self.message = message
 
     async def call_tool(self, tool_name, arguments, meta=None):
         self.call_tool_attempts += 1
-        raise httpx.TimeoutException("timed out")
+        raise httpx.TimeoutException(self.message)
 
 
 class IsolatedRetrySession:
@@ -253,6 +254,29 @@ class DummyStreamableHttpServer(MCPServerStreamableHttp):
 
     async def get_prompt(self, name, arguments=None):
         raise NotImplementedError
+
+
+class IsolatedSessionEnterFailure:
+    def __init__(self, server: "EnterFailingStreamableHttpServer", message: str):
+        self.server = server
+        self.message = message
+
+    async def __aenter__(self):
+        self.server.isolated_enter_attempts += 1
+        raise httpx.TimeoutException(self.message)
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class EnterFailingStreamableHttpServer(DummyStreamableHttpServer):
+    def __init__(self, shared_session: object, *, isolated_message: str):
+        super().__init__(shared_session, IsolatedRetrySession())
+        self.isolated_enter_attempts = 0
+        self._isolated_message = isolated_message
+
+    def _isolated_client_session(self):
+        return IsolatedSessionEnterFailure(self, self._isolated_message)
 
 
 @pytest.mark.asyncio
@@ -305,16 +329,32 @@ async def test_streamable_http_does_not_isolated_retry_without_retry_budget():
 
 @pytest.mark.asyncio
 async def test_streamable_http_counts_isolated_retry_against_retry_budget():
-    shared_session = TimeoutSession()
-    isolated_session = TimeoutSession()
+    shared_session = TimeoutSession("shared timed out")
+    isolated_session = TimeoutSession("isolated timed out")
     server = DummyStreamableHttpServer(shared_session, isolated_session)
     server.max_retry_attempts = 2
 
-    with pytest.raises(httpx.TimeoutException, match="timed out"):
+    with pytest.raises(httpx.TimeoutException, match="shared timed out"):
         await server.call_tool("tool", None)
 
     assert shared_session.call_tool_attempts == 2
     assert isolated_session.call_tool_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_counts_isolated_session_setup_failure_against_retry_budget():
+    shared_session = TimeoutSession("shared timed out")
+    server = EnterFailingStreamableHttpServer(
+        shared_session,
+        isolated_message="isolated setup timed out",
+    )
+    server.max_retry_attempts = 2
+
+    with pytest.raises(httpx.TimeoutException, match="shared timed out"):
+        await server.call_tool("tool", None)
+
+    assert shared_session.call_tool_attempts == 2
+    assert server.isolated_enter_attempts == 1
 
 
 @pytest.mark.asyncio

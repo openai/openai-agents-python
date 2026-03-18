@@ -1213,7 +1213,16 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         try:
             return await asyncio.shield(request_task), False
         except _SharedSessionRequestNeedsIsolation:
-            async with self._isolated_client_session() as session:
+            exit_stack = AsyncExitStack()
+            try:
+                session = await exit_stack.enter_async_context(self._isolated_client_session())
+            except asyncio.CancelledError:
+                await exit_stack.aclose()
+                raise
+            except BaseException as exc:
+                await exit_stack.aclose()
+                raise _IsolatedSessionRetryFailed() from exc
+            try:
                 try:
                     result = await self._call_tool_with_session(session, tool_name, arguments, meta)
                     return result, True
@@ -1221,6 +1230,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                     raise
                 except BaseException as exc:
                     raise _IsolatedSessionRetryFailed() from exc
+            finally:
+                await exit_stack.aclose()
         except asyncio.CancelledError:
             if not request_task.done():
                 request_task.cancel()
