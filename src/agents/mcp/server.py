@@ -1201,7 +1201,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         meta: dict[str, Any] | None = None,
         *,
         allow_isolated_retry: bool,
-    ) -> CallToolResult:
+    ) -> tuple[CallToolResult, bool]:
         request_task = asyncio.create_task(
             self._call_tool_with_shared_session(
                 tool_name,
@@ -1211,11 +1211,12 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             )
         )
         try:
-            return await asyncio.shield(request_task)
+            return await asyncio.shield(request_task), False
         except _SharedSessionRequestNeedsIsolation:
             async with self._isolated_client_session() as session:
                 try:
-                    return await self._call_tool_with_session(session, tool_name, arguments, meta)
+                    result = await self._call_tool_with_session(session, tool_name, arguments, meta)
+                    return result, True
                 except asyncio.CancelledError:
                     raise
                 except BaseException as exc:
@@ -1241,17 +1242,23 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         try:
             self._validate_required_parameters(tool_name=tool_name, arguments=arguments)
             retries_used = 0
+            first_attempt = True
             while True:
+                if not first_attempt and self.max_retry_attempts != -1:
+                    retries_used += 1
                 allow_isolated_retry = (
                     self.max_retry_attempts == -1 or retries_used < self.max_retry_attempts
                 )
                 try:
-                    return await self._call_tool_with_isolated_retry(
+                    result, used_isolated_retry = await self._call_tool_with_isolated_retry(
                         tool_name,
                         arguments,
                         meta,
                         allow_isolated_retry=allow_isolated_retry,
                     )
+                    if used_isolated_retry and self.max_retry_attempts != -1:
+                        retries_used += 1
+                    return result
                 except _IsolatedSessionRetryFailed as exc:
                     retries_used += 1
                     if self.max_retry_attempts != -1 and retries_used >= self.max_retry_attempts:
@@ -1263,9 +1270,9 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 except Exception:
                     if self.max_retry_attempts != -1 and retries_used >= self.max_retry_attempts:
                         raise
-                    retries_used += 1
-                    backoff = self.retry_backoff_seconds_base * (2 ** (retries_used - 1))
+                    backoff = self.retry_backoff_seconds_base * (2**retries_used)
                     await asyncio.sleep(backoff)
+                first_attempt = False
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
             raise UserError(
