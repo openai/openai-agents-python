@@ -143,22 +143,20 @@ class AdvancedSQLiteSession(SQLiteSession):
     async def get_items(
         self,
         limit: int | None = None,
-        wrapper: RunContextWrapper[Any] | str | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+        *,
         branch_id: str | None = None,
     ) -> list[TResponseInputItem]:
         """Get items from current or specified branch.
 
         Args:
             limit: Maximum number of items to return. If None, uses session_settings.limit.
+            wrapper: Optional runtime wrapper for the current run context.
             branch_id: Branch to get items from. If None, uses current branch.
 
         Returns:
             List of conversation items from the specified branch.
         """
-        if isinstance(wrapper, str) and branch_id is None:
-            branch_id = wrapper
-            wrapper = None
-
         session_limit = resolve_session_limit(limit, self.session_settings)
 
         if branch_id is None:

@@ -10,7 +10,7 @@ from agents.extensions.memory.advanced_sqlite_session import AdvancedSQLiteSessi
 pytestmark = pytest.mark.asyncio
 
 
-async def test_advanced_sqlite_get_items_preserves_branch_id_positional_argument() -> None:
+async def test_advanced_sqlite_get_items_branch_id_kwarg() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "advanced.db"
         session = AdvancedSQLiteSession(session_id="test", db_path=db_path, create_tables=True)
@@ -29,7 +29,7 @@ async def test_advanced_sqlite_get_items_preserves_branch_id_positional_argument
         )
         await session.switch_to_branch("main")
 
-        branch_items = await session.get_items(50, "branch-a")
+        branch_items = await session.get_items(50, branch_id="branch-a")
         contents = [item.get("content") for item in branch_items if isinstance(item, dict)]
 
         assert "branch message" in contents
