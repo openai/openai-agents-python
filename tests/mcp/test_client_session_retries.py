@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 from typing import cast
 
@@ -9,6 +10,9 @@ from mcp.types import CallToolResult, GetPromptResult, ListPromptsResult, ListTo
 
 from agents.exceptions import UserError
 from agents.mcp.server import MCPServerStreamableHttp, _MCPServerWithClientSession
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup  # pyright: ignore[reportMissingImports]
 
 
 class DummySession:
@@ -177,6 +181,19 @@ class CancelledToolSession:
         raise asyncio.CancelledError("synthetic call cancellation")
 
 
+class MixedExceptionGroupSession:
+    async def call_tool(self, tool_name, arguments, meta=None):
+        req = httpx.Request("POST", "https://example.test/mcp")
+        resp = httpx.Response(401, request=req)
+        raise BaseExceptionGroup(
+            "mixed request failure",
+            [
+                asyncio.CancelledError("synthetic call cancellation"),
+                httpx.HTTPStatusError("HTTP error 401", request=req, response=resp),
+            ],
+        )
+
+
 class SharedHttpStatusSession:
     def __init__(self, status_code: int):
         self.status_code = status_code
@@ -234,6 +251,7 @@ async def test_streamable_http_retries_cancelled_request_on_isolated_session():
     shared_session = CancelledToolSession()
     isolated_session = IsolatedRetrySession()
     server = DummyStreamableHttpServer(shared_session, isolated_session)
+    server.max_retry_attempts = 1
 
     result = await server.call_tool("tool", None)
 
@@ -245,6 +263,7 @@ async def test_streamable_http_retries_cancelled_request_on_isolated_session():
 async def test_streamable_http_retries_5xx_on_isolated_session():
     isolated_session = IsolatedRetrySession()
     server = DummyStreamableHttpServer(SharedHttpStatusSession(504), isolated_session)
+    server.max_retry_attempts = 1
 
     result = await server.call_tool("tool", None)
 
@@ -256,6 +275,30 @@ async def test_streamable_http_retries_5xx_on_isolated_session():
 async def test_streamable_http_does_not_retry_4xx_on_isolated_session():
     isolated_session = IsolatedRetrySession()
     server = DummyStreamableHttpServer(SharedHttpStatusSession(401), isolated_session)
+
+    with pytest.raises(UserError, match="HTTP error 401"):
+        await server.call_tool("tool", None)
+
+    assert isolated_session.call_tool_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_does_not_isolated_retry_without_retry_budget():
+    isolated_session = IsolatedRetrySession()
+    server = DummyStreamableHttpServer(CancelledToolSession(), isolated_session)
+    server.max_retry_attempts = 0
+
+    with pytest.raises(asyncio.CancelledError):
+        await server.call_tool("tool", None)
+
+    assert isolated_session.call_tool_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_does_not_retry_mixed_exception_groups():
+    isolated_session = IsolatedRetrySession()
+    server = DummyStreamableHttpServer(MixedExceptionGroupSession(), isolated_session)
+    server.max_retry_attempts = 1
 
     with pytest.raises(UserError, match="HTTP error 401"):
         await server.call_tool("tool", None)
