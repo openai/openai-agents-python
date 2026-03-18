@@ -126,6 +126,7 @@ class AdvancedSQLiteSession(SQLiteSession):
     async def add_items(
         self,
         items: list[TResponseInputItem],
+        *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> None:
         """Add items to the session.
@@ -143,8 +144,8 @@ class AdvancedSQLiteSession(SQLiteSession):
     async def get_items(
         self,
         limit: int | None = None,
-        wrapper: RunContextWrapper[Any] | None = None,
         *,
+        wrapper: RunContextWrapper[Any] | None = None,
         branch_id: str | None = None,
     ) -> list[TResponseInputItem]:
         """Get items from current or specified branch.

@@ -106,6 +106,7 @@ class AsyncSQLiteSession(SessionABC):
     async def get_items(
         self,
         limit: int | None = None,
+        *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
@@ -158,6 +159,7 @@ class AsyncSQLiteSession(SessionABC):
     async def add_items(
         self,
         items: list[TResponseInputItem],
+        *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> None:
         """Add new items to the conversation history.

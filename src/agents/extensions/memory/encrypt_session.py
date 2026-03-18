@@ -231,6 +231,7 @@ class EncryptedSession(SessionABC):
     async def get_items(
         self,
         limit: int | None = None,
+        *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> list[TResponseInputItem]:
         encrypted_items = await _delegate_get_items(
@@ -248,6 +249,7 @@ class EncryptedSession(SessionABC):
     async def add_items(
         self,
         items: list[TResponseInputItem],
+        *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> None:
         wrapped: list[EncryptedEnvelope] = [self._wrap(it) for it in items]

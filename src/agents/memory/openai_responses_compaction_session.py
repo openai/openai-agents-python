@@ -296,6 +296,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     async def get_items(
         self,
         limit: int | None = None,
+        *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> list[TResponseInputItem]:
         return await _delegate_get_items(
@@ -333,6 +334,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     async def add_items(
         self,
         items: list[TResponseInputItem],
+        *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> None:
         if wrapper is not None and _method_accepts_wrapper(self.underlying_session.add_items):

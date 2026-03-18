@@ -76,6 +76,7 @@ class OpenAIConversationsSession(SessionABC):
     async def get_items(
         self,
         limit: int | None = None,
+        *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> list[TResponseInputItem]:
         session_id = await self._get_session_id()
@@ -107,6 +108,7 @@ class OpenAIConversationsSession(SessionABC):
     async def add_items(
         self,
         items: list[TResponseInputItem],
+        *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> None:
         session_id = await self._get_session_id()
