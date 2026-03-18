@@ -1178,7 +1178,9 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         session = self.session
         assert session is not None
         try:
-            return await self._call_tool_with_session(session, tool_name, arguments, meta)
+            return await self._maybe_serialize_request(
+                lambda: self._call_tool_with_session(session, tool_name, arguments, meta)
+            )
         except BaseException as exc:
             if self._should_retry_in_isolated_session(exc):
                 raise _SharedSessionRequestNeedsIsolation from exc

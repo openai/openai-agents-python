@@ -5,7 +5,7 @@ from typing import cast
 import httpx
 import pytest
 from mcp import ClientSession, Tool as MCPTool
-from mcp.types import CallToolResult, ListPromptsResult, ListToolsResult
+from mcp.types import CallToolResult, GetPromptResult, ListPromptsResult, ListToolsResult
 
 from agents.exceptions import UserError
 from agents.mcp.server import MCPServerStreamableHttp, _MCPServerWithClientSession
@@ -172,6 +172,11 @@ class ConcurrentCancellationSession:
         raise RuntimeError("synthetic request failure")
 
 
+class CancelledToolSession:
+    async def call_tool(self, tool_name, arguments, meta=None):
+        raise asyncio.CancelledError("synthetic call cancellation")
+
+
 class SharedHttpStatusSession:
     def __init__(self, status_code: int):
         self.status_code = status_code
@@ -214,8 +219,8 @@ class DummyStreamableHttpServer(MCPServerStreamableHttp):
     async def _isolated_client_session(self):
         yield self._isolated_session
 
-    async def list_tools(self):
-        return ListToolsResult(tools=[MCPTool(name="tool", inputSchema={})])
+    async def list_tools(self, run_context=None, agent=None):
+        return [MCPTool(name="tool", inputSchema={})]
 
     async def list_prompts(self):
         return ListPromptsResult(prompts=[])
@@ -226,19 +231,13 @@ class DummyStreamableHttpServer(MCPServerStreamableHttp):
 
 @pytest.mark.asyncio
 async def test_streamable_http_retries_cancelled_request_on_isolated_session():
-    shared_session = ConcurrentCancellationSession()
+    shared_session = CancelledToolSession()
     isolated_session = IsolatedRetrySession()
     server = DummyStreamableHttpServer(shared_session, isolated_session)
 
-    results = await asyncio.gather(
-        server.call_tool("slow", None),
-        server.call_tool("fail", None),
-        return_exceptions=True,
-    )
+    result = await server.call_tool("tool", None)
 
-    assert isinstance(results[0], CallToolResult)
-    assert isinstance(results[1], RuntimeError)
-    assert shared_session._slow_task is not None
+    assert isinstance(result, CallToolResult)
     assert isolated_session.call_tool_attempts == 1
 
 
@@ -296,6 +295,57 @@ class ConcurrentPromptCancellationSession(ConcurrentCancellationSession):
         raise RuntimeError("synthetic request failure")
 
 
+class OverlapTrackingSession:
+    def __init__(self):
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    @asynccontextmanager
+    async def _enter_request(self):
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(0.02)
+            yield
+        finally:
+            self.in_flight -= 1
+
+    async def call_tool(self, tool_name, arguments, meta=None):
+        async with self._enter_request():
+            return CallToolResult(content=[])
+
+    async def list_prompts(self):
+        async with self._enter_request():
+            return ListPromptsResult(prompts=[])
+
+    async def get_prompt(self, name, arguments=None):
+        async with self._enter_request():
+            return GetPromptResult(
+                description=None,
+                messages=[],
+            )
+
+
+class DummyPromptStreamableHttpServer(DummyStreamableHttpServer):
+    def __init__(
+        self,
+        shared_session: OverlapTrackingSession,
+        isolated_session: IsolatedRetrySession,
+    ):
+        super().__init__(shared_session, isolated_session)
+        self.session = cast(ClientSession, shared_session)
+
+    async def list_prompts(self):
+        session = self.session
+        assert session is not None
+        return await self._maybe_serialize_request(lambda: session.list_prompts())
+
+    async def get_prompt(self, name, arguments=None):
+        session = self.session
+        assert session is not None
+        return await self._maybe_serialize_request(lambda: session.get_prompt(name, arguments))
+
+
 @pytest.mark.asyncio
 async def test_serialized_session_requests_prevent_sibling_cancellation():
     session = ConcurrentPromptCancellationSession()
@@ -328,3 +378,28 @@ async def test_serialized_prompt_requests_prevent_tool_cancellation(prompt_metho
 
     assert isinstance(results[0], CallToolResult)
     assert isinstance(results[1], RuntimeError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt_method", ["list_prompts", "get_prompt"])
+async def test_streamable_http_serializes_call_tool_with_prompt_requests(prompt_method: str):
+    shared_session = OverlapTrackingSession()
+    isolated_session = IsolatedRetrySession()
+    server = DummyPromptStreamableHttpServer(shared_session, isolated_session)
+
+    prompt_request = (
+        server.list_prompts() if prompt_method == "list_prompts" else server.get_prompt("prompt")
+    )
+    results = await asyncio.gather(
+        server.call_tool("slow", None),
+        prompt_request,
+        return_exceptions=True,
+    )
+
+    assert isinstance(results[0], CallToolResult)
+    if prompt_method == "list_prompts":
+        assert isinstance(results[1], ListPromptsResult)
+    else:
+        assert isinstance(results[1], GetPromptResult)
+    assert shared_session.max_in_flight == 1
+    assert isolated_session.call_tool_attempts == 0
