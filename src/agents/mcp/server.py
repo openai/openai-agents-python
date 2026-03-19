@@ -901,7 +901,23 @@ class MCPServerStdio(_MCPServerWithClientSession):
         self,
     ) -> AbstractAsyncContextManager[MCPStreamTransport]:
         """Create the streams for the server."""
-        return stdio_client(self.params)
+        return stdio_client(self._params_with_warning_suppression())
+
+    def _params_with_warning_suppression(self) -> StdioServerParameters:
+        """Return a copy of params with resource_tracker warnings suppressed.
+
+        When the MCP server subprocess uses multiprocessing internally, its
+        resource_tracker may warn about leaked semaphore objects on termination.
+        These warnings are spurious because the OS reclaims the resources when
+        the subprocess exits. Suppress them via PYTHONWARNINGS in the subprocess
+        environment.
+        """
+        warning_filter = "ignore:resource_tracker:UserWarning:multiprocessing.resource_tracker"
+        env = dict(self.params.env) if self.params.env is not None else {}
+        existing = env.get("PYTHONWARNINGS", "")
+        if warning_filter not in existing:
+            env["PYTHONWARNINGS"] = f"{existing},{warning_filter}" if existing else warning_filter
+        return self.params.model_copy(update={"env": env})
 
     @property
     def name(self) -> str:

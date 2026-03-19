@@ -1,6 +1,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from mcp import StdioServerParameters
 from mcp.types import ListToolsResult, Tool as MCPTool
 
 from agents.mcp import MCPServerStdio
@@ -67,3 +68,51 @@ async def test_manual_connect_disconnect_works(
 
     await server.cleanup()
     assert server.session is None, "Server should be disconnected"
+
+
+@pytest.mark.asyncio
+@patch("agents.mcp.server.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+async def test_stdio_suppresses_resource_tracker_warnings(
+    mock_initialize: AsyncMock, mock_stdio_client: AsyncMock
+):
+    """Test that MCPServerStdio suppresses resource_tracker semaphore warnings."""
+    server = MCPServerStdio(
+        params={"command": tee},
+        cache_tools_list=True,
+    )
+
+    async with server:
+        pass
+
+    # Verify stdio_client was called with params containing PYTHONWARNINGS.
+    mock_stdio_client.assert_called_once()
+    params = mock_stdio_client.call_args[0][0]
+    assert isinstance(params, StdioServerParameters)
+    assert params.env is not None
+    assert "PYTHONWARNINGS" in params.env
+    assert "resource_tracker" in params.env["PYTHONWARNINGS"]
+
+
+@pytest.mark.asyncio
+@patch("agents.mcp.server.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+async def test_stdio_preserves_existing_pythonwarnings(
+    mock_initialize: AsyncMock, mock_stdio_client: AsyncMock
+):
+    """Test that existing PYTHONWARNINGS values are preserved."""
+    server = MCPServerStdio(
+        params={
+            "command": tee,
+            "env": {"PYTHONWARNINGS": "error::DeprecationWarning"},
+        },
+        cache_tools_list=True,
+    )
+
+    async with server:
+        pass
+
+    params = mock_stdio_client.call_args[0][0]
+    assert params.env is not None
+    assert "error::DeprecationWarning" in params.env["PYTHONWARNINGS"]
+    assert "resource_tracker" in params.env["PYTHONWARNINGS"]
