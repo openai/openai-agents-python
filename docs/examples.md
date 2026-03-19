@@ -29,7 +29,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   File handling (local and remote, images and PDFs)
     -   Usage tracking
     -   Runner-managed retry settings (`examples/basic/retry.py`)
-    -   Runner-managed retries with LiteLLM (`examples/basic/retry_litellm.py`)
+    -   Runner-managed retries through a third-party adapter (`examples/basic/retry_litellm.py`)
     -   Non-strict output types
     -   Previous response ID usage
 
@@ -68,7 +68,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Stateless Responses compaction with `ModelSettings(store=False)` (`examples/memory/compaction_session_stateless_example.py`)
 
 -   **[model_providers](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers):**
-    Explore how to use non-OpenAI models with the SDK, including custom providers and LiteLLM integration.
+    Explore how to use non-OpenAI models with the SDK, including custom providers and third-party adapters.
 
 -   **[realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime):**
     Examples showing how to build real-time experiences using the SDK, including:

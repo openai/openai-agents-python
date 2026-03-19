@@ -29,23 +29,14 @@ print("Total tokens:", usage.total_tokens)
 
 Usage is aggregated across all model calls during the run (including tool calls and handoffs).
 
-### Enabling usage with LiteLLM models
+### Enabling usage with third-party adapters
 
-LiteLLM providers do not report usage metrics by default. When you are using [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel], pass `ModelSettings(include_usage=True)` to your agent so that LiteLLM responses populate `result.context_wrapper.usage`. See the [LiteLLM note](models/index.md#litellm) in the Models guide for setup guidance and examples.
+Usage reporting varies across third-party adapters and provider backends. If you rely on adapter-backed models and need accurate `result.context_wrapper.usage` values:
 
-```python
-from agents import Agent, ModelSettings, Runner
-from agents.extensions.models.litellm_model import LitellmModel
+- With `AnyLLMModel`, usage is propagated automatically when the upstream provider returns it. For streamed Chat Completions backends, you may need `ModelSettings(include_usage=True)` before usage chunks are emitted.
+- With `LitellmModel`, some provider backends do not report usage by default, so `ModelSettings(include_usage=True)` is often required.
 
-agent = Agent(
-    name="Assistant",
-    model=LitellmModel(model="your/model", api_key="..."),
-    model_settings=ModelSettings(include_usage=True),
-)
-
-result = await Runner.run(agent, "What's the weather in Tokyo?")
-print(result.context_wrapper.usage.total_tokens)
-```
+Review the adapter-specific notes in the [Third-party adapters](models/index.md#third-party-adapters) section of the Models guide and validate the exact provider backend you plan to deploy.
 
 ## Per-request usage tracking
 

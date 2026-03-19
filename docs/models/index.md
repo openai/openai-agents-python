@@ -16,7 +16,7 @@ Start with the simplest path that fits your setup:
 | Use one non-OpenAI provider | Start with the built-in provider integration points | [Non-OpenAI models](#non-openai-models) |
 | Mix models or providers across agents | Select providers per run or per agent and review feature differences | [Mixing models in one workflow](#mixing-models-in-one-workflow) and [Mixing models across providers](#mixing-models-across-providers) |
 | Tune advanced OpenAI Responses request settings | Use `ModelSettings` on the OpenAI Responses path | [Advanced OpenAI Responses settings](#advanced-openai-responses-settings) |
-| Use LiteLLM for non-OpenAI Chat Completions providers | Treat LiteLLM as a beta fallback | [LiteLLM](#litellm) |
+| Use a third-party adapter for non-OpenAI or mixed-provider routing | Compare the supported beta adapters and validate the provider path you plan to ship | [Third-party adapters](#third-party-adapters) |
 
 ## OpenAI models
 
@@ -135,7 +135,7 @@ result = await Runner.run(
 
 #### Advanced routing with `MultiProvider`
 
-If you need prefix-based model routing (for example mixing `openai/...` and `litellm/...` model names in one run), use [`MultiProvider`][agents.MultiProvider] and set `openai_use_responses_websocket=True` there instead.
+If you need prefix-based model routing (for example mixing `openai/...` and `any-llm/...` model names in one run), use [`MultiProvider`][agents.MultiProvider] and set `openai_use_responses_websocket=True` there instead.
 
 `MultiProvider` keeps two historical defaults:
 
@@ -180,7 +180,7 @@ If you use a custom OpenAI-compatible endpoint or proxy, websocket transport als
 
 ## Non-OpenAI models
 
-If you need a non-OpenAI provider, start with the SDK's built-in provider integration points. In many setups, this is enough without adding LiteLLM. Examples for each pattern live in [examples/model_providers](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/).
+If you need a non-OpenAI provider, start with the SDK's built-in provider integration points. In many setups, this is enough without adding a third-party adapter. Examples for each pattern live in [examples/model_providers](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/).
 
 ### Ways to integrate non-OpenAI providers
 
@@ -189,7 +189,7 @@ If you need a non-OpenAI provider, start with the SDK's built-in provider integr
 | [`set_default_openai_client`][agents.set_default_openai_client] | One OpenAI-compatible endpoint should be the default for most or all agents | Global default |
 | [`ModelProvider`][agents.models.interface.ModelProvider] | One custom provider should apply to a single run | Per run |
 | [`Agent.model`][agents.agent.Agent.model] | Different agents need different providers or concrete model objects | Per agent |
-| LiteLLM (beta) | You need LiteLLM-specific provider coverage or routing | See [LiteLLM](#litellm) |
+| Third-party adapter | You need adapter-managed provider coverage or routing that the built-in paths do not provide | See [Third-party adapters](#third-party-adapters) |
 
 You can integrate other LLM providers with these built-in paths:
 
@@ -404,7 +404,7 @@ Stateful follow-up requests using `previous_response_id` or `conversation_id` ar
 - An agent can override only part of `retry.backoff` and keep sibling backoff fields from the runner.
 - `policy` is runtime-only, so serialized `ModelSettings` keep `max_retries` and `backoff` but omit the callback itself.
 
-For fuller examples, see [`examples/basic/retry.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/retry.py) and [`examples/basic/retry_litellm.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/retry_litellm.py).
+For fuller examples, see [`examples/basic/retry.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/retry.py) and the [adapter-backed retry example](https://github.com/openai/openai-agents-python/tree/main/examples/basic/retry_litellm.py).
 
 ## Troubleshooting non-OpenAI providers
 
@@ -443,14 +443,24 @@ You need to be aware of feature differences between model providers, or you may 
 -   Filter out multimodal inputs before calling models that are text-only
 -   Be aware that providers that don't support structured JSON outputs will occasionally produce invalid JSON.
 
-## LiteLLM
+## Third-party adapters
 
-LiteLLM support is included on a best-effort, beta basis for cases where you need to bring non-OpenAI providers into an Agents SDK workflow.
+Reach for a third-party adapter only when the SDK's built-in provider integration points are not enough. If you are using OpenAI models only with this SDK, prefer the built-in [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] path instead of Any-LLM or LiteLLM. Third-party adapters are for cases where you need to combine OpenAI models with non-OpenAI providers, or need adapter-managed provider coverage or routing that the built-in paths do not provide. Adapters add another compatibility layer between the SDK and the upstream model provider, so feature support and request semantics can vary by provider. The SDK currently includes Any-LLM and LiteLLM as best-effort, beta adapter integrations.
 
-If you are using OpenAI models with this SDK, we recommend the built-in [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] path instead of LiteLLM.
+### Any-LLM
 
-If you need to combine OpenAI models with non-OpenAI providers, especially through Chat Completions-compatible APIs, LiteLLM is available as a beta option, but it may not be the optimal choice for every setup.
+Any-LLM support is included on a best-effort, beta basis for cases where you need Any-LLM-managed provider coverage or routing.
 
-If you need LiteLLM for a non-OpenAI provider, install `openai-agents[litellm]`, then start from [`examples/model_providers/litellm_auto.py`](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/litellm_auto.py) or [`examples/model_providers/litellm_provider.py`](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/litellm_provider.py). You can either use `litellm/...` model names or instantiate [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] directly.
+Depending on the upstream provider path, Any-LLM may use the Responses API, Chat Completions-compatible APIs, or provider-specific compatibility layers.
 
-If you want LiteLLM responses to populate the SDK's usage metrics, pass `ModelSettings(include_usage=True)`.
+If you need Any-LLM, install `openai-agents[any-llm]`, then start from [`examples/model_providers/any_llm_auto.py`](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/any_llm_auto.py) or [`examples/model_providers/any_llm_provider.py`](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/any_llm_provider.py). You can use `any-llm/...` model names with [`MultiProvider`][agents.MultiProvider], instantiate `AnyLLMModel` directly, or use `AnyLLMProvider` at run scope. If you need to pin the model surface explicitly, pass `api="responses"` or `api="chat_completions"` when constructing `AnyLLMModel`.
+
+Any-LLM remains a third-party adapter layer, so provider dependencies and capability gaps are defined upstream by Any-LLM rather than by the SDK. Usage metrics are propagated automatically when the upstream provider returns them, but streamed Chat Completions backends may require `ModelSettings(include_usage=True)` before they emit usage chunks. Validate the exact provider backend you plan to deploy if you depend on structured outputs, tool calling, usage reporting, or Responses-specific behavior.
+
+### LiteLLM
+
+LiteLLM support is included on a best-effort, beta basis for cases where you need LiteLLM-specific provider coverage or routing.
+
+If you need LiteLLM, install `openai-agents[litellm]`, then start from [`examples/model_providers/litellm_auto.py`](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/litellm_auto.py) or [`examples/model_providers/litellm_provider.py`](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/litellm_provider.py). You can use `litellm/...` model names or instantiate [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] directly.
+
+Some LiteLLM-backed providers do not populate SDK usage metrics by default. If you need usage reporting, pass `ModelSettings(include_usage=True)` and validate the exact provider backend you plan to deploy if you depend on structured outputs, tool calling, usage reporting, or adapter-specific routing behavior.

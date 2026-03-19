@@ -156,7 +156,12 @@ plugins:
                 - Extensions:
                     - ref/extensions/handoff_filters.md
                     - ref/extensions/handoff_prompt.md
-                    - ref/extensions/litellm.md
+                    - Third-party adapters:
+                        - Overview: ref/extensions/third_party_adapters.md
+                        - Any-LLM model: ref/extensions/models/any_llm_model.md
+                        - Any-LLM provider: ref/extensions/models/any_llm_provider.md
+                        - LiteLLM model: ref/extensions/models/litellm_model.md
+                        - LiteLLM provider: ref/extensions/models/litellm_provider.md
                     - ref/extensions/tool_output_trimmer.md
                     - ref/extensions/memory/sqlalchemy_session.md
                     - ref/extensions/memory/async_sqlite_session.md
