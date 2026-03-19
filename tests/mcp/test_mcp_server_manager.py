@@ -2,7 +2,15 @@ import asyncio
 from typing import Any, cast
 
 import pytest
-from mcp.types import CallToolResult, GetPromptResult, ListPromptsResult, Tool as MCPTool
+from mcp.types import (
+    CallToolResult,
+    GetPromptResult,
+    ListPromptsResult,
+    ListResourcesResult,
+    ListResourceTemplatesResult,
+    ReadResourceResult,
+    Tool as MCPTool,
+)
 
 from agents.mcp import MCPServer, MCPServerManager
 from agents.run_context import RunContextWrapper
@@ -49,6 +57,15 @@ class TaskBoundServer(MCPServer):
     ) -> GetPromptResult:
         raise NotImplementedError
 
+    async def list_resources(self) -> ListResourcesResult:
+        return ListResourcesResult(resources=[])
+
+    async def list_resource_templates(self) -> ListResourceTemplatesResult:
+        return ListResourceTemplatesResult(resourceTemplates=[])
+
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        return ReadResourceResult(contents=[])
+
 
 class FlakyServer(MCPServer):
     def __init__(self, failures: int) -> None:
@@ -90,6 +107,15 @@ class FlakyServer(MCPServer):
     ) -> GetPromptResult:
         raise NotImplementedError
 
+    async def list_resources(self) -> ListResourcesResult:
+        return ListResourcesResult(resources=[])
+
+    async def list_resource_templates(self) -> ListResourceTemplatesResult:
+        return ListResourceTemplatesResult(resourceTemplates=[])
+
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        return ReadResourceResult(contents=[])
+
 
 class CleanupAwareServer(MCPServer):
     def __init__(self) -> None:
@@ -130,6 +156,15 @@ class CleanupAwareServer(MCPServer):
     ) -> GetPromptResult:
         raise NotImplementedError
 
+    async def list_resources(self) -> ListResourcesResult:
+        return ListResourcesResult(resources=[])
+
+    async def list_resource_templates(self) -> ListResourceTemplatesResult:
+        return ListResourceTemplatesResult(resourceTemplates=[])
+
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        return ReadResourceResult(contents=[])
+
 
 class CancelledServer(MCPServer):
     @property
@@ -162,6 +197,15 @@ class CancelledServer(MCPServer):
         self, name: str, arguments: dict[str, Any] | None = None
     ) -> GetPromptResult:
         raise NotImplementedError
+
+    async def list_resources(self) -> ListResourcesResult:
+        return ListResourcesResult(resources=[])
+
+    async def list_resource_templates(self) -> ListResourceTemplatesResult:
+        return ListResourceTemplatesResult(resourceTemplates=[])
+
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        return ReadResourceResult(contents=[])
 
 
 class FailingTaskBoundServer(TaskBoundServer):

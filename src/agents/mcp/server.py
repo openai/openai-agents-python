@@ -22,7 +22,15 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
 from mcp.shared.exceptions import McpError
 from mcp.shared.message import SessionMessage
-from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult
+from mcp.types import (
+    CallToolResult,
+    GetPromptResult,
+    InitializeResult,
+    ListPromptsResult,
+    ListResourcesResult,
+    ListResourceTemplatesResult,
+    ReadResourceResult,
+)
 from typing_extensions import NotRequired, TypedDict
 
 from ..exceptions import UserError
@@ -190,6 +198,21 @@ class MCPServer(abc.ABC):
         self, name: str, arguments: dict[str, Any] | None = None
     ) -> GetPromptResult:
         """Get a specific prompt from the server."""
+        pass
+
+    @abc.abstractmethod
+    async def list_resources(self) -> ListResourcesResult:
+        """List the resources available on the server."""
+        pass
+
+    @abc.abstractmethod
+    async def list_resource_templates(self) -> ListResourceTemplatesResult:
+        """List the resource templates available on the server."""
+        pass
+
+    @abc.abstractmethod
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        """Read the contents of a specific resource by URI."""
         pass
 
     @staticmethod
@@ -707,6 +730,35 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         session = self.session
         assert session is not None
         return await self._maybe_serialize_request(lambda: session.get_prompt(name, arguments))
+
+    async def list_resources(self) -> ListResourcesResult:
+        """List the resources available on the server."""
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        session = self.session
+        assert session is not None
+        return await self._maybe_serialize_request(lambda: session.list_resources())
+
+    async def list_resource_templates(self) -> ListResourceTemplatesResult:
+        """List the resource templates available on the server."""
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        session = self.session
+        assert session is not None
+        return await self._maybe_serialize_request(lambda: session.list_resource_templates())
+
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        """Read the contents of a specific resource by URI.
+
+        Args:
+            uri: The URI of the resource to read (e.g. ``file:///path/to/file.txt`` or
+                ``postgres://db/table/row``).
+        """
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        session = self.session
+        assert session is not None
+        return await self._maybe_serialize_request(lambda: session.read_resource(uri))
 
     async def cleanup(self):
         """Cleanup the server."""
