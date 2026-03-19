@@ -29,7 +29,6 @@ from .agent_tool_state import (
 from .exceptions import ModelBehaviorError, UserError
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
-from .items import ItemHelpers
 from .logger import logger
 from .mcp import MCPUtil
 from .model_settings import ModelSettings
@@ -117,59 +116,6 @@ def _validate_codex_tool_name_collisions(tools: list[Tool]) -> None:
             + ", ".join(duplicate_codex_names)
             + ". Provide a unique codex_tool(name=...) per tool instance."
         )
-
-
-def _recover_streamed_agent_tool_text(run_result: Any) -> str | None:
-    new_items = getattr(run_result, "new_items", None)
-    if isinstance(new_items, list):
-        text = ItemHelpers.text_message_outputs(new_items)
-        if text:
-            return text
-
-    raw_responses = getattr(run_result, "raw_responses", None)
-    if not isinstance(raw_responses, list):
-        return None
-
-    recovered_chunks: list[str] = []
-    for raw_response in raw_responses:
-        outputs = getattr(raw_response, "output", None)
-        if not isinstance(outputs, list):
-            continue
-        for output_item in outputs:
-            chunk = ItemHelpers.extract_text(output_item)
-            if chunk:
-                recovered_chunks.append(chunk)
-
-    if not recovered_chunks:
-        return None
-    return "\n\n".join(recovered_chunks)
-
-
-def _finalize_cancelled_streamed_agent_tool_recovery(run_result: Any) -> bool:
-    """Preserve completed outputs and only backfill plain-text results when missing."""
-    final_output = getattr(run_result, "final_output", None)
-    if final_output is not None and not (isinstance(final_output, str) and not final_output):
-        return True
-
-    recovered_text = _recover_streamed_agent_tool_text(run_result)
-    if recovered_text is None:
-        return final_output is not None
-
-    run_result.final_output = recovered_text
-    return True
-
-
-def _can_recover_cancelled_streamed_agent_tool(run_result: Any) -> bool:
-    """Recover text only after the nested streamed run has already reached local terminal state."""
-    run_loop_task = getattr(run_result, "run_loop_task", None)
-    if isinstance(run_loop_task, asyncio.Task):
-        return (
-            run_loop_task.done()
-            and not run_loop_task.cancelled()
-            and run_loop_task.exception() is None
-        )
-
-    return False
 
 
 class AgentToolStreamEvent(TypedDict):
@@ -843,6 +789,7 @@ class Agent(AgentBase, Generic[TContext]):
                                 break
 
                     dispatch_task = asyncio.create_task(dispatch_stream_events())
+                    stream_iteration_cancelled = False
 
                     try:
                         from .stream_events import AgentUpdatedStreamEvent
@@ -860,16 +807,19 @@ class Agent(AgentBase, Generic[TContext]):
                                 }
                                 await event_queue.put(payload)
                         except asyncio.CancelledError:
-                            if not _can_recover_cancelled_streamed_agent_tool(run_result_streaming):
-                                raise
-                            if not _finalize_cancelled_streamed_agent_tool_recovery(
-                                run_result_streaming
-                            ):
-                                raise
+                            stream_iteration_cancelled = True
+                            raise
                     finally:
-                        await event_queue.put(None)
-                        await event_queue.join()
-                        await dispatch_task
+                        if stream_iteration_cancelled:
+                            dispatch_task.cancel()
+                            try:
+                                await dispatch_task
+                            except asyncio.CancelledError:
+                                pass
+                        else:
+                            await event_queue.put(None)
+                            await event_queue.join()
+                            await dispatch_task
                     run_result = run_result_streaming
                 else:
                     run_result = await Runner.run(

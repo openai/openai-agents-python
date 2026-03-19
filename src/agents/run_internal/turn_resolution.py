@@ -615,7 +615,7 @@ async def execute_tools_and_side_effects(
 
     message_items = [item for item in new_step_items if isinstance(item, MessageOutputItem)]
     potential_final_output_text = (
-        ItemHelpers.extract_last_text(message_items[-1].raw_item) if message_items else None
+        ItemHelpers.extract_text(message_items[-1].raw_item) if message_items else None
     )
 
     if not processed_response.has_tools_or_approvals_to_run():
