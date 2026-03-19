@@ -5,6 +5,7 @@ from typing import cast
 
 import httpx
 import pytest
+from anyio import ClosedResourceError
 from mcp import ClientSession, Tool as MCPTool
 from mcp.types import CallToolResult, GetPromptResult, ListPromptsResult, ListToolsResult
 
@@ -218,6 +219,15 @@ class TimeoutSession:
         raise httpx.TimeoutException(self.message)
 
 
+class ClosedResourceSession:
+    def __init__(self):
+        self.call_tool_attempts = 0
+
+    async def call_tool(self, tool_name, arguments, meta=None):
+        self.call_tool_attempts += 1
+        raise ClosedResourceError()
+
+
 class IsolatedRetrySession:
     def __init__(self):
         self.call_tool_attempts = 0
@@ -296,6 +306,18 @@ async def test_streamable_http_retries_cancelled_request_on_isolated_session():
 async def test_streamable_http_retries_5xx_on_isolated_session():
     isolated_session = IsolatedRetrySession()
     server = DummyStreamableHttpServer(SharedHttpStatusSession(504), isolated_session)
+    server.max_retry_attempts = 1
+
+    result = await server.call_tool("tool", None)
+
+    assert isinstance(result, CallToolResult)
+    assert isolated_session.call_tool_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_retries_closed_resource_on_isolated_session():
+    isolated_session = IsolatedRetrySession()
+    server = DummyStreamableHttpServer(ClosedResourceSession(), isolated_session)
     server.max_retry_attempts = 1
 
     result = await server.call_tool("tool", None)

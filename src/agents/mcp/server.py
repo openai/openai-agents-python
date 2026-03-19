@@ -14,6 +14,7 @@ import httpx
 
 if sys.version_info < (3, 11):
     from exceptiongroup import BaseExceptionGroup  # pyright: ignore[reportMissingImports]
+from anyio import ClosedResourceError
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
 from mcp.client.session import MessageHandlerFnT
@@ -1165,7 +1166,15 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         return await session.call_tool(tool_name, arguments, meta=meta)
 
     def _should_retry_in_isolated_session(self, exc: BaseException) -> bool:
-        if isinstance(exc, (asyncio.CancelledError, httpx.ConnectError, httpx.TimeoutException)):
+        if isinstance(
+            exc,
+            (
+                asyncio.CancelledError,
+                ClosedResourceError,
+                httpx.ConnectError,
+                httpx.TimeoutException,
+            ),
+        ):
             return True
         if isinstance(exc, httpx.HTTPStatusError):
             return exc.response.status_code >= 500
