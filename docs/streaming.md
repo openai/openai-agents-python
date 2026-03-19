@@ -61,7 +61,7 @@ If you need to stop a streaming run in the middle, call [`result.cancel()`][agen
 
 A streamed run is not complete until `result.stream_events()` finishes. The SDK may still be persisting session items, finalizing approval state, or compacting history after the last visible token.
 
--   With [`session=...`](sessions/index.md), wait for the streamed run to finish before starting the next user turn. Then start a new run with the same session and only the new user input; the SDK reloads the prior history from the session automatically.
+-   With [`session=...`](sessions/index.md), wait for the streamed run to finish before deciding the next step. If the run completed normally, start a new run with the same session and only the new user input; the SDK reloads the prior history from the session automatically.
 -   With OpenAI server-managed continuation, wait for the streamed run to finish before deciding the next step. If the run completed normally, reuse the same `conversation_id`, or pass `result.last_response_id` as `previous_response_id`, together with only the new user input.
 -   If a streamed run stopped for tool approval, do not treat that as a new turn. Finish draining the stream, inspect `result.interruptions`, and resume from `result.to_state()` instead.
 -   If you need to reduce long client-managed history between turns, do it only after the streamed run finishes. Use [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession] to compact stored session history.
