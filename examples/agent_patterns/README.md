@@ -60,3 +60,6 @@ See the [`input_guardrails.py`](./input_guardrails.py) and [`output_guardrails.p
 You can pause runs for manual approval before executing sensitive tools. This is useful for operations like sending money, deleting data, or running destructive commands.
 
 See [`human_in_the_loop.py`](./human_in_the_loop.py) for the base approval flow and [`human_in_the_loop_custom_rejection.py`](./human_in_the_loop_custom_rejection.py) for run-level tool error formatting when approvals are rejected.
+
+If you need to stop a streamed run after the current turn because the host application received a
+new message or other external signal, see [`pause_between_turns_stream.py`](./pause_between_turns_stream.py).

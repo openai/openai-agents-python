@@ -16,6 +16,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Routing
     -   Streaming guardrails
     -   Custom rejection messages for approval flows (`examples/agent_patterns/human_in_the_loop_custom_rejection.py`)
+    -   Pausing a streamed run between turns to inject new user input (`examples/agent_patterns/pause_between_turns_stream.py`)
 
 -   **[basic](https://github.com/openai/openai-agents-python/tree/main/examples/basic):**
     These examples showcase foundational capabilities of the SDK, such as

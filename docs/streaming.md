@@ -55,6 +55,61 @@ if result.interruptions:
 
 For a full pause/resume walkthrough, see the [human-in-the-loop guide](human_in_the_loop.md).
 
+## Pause between turns
+
+For host-controlled agent loops, you may need to stop after the current turn, react to an
+external event, and only then continue. In streaming mode, use
+[`cancel(mode="after_turn")`][agents.result.RunResultStreaming.cancel] as the turn boundary.
+
+The key steps are:
+
+1. Request a graceful stop with `result.cancel(mode="after_turn")`.
+2. Keep consuming [`stream_events()`][agents.result.RunResultStreaming.stream_events] until the
+   iterator finishes.
+3. Continue from the completed turn using the persistence strategy you already chose.
+
+For client-managed history, use [`last_agent`][agents.result.RunResultBase.last_agent] together
+with [`to_input_list(mode="normalized")`][agents.result.RunResultBase.to_input_list], append the
+new user message, and start the next run.
+
+```python
+result = Runner.run_streamed(agent, "Check warehouse stock for sku-123.")
+pause_requested = False
+
+async for event in result.stream_events():
+    if (
+        event.type == "run_item_stream_event"
+        and event.name == "tool_called"
+        and not pause_requested
+    ):
+        # The host app noticed a higher-priority external update and wants to
+        # stop after the current turn, not in the middle of the tool work.
+        result.cancel(mode="after_turn")
+        pause_requested = True
+
+if pause_requested:
+    next_input = result.to_input_list(mode="normalized")
+    next_input.append(
+        {"role": "user", "content": "Also include refurbished inventory if available."}
+    )
+
+    result = Runner.run_streamed(result.last_agent, next_input)
+    async for _event in result.stream_events():
+        pass
+```
+
+For other persistence strategies:
+
+-   With [`session=...`](sessions/index.md), wait for the paused stream to finish and then start
+    the next run with the same session plus only the new user turn.
+-   With OpenAI server-managed continuation (`conversation_id` or `previous_response_id`), wait
+    for the paused stream to finish and then send only the new user turn with the same saved ID.
+-   If you need to compact long client-managed history between turns, do it after the paused
+    stream finishes. Sessions can use
+    [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession]
+    or [`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_callback]. See
+    [Sessions](sessions/index.md).
+
 ## Run item events and agent events
 
 [`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent]s are higher level events. They inform you when an item has been fully generated. This allows you to push progress updates at the level of "message generated", "tool ran", etc, instead of each token. Similarly, [`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] gives you updates when the current agent changes (e.g. as the result of a handoff).
