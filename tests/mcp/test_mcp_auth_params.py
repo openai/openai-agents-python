@@ -1,4 +1,4 @@
-"""Tests for auth and httpx_client_factory parameters on MCPServerSse and MCPServerStreamableHttp."""
+"""Tests for auth and httpx_client_factory params on MCPServerSse and MCPServerStreamableHttp."""
 
 from __future__ import annotations
 
