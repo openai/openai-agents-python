@@ -1759,6 +1759,189 @@ async def test_agent_as_tool_streaming_recovers_text_from_raw_responses_on_cance
 
 
 @pytest.mark.asyncio
+async def test_agent_as_tool_streaming_recovers_all_text_chunks_from_raw_responses_on_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="streamer")
+    stream_event = RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = ""
+            self.current_agent = agent
+            self.new_items: list[Any] = []
+            self.raw_responses = [
+                ModelResponse(
+                    output=[
+                        ResponseOutputMessage(
+                            id="msg_recover",
+                            role="assistant",
+                            status="completed",
+                            type="message",
+                            content=[
+                                ResponseOutputText(
+                                    annotations=[],
+                                    text="first ",
+                                    type="output_text",
+                                    logprobs=[],
+                                ),
+                                ResponseOutputText(
+                                    annotations=[],
+                                    text="second",
+                                    type="output_text",
+                                    logprobs=[],
+                                ),
+                            ],
+                        )
+                    ],
+                    usage=Usage(),
+                    response_id="resp_nested",
+                )
+            ]
+            self.run_loop_task = asyncio.create_task(asyncio.sleep(0))
+
+        async def stream_events(self):
+            yield stream_event
+            raise asyncio.CancelledError("stream-cancelled")
+
+    streaming_result = DummyStreamingResult()
+    await streaming_result.run_loop_task
+
+    def fake_run_streamed(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        auto_previous_response_id=False,
+        conversation_id,
+        session,
+    ):
+        return streaming_result
+
+    async def unexpected_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Runner.run should not be called when on_stream is provided.")
+
+    monkeypatch.setattr(Runner, "run_streamed", classmethod(fake_run_streamed))
+    monkeypatch.setattr(Runner, "run", classmethod(unexpected_run))
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        del payload
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_cancelled_multi_chunk",
+        arguments='{"input": "recover"}',
+        call_id="call-cancelled-multi-chunk",
+        name="stream_tool",
+        type="function_call",
+    )
+
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+    output = await tool.on_invoke_tool(tool_context, '{"input": "recover"}')
+
+    assert output == "first second"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_preserves_structured_output_on_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StructuredOutput(BaseModel):
+        answer: str
+
+    agent = Agent(name="streamer", output_type=StructuredOutput)
+    stream_event = RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = StructuredOutput(answer="structured")
+            self.current_agent = agent
+            self.new_items: list[Any] = []
+            self.raw_responses = [
+                ModelResponse(
+                    output=[get_text_message('{"answer":"text-json"}')],
+                    usage=Usage(),
+                    response_id="resp_nested",
+                )
+            ]
+            self.run_loop_task = asyncio.create_task(asyncio.sleep(0))
+
+        async def stream_events(self):
+            yield stream_event
+            raise asyncio.CancelledError("stream-cancelled")
+
+    streaming_result = DummyStreamingResult()
+    await streaming_result.run_loop_task
+
+    def fake_run_streamed(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        auto_previous_response_id=False,
+        conversation_id,
+        session,
+    ):
+        return streaming_result
+
+    async def unexpected_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Runner.run should not be called when on_stream is provided.")
+
+    monkeypatch.setattr(Runner, "run_streamed", classmethod(fake_run_streamed))
+    monkeypatch.setattr(Runner, "run", classmethod(unexpected_run))
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        del payload
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_cancelled_structured",
+        arguments='{"input": "recover"}',
+        call_id="call-cancelled-structured",
+        name="stream_tool",
+        type="function_call",
+    )
+
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+    output = await tool.on_invoke_tool(tool_context, '{"input": "recover"}')
+
+    assert output == StructuredOutput(answer="structured")
+    assert not isinstance(output, str)
+
+
+@pytest.mark.asyncio
 async def test_agent_as_tool_streaming_reraises_caller_cancellation_with_live_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

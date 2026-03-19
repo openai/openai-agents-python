@@ -676,6 +676,19 @@ class ItemHelpers:
         return None
 
     @classmethod
+    def extract_text(cls, message: TResponseOutputItem) -> str | None:
+        """Extracts all text content from a message, if any. Ignores refusals."""
+        if not isinstance(message, ResponseOutputMessage):
+            return None
+
+        text = ""
+        for content_item in message.content:
+            if isinstance(content_item, ResponseOutputText):
+                text += content_item.text
+
+        return text or None
+
+    @classmethod
     def input_to_new_input_list(
         cls, input: str | list[TResponseInputItem]
     ) -> list[TResponseInputItem]:

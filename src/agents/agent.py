@@ -120,10 +120,6 @@ def _validate_codex_tool_name_collisions(tools: list[Tool]) -> None:
 
 
 def _recover_streamed_agent_tool_text(run_result: Any) -> str | None:
-    final_output = getattr(run_result, "final_output", None)
-    if isinstance(final_output, str) and final_output:
-        return final_output
-
     new_items = getattr(run_result, "new_items", None)
     if isinstance(new_items, list):
         text = ItemHelpers.text_message_outputs(new_items)
@@ -140,13 +136,27 @@ def _recover_streamed_agent_tool_text(run_result: Any) -> str | None:
         if not isinstance(outputs, list):
             continue
         for output_item in outputs:
-            chunk = ItemHelpers.extract_last_text(output_item)
+            chunk = ItemHelpers.extract_text(output_item)
             if chunk:
                 recovered_chunks.append(chunk)
 
     if not recovered_chunks:
         return None
     return "\n\n".join(recovered_chunks)
+
+
+def _finalize_cancelled_streamed_agent_tool_recovery(run_result: Any) -> bool:
+    """Preserve completed outputs and only backfill plain-text results when missing."""
+    final_output = getattr(run_result, "final_output", None)
+    if final_output is not None and not (isinstance(final_output, str) and not final_output):
+        return True
+
+    recovered_text = _recover_streamed_agent_tool_text(run_result)
+    if recovered_text is None:
+        return final_output is not None
+
+    run_result.final_output = recovered_text
+    return True
 
 
 def _can_recover_cancelled_streamed_agent_tool(run_result: Any) -> bool:
@@ -852,10 +862,10 @@ class Agent(AgentBase, Generic[TContext]):
                         except asyncio.CancelledError:
                             if not _can_recover_cancelled_streamed_agent_tool(run_result_streaming):
                                 raise
-                            recovered_text = _recover_streamed_agent_tool_text(run_result_streaming)
-                            if not recovered_text:
+                            if not _finalize_cancelled_streamed_agent_tool_recovery(
+                                run_result_streaming
+                            ):
                                 raise
-                            run_result_streaming.final_output = recovered_text
                     finally:
                         await event_queue.put(None)
                         await event_queue.join()
