@@ -20,6 +20,7 @@ from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_cli
 from mcp.client.session import MessageHandlerFnT
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
+from mcp.shared.exceptions import McpError
 from mcp.shared.message import SessionMessage
 from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult
 from typing_extensions import NotRequired, TypedDict
@@ -1195,6 +1196,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             return True
         if isinstance(exc, httpx.HTTPStatusError):
             return exc.response.status_code >= 500
+        if isinstance(exc, McpError):
+            return exc.error.code == httpx.codes.REQUEST_TIMEOUT
         if isinstance(exc, BaseExceptionGroup):
             return bool(exc.exceptions) and all(
                 self._should_retry_in_isolated_session(inner) for inner in exc.exceptions
