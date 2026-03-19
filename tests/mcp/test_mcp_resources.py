@@ -100,3 +100,51 @@ async def test_read_resource_returns_result(server: MCPServerStreamableHttp):
 
     assert result is expected
     mock_session.read_resource.assert_awaited_once_with(uri)
+
+
+@pytest.mark.asyncio
+async def test_base_methods_raise_not_implemented():
+    """Bare MCPServer subclasses that don't override resource methods get NotImplementedError."""
+    from mcp.types import CallToolResult
+
+    from agents.mcp import MCPServer
+
+    class MinimalServer(MCPServer):
+        """Minimal subclass implementing only the truly abstract methods."""
+
+        @property
+        def name(self) -> str:
+            return "minimal"
+
+        async def connect(self) -> None:
+            pass
+
+        async def cleanup(self) -> None:
+            pass
+
+        async def list_tools(self, run_context=None, agent=None):
+            return []
+
+        async def call_tool(self, tool_name, tool_arguments, run_context=None, agent=None):
+            return CallToolResult(content=[])
+
+        async def list_prompts(self):
+            from mcp.types import ListPromptsResult
+
+            return ListPromptsResult(prompts=[])
+
+        async def get_prompt(self, name, arguments=None):
+            from mcp.types import GetPromptResult
+
+            return GetPromptResult(messages=[])
+
+    s = MinimalServer()
+
+    with pytest.raises(NotImplementedError, match="list_resources"):
+        await s.list_resources()
+
+    with pytest.raises(NotImplementedError, match="list_resource_templates"):
+        await s.list_resource_templates()
+
+    with pytest.raises(NotImplementedError, match="read_resource"):
+        await s.read_resource("file:///test.txt")

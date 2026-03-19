@@ -200,20 +200,44 @@ class MCPServer(abc.ABC):
         """Get a specific prompt from the server."""
         pass
 
-    @abc.abstractmethod
     async def list_resources(self) -> ListResourcesResult:
-        """List the resources available on the server."""
-        pass
+        """List the resources available on the server.
 
-    @abc.abstractmethod
+        Returns a :class:`~mcp.types.ListResourcesResult` containing all resources
+        exposed by the server.  Subclasses that do not support resources may leave
+        this unimplemented; it will raise :exc:`NotImplementedError` at call time.
+        """
+        raise NotImplementedError(
+            f"MCP server '{self.name}' does not support list_resources. "
+            "Override this method in your server implementation."
+        )
+
     async def list_resource_templates(self) -> ListResourceTemplatesResult:
-        """List the resource templates available on the server."""
-        pass
+        """List the resource templates available on the server.
 
-    @abc.abstractmethod
+        Returns a :class:`~mcp.types.ListResourceTemplatesResult`.  Subclasses that
+        do not support resource templates may leave this unimplemented; it will raise
+        :exc:`NotImplementedError` at call time.
+        """
+        raise NotImplementedError(
+            f"MCP server '{self.name}' does not support list_resource_templates. "
+            "Override this method in your server implementation."
+        )
+
     async def read_resource(self, uri: str) -> ReadResourceResult:
-        """Read the contents of a specific resource by URI."""
-        pass
+        """Read the contents of a specific resource by URI.
+
+        Args:
+            uri: The URI of the resource to read (e.g. ``file:///path/to/file.txt``).
+
+        Returns a :class:`~mcp.types.ReadResourceResult`.  Subclasses that do not
+        support resources may leave this unimplemented; it will raise
+        :exc:`NotImplementedError` at call time.
+        """
+        raise NotImplementedError(
+            f"MCP server '{self.name}' does not support read_resource. "
+            "Override this method in your server implementation."
+        )
 
     @staticmethod
     def _normalize_needs_approval(
