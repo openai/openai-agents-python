@@ -91,3 +91,25 @@ class TestStreamableHttpSessionId:
         # After connect, _get_session_id should be the callable from the transport
         assert server._get_session_id is mock_get_session_id
         assert server.session_id == "captured-session-xyz"
+
+
+@pytest.mark.asyncio
+async def test_session_id_is_none_after_cleanup():
+    """session_id must return None after the server is disconnected (cleanup clears _get_session_id)."""
+    server = MCPServerStreamableHttp(params={"url": "http://localhost:8000/mcp"})
+
+    mock_get_session_id = MagicMock(return_value="session-to-clear")
+    # Manually inject a session-id callback to simulate a connected state
+    server._get_session_id = mock_get_session_id
+    server.session = MagicMock()  # pretend connected
+
+    assert server.session_id == "session-to-clear"
+
+    # Now simulate cleanup completing (exit_stack.aclose is a no-op here)
+    with patch.object(server.exit_stack, "aclose", new_callable=AsyncMock):
+        await server.cleanup()
+
+    # After cleanup both session and _get_session_id must be None
+    assert server.session is None
+    assert server._get_session_id is None
+    assert server.session_id is None

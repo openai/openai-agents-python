@@ -783,6 +783,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     logger.error(f"Error cleaning up server: {e}")
             finally:
                 self.session = None
+                self._get_session_id = None
 
 
 class MCPServerStdioParams(TypedDict):
