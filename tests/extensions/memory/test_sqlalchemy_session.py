@@ -226,7 +226,12 @@ async def test_add_items_concurrent_first_access_with_create_tables(tmp_path):
 
     stored = await session.get_items()
     assert len(stored) == len(submitted)
-    assert sorted(item.get("content") for item in stored) == sorted(submitted)
+    stored_contents: list[str] = []
+    for item in stored:
+        content = item.get("content")
+        assert isinstance(content, str)
+        stored_contents.append(content)
+    assert sorted(stored_contents) == sorted(submitted)
 
 
 async def test_add_items_concurrent_first_write_after_tables_exist(tmp_path):
@@ -258,7 +263,12 @@ async def test_add_items_concurrent_first_write_after_tables_exist(tmp_path):
 
     stored = await session.get_items()
     assert len(stored) == len(submitted)
-    assert sorted(item.get("content") for item in stored) == sorted(submitted)
+    stored_contents: list[str] = []
+    for item in stored:
+        content = item.get("content")
+        assert isinstance(content, str)
+        stored_contents.append(content)
+    assert sorted(stored_contents) == sorted(submitted)
 
 
 async def test_get_items_same_timestamp_consistent_order():
