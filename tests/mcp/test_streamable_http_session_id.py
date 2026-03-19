@@ -95,7 +95,7 @@ class TestStreamableHttpSessionId:
 
 @pytest.mark.asyncio
 async def test_session_id_is_none_after_cleanup():
-    """session_id must return None after the server is disconnected (cleanup clears _get_session_id)."""
+    """session_id must return None after disconnect (cleanup clears _get_session_id)."""
     server = MCPServerStreamableHttp(params={"url": "http://localhost:8000/mcp"})
 
     mock_get_session_id = MagicMock(return_value="session-to-clear")
