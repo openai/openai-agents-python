@@ -93,6 +93,7 @@ class TwilioHandler:
             model_config={
                 "api_key": api_key,
                 "initial_model_settings": {
+                    "model_name": "gpt-realtime-1.5",
                     "input_audio_format": "g711_ulaw",
                     "output_audio_format": "g711_ulaw",
                     "turn_detection": {

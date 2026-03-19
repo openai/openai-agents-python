@@ -26,7 +26,7 @@ Here are the main features of the SDK:
 -   **Sessions**: A persistent memory layer for maintaining working context within an agent loop.
 -   **Human in the loop**: Built-in mechanisms for involving humans across agent runs.
 -   **Tracing**: Built-in tracing for visualizing, debugging, and monitoring workflows, with support for the OpenAI suite of evaluation, fine-tuning, and distillation tools.
--   **Realtime Agents**: Build powerful voice agents with features such as automatic interruption detection, context management, guardrails, and more.
+-   **Realtime Agents**: Build powerful voice agents with `gpt-realtime-1.5`, automatic interruption detection, context management, guardrails, and more.
 
 ## Installation
 
@@ -73,5 +73,5 @@ Use this table when you know the job you want to do, but not which page explains
 | Keep memory across turns | [Running agents](running_agents.md#choose-a-memory-strategy) and [Sessions](sessions/index.md) |
 | Use OpenAI models, websocket transport, or non-OpenAI providers | [Models](models/index.md) |
 | Review outputs, run items, interruptions, and resume state | [Results](results.md) |
-| Build a low-latency voice agent | [Realtime agents quickstart](realtime/quickstart.md) and [Realtime transport](realtime/transport.md) |
+| Build a low-latency voice agent with `gpt-realtime-1.5` | [Realtime agents quickstart](realtime/quickstart.md) and [Realtime transport](realtime/transport.md) |
 | Build a speech-to-text / agent / text-to-speech pipeline | [Voice pipeline quickstart](voice/quickstart.md) |
