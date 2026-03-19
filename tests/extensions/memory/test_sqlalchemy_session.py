@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
@@ -201,6 +202,63 @@ async def test_add_empty_items_list():
 
     items_after_add = await session.get_items()
     assert len(items_after_add) == 0
+
+
+async def test_add_items_concurrent_first_access_with_create_tables(tmp_path):
+    """Concurrent first writes should not race table creation or drop items."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'concurrent_first_access.db'}"
+    session = SQLAlchemySession.from_url(
+        "concurrent_first_access",
+        url=db_url,
+        create_tables=True,
+    )
+    submitted = [f"msg-{i}" for i in range(25)]
+
+    async def worker(content: str) -> None:
+        await session.add_items([{"role": "user", "content": content}])
+
+    results = await asyncio.gather(
+        *(worker(content) for content in submitted),
+        return_exceptions=True,
+    )
+
+    assert [result for result in results if isinstance(result, Exception)] == []
+
+    stored = await session.get_items()
+    assert len(stored) == len(submitted)
+    assert sorted(item.get("content") for item in stored) == sorted(submitted)
+
+
+async def test_add_items_concurrent_first_write_after_tables_exist(tmp_path):
+    """Concurrent first writes should not race parent session creation."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'concurrent_first_write.db'}"
+    setup_session = SQLAlchemySession.from_url(
+        "concurrent_first_write",
+        url=db_url,
+        create_tables=True,
+    )
+    await setup_session.get_items()
+
+    session = SQLAlchemySession.from_url(
+        "concurrent_first_write",
+        url=db_url,
+        create_tables=False,
+    )
+    submitted = [f"msg-{i}" for i in range(25)]
+
+    async def worker(content: str) -> None:
+        await session.add_items([{"role": "user", "content": content}])
+
+    results = await asyncio.gather(
+        *(worker(content) for content in submitted),
+        return_exceptions=True,
+    )
+
+    assert [result for result in results if isinstance(result, Exception)] == []
+
+    stored = await session.get_items()
+    assert len(stored) == len(submitted)
+    assert sorted(item.get("content") for item in stored) == sorted(submitted)
 
 
 async def test_get_items_same_timestamp_consistent_order():

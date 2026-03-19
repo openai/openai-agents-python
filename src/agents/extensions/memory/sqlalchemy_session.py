@@ -43,6 +43,7 @@ from sqlalchemy import (
     text as sql_text,
     update,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from ...items import TResponseInputItem
@@ -86,6 +87,7 @@ class SQLAlchemySession(SessionABC):
         self.session_settings = session_settings or SessionSettings()
         self._engine = engine
         self._lock = asyncio.Lock()
+        self._init_lock = asyncio.Lock()
 
         self._metadata = MetaData()
         self._sessions = Table(
@@ -182,7 +184,13 @@ class SQLAlchemySession(SessionABC):
     # ------------------------------------------------------------------
     async def _ensure_tables(self) -> None:
         """Ensure tables are created before any database operations."""
-        if self._create_tables:
+        if not self._create_tables:
+            return
+
+        async with self._init_lock:
+            if not self._create_tables:
+                return
+
             async with self._engine.begin() as conn:
                 await conn.run_sync(self._metadata.create_all)
             self._create_tables = False  # Only create once
@@ -248,39 +256,44 @@ class SQLAlchemySession(SessionABC):
         if not items:
             return
 
-        await self._ensure_tables()
-        payload = [
-            {
-                "session_id": self.session_id,
-                "message_data": await self._serialize_item(item),
-            }
-            for item in items
-        ]
+        async with self._lock:
+            await self._ensure_tables()
+            payload = [
+                {
+                    "session_id": self.session_id,
+                    "message_data": await self._serialize_item(item),
+                }
+                for item in items
+            ]
 
-        async with self._session_factory() as sess:
-            async with sess.begin():
-                # Ensure the parent session row exists - use merge for cross-DB compatibility
-                # Check if session exists
-                existing = await sess.execute(
-                    select(self._sessions.c.session_id).where(
-                        self._sessions.c.session_id == self.session_id
+            async with self._session_factory() as sess:
+                async with sess.begin():
+                    # Avoid check-then-insert races on the first write while keeping
+                    # the common path free of avoidable integrity exceptions.
+                    existing = await sess.execute(
+                        select(self._sessions.c.session_id).where(
+                            self._sessions.c.session_id == self.session_id
+                        )
                     )
-                )
-                if not existing.scalar_one_or_none():
-                    # Session doesn't exist, create it
+                    if not existing.scalar_one_or_none():
+                        try:
+                            async with sess.begin_nested():
+                                await sess.execute(
+                                    insert(self._sessions).values({"session_id": self.session_id})
+                                )
+                        except IntegrityError:
+                            # Another concurrent writer created the parent row first.
+                            pass
+
+                    # Insert messages in bulk
+                    await sess.execute(insert(self._messages), payload)
+
+                    # Touch updated_at column
                     await sess.execute(
-                        insert(self._sessions).values({"session_id": self.session_id})
+                        update(self._sessions)
+                        .where(self._sessions.c.session_id == self.session_id)
+                        .values(updated_at=sql_text("CURRENT_TIMESTAMP"))
                     )
-
-                # Insert messages in bulk
-                await sess.execute(insert(self._messages), payload)
-
-                # Touch updated_at column
-                await sess.execute(
-                    update(self._sessions)
-                    .where(self._sessions.c.session_id == self.session_id)
-                    .values(updated_at=sql_text("CURRENT_TIMESTAMP"))
-                )
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
