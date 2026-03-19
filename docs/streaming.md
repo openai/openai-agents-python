@@ -57,6 +57,8 @@ For a full pause/resume walkthrough, see the [human-in-the-loop guide](human_in_
 
 ## Cancel streaming after the current turn
 
+If you need to stop a streaming run in the middle, call [`result.cancel()`][agents.result.RunResultStreaming.cancel]. By default this stops the run immediately. To let the current turn finish cleanly before stopping, call `result.cancel(mode="after_turn")` instead.
+
 A streamed run is not complete until `result.stream_events()` finishes. The SDK may still be
 persisting session items, finalizing approval state, or compacting history after the last visible
 token.
