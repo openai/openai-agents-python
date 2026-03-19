@@ -1922,6 +1922,88 @@ async def test_agent_as_tool_streaming_reraises_caller_cancellation_with_cancell
 
 
 @pytest.mark.asyncio
+async def test_agent_as_tool_streaming_reraises_caller_cancellation_with_failed_run_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="streamer")
+    stream_event = RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+
+    async def fail_run_loop() -> None:
+        raise RuntimeError("run-loop-failed")
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = ""
+            self.current_agent = agent
+            self.new_items: list[Any] = []
+            self.raw_responses = [
+                ModelResponse(
+                    output=[get_text_message("Recovered nested summary")],
+                    usage=Usage(),
+                    response_id="resp_nested",
+                )
+            ]
+            self.run_loop_task = asyncio.create_task(fail_run_loop())
+
+        async def stream_events(self):
+            yield stream_event
+            raise asyncio.CancelledError("stream-cancelled")
+
+    streaming_result = DummyStreamingResult()
+    with contextlib.suppress(RuntimeError):
+        await streaming_result.run_loop_task
+
+    def fake_run_streamed(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        auto_previous_response_id=False,
+        conversation_id,
+        session,
+    ):
+        return streaming_result
+
+    async def unexpected_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Runner.run should not be called when on_stream is provided.")
+
+    monkeypatch.setattr(Runner, "run_streamed", classmethod(fake_run_streamed))
+    monkeypatch.setattr(Runner, "run", classmethod(unexpected_run))
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        del payload
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_failed_done",
+        arguments='{"input": "recover"}',
+        call_id="call-failed-done",
+        name="stream_tool",
+        type="function_call",
+    )
+
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+    with pytest.raises(asyncio.CancelledError, match="stream-cancelled"):
+        await tool.on_invoke_tool(tool_context, '{"input": "recover"}')
+
+
+@pytest.mark.asyncio
 async def test_agent_as_tool_streaming_extractor_can_access_agent_tool_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

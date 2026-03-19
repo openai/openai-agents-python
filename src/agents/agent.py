@@ -153,7 +153,11 @@ def _can_recover_cancelled_streamed_agent_tool(run_result: Any) -> bool:
     """Recover text only after the nested streamed run has already reached local terminal state."""
     run_loop_task = getattr(run_result, "run_loop_task", None)
     if isinstance(run_loop_task, asyncio.Task):
-        return run_loop_task.done() and not run_loop_task.cancelled()
+        return (
+            run_loop_task.done()
+            and not run_loop_task.cancelled()
+            and run_loop_task.exception() is None
+        )
 
     return False
 
