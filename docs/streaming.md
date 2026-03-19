@@ -61,11 +61,13 @@ If you need to stop a streaming run in the middle, call [`result.cancel()`][agen
 
 A streamed run is not complete until `result.stream_events()` finishes. The SDK may still be persisting session items, finalizing approval state, or compacting history after the last visible token.
 
+Only start a fresh next user turn after the previous turn completed normally. `cancel(mode="after_turn")` can also stop after a tool or handoff turn before the follow-up model call, and the current public result surface does not expose a general resume flow for that unfinished-turn case.
+
 -   With [`session=...`](sessions/index.md), wait for the streamed run to finish before deciding the next step. If the run completed normally, start a new run with the same session and only the new user input; the SDK reloads the prior history from the session automatically.
 -   With OpenAI server-managed continuation, wait for the streamed run to finish before deciding the next step. If the run completed normally, continue with the same strategy you started with: reuse the same `conversation_id` when you are using Conversations, or, when you are chaining stored Responses API turns, pass `result.last_response_id` as `previous_response_id` together with only the new user input. For stateless `store=False` runs, use locally managed continuation instead.
 -   If a streamed run stopped for tool approval, do not treat that as a new turn. Finish draining the stream, inspect `result.interruptions`, and resume from `result.to_state()` instead.
 -   If you are using an OpenAI Responses-based session and need to reduce long client-managed history between turns, do it only after the streamed run finishes. Use [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession] to compact stored session history.
--   Use [`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_callback] only to customize how retrieved session history and the new user input are merged before the next model call. It is not a replacement for compaction of previously stored session history.
+-   Use [`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_callback] to customize how retrieved session history and the new user input are merged before the next model call. If you rewrite new-turn items there, the rewritten version is what gets persisted for that turn. It is not a replacement for compaction of previously stored session history.
 
 ## Run item events and agent events
 
