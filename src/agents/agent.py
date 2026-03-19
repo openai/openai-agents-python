@@ -140,9 +140,9 @@ def _recover_streamed_agent_tool_text(run_result: Any) -> str | None:
         if not isinstance(outputs, list):
             continue
         for output_item in outputs:
-            text = ItemHelpers.extract_last_text(output_item)
-            if text:
-                recovered_chunks.append(text)
+            chunk = ItemHelpers.extract_last_text(output_item)
+            if chunk:
+                recovered_chunks.append(chunk)
 
     if not recovered_chunks:
         return None
@@ -151,9 +151,6 @@ def _recover_streamed_agent_tool_text(run_result: Any) -> str | None:
 
 def _can_recover_cancelled_streamed_agent_tool(run_result: Any) -> bool:
     """Recover text only after the nested streamed run has already reached local terminal state."""
-    if getattr(run_result, "is_complete", False):
-        return True
-
     run_loop_task = getattr(run_result, "run_loop_task", None)
     if isinstance(run_loop_task, asyncio.Task):
         return run_loop_task.done()
@@ -851,9 +848,7 @@ class Agent(AgentBase, Generic[TContext]):
                         except asyncio.CancelledError:
                             if not _can_recover_cancelled_streamed_agent_tool(run_result_streaming):
                                 raise
-                            recovered_text = _recover_streamed_agent_tool_text(
-                                run_result_streaming
-                            )
+                            recovered_text = _recover_streamed_agent_tool_text(run_result_streaming)
                             if not recovered_text:
                                 raise
                             run_result_streaming.final_output = recovered_text
