@@ -407,8 +407,8 @@ async def test_streaming_cancel_after_turn_allows_turn_completion() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pause_between_turns_stream_reuses_normalized_history() -> None:
-    """Mimics pausing a streamed run after a turn, then continuing with new user input."""
+async def test_cancel_after_turn_reuses_normalized_history() -> None:
+    """Mimics canceling a streamed run after a turn, then starting a new run with new input."""
     model = FakeModel()
 
     @function_tool
@@ -428,18 +428,18 @@ async def test_pause_between_turns_stream_reuses_normalized_history() -> None:
     agent = Agent(name="inventory", model=model, tools=[fetch_inventory])
 
     streamed = Runner.run_streamed(agent, input="Check warehouse stock for sku-123.")
-    pause_requested = False
+    cancel_requested = False
 
     async for event in streamed.stream_events():
         if (
             event.type == "run_item_stream_event"
             and event.name == "tool_called"
-            and not pause_requested
+            and not cancel_requested
         ):
             streamed.cancel(mode="after_turn")
-            pause_requested = True
+            cancel_requested = True
 
-    assert pause_requested is True
+    assert cancel_requested is True
     assert streamed.is_complete is True
     assert streamed.final_output is None
 

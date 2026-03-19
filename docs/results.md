@@ -105,13 +105,6 @@ if result.interruptions:
 
 For streaming runs, finish consuming [`stream_events()`][agents.result.RunResultStreaming.stream_events] first, then inspect `result.interruptions` and resume from `result.to_state()`. For the full approval flow, see [Human-in-the-loop](human_in_the_loop.md).
 
-For host-controlled streaming loops that need to stop between turns because of outside events, use
-[`cancel(mode="after_turn")`][agents.result.RunResultStreaming.cancel], wait for
-[`stream_events()`][agents.result.RunResultStreaming.stream_events] to finish, and then continue
-with [`last_agent`][agents.result.RunResultBase.last_agent] plus
-[`to_input_list(mode="normalized")`][agents.result.RunResultBase.to_input_list], a
-[`session`](sessions/index.md), or server-managed continuation IDs. See [Streaming](streaming.md).
-
 ### Server-managed continuation
 
 [`last_response_id`][agents.result.RunResultBase.last_response_id] is the latest model response ID from the run. Pass it back as `previous_response_id` on the next turn when you want to continue an OpenAI Responses API chain.
