@@ -1,12 +1,9 @@
-from pydantic import AnyUrl
-
 """Tests for MCP server list_resources, list_resource_templates, and read_resource."""
 
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from mcp.types import (
-    AnyUrl,
     ListResourcesResult,
     ListResourceTemplatesResult,
     ReadResourceResult,
@@ -14,6 +11,7 @@ from mcp.types import (
     ResourceTemplate,
     TextResourceContents,
 )
+from pydantic import AnyUrl
 
 from agents.mcp import MCPServerStreamableHttp
 
@@ -108,7 +106,7 @@ async def test_read_resource_returns_result(server: MCPServerStreamableHttp):
 @pytest.mark.asyncio
 async def test_base_methods_raise_not_implemented():
     """Bare MCPServer subclasses that don't override resource methods get NotImplementedError."""
-    from mcp.types import CallToolResult
+    from mcp.types import CallToolResult, GetPromptResult, ListPromptsResult
 
     from agents.mcp import MCPServer
 
@@ -132,13 +130,9 @@ async def test_base_methods_raise_not_implemented():
             return CallToolResult(content=[])
 
         async def list_prompts(self):
-            from mcp.types import ListPromptsResult
-
             return ListPromptsResult(prompts=[])
 
         async def get_prompt(self, name, arguments=None):
-            from mcp.types import GetPromptResult
-
             return GetPromptResult(messages=[])
 
     s = MinimalServer()
