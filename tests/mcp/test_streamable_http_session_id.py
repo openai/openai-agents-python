@@ -69,9 +69,7 @@ class TestStreamableHttpSessionId:
         transport_tuple = (mock_read, mock_write, mock_get_session_id)
 
         with patch("agents.mcp.server.ClientSession") as mock_client_session_cls:
-            mock_client_session_cls.return_value.__aenter__ = AsyncMock(
-                return_value=mock_session
-            )
+            mock_client_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
             mock_client_session_cls.return_value.__aexit__ = AsyncMock(return_value=None)
 
             with patch.object(
