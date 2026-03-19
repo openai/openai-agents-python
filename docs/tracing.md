@@ -168,3 +168,4 @@ The following community and vendor integrations support the OpenAI Agents SDK tr
 -   [Agenta](https://docs.agenta.ai/observability/integrations/openai-agents)
 -   [PostHog](https://posthog.com/docs/llm-analytics/installation/openai-agents)
 -   [Traccia](https://traccia.ai/docs/integrations/openai-agents)
+-   [PromptLayer](https://docs.promptlayer.com/languages/integrations#openai-agents-sdk)
