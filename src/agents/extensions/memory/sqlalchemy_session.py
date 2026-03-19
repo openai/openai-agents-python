@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+import threading
+from typing import Any, ClassVar
+from weakref import WeakKeyDictionary
 
 from sqlalchemy import (
     TIMESTAMP,
@@ -54,10 +56,23 @@ from ...memory.session_settings import SessionSettings, resolve_session_limit
 class SQLAlchemySession(SessionABC):
     """SQLAlchemy implementation of :pyclass:`agents.memory.session.Session`."""
 
+    _engine_init_locks: ClassVar[WeakKeyDictionary[AsyncEngine, asyncio.Lock]] = (
+        WeakKeyDictionary()
+    )
+    _engine_init_locks_guard: ClassVar[threading.Lock] = threading.Lock()
     _metadata: MetaData
     _sessions: Table
     _messages: Table
     session_settings: SessionSettings | None = None
+
+    @classmethod
+    def _get_engine_init_lock(cls, engine: AsyncEngine) -> asyncio.Lock:
+        with cls._engine_init_locks_guard:
+            lock = cls._engine_init_locks.get(engine)
+            if lock is None:
+                lock = asyncio.Lock()
+                cls._engine_init_locks[engine] = lock
+            return lock
 
     def __init__(
         self,
@@ -87,7 +102,7 @@ class SQLAlchemySession(SessionABC):
         self.session_settings = session_settings or SessionSettings()
         self._engine = engine
         self._lock = asyncio.Lock()
-        self._init_lock = asyncio.Lock()
+        self._init_lock = self._get_engine_init_lock(engine)
 
         self._metadata = MetaData()
         self._sessions = Table(

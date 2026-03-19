@@ -271,6 +271,33 @@ async def test_add_items_concurrent_first_write_after_tables_exist(tmp_path):
     assert sorted(stored_contents) == sorted(submitted)
 
 
+async def test_add_items_concurrent_first_access_across_sessions_with_shared_engine(tmp_path):
+    """Concurrent first writes should not race table creation across session instances."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'concurrent_shared_engine.db'}"
+    engine = create_async_engine(db_url)
+    try:
+        session_a = SQLAlchemySession("shared_engine_a", engine=engine, create_tables=True)
+        session_b = SQLAlchemySession("shared_engine_b", engine=engine, create_tables=True)
+
+        results = await asyncio.gather(
+            session_a.add_items([{"role": "user", "content": "one"}]),
+            session_b.add_items([{"role": "user", "content": "two"}]),
+            return_exceptions=True,
+        )
+
+        assert [result for result in results if isinstance(result, Exception)] == []
+
+        stored_a = await session_a.get_items()
+        assert len(stored_a) == 1
+        assert stored_a[0].get("content") == "one"
+
+        stored_b = await session_b.get_items()
+        assert len(stored_b) == 1
+        assert stored_b[0].get("content") == "two"
+    finally:
+        await engine.dispose()
+
+
 async def test_get_items_same_timestamp_consistent_order():
     """Test that items with identical timestamps keep insertion order."""
     session_id = "same_timestamp_test"
