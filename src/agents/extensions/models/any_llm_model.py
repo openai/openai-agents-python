@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import inspect
 import json
 import time
@@ -48,7 +49,7 @@ from ...usage import Usage
 from ...util._json import _to_dump_compatible
 
 try:
-    from any_llm import AnyLLM  # type: ignore[import-not-found]
+    AnyLLM = importlib.import_module("any_llm").AnyLLM
 except ImportError as _e:
     raise ImportError(
         "`any-llm-sdk` is required to use the AnyLLMModel. Install it via the optional "
@@ -1087,12 +1088,11 @@ class AnyLLMModel(Model):
     @staticmethod
     def _make_any_llm_responses_params(payload: dict[str, Any]) -> Any:
         try:
-            from any_llm.types.responses import (  # type: ignore[import-not-found]
-                ResponsesParams as AnyLLMResponsesParams,
-            )
+            any_llm_responses = importlib.import_module("any_llm.types.responses")
         except ImportError:
             return _AnyLLMResponsesParamsShim(**payload)
 
+        AnyLLMResponsesParams = any_llm_responses.ResponsesParams
         return AnyLLMResponsesParams(**payload)
 
     def _remove_openai_responses_api_incompatible_fields(self, list_input: list[Any]) -> list[Any]:
