@@ -149,6 +149,18 @@ def _recover_streamed_agent_tool_text(run_result: Any) -> str | None:
     return "\n\n".join(recovered_chunks)
 
 
+def _can_recover_cancelled_streamed_agent_tool(run_result: Any) -> bool:
+    """Recover text only after the nested streamed run has already reached local terminal state."""
+    if getattr(run_result, "is_complete", False):
+        return True
+
+    run_loop_task = getattr(run_result, "run_loop_task", None)
+    if isinstance(run_loop_task, asyncio.Task):
+        return run_loop_task.done()
+
+    return False
+
+
 class AgentToolStreamEvent(TypedDict):
     """Streaming event emitted when an agent is invoked as a tool."""
 
@@ -837,6 +849,8 @@ class Agent(AgentBase, Generic[TContext]):
                                 }
                                 await event_queue.put(payload)
                         except asyncio.CancelledError:
+                            if not _can_recover_cancelled_streamed_agent_tool(run_result_streaming):
+                                raise
                             recovered_text = _recover_streamed_agent_tool_text(
                                 run_result_streaming
                             )

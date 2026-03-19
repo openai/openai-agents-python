@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 from typing import Any, cast
@@ -1693,6 +1694,7 @@ async def test_agent_as_tool_streaming_recovers_text_from_raw_responses_on_cance
                     response_id="resp_nested",
                 )
             ]
+            self.is_complete = True
 
         async def stream_events(self):
             yield stream_event
@@ -1751,6 +1753,89 @@ async def test_agent_as_tool_streaming_recovers_text_from_raw_responses_on_cance
     assert output == "Recovered nested summary"
     assert len(received_events) == 1
     assert received_events[0]["event"] == stream_event
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_reraises_caller_cancellation_with_live_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="streamer")
+    stream_event = RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = ""
+            self.current_agent = agent
+            self.new_items: list[Any] = []
+            self.raw_responses = [
+                ModelResponse(
+                    output=[get_text_message("Recovered nested summary")],
+                    usage=Usage(),
+                    response_id="resp_nested",
+                )
+            ]
+            self.is_complete = False
+            self.run_loop_task = asyncio.create_task(asyncio.sleep(60))
+
+        async def stream_events(self):
+            yield stream_event
+            raise asyncio.CancelledError("stream-cancelled")
+
+    streaming_result = DummyStreamingResult()
+
+    def fake_run_streamed(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        auto_previous_response_id=False,
+        conversation_id,
+        session,
+    ):
+        return streaming_result
+
+    async def unexpected_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Runner.run should not be called when on_stream is provided.")
+
+    monkeypatch.setattr(Runner, "run_streamed", classmethod(fake_run_streamed))
+    monkeypatch.setattr(Runner, "run", classmethod(unexpected_run))
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        del payload
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_cancelled_live",
+        arguments='{"input": "recover"}',
+        call_id="call-cancelled-live",
+        name="stream_tool",
+        type="function_call",
+    )
+
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+    try:
+        with pytest.raises(asyncio.CancelledError, match="stream-cancelled"):
+            await tool.on_invoke_tool(tool_context, '{"input": "recover"}')
+    finally:
+        streaming_result.run_loop_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await streaming_result.run_loop_task
 
 
 @pytest.mark.asyncio
