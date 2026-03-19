@@ -1,3 +1,5 @@
+from pydantic import AnyUrl
+
 """Tests for MCP server list_resources, list_resource_templates, and read_resource."""
 
 from unittest.mock import AsyncMock, MagicMock
