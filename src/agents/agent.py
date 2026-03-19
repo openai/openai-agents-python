@@ -29,6 +29,7 @@ from .agent_tool_state import (
 from .exceptions import ModelBehaviorError, UserError
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
+from .items import ItemHelpers
 from .logger import logger
 from .mcp import MCPUtil
 from .model_settings import ModelSettings
@@ -116,6 +117,36 @@ def _validate_codex_tool_name_collisions(tools: list[Tool]) -> None:
             + ", ".join(duplicate_codex_names)
             + ". Provide a unique codex_tool(name=...) per tool instance."
         )
+
+
+def _recover_streamed_agent_tool_text(run_result: Any) -> str | None:
+    final_output = getattr(run_result, "final_output", None)
+    if isinstance(final_output, str) and final_output:
+        return final_output
+
+    new_items = getattr(run_result, "new_items", None)
+    if isinstance(new_items, list):
+        text = ItemHelpers.text_message_outputs(new_items)
+        if text:
+            return text
+
+    raw_responses = getattr(run_result, "raw_responses", None)
+    if not isinstance(raw_responses, list):
+        return None
+
+    recovered_chunks: list[str] = []
+    for raw_response in raw_responses:
+        outputs = getattr(raw_response, "output", None)
+        if not isinstance(outputs, list):
+            continue
+        for output_item in outputs:
+            text = ItemHelpers.extract_last_text(output_item)
+            if text:
+                recovered_chunks.append(text)
+
+    if not recovered_chunks:
+        return None
+    return "\n\n".join(recovered_chunks)
 
 
 class AgentToolStreamEvent(TypedDict):
@@ -794,16 +825,24 @@ class Agent(AgentBase, Generic[TContext]):
                         from .stream_events import AgentUpdatedStreamEvent
 
                         current_agent = run_result_streaming.current_agent
-                        async for event in run_result_streaming.stream_events():
-                            if isinstance(event, AgentUpdatedStreamEvent):
-                                current_agent = event.new_agent
+                        try:
+                            async for event in run_result_streaming.stream_events():
+                                if isinstance(event, AgentUpdatedStreamEvent):
+                                    current_agent = event.new_agent
 
-                            payload: AgentToolStreamEvent = {
-                                "event": event,
-                                "agent": current_agent,
-                                "tool_call": context.tool_call,
-                            }
-                            await event_queue.put(payload)
+                                payload: AgentToolStreamEvent = {
+                                    "event": event,
+                                    "agent": current_agent,
+                                    "tool_call": context.tool_call,
+                                }
+                                await event_queue.put(payload)
+                        except asyncio.CancelledError:
+                            recovered_text = _recover_streamed_agent_tool_text(
+                                run_result_streaming
+                            )
+                            if not recovered_text:
+                                raise
+                            run_result_streaming.final_output = recovered_text
                     finally:
                         await event_queue.put(None)
                         await event_queue.join()

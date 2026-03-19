@@ -17,6 +17,7 @@ from agents import (
     FunctionTool,
     MessageOutputItem,
     ModelBehaviorError,
+    ModelResponse,
     RunConfig,
     RunContextWrapper,
     RunHooks,
@@ -27,6 +28,7 @@ from agents import (
     SessionSettings,
     ToolApprovalItem,
     TResponseInputItem,
+    Usage,
     tool_namespace,
 )
 from agents.agent_tool_input import StructuredToolInputBuilderOptions
@@ -39,6 +41,7 @@ from agents.run_context import _ApprovalRecord
 from agents.run_state import _build_agent_map
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
 from agents.tool_context import ToolContext
+from tests.test_responses import get_text_message
 from tests.utils.hitl import make_function_tool_call
 
 
@@ -1669,6 +1672,85 @@ async def test_agent_as_tool_streaming_works_with_custom_extractor(
     assert output == "custom value"
     assert received == [streamed_instance]
     assert callbacks == stream_events
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_recovers_text_from_raw_responses_on_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="streamer")
+    stream_event = RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = ""
+            self.current_agent = agent
+            self.new_items: list[Any] = []
+            self.raw_responses = [
+                ModelResponse(
+                    output=[get_text_message("Recovered nested summary")],
+                    usage=Usage(),
+                    response_id="resp_nested",
+                )
+            ]
+
+        async def stream_events(self):
+            yield stream_event
+            raise asyncio.CancelledError("stream-cancelled")
+
+    def fake_run_streamed(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        auto_previous_response_id=False,
+        conversation_id,
+        session,
+    ):
+        return DummyStreamingResult()
+
+    async def unexpected_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Runner.run should not be called when on_stream is provided.")
+
+    monkeypatch.setattr(Runner, "run_streamed", classmethod(fake_run_streamed))
+    monkeypatch.setattr(Runner, "run", classmethod(unexpected_run))
+
+    received_events: list[AgentToolStreamEvent] = []
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        received_events.append(payload)
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_cancelled",
+        arguments='{"input": "recover"}',
+        call_id="call-cancelled",
+        name="stream_tool",
+        type="function_call",
+    )
+
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+    output = await tool.on_invoke_tool(tool_context, '{"input": "recover"}')
+
+    assert output == "Recovered nested summary"
+    assert len(received_events) == 1
+    assert received_events[0]["event"] == stream_event
 
 
 @pytest.mark.asyncio
