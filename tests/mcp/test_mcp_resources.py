@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from mcp.types import (
+    AnyUrl,
     ListResourcesResult,
     ListResourceTemplatesResult,
     ReadResourceResult,
@@ -53,7 +54,7 @@ async def test_list_resources_returns_result(server: MCPServerStreamableHttp):
     mock_session = MagicMock()
     expected = ListResourcesResult(
         resources=[
-            Resource(uri="file:///readme.md", name="readme.md", mimeType="text/markdown"),
+            Resource(uri=AnyUrl("file:///readme.md"), name="readme.md", mimeType="text/markdown"),
         ]
     )
     mock_session.list_resources = AsyncMock(return_value=expected)
@@ -90,7 +91,7 @@ async def test_read_resource_returns_result(server: MCPServerStreamableHttp):
     uri = "file:///readme.md"
     expected = ReadResourceResult(
         contents=[
-            TextResourceContents(uri=uri, text="# Hello", mimeType="text/markdown"),
+            TextResourceContents(uri=AnyUrl(uri), text="# Hello", mimeType="text/markdown"),
         ]
     )
     mock_session.read_resource = AsyncMock(return_value=expected)
@@ -99,7 +100,7 @@ async def test_read_resource_returns_result(server: MCPServerStreamableHttp):
     result = await server.read_resource(uri)
 
     assert result is expected
-    mock_session.read_resource.assert_awaited_once_with(uri)
+    mock_session.read_resource.assert_awaited_once_with(AnyUrl(uri))
 
 
 @pytest.mark.asyncio
