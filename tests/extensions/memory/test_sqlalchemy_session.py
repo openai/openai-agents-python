@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -322,6 +323,54 @@ async def test_add_items_concurrent_first_access_across_from_url_sessions(tmp_pa
     finally:
         await session_a.engine.dispose()
         await session_b.engine.dispose()
+
+
+async def test_add_items_concurrent_first_access_across_from_url_sessions_cross_loop(tmp_path):
+    """Concurrent first writes should not race or hang across event loops."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'concurrent_from_url_cross_loop.db'}"
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, str, Any]] = []
+    results_lock = threading.Lock()
+
+    def worker(session_id: str, content: str) -> None:
+        async def run() -> tuple[str, Any]:
+            session = SQLAlchemySession.from_url(session_id, url=db_url, create_tables=True)
+            barrier.wait()
+            try:
+                await asyncio.wait_for(
+                    session.add_items([{"role": "user", "content": content}]),
+                    timeout=5,
+                )
+                stored = await session.get_items()
+                return ("ok", stored)
+            finally:
+                await session.engine.dispose()
+
+        try:
+            status, payload = asyncio.run(run())
+        except Exception as exc:
+            status, payload = type(exc).__name__, str(exc)
+
+        with results_lock:
+            results.append((session_id, status, payload))
+
+    threads = [
+        threading.Thread(target=worker, args=("from_url_cross_loop_a", "one")),
+        threading.Thread(target=worker, args=("from_url_cross_loop_b", "two")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        await asyncio.to_thread(thread.join)
+
+    assert len(results) == 2
+    assert [status for _, status, _ in results] == ["ok", "ok"]
+
+    stored_by_session = {
+        session_id: cast(list[TResponseInputItem], payload) for session_id, _, payload in results
+    }
+    assert stored_by_session["from_url_cross_loop_a"][0].get("content") == "one"
+    assert stored_by_session["from_url_cross_loop_b"][0].get("content") == "two"
 
 
 async def test_get_items_same_timestamp_consistent_order():

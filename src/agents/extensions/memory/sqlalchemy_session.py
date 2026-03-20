@@ -55,7 +55,7 @@ from ...memory.session_settings import SessionSettings, resolve_session_limit
 class SQLAlchemySession(SessionABC):
     """SQLAlchemy implementation of :pyclass:`agents.memory.session.Session`."""
 
-    _table_init_locks: ClassVar[dict[tuple[str, str, str], asyncio.Lock]] = {}
+    _table_init_locks: ClassVar[dict[tuple[str, str, str], threading.Lock]] = {}
     _table_init_locks_guard: ClassVar[threading.Lock] = threading.Lock()
     _metadata: MetaData
     _sessions: Table
@@ -65,7 +65,7 @@ class SQLAlchemySession(SessionABC):
     @classmethod
     def _get_table_init_lock(
         cls, engine: AsyncEngine, sessions_table: str, messages_table: str
-    ) -> asyncio.Lock:
+    ) -> threading.Lock:
         lock_key = (
             engine.url.render_as_string(hide_password=True),
             sessions_table,
@@ -74,7 +74,7 @@ class SQLAlchemySession(SessionABC):
         with cls._table_init_locks_guard:
             lock = cls._table_init_locks.get(lock_key)
             if lock is None:
-                lock = asyncio.Lock()
+                lock = threading.Lock()
                 cls._table_init_locks[lock_key] = lock
             return lock
 
@@ -206,13 +206,18 @@ class SQLAlchemySession(SessionABC):
         if not self._create_tables:
             return
 
-        async with self._init_lock:
+        acquired = self._init_lock.acquire(blocking=False)
+        if not acquired:
+            await asyncio.to_thread(self._init_lock.acquire)
+        try:
             if not self._create_tables:
                 return
 
             async with self._engine.begin() as conn:
                 await conn.run_sync(self._metadata.create_all)
             self._create_tables = False  # Only create once
+        finally:
+            self._init_lock.release()
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
