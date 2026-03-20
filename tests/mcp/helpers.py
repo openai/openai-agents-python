@@ -141,11 +141,11 @@ class FakeMCPServer(MCPServer):
         message = PromptMessage(role="user", content=TextContent(type="text", text=content))
         return GetPromptResult(description=f"Fake prompt: {name}", messages=[message])
 
-    async def list_resources(self) -> ListResourcesResult:
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
         """Return empty list of resources for fake server."""
         return ListResourcesResult(resources=[])
 
-    async def list_resource_templates(self) -> ListResourceTemplatesResult:
+    async def list_resource_templates(self, cursor: str | None = None) -> ListResourceTemplatesResult:
         """Return empty list of resource templates for fake server."""
         return ListResourceTemplatesResult(resourceTemplates=[])
 
