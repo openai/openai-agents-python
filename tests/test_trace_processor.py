@@ -905,3 +905,19 @@ def test_flush_traces_tolerates_provider_without_override():
     with patch("agents.tracing.get_trace_provider", return_value=provider):
         # Should not raise - force_flush has a default no-op implementation
         flush_traces()
+
+
+def test_force_flush_respects_disabled_flag():
+    """Test that force_flush() skips processing when tracing is disabled."""
+    from unittest.mock import MagicMock
+
+    from agents.tracing.provider import DefaultTraceProvider
+
+    provider = DefaultTraceProvider()
+    mock_processor = MagicMock()
+    provider.register_processor(mock_processor)
+
+    provider.set_disabled(True)
+    provider.force_flush()
+
+    mock_processor.force_flush.assert_not_called()
