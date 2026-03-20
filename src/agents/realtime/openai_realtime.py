@@ -743,11 +743,6 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def close(self) -> None:
         """Close the session."""
-        self._response_state = _ResponseLifecycle.IDLE
-        self._queued_response_create = False
-        self._pending_cancel_event_id = None
-        self._active_response_id = None
-        self._pending_create_event_id = None
         if self._websocket:
             await self._websocket.close()
             self._websocket = None
@@ -758,6 +753,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             except asyncio.CancelledError:
                 pass
             self._websocket_task = None
+        # Reset lifecycle state after the listener task has fully
+        # stopped so an in-flight _handle_ws_event cannot overwrite.
+        self._response_state = _ResponseLifecycle.IDLE
+        self._queued_response_create = False
+        self._pending_cancel_event_id = None
+        self._active_response_id = None
+        self._pending_create_event_id = None
 
     async def _cancel_response(self) -> None:
         if self._response_state == _ResponseLifecycle.ACTIVE:
