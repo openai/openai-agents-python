@@ -145,7 +145,9 @@ class FakeMCPServer(MCPServer):
         """Return empty list of resources for fake server."""
         return ListResourcesResult(resources=[])
 
-    async def list_resource_templates(self, cursor: str | None = None) -> ListResourceTemplatesResult:
+    async def list_resource_templates(
+        self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
         """Return empty list of resource templates for fake server."""
         return ListResourceTemplatesResult(resourceTemplates=[])
 
