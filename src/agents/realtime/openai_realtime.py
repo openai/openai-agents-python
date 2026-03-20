@@ -927,7 +927,6 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             # so the SDK-managed create is still tracked.
             await self._emit_event(RealtimeModelTurnStartedEvent())
         elif parsed.type == "response.done":
-            self._pending_cancel_event_id = None
             done_resp_id = (
                 getattr(parsed.response, "id", None)
                 if hasattr(parsed, "response")
@@ -940,9 +939,11 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             ):
                 # Stale response.done from a previous turn — the
                 # replacement turn is still active.  Ignore so we
-                # don't reset state mid-turn.
+                # don't reset state mid-turn.  Keep cancel correlation
+                # intact for the current turn.
                 pass
             else:
+                self._pending_cancel_event_id = None
                 self._active_response_id = None
                 # Emit turn-ended before draining so listeners always
                 # see the end-of-turn notification even if drain fails.
