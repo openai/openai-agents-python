@@ -421,14 +421,22 @@ def function_schema(
     if strict_json_schema:
         json_schema = ensure_strict_json_schema(json_schema)
 
-    # 5. Return as a FuncSchema dataclass
+    # 5. Build a signature that excludes self/cls so to_call_args iterates
+    #    only the parameters the caller actually needs to pass.
+    if self_or_cls_skipped or (takes_context and params and params[0][0] in ("self", "cls")):
+        remaining = [p for name, p in params if name not in ("self", "cls")]
+        call_sig = sig.replace(parameters=remaining)
+    else:
+        call_sig = sig
+
+    # 6. Return as a FuncSchema dataclass
     return FuncSchema(
         name=func_name,
         # Ensure description_override takes precedence even if docstring info is disabled.
         description=description_override or (doc_info.description if doc_info else None),
         params_pydantic_model=dynamic_model,
         params_json_schema=json_schema,
-        signature=sig,
+        signature=call_sig,
         takes_context=takes_context,
         strict_json_schema=strict_json_schema,
     )

@@ -946,6 +946,30 @@ def test_method_context_not_immediately_after_self_raises():
         function_schema(obj.greet, use_docstring_info=False)
 
 
+def test_method_self_excluded_from_call_signature():
+    """Test that self/cls is excluded from the stored signature used by to_call_args."""
+
+    # Simulate an unbound method with self as first param
+    code = compile(
+        "def greet(self, ctx, name: str) -> str: ...", "<test>", "exec"
+    )
+    ns: dict[str, Any] = {}
+    exec(code, ns)  # noqa: S102
+    fn = ns["greet"]
+    fn.__annotations__ = {"ctx": RunContextWrapper[None], "name": str, "return": str}
+
+    fs = function_schema(fn, use_docstring_info=False)
+    # self should not be in the signature used by to_call_args
+    assert "self" not in fs.signature.parameters
+    assert "name" in fs.signature.parameters
+    assert fs.takes_context is True
+
+    # to_call_args should produce only the non-context, non-self params
+    parsed = fs.params_pydantic_model(name="world")
+    args, kwargs = fs.to_call_args(parsed)
+    assert args == ["world"]
+
+
 def test_regular_unannotated_first_param_still_included():
     """Test that a regular unannotated first param (not self/cls) is still included."""
 
