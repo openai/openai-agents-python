@@ -1334,10 +1334,15 @@ class _FunctionToolBatchExecutor:
         )
 
     def _create_tool_task(self, tool_run: ToolRunFunction, order: int) -> None:
+        task_state = _FunctionToolTaskState(tool_run=tool_run, order=order)
         task = asyncio.create_task(
-            self._run_single_tool(tool_run.function_tool, tool_run.tool_call)
+            self._run_single_tool(
+                task_state=task_state,
+                func_tool=tool_run.function_tool,
+                tool_call=tool_run.tool_call,
+            )
         )
-        self.task_states[task] = _FunctionToolTaskState(tool_run=tool_run, order=order)
+        self.task_states[task] = task_state
         self.pending_tasks.add(task)
 
     async def _drain_pending_tasks(self) -> None:
@@ -1431,13 +1436,14 @@ class _FunctionToolBatchExecutor:
 
     async def _run_single_tool(
         self,
+        *,
+        task_state: _FunctionToolTaskState,
         func_tool: FunctionTool,
         tool_call: ResponseFunctionToolCall,
     ) -> Any:
         raw_tool_call = tool_call
-        current_task = asyncio.current_task()
-        if current_task is not None:
-            self.task_states[current_task].in_post_invoke_phase = False
+        outer_task = asyncio.current_task()
+        task_state.in_post_invoke_phase = False
 
         tool_call = cast(
             ResponseFunctionToolCall,
@@ -1475,7 +1481,8 @@ class _FunctionToolBatchExecutor:
                     result = approval_result
                 else:
                     result = await self._execute_single_tool_body(
-                        current_task=current_task,
+                        outer_task=outer_task,
+                        task_state=task_state,
                         func_tool=func_tool,
                         tool_call=tool_call,
                         tool_context=tool_context,
@@ -1576,7 +1583,8 @@ class _FunctionToolBatchExecutor:
     async def _execute_single_tool_body(
         self,
         *,
-        current_task: asyncio.Task[Any] | None,
+        outer_task: asyncio.Task[Any] | None,
+        task_state: _FunctionToolTaskState,
         func_tool: FunctionTool,
         tool_call: ResponseFunctionToolCall,
         tool_context: ToolContext[Any],
@@ -1602,21 +1610,22 @@ class _FunctionToolBatchExecutor:
 
         invoke_task = asyncio.create_task(
             self._invoke_tool_and_run_post_invoke(
-                current_task=current_task,
+                outer_task=outer_task,
+                task_state=task_state,
                 func_tool=func_tool,
                 tool_call=tool_call,
                 tool_context=tool_context,
                 agent_hooks=agent_hooks,
             )
         )
-        if current_task is not None:
-            self.task_states[current_task].invoke_task = invoke_task
-        return await self._await_invoke_task(current_task=current_task, invoke_task=invoke_task)
+        task_state.invoke_task = invoke_task
+        return await self._await_invoke_task(outer_task=outer_task, invoke_task=invoke_task)
 
     async def _invoke_tool_and_run_post_invoke(
         self,
         *,
-        current_task: asyncio.Task[Any] | None,
+        outer_task: asyncio.Task[Any] | None,
+        task_state: _FunctionToolTaskState,
         func_tool: FunctionTool,
         tool_call: ResponseFunctionToolCall,
         tool_context: ToolContext[Any],
@@ -1629,7 +1638,7 @@ class _FunctionToolBatchExecutor:
                 arguments=tool_call.arguments,
             )
         except asyncio.CancelledError as e:
-            if not self.isolate_parallel_failures or current_task in self.teardown_cancelled_tasks:
+            if not self.isolate_parallel_failures or outer_task in self.teardown_cancelled_tasks:
                 raise
 
             result = await maybe_invoke_function_tool_failure_error_function(
@@ -1648,8 +1657,7 @@ class _FunctionToolBatchExecutor:
             )
             real_result = result
 
-        if current_task is not None:
-            self.task_states[current_task].in_post_invoke_phase = True
+        task_state.in_post_invoke_phase = True
 
         final_result = await _execute_tool_output_guardrails(
             func_tool=func_tool,
@@ -1672,14 +1680,14 @@ class _FunctionToolBatchExecutor:
     async def _await_invoke_task(
         self,
         *,
-        current_task: asyncio.Task[Any] | None,
+        outer_task: asyncio.Task[Any] | None,
         invoke_task: asyncio.Task[Any],
     ) -> Any:
         try:
             return await asyncio.shield(invoke_task)
         except asyncio.CancelledError as cancel_exc:
             sibling_failure_cancelled = (
-                current_task is not None and current_task in self.teardown_cancelled_tasks
+                outer_task is not None and outer_task in self.teardown_cancelled_tasks
             )
             if not invoke_task.done():
                 invoke_task.cancel()
