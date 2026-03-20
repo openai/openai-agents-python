@@ -287,6 +287,9 @@ def function_schema(
     takes_context = False
     filtered_params = []
 
+    # Track whether the first real (non-self/cls) parameter has been processed for context check
+    self_or_cls_skipped = False
+
     if params:
         first_name, first_param = params[0]
         # Prefer the evaluated type hint if available
@@ -297,15 +300,23 @@ def function_schema(
                 takes_context = True  # Mark that the function takes context
             else:
                 filtered_params.append((first_name, first_param))
+        elif first_name in ("self", "cls"):
+            self_or_cls_skipped = True  # Skip bound method receiver parameter
         else:
             filtered_params.append((first_name, first_param))
 
-    # For parameters other than the first, raise error if any use RunContextWrapper or ToolContext.
+    # For parameters other than the first, raise error if any use RunContextWrapper or ToolContext
+    # (unless self/cls was skipped, in which case the second param is the effective first param).
     for name, param in params[1:]:
         ann = type_hints.get(name, param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
             if origin is RunContextWrapper or origin is ToolContext:
+                if self_or_cls_skipped and not takes_context:
+                    # self/cls was the first param, so this is the effective first param
+                    takes_context = True
+                    self_or_cls_skipped = False
+                    continue
                 raise UserError(
                     f"RunContextWrapper/ToolContext param found at non-first position in function"
                     f" {func.__name__}"

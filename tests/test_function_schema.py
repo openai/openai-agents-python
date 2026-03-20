@@ -885,3 +885,61 @@ def test_function_with_annotated_field_multiple_constraints():
 
     with pytest.raises(ValidationError):  # zero factor
         fs.params_pydantic_model(**{"score": 50, "factor": 0.0})
+
+
+def test_method_self_param_skipped():
+    """Test that self parameter is skipped for class methods."""
+
+    class MyTools:
+        def greet(self, name: str) -> str:
+            return f"Hello, {name}"
+
+    obj = MyTools()
+    fs = function_schema(obj.greet, use_docstring_info=False)
+    props = fs.params_json_schema.get("properties", {})
+    assert "self" not in props
+    assert "name" in props
+    assert fs.params_json_schema.get("required") == ["name"]
+
+
+def test_classmethod_cls_param_skipped():
+    """Test that cls parameter is skipped for classmethods passed as unbound."""
+
+    # Simulate a function whose first param is named cls with no annotation
+    code = compile("def greet(cls, name: str) -> str: ...", "<test>", "exec")
+    ns: dict[str, Any] = {}
+    exec(code, ns)  # noqa: S102
+    fn = ns["greet"]
+    fn.__annotations__ = {"name": str, "return": str}
+
+    fs = function_schema(fn, use_docstring_info=False)
+    props = fs.params_json_schema.get("properties", {})
+    assert "cls" not in props
+    assert "name" in props
+
+
+def test_method_self_with_context_second_param():
+    """Test that self is skipped and RunContextWrapper as second param is recognized."""
+
+    class MyTools:
+        def greet(self, ctx: RunContextWrapper[None], name: str) -> str:
+            return f"Hello, {name}"
+
+    obj = MyTools()
+    fs = function_schema(obj.greet, use_docstring_info=False)
+    props = fs.params_json_schema.get("properties", {})
+    assert "self" not in props
+    assert "ctx" not in props
+    assert "name" in props
+    assert fs.takes_context is True
+
+
+def test_regular_unannotated_first_param_still_included():
+    """Test that a regular unannotated first param (not self/cls) is still included."""
+
+    def process(data, flag: bool = False) -> str:
+        return str(data)
+
+    fs = function_schema(process, use_docstring_info=False)
+    props = fs.params_json_schema.get("properties", {})
+    assert "data" in props
