@@ -61,7 +61,7 @@ If you need to stop a streaming run in the middle, call [`result.cancel()`][agen
 
 A streamed run is not complete until `result.stream_events()` finishes. The SDK may still be persisting session items, finalizing approval state, or compacting history after the last visible token.
 
-Only start a fresh next user turn after the previous turn completed normally. `cancel(mode="after_turn")` can also stop after a tool or handoff turn before the follow-up model call, and the current public result surface does not expose a general resume flow for that unfinished-turn case.
+Only start a fresh next user turn after the previous turn completed normally. With client-managed history, if `cancel(mode="after_turn")` stops after a tool or handoff turn, continue that unfinished turn by rerunning `result.last_agent` with `result.to_input_list(mode="normalized")` instead of appending a fresh user turn right away.
 
 -   With [`session=...`](sessions/index.md), wait for the streamed run to finish before deciding the next step. If the run completed normally, start a new run with the same session and only the new user input; the SDK reloads the prior history from the session automatically.
 -   With OpenAI server-managed continuation, wait for the streamed run to finish before deciding the next step. If the run completed normally, continue with the same strategy you started with: reuse the same `conversation_id` when you are using Conversations, or, when you are chaining stored Responses API turns, pass `result.last_response_id` as `previous_response_id` together with only the new user input. For stateless `store=False` runs, use locally managed continuation instead.
