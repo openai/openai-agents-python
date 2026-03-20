@@ -105,7 +105,6 @@ class SQLAlchemySession(SessionABC):
         self.session_id = session_id
         self.session_settings = session_settings or SessionSettings()
         self._engine = engine
-        self._lock = asyncio.Lock()
         self._init_lock = self._get_table_init_lock(engine, sessions_table, messages_table)
 
         self._metadata = MetaData()
@@ -206,9 +205,10 @@ class SQLAlchemySession(SessionABC):
         if not self._create_tables:
             return
 
-        acquired = self._init_lock.acquire(blocking=False)
-        if not acquired:
-            await asyncio.to_thread(self._init_lock.acquire)
+        while not self._init_lock.acquire(blocking=False):
+            # Poll without handing lock acquisition to a background thread so
+            # cancellation cannot strand the shared init lock in the acquired state.
+            await asyncio.sleep(0.01)
         try:
             if not self._create_tables:
                 return
@@ -280,44 +280,43 @@ class SQLAlchemySession(SessionABC):
         if not items:
             return
 
-        async with self._lock:
-            await self._ensure_tables()
-            payload = [
-                {
-                    "session_id": self.session_id,
-                    "message_data": await self._serialize_item(item),
-                }
-                for item in items
-            ]
+        await self._ensure_tables()
+        payload = [
+            {
+                "session_id": self.session_id,
+                "message_data": await self._serialize_item(item),
+            }
+            for item in items
+        ]
 
-            async with self._session_factory() as sess:
-                async with sess.begin():
-                    # Avoid check-then-insert races on the first write while keeping
-                    # the common path free of avoidable integrity exceptions.
-                    existing = await sess.execute(
-                        select(self._sessions.c.session_id).where(
-                            self._sessions.c.session_id == self.session_id
-                        )
+        async with self._session_factory() as sess:
+            async with sess.begin():
+                # Avoid check-then-insert races on the first write while keeping
+                # the common path free of avoidable integrity exceptions.
+                existing = await sess.execute(
+                    select(self._sessions.c.session_id).where(
+                        self._sessions.c.session_id == self.session_id
                     )
-                    if not existing.scalar_one_or_none():
-                        try:
-                            async with sess.begin_nested():
-                                await sess.execute(
-                                    insert(self._sessions).values({"session_id": self.session_id})
-                                )
-                        except IntegrityError:
-                            # Another concurrent writer created the parent row first.
-                            pass
+                )
+                if not existing.scalar_one_or_none():
+                    try:
+                        async with sess.begin_nested():
+                            await sess.execute(
+                                insert(self._sessions).values({"session_id": self.session_id})
+                            )
+                    except IntegrityError:
+                        # Another concurrent writer created the parent row first.
+                        pass
 
-                    # Insert messages in bulk
-                    await sess.execute(insert(self._messages), payload)
+                # Insert messages in bulk
+                await sess.execute(insert(self._messages), payload)
 
-                    # Touch updated_at column
-                    await sess.execute(
-                        update(self._sessions)
-                        .where(self._sessions.c.session_id == self.session_id)
-                        .values(updated_at=sql_text("CURRENT_TIMESTAMP"))
-                    )
+                # Touch updated_at column
+                await sess.execute(
+                    update(self._sessions)
+                    .where(self._sessions.c.session_id == self.session_id)
+                    .values(updated_at=sql_text("CURRENT_TIMESTAMP"))
+                )
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.

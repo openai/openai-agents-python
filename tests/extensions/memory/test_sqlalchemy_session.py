@@ -373,6 +373,94 @@ async def test_add_items_concurrent_first_access_across_from_url_sessions_cross_
     assert stored_by_session["from_url_cross_loop_b"][0].get("content") == "two"
 
 
+async def test_add_items_concurrent_first_access_with_shared_session_cross_loop(tmp_path):
+    """A shared session instance should not hang when used from two event loops."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'shared_session_cross_loop.db'}"
+    session = SQLAlchemySession.from_url(
+        "shared_session_cross_loop",
+        url=db_url,
+        create_tables=True,
+    )
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, str]] = []
+    results_lock = threading.Lock()
+
+    def worker(content: str) -> None:
+        async def run() -> None:
+            barrier.wait()
+            await asyncio.wait_for(
+                session.add_items([{"role": "user", "content": content}]),
+                timeout=5,
+            )
+
+        try:
+            asyncio.run(run())
+            status = "ok"
+        except Exception as exc:
+            status = type(exc).__name__
+
+        with results_lock:
+            results.append((content, status))
+
+    threads = [
+        threading.Thread(target=worker, args=("one",)),
+        threading.Thread(target=worker, args=("two",)),
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            await asyncio.to_thread(thread.join)
+
+        assert sorted(results) == [("one", "ok"), ("two", "ok")]
+
+        stored = await session.get_items()
+        stored_contents: list[str] = []
+        for item in stored:
+            content = item.get("content")
+            assert isinstance(content, str)
+            stored_contents.append(content)
+        assert sorted(stored_contents) == ["one", "two"]
+    finally:
+        await session.engine.dispose()
+
+
+async def test_add_items_cancelled_waiter_does_not_strand_table_init_lock(tmp_path):
+    """Cancelling a waiting initializer must not leave the shared init lock acquired."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'cancelled_table_init_waiter.db'}"
+    holder = SQLAlchemySession.from_url("holder", url=db_url, create_tables=True)
+    waiter = SQLAlchemySession.from_url("waiter", url=db_url, create_tables=True)
+    follower = SQLAlchemySession.from_url("follower", url=db_url, create_tables=True)
+
+    assert holder._init_lock is waiter._init_lock
+    assert waiter._init_lock is follower._init_lock
+
+    acquired = holder._init_lock.acquire(blocking=False)
+    assert acquired
+
+    try:
+        blocked = asyncio.create_task(waiter.add_items([{"role": "user", "content": "waiter"}]))
+        await asyncio.sleep(0.05)
+        blocked.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await blocked
+    finally:
+        holder._init_lock.release()
+
+    try:
+        await asyncio.wait_for(
+            follower.add_items([{"role": "user", "content": "follower"}]),
+            timeout=2,
+        )
+        stored = await follower.get_items()
+        assert len(stored) == 1
+        assert stored[0].get("content") == "follower"
+    finally:
+        await holder.engine.dispose()
+        await waiter.engine.dispose()
+        await follower.engine.dispose()
+
+
 async def test_get_items_same_timestamp_consistent_order():
     """Test that items with identical timestamps keep insertion order."""
     session_id = "same_timestamp_test"
