@@ -856,3 +856,52 @@ def test_flush_traces_importable_from_agents():
     from agents import flush_traces
 
     assert callable(flush_traces)
+
+
+def test_flush_traces_tolerates_provider_without_override():
+    """Test that flush_traces() is safe with a TraceProvider that does not override force_flush."""
+    from unittest.mock import patch
+
+    from agents.tracing import flush_traces
+    from agents.tracing.provider import TraceProvider
+
+    class MinimalProvider(TraceProvider):
+        """A provider that only implements the required abstract methods."""
+
+        def register_processor(self, processor):
+            pass
+
+        def set_processors(self, processors):
+            pass
+
+        def get_current_trace(self):
+            return None
+
+        def get_current_span(self):
+            return None
+
+        def set_disabled(self, disabled):
+            pass
+
+        def time_iso(self):
+            return ""
+
+        def gen_trace_id(self):
+            return "t"
+
+        def gen_span_id(self):
+            return "s"
+
+        def gen_group_id(self):
+            return "g"
+
+        def create_trace(self, name, **kwargs):
+            raise NotImplementedError
+
+        def create_span(self, span_data, **kwargs):
+            raise NotImplementedError
+
+    provider = MinimalProvider()
+    with patch("agents.tracing.get_trace_provider", return_value=provider):
+        # Should not raise - force_flush has a default no-op implementation
+        flush_traces()
