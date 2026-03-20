@@ -189,6 +189,10 @@ class TraceProvider(ABC):
         """Create a new span."""
 
     @abstractmethod
+    def force_flush(self) -> None:
+        """Force all registered processors to flush their buffers immediately."""
+
+    @abstractmethod
     def shutdown(self) -> None:
         """Clean up any resources used by the provider."""
 
