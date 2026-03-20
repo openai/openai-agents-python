@@ -1335,13 +1335,24 @@ class _FunctionToolBatchExecutor:
 
     def _create_tool_task(self, tool_run: ToolRunFunction, order: int) -> None:
         task_state = _FunctionToolTaskState(tool_run=tool_run, order=order)
-        task = asyncio.create_task(
-            self._run_single_tool(
+
+        # Under asyncio.eager_task_factory, the coroutine starts executing inside
+        # create_task() before it returns. This creates a race: the task could
+        # complete and be processed by _partition_pending_tasks before
+        # self.task_states[task] is set on the next line, causing KeyError.
+        #
+        # Fix: wrap in an inner async function so eager execution runs the
+        # wrapper's synchronous preamble (nothing) and yields at the first
+        # await, returning control to this method to finish registration.
+        # See: https://github.com/openai/openai-agents-python/issues/2729
+        async def _run() -> Any:
+            return await self._run_single_tool(
                 task_state=task_state,
                 func_tool=tool_run.function_tool,
                 tool_call=tool_run.tool_call,
             )
-        )
+
+        task = asyncio.create_task(_run())
         self.task_states[task] = task_state
         self.pending_tasks.add(task)
 
