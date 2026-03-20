@@ -24,7 +24,11 @@ from agents.realtime.model_inputs import (
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
 )
-from agents.realtime.openai_realtime import OpenAIRealtimeWebSocketModel, TransportConfig
+from agents.realtime.openai_realtime import (
+    OpenAIRealtimeWebSocketModel,
+    TransportConfig,
+    _ResponseLifecycle,
+)
 
 
 class TestOpenAIRealtimeWebSocketModel:
@@ -648,7 +652,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         state = model._audio_state_tracker.get_state("i1", 0)
         assert state is not None
         state.initial_received_time = datetime.now() - timedelta(seconds=5)
-        model._ongoing_response = True
+        model._response_state = _ResponseLifecycle.ACTIVE
 
         monkeypatch.setattr(
             model,
@@ -696,17 +700,20 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         # user_input -> 2 raw messages (item.create + response.create)
         # audio append -> 1, commit -> +1
-        # tool output -> 1
+        # tool output -> 1 (the follow-up response.create is queued because the
+        # first response is still waiting for response.created)
         # interrupt -> 1
         # session update -> 1
-        assert send_raw.await_count == 8
+        assert send_raw.await_count == 7
+        assert model._response_state == _ResponseLifecycle.CREATE_SENT
+        assert model._queued_response_create is True
 
     @pytest.mark.asyncio
     async def test_interrupt_force_cancel_overrides_auto_cancellation(self, model, monkeypatch):
         """Interrupt should send response.cancel even when auto cancel is enabled."""
         model._audio_state_tracker.set_audio_format("pcm16")
         model._audio_state_tracker.on_audio_delta("item_1", 0, b"\x00" * 4800)
-        model._ongoing_response = True
+        model._response_state = _ResponseLifecycle.ACTIVE
         model._created_session = SimpleNamespace(
             audio=SimpleNamespace(
                 input=SimpleNamespace(turn_detection=SimpleNamespace(interrupt_response=True))
@@ -723,7 +730,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert send_raw.await_count == 2
         payload_types = {call.args[0].type for call in send_raw.call_args_list}
         assert payload_types == {"conversation.item.truncate", "response.cancel"}
-        assert model._ongoing_response is False
+        assert model._response_state == _ResponseLifecycle.CANCEL_SENT
         assert model._audio_state_tracker.get_last_audio_item() is None
 
     @pytest.mark.asyncio
@@ -731,7 +738,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         """Interrupt should avoid sending response.cancel when relying on automatic cancellation."""
         model._audio_state_tracker.set_audio_format("pcm16")
         model._audio_state_tracker.on_audio_delta("item_1", 0, b"\x00" * 4800)
-        model._ongoing_response = True
+        model._response_state = _ResponseLifecycle.ACTIVE
         model._created_session = SimpleNamespace(
             audio=SimpleNamespace(
                 input=SimpleNamespace(turn_detection=SimpleNamespace(interrupt_response=True))
@@ -748,7 +755,743 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert send_raw.await_count == 1
         assert send_raw.call_args_list[0].args[0].type == "conversation.item.truncate"
         assert all(call.args[0].type != "response.cancel" for call in send_raw.call_args_list)
-        assert model._ongoing_response is True
+        assert model._response_state == _ResponseLifecycle.ACTIVE
+
+    @pytest.mark.asyncio
+    async def test_user_input_queued_while_cancel_pending(self, model, monkeypatch):
+        """User input after a forced cancel should queue response.create until response.done."""
+        model._response_state = _ResponseLifecycle.CANCEL_SENT
+
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        await model.send_event(RealtimeModelSendUserInput(user_input="follow-up"))
+
+        payload_types = [call.args[0].type for call in send_raw.call_args_list]
+        assert "conversation.item.create" in payload_types
+        assert "response.create" not in payload_types
+        assert model._queued_response_create is True
+
+    @pytest.mark.asyncio
+    async def test_user_input_queued_while_response_ongoing(self, model, monkeypatch):
+        """User input during an active response should queue the next response.create."""
+        model._response_state = _ResponseLifecycle.ACTIVE
+
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        await model.send_event(RealtimeModelSendUserInput(user_input="follow-up"))
+
+        payload_types = [call.args[0].type for call in send_raw.call_args_list]
+        assert "conversation.item.create" in payload_types
+        assert "response.create" not in payload_types
+        assert model._queued_response_create is True
+
+    @pytest.mark.asyncio
+    async def test_user_input_queued_while_response_create_pending(self, model, monkeypatch):
+        """User input should queue while waiting for response.created after response.create."""
+        model._response_state = _ResponseLifecycle.CREATE_SENT
+
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        await model.send_event(RealtimeModelSendUserInput(user_input="follow-up"))
+
+        payload_types = [call.args[0].type for call in send_raw.call_args_list]
+        assert "conversation.item.create" in payload_types
+        assert "response.create" not in payload_types
+        assert model._queued_response_create is True
+
+    @pytest.mark.asyncio
+    async def test_tool_output_queued_while_cancel_pending(self, model, monkeypatch):
+        """Tool output after a forced cancel should queue response.create until response.done."""
+        model._response_state = _ResponseLifecycle.CANCEL_SENT
+
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model.send_event(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(name="t", call_id="c", arguments="{}"),
+                output="ok",
+                start_response=True,
+            )
+        )
+
+        payload_types = [call.args[0].type for call in send_raw.call_args_list]
+        assert "conversation.item.create" in payload_types
+        assert "response.create" not in payload_types
+        assert model._queued_response_create is True
+
+    @pytest.mark.asyncio
+    async def test_response_done_drains_queued_response_create(self, model, monkeypatch):
+        """response.done should send the queued response.create."""
+        model._response_state = _ResponseLifecycle.CANCEL_SENT
+        model._queued_response_create = True
+
+        sent_types: list[str] = []
+
+        async def fake_send(event):
+            sent_types.append(event.type)
+
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", fake_send)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "evt_1",
+                "response": {
+                    "id": "resp_1",
+                    "object": "realtime.response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        )
+
+        assert "response.create" in sent_types
+        assert model._response_state == _ResponseLifecycle.CREATE_SENT
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_response_done_drains_queue_without_prior_cancel(self, model, monkeypatch):
+        """response.done should drain the queue even when no cancel was pending."""
+        model._response_state = _ResponseLifecycle.ACTIVE
+        model._queued_response_create = True
+
+        sent_types: list[str] = []
+
+        async def fake_send(event):
+            sent_types.append(event.type)
+
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", fake_send)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "evt_no_cancel",
+                "response": {
+                    "id": "resp_no_cancel",
+                    "object": "realtime.response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        )
+
+        assert "response.create" in sent_types
+        assert model._response_state == _ResponseLifecycle.CREATE_SENT
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_response_done_keeps_queue_pending_until_create_send_completes(
+        self, model, monkeypatch
+    ):
+        """Queued response.create should remain protected while the drain send is in flight."""
+        model._response_state = _ResponseLifecycle.CANCEL_SENT
+        model._queued_response_create = True
+
+        sent_types: list[str] = []
+
+        async def fake_send(event):
+            sent_types.append(event.type)
+            if event.type == "response.create":
+                assert model._response_state == _ResponseLifecycle.CREATE_SENT
+                assert model._queued_response_create is False
+                await model._send_or_queue_response_create()
+                assert model._queued_response_create is True
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "evt_in_flight",
+                "response": {
+                    "id": "resp_in_flight",
+                    "object": "realtime.response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        )
+
+        assert sent_types == ["response.create"]
+        assert model._response_state == _ResponseLifecycle.CREATE_SENT
+        assert model._queued_response_create is True
+
+    @pytest.mark.asyncio
+    async def test_response_done_preserves_queue_if_drain_send_fails(self, model, monkeypatch):
+        """A failed queued response.create should leave the queue set for retry."""
+        model._response_state = _ResponseLifecycle.CANCEL_SENT
+        model._queued_response_create = True
+
+        async def fake_send(event):
+            if event.type == "response.create":
+                raise RuntimeError("send failed")
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        with pytest.raises(RuntimeError, match="send failed"):
+            await model._handle_ws_event(
+                {
+                    "type": "response.done",
+                    "event_id": "evt_failed_drain",
+                    "response": {
+                        "id": "resp_failed_drain",
+                        "object": "realtime.response",
+                        "status": "completed",
+                        "output": [],
+                    },
+                }
+            )
+
+        assert model._response_state == _ResponseLifecycle.IDLE
+        assert model._queued_response_create is True
+
+    @pytest.mark.asyncio
+    async def test_response_done_skips_send_when_nothing_queued(self, model, monkeypatch):
+        """response.done without a queued response should not send response.create."""
+        model._response_state = _ResponseLifecycle.CANCEL_SENT
+        model._queued_response_create = False
+
+        sent_types: list[str] = []
+
+        async def fake_send(event):
+            sent_types.append(event.type)
+
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", fake_send)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "evt_2",
+                "response": {
+                    "id": "resp_2",
+                    "object": "realtime.response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        )
+
+        assert "response.create" not in sent_types
+        assert model._response_state == _ResponseLifecycle.IDLE
+
+    @pytest.mark.asyncio
+    async def test_cancel_response_sets_pending_flag(self, model, monkeypatch):
+        """_cancel_response should transition to CANCEL_SENT."""
+        model._response_state = _ResponseLifecycle.ACTIVE
+
+        async def fake_send(event):
+            assert event.type == "response.cancel"
+            assert model._response_state == _ResponseLifecycle.CANCEL_SENT
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send)
+
+        await model._cancel_response()
+
+        assert model._response_state == _ResponseLifecycle.CANCEL_SENT
+
+    @pytest.mark.asyncio
+    async def test_cancel_response_restores_state_if_cancel_send_fails(self, model, monkeypatch):
+        """_cancel_response should restore local state if response.cancel send fails."""
+        model._response_state = _ResponseLifecycle.ACTIVE
+
+        async def fake_send(event):
+            raise RuntimeError("cancel failed")
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send)
+        with pytest.raises(RuntimeError, match="cancel failed"):
+            await model._cancel_response()
+
+        assert model._response_state == _ResponseLifecycle.ACTIVE
+
+    @pytest.mark.asyncio
+    async def test_send_response_create_restores_pending_flag_on_failure(self, model, monkeypatch):
+        """A failed response.create send should not leave start-response state pending."""
+
+        async def fake_send(event):
+            raise RuntimeError("create failed")
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send)
+
+        with pytest.raises(RuntimeError, match="create failed"):
+            await model._send_or_queue_response_create()
+
+        assert model._response_state == _ResponseLifecycle.IDLE
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_cancel_response_skips_duplicate_cancel(self, model, monkeypatch):
+        """_cancel_response should not send a second response.cancel while one is pending."""
+        model._response_state = _ResponseLifecycle.CANCEL_SENT
+
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        await model._cancel_response()
+
+        assert send_raw.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_cancel_response_noop_when_no_ongoing_response(self, model, monkeypatch):
+        """_cancel_response should be a no-op when no response is active."""
+        model._response_state = _ResponseLifecycle.IDLE
+
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        await model._cancel_response()
+
+        assert send_raw.await_count == 0
+        assert model._response_state == _ResponseLifecycle.IDLE
+
+    @pytest.mark.asyncio
+    async def test_close_resets_cancel_and_queue_flags(self, model):
+        """close() should reset all response state to prevent stale state on reconnect."""
+        model._response_state = _ResponseLifecycle.ACTIVE
+        model._queued_response_create = True
+
+        await model.close()
+
+        assert model._response_state == _ResponseLifecycle.IDLE
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_multiple_inputs_while_cancel_pending_drain_once(self, model, monkeypatch):
+        """Multiple inputs while cancel is pending should produce only one response.create."""
+        model._response_state = _ResponseLifecycle.CANCEL_SENT
+
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        await model.send_event(RealtimeModelSendUserInput(user_input="first"))
+        await model.send_event(RealtimeModelSendUserInput(user_input="second"))
+
+        # Both queued but the boolean ensures only one response.create on drain
+        assert model._queued_response_create is True
+
+        sent_types: list[str] = []
+
+        async def fake_send(event):
+            sent_types.append(event.type)
+
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", fake_send)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "evt_multi",
+                "response": {
+                    "id": "resp_multi",
+                    "object": "realtime.response",
+                    "status": "cancelled",
+                    "output": [],
+                },
+            }
+        )
+
+        assert sent_types.count("response.create") == 1
+
+    @pytest.mark.asyncio
+    async def test_response_done_cancelled_status_drains_queue(self, model, monkeypatch):
+        """response.done with status cancelled should drain the queue correctly."""
+        model._response_state = _ResponseLifecycle.CANCEL_SENT
+        model._queued_response_create = True
+
+        sent_types: list[str] = []
+
+        async def fake_send(event):
+            sent_types.append(event.type)
+
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", fake_send)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "evt_cancel",
+                "response": {
+                    "id": "resp_cancel",
+                    "object": "realtime.response",
+                    "status": "cancelled",
+                    "output": [],
+                },
+            }
+        )
+
+        assert "response.create" in sent_types
+        assert model._response_state == _ResponseLifecycle.CREATE_SENT
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_response_created_clears_response_create_pending(self, model, monkeypatch):
+        """response.created should transition to ACTIVE."""
+        model._response_state = _ResponseLifecycle.CREATE_SENT
+        model._pending_create_event_id = "agsdk_rc_sdk"
+
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._handle_ws_event(
+            {
+                "type": "response.created",
+                "event_id": "evt_created",
+                "response": {
+                    "id": "resp_created",
+                    "object": "realtime.response",
+                    "status": "in_progress",
+                    "output": [],
+                },
+            }
+        )
+
+        assert model._response_state == _ResponseLifecycle.ACTIVE
+        assert model._pending_create_event_id is None
+
+    @pytest.mark.asyncio
+    async def test_response_created_without_sdk_create_preserves_pending(self, model, monkeypatch):
+        """Raw response.created must not clear SDK create-pending state."""
+        model._response_state = _ResponseLifecycle.CREATE_SENT
+        model._pending_create_event_id = None
+
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._handle_ws_event(
+            {
+                "type": "response.created",
+                "event_id": "evt_created_raw",
+                "response": {
+                    "id": "resp_raw",
+                    "object": "realtime.response",
+                    "status": "in_progress",
+                    "output": [],
+                },
+            }
+        )
+
+        # SDK-managed create is still in flight — stay CREATE_SENT so it
+        # isn't dropped by an unrelated raw response.
+        assert model._response_state == _ResponseLifecycle.CREATE_SENT
+
+    @pytest.mark.asyncio
+    async def test_unrelated_error_does_not_modify_pending_flags(self, model, monkeypatch):
+        """Errors whose event_id doesn't match pending cancel/create must not touch state."""
+        model._response_state = _ResponseLifecycle.CREATE_SENT
+        model._queued_response_create = True
+        model._pending_create_event_id = "agsdk_rc_aaa"
+        model._pending_cancel_event_id = "agsdk_cx_bbb"
+
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "evt_err",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "some_other_error",
+                    "message": "Unrelated error",
+                    "event_id": "evt_unrelated_client",
+                },
+            }
+        )
+
+        assert model._response_state == _ResponseLifecycle.CREATE_SENT
+        assert model._queued_response_create is True
+
+    @pytest.mark.asyncio
+    async def test_error_for_rejected_cancel_clears_cancel_pending(self, model, monkeypatch):
+        """When the server rejects response.cancel, clear cancel state and drain queue."""
+        cancel_eid = "agsdk_cx_cancel1"
+        model._response_state = _ResponseLifecycle.CANCEL_SENT
+        model._pending_cancel_event_id = cancel_eid
+        model._queued_response_create = True
+
+        sent_types: list[str] = []
+
+        async def capture_send(msg: Any) -> None:
+            sent_types.append(msg.type)
+
+        monkeypatch.setattr(model, "_send_raw_message", capture_send)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "evt_err_cancel",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": "Response is already done",
+                    "event_id": cancel_eid,
+                },
+            }
+        )
+
+        assert model._response_state == _ResponseLifecycle.CREATE_SENT
+        assert model._pending_cancel_event_id is None
+        assert "response.create" in sent_types
+
+    @pytest.mark.asyncio
+    async def test_error_for_rejected_create_clears_create_pending(self, model, monkeypatch):
+        """When the server rejects response.create, transition to IDLE so session recovers."""
+        create_eid = "agsdk_rc_create1"
+        model._response_state = _ResponseLifecycle.CREATE_SENT
+        model._pending_create_event_id = create_eid
+        model._queued_response_create = False
+
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "evt_err_create",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "conversation_already_has_active_response",
+                    "message": "Already has an active response",
+                    "event_id": create_eid,
+                },
+            }
+        )
+
+        assert model._response_state == _ResponseLifecycle.IDLE
+        assert model._pending_create_event_id is None
+
+    @pytest.mark.asyncio
+    async def test_rejected_create_preserves_queue_when_response_active(self, model, monkeypatch):
+        """With an active response, queue stays for response.done to drain later."""
+        create_eid = "agsdk_rc_create1"
+        model._response_state = _ResponseLifecycle.ACTIVE
+        model._pending_create_event_id = create_eid
+        model._queued_response_create = True
+
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "evt_err_create2",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "conversation_already_has_active_response",
+                    "message": "Already has an active response",
+                    "event_id": create_eid,
+                },
+            }
+        )
+
+        assert model._response_state == _ResponseLifecycle.ACTIVE
+        assert model._pending_create_event_id is None
+        # Queue preserved — response.done from the active response will drain it
+        assert model._queued_response_create is True
+
+    @pytest.mark.asyncio
+    async def test_rejected_create_drains_queue_when_no_active_response(self, model, monkeypatch):
+        """Without an active response, drain immediately so the session doesn't stall."""
+        create_eid = "agsdk_rc_create1"
+        model._response_state = _ResponseLifecycle.CREATE_SENT
+        model._pending_create_event_id = create_eid
+        model._queued_response_create = True
+
+        sent_types: list[str] = []
+
+        async def capture_send(msg: Any) -> None:
+            sent_types.append(msg.type)
+
+        monkeypatch.setattr(model, "_send_raw_message", capture_send)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "evt_err_create3",
+                "error": {
+                    "type": "rate_limit_error",
+                    "code": "rate_limit_exceeded",
+                    "message": "Rate limit exceeded",
+                    "event_id": create_eid,
+                },
+            }
+        )
+
+        assert model._response_state == _ResponseLifecycle.CREATE_SENT  # new create now pending
+        assert model._queued_response_create is False
+        assert "response.create" in sent_types
+
+    @pytest.mark.asyncio
+    async def test_response_done_preserves_create_pending_for_new_create(self, model, monkeypatch):
+        """response.done must not clear create state if a new create is already in flight."""
+        model._response_state = _ResponseLifecycle.ACTIVE
+        model._pending_create_event_id = "agsdk_rc_new"
+        model._pending_cancel_event_id = None
+        model._queued_response_create = False
+
+        monkeypatch.setattr(model, "_send_raw_message", AsyncMock())
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "evt_done_stale",
+                "response": {
+                    "id": "resp_done_stale",
+                    "object": "realtime.response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        )
+
+        # New create still in flight — state preserved (response.done doesn't reset
+        # when a pending create event_id exists)
+        assert model._pending_create_event_id == "agsdk_rc_new"
+
+    @pytest.mark.asyncio
+    async def test_response_done_clears_pending_state_and_event_ids(self, model, monkeypatch):
+        """response.done should clear pending state when no new create is in flight."""
+        model._response_state = _ResponseLifecycle.ACTIVE
+        model._pending_create_event_id = None
+        model._pending_cancel_event_id = "agsdk_cx_old"
+        model._queued_response_create = False
+
+        monkeypatch.setattr(model, "_send_raw_message", AsyncMock())
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "evt_done_clears",
+                "response": {
+                    "id": "resp_done_clears",
+                    "object": "realtime.response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        )
+
+        assert model._response_state == _ResponseLifecycle.IDLE
+        assert model._pending_cancel_event_id is None
+
+    @pytest.mark.asyncio
+    async def test_send_create_failure_drains_queued_followup(self, model, monkeypatch):
+        """A failed response.create send should still drain a queued follow-up."""
+        call_count = 0
+
+        async def fake_send(event):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Simulate a concurrent queue while send is in flight
+                model._queued_response_create = True
+                raise RuntimeError("socket closed")
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send)
+
+        # The first send fails, but the retry for the queued follow-up
+        # should succeed (call_count == 2 doesn't raise).
+        await model._send_response_create()
+
+        assert model._response_state == _ResponseLifecycle.CREATE_SENT
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_error_without_event_id_clears_cancel_pending(self, model, monkeypatch):
+        """An error without event_id should still clear cancel-pending state."""
+        model._response_state = _ResponseLifecycle.CANCEL_SENT
+        model._pending_cancel_event_id = "agsdk_cx_123"
+        model._queued_response_create = True
+
+        sent_types: list[str] = []
+
+        async def capture_send(msg: Any) -> None:
+            sent_types.append(msg.type)
+
+        monkeypatch.setattr(model, "_send_raw_message", capture_send)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "evt_err_no_source",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": "Response is already done",
+                },
+            }
+        )
+
+        assert model._pending_cancel_event_id is None
+        assert "response.create" in sent_types
+
+    @pytest.mark.asyncio
+    async def test_error_without_event_id_clears_create_pending(self, model, monkeypatch):
+        """An error without event_id should clear create-pending state."""
+        model._response_state = _ResponseLifecycle.CREATE_SENT
+        model._pending_create_event_id = "agsdk_rc_123"
+
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "evt_err_no_source",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": "Some error",
+                },
+            }
+        )
+
+        assert model._response_state == _ResponseLifecycle.IDLE
+        assert model._pending_create_event_id is None
+
+    @pytest.mark.asyncio
+    async def test_raw_response_created_ignored_while_sdk_create_pending(
+        self, model, monkeypatch
+    ):
+        """response.created while no SDK create is pending and state is
+        CREATE_SENT should not transition (SDK create still tracked)."""
+        # State is CREATE_SENT but _pending_create_event_id is already
+        # cleared (e.g. by a prior response.created).  An additional raw
+        # response.created should not move us out of CREATE_SENT.
+        model._response_state = _ResponseLifecycle.CREATE_SENT
+        model._pending_create_event_id = None
+
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._handle_ws_event(
+            {
+                "type": "response.created",
+                "event_id": "evt_raw_created",
+                "response": {
+                    "id": "resp_raw",
+                    "object": "realtime.response",
+                    "status": "in_progress",
+                    "output": [],
+                },
+            }
+        )
+
+        # Stay CREATE_SENT — SDK-managed create gate preserved
+        assert model._response_state == _ResponseLifecycle.CREATE_SENT
 
     def test_add_remove_listener_and_tools_conversion(self, model):
         listener = AsyncMock()

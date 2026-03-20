@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import enum
 import inspect
 import json
 import math
 import os
+import uuid
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any, Callable, Literal, Union, cast
@@ -267,6 +269,29 @@ class TransportConfig(TypedDict):
     """Time in seconds to wait for the connection handshake to complete."""
 
 
+class _ResponseLifecycle(enum.Enum):
+    """State machine for the response lifecycle.
+
+    Replaces the previous boolean flags with a single enum that makes
+    invalid states unrepresentable.
+
+    Transitions::
+
+        IDLE ──send response.create──► CREATE_SENT
+        CREATE_SENT ──response.created──► ACTIVE
+        ACTIVE ──send response.cancel──► CANCEL_SENT
+        CANCEL_SENT ──response.done──► IDLE
+        ACTIVE ──response.done──► IDLE
+        CREATE_SENT ──error(create rejected)──► IDLE
+        CANCEL_SENT ──error(cancel rejected)──► IDLE
+    """
+
+    IDLE = "idle"
+    CREATE_SENT = "create_sent"
+    ACTIVE = "active"
+    CANCEL_SENT = "cancel_sent"
+
+
 class OpenAIRealtimeWebSocketModel(RealtimeModel):
     """A model that uses OpenAI's WebSocket API."""
 
@@ -277,7 +302,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._listeners: list[RealtimeModelListener] = []
         self._current_item_id: str | None = None
         self._audio_state_tracker: ModelAudioTracker = ModelAudioTracker()
-        self._ongoing_response: bool = False
+        self._response_state: _ResponseLifecycle = _ResponseLifecycle.IDLE
+        self._queued_response_create: bool = False
+        self._pending_cancel_event_id: str | None = None
+        self._pending_create_event_id: str | None = None
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
         self._playback_tracker: RealtimePlaybackTracker | None = None
         self._created_session: OpenAISessionCreateRequest | None = None
@@ -471,7 +499,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
     async def _send_user_input(self, event: RealtimeModelSendUserInput) -> None:
         converted = _ConversionHelper.convert_user_input_to_item_create(event)
         await self._send_raw_message(converted)
-        await self._send_raw_message(OpenAIResponseCreateEvent(type="response.create"))
+        await self._send_or_queue_response_create()
 
     async def _send_audio(self, event: RealtimeModelSendAudio) -> None:
         converted = _ConversionHelper.convert_audio_to_input_audio_buffer_append(event)
@@ -498,7 +526,55 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         await self._emit_event(RealtimeModelItemUpdatedEvent(item=tool_item))
 
         if event.start_response:
-            await self._send_raw_message(OpenAIResponseCreateEvent(type="response.create"))
+            await self._send_or_queue_response_create()
+
+    async def _send_or_queue_response_create(self) -> None:
+        """Send ``response.create``, or queue it while a cancellation is in flight.
+
+        After ``response.cancel`` the server may still consider the response
+        active until it emits ``response.done``.  Sending ``response.create``
+        before that acknowledgment causes
+        ``conversation_already_has_active_response`` errors.
+        """
+        if self._response_state != _ResponseLifecycle.IDLE:
+            self._queued_response_create = True
+            return
+        await self._send_response_create()
+
+    async def _send_response_create(self) -> None:
+        """Send ``response.create`` and transition to CREATE_SENT."""
+        event_id = f"agsdk_rc_{uuid.uuid4().hex[:12]}"
+        self._response_state = _ResponseLifecycle.CREATE_SENT
+        self._pending_create_event_id = event_id
+        try:
+            await self._send_raw_message(
+                OpenAIResponseCreateEvent(type="response.create", event_id=event_id)
+            )
+        except Exception:
+            self._pending_create_event_id = None
+            # A queued follow-up may exist if another caller set it while
+            # we were awaiting the send.  Attempt to drain it so the
+            # queued turn is not orphaned.  If this also fails the
+            # exception propagates and close()/reconnect resets state.
+            if self._queued_response_create:
+                await self._drain_queued_response_create()
+            else:
+                self._response_state = _ResponseLifecycle.IDLE
+                raise
+
+    async def _drain_queued_response_create(self) -> None:
+        """Send a queued ``response.create`` while keeping the queue state consistent."""
+        if not self._queued_response_create:
+            self._response_state = _ResponseLifecycle.IDLE
+            return
+
+        self._queued_response_create = False
+        try:
+            await self._send_response_create()
+        except Exception:
+            self._queued_response_create = True
+            self._response_state = _ResponseLifecycle.IDLE
+            raise
 
     def _get_playback_state(self) -> RealtimePlaybackState:
         if self._playback_tracker:
@@ -557,7 +633,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 if audio_limits is not None:
                     _, max_audio_ms = audio_limits
                 truncated_ms = max(int(elapsed_ms), 0)
-                if self._ongoing_response or max_audio_ms is None or truncated_ms < max_audio_ms:
+                response_active = self._response_state == _ResponseLifecycle.ACTIVE
+                if response_active or max_audio_ms is None or truncated_ms < max_audio_ms:
                     converted = _ConversionHelper.convert_interrupt(
                         current_item_id,
                         current_item_content_index,
@@ -662,6 +739,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def close(self) -> None:
         """Close the session."""
+        self._response_state = _ResponseLifecycle.IDLE
+        self._queued_response_create = False
+        self._pending_cancel_event_id = None
+        self._pending_create_event_id = None
         if self._websocket:
             await self._websocket.close()
             self._websocket = None
@@ -674,9 +755,18 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             self._websocket_task = None
 
     async def _cancel_response(self) -> None:
-        if self._ongoing_response:
-            await self._send_raw_message(OpenAIResponseCancelEvent(type="response.cancel"))
-            self._ongoing_response = False
+        if self._response_state == _ResponseLifecycle.ACTIVE:
+            event_id = f"agsdk_cx_{uuid.uuid4().hex[:12]}"
+            self._response_state = _ResponseLifecycle.CANCEL_SENT
+            self._pending_cancel_event_id = event_id
+            try:
+                await self._send_raw_message(
+                    OpenAIResponseCancelEvent(type="response.cancel", event_id=event_id)
+                )
+            except Exception:
+                self._response_state = _ResponseLifecycle.ACTIVE
+                self._pending_cancel_event_id = None
+                raise
 
     async def _handle_ws_event(self, event: dict[str, Any]):
         await self._emit_event(RealtimeModelRawServerEvent(data=event))
@@ -776,7 +866,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     if (
                         max_audio_ms is not None
                         and truncated_ms >= max_audio_ms
-                        and not self._ongoing_response
+                        and self._response_state != _ResponseLifecycle.ACTIVE
                     ):
                         logger.debug(
                             "Skipping truncate because playback appears complete. "
@@ -815,10 +905,26 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 if not automatic_response_cancellation_enabled:
                     await self._cancel_response()
         elif parsed.type == "response.created":
-            self._ongoing_response = True
+            if self._pending_create_event_id:
+                # This response.created corresponds to our SDK-managed
+                # create — clear the tracker so response.done/error can
+                # tell whether another create is still in flight.
+                self._pending_create_event_id = None
+                self._response_state = _ResponseLifecycle.ACTIVE
+            elif self._response_state == _ResponseLifecycle.IDLE:
+                # Raw / out-of-band response.create — track it.
+                self._response_state = _ResponseLifecycle.ACTIVE
+            # If state is CREATE_SENT but event_id doesn't match, this
+            # is an unrelated raw response — leave state as CREATE_SENT
+            # so the SDK-managed create is still tracked.
             await self._emit_event(RealtimeModelTurnStartedEvent())
         elif parsed.type == "response.done":
-            self._ongoing_response = False
+            self._pending_cancel_event_id = None
+            if self._pending_create_event_id:
+                # A new SDK-managed create is already in flight; stay in CREATE_SENT.
+                pass
+            else:
+                await self._drain_queued_response_create()
             await self._emit_event(RealtimeModelTurnEndedEvent())
         elif parsed.type == "session.created":
             await self._send_tracing_config(self._tracing_config)
@@ -826,6 +932,38 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         elif parsed.type == "session.updated":
             self._update_created_session(parsed.session)
         elif parsed.type == "error":
+            error_source_id = getattr(parsed.error, "event_id", None)
+            error_code = getattr(parsed.error, "code", None)
+            if error_source_id and error_source_id == self._pending_cancel_event_id:
+                self._pending_cancel_event_id = None
+                await self._drain_queued_response_create()
+            elif error_source_id and error_source_id == self._pending_create_event_id:
+                self._pending_create_event_id = None
+                if self._response_state == _ResponseLifecycle.CREATE_SENT:
+                    self._response_state = _ResponseLifecycle.IDLE
+                if self._response_state == _ResponseLifecycle.IDLE and self._queued_response_create:
+                    await self._drain_queued_response_create()
+            elif not error_source_id:
+                # Server omitted event_id — fall back to error code to
+                # decide whether the cancel/create we're waiting on was
+                # rejected, so the session doesn't wedge.
+                is_active_response_err = error_code in (
+                    "conversation_already_has_active_response",
+                )
+                if (
+                    self._response_state == _ResponseLifecycle.CANCEL_SENT
+                    and self._pending_cancel_event_id
+                ):
+                    self._pending_cancel_event_id = None
+                    await self._drain_queued_response_create()
+                elif (
+                    self._response_state == _ResponseLifecycle.CREATE_SENT
+                    and not is_active_response_err
+                ):
+                    self._pending_create_event_id = None
+                    self._response_state = _ResponseLifecycle.IDLE
+                    if self._queued_response_create:
+                        await self._drain_queued_response_create()
             await self._emit_event(RealtimeModelErrorEvent(error=parsed.error))
         elif parsed.type == "conversation.item.deleted":
             await self._emit_event(RealtimeModelItemDeletedEvent(item_id=parsed.item_id))
