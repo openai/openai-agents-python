@@ -782,7 +782,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
         session = self.session
         assert session is not None
-        from mcp.types import AnyUrl
+        from pydantic import AnyUrl
 
         return await self._maybe_serialize_request(lambda: session.read_resource(AnyUrl(uri)))
 
