@@ -405,6 +405,7 @@ async def test_streaming_cancel_after_turn_allows_turn_completion() -> None:
     assert streamed.is_complete is True
     assert len(streamed.new_items) == 2
 
+
 @pytest.mark.asyncio
 async def test_streaming_handoff_emits_agent_updated_event() -> None:
     """Mimics routing handoff stream: emits AgentUpdatedStreamEvent and switches agent."""
