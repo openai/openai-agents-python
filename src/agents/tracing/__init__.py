@@ -118,4 +118,6 @@ def flush_traces() -> None:
     (Celery, FastAPI background tasks, RQ, etc.) to ensure traces are
     exported to the backend rather than remaining buffered indefinitely.
     """
-    get_trace_provider().force_flush()
+    provider = get_trace_provider()
+    if hasattr(provider, "force_flush"):
+        provider.force_flush()
