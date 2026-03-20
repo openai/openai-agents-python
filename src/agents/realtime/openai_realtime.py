@@ -158,6 +158,7 @@ OpenAIRealtimeAudioOutput = _rt_audio_config.RealtimeAudioConfigOutput  # type: 
 
 
 _USER_AGENT = f"Agents/Python {__version__}"
+DEFAULT_REALTIME_MODEL = "gpt-realtime-1.5"
 
 DEFAULT_MODEL_SETTINGS: RealtimeSessionModelSettings = {
     "voice": "ash",
@@ -271,7 +272,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
     """A model that uses OpenAI's WebSocket API."""
 
     def __init__(self, *, transport_config: TransportConfig | None = None) -> None:
-        self.model = "gpt-realtime"  # Default model
+        self.model = DEFAULT_REALTIME_MODEL
         self._websocket: ClientConnection | None = None
         self._websocket_task: asyncio.Task[None] | None = None
         self._listeners: list[RealtimeModelListener] = []
@@ -1105,7 +1106,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         # Construct full session object. `type` will be excluded at serialization time for updates.
         session_create_request = OpenAISessionCreateRequest(
             type="realtime",
-            model=(model_settings.get("model_name") or self.model) or "gpt-realtime",
+            model=(model_settings.get("model_name") or self.model) or DEFAULT_REALTIME_MODEL,
             output_modalities=output_modalities,
             audio=OpenAIRealtimeAudioConfig(
                 input=OpenAIRealtimeAudioInput(**audio_input_args),

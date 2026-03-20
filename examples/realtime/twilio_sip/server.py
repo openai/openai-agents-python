@@ -69,7 +69,7 @@ async def accept_call(call_id: str) -> None:
             f"/realtime/calls/{call_id}/accept",
             body={
                 "type": "realtime",
-                "model": "gpt-realtime",
+                "model": "gpt-realtime-1.5",
                 "instructions": instructions_payload,
             },
             cast_to=dict,

@@ -114,6 +114,36 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
         assert model.model == "gpt-4o-realtime-preview"
 
     @pytest.mark.asyncio
+    async def test_connect_defaults_to_gpt_realtime_1_5(self, model, mock_websocket):
+        """Test that connect() uses gpt-realtime-1.5 when no model is provided."""
+        config = {
+            "api_key": "test-api-key-123",
+            "initial_model_settings": {},
+        }
+
+        async def async_websocket(*args, **kwargs):
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket) as mock_connect:
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                await model.connect(config)
+
+                mock_connect.assert_called_once()
+                call_args = mock_connect.call_args
+                assert call_args[0][0] == "wss://api.openai.com/v1/realtime?model=gpt-realtime-1.5"
+                assert model.model == "gpt-realtime-1.5"
+
+        assert model._websocket_task is not None
+
+    @pytest.mark.asyncio
     async def test_session_update_includes_noise_reduction(self, model, mock_websocket):
         """Session.update should pass through input_audio_noise_reduction config."""
         config = {
@@ -788,6 +818,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
     def test_session_config_defaults_audio_formats_when_not_call(self, model):
         settings: dict[str, Any] = {}
         cfg = model._get_session_config(settings)
+        assert cfg.model == "gpt-realtime-1.5"
         assert cfg.audio is not None
         assert cfg.audio.input is not None
         assert cfg.audio.input.format is not None
