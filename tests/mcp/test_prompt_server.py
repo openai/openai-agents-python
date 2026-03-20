@@ -77,10 +77,12 @@ class FakeMCPPromptServer(MCPServer):
     ):
         raise NotImplementedError("This fake server doesn't support tools")
 
-    async def list_resources(self) -> ListResourcesResult:
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
         return ListResourcesResult(resources=[])
 
-    async def list_resource_templates(self) -> ListResourceTemplatesResult:
+    async def list_resource_templates(
+        self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
         return ListResourceTemplatesResult(resourceTemplates=[])
 
     async def read_resource(self, uri: str) -> ReadResourceResult:

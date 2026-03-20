@@ -57,10 +57,12 @@ class TaskBoundServer(MCPServer):
     ) -> GetPromptResult:
         raise NotImplementedError
 
-    async def list_resources(self) -> ListResourcesResult:
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
         return ListResourcesResult(resources=[])
 
-    async def list_resource_templates(self) -> ListResourceTemplatesResult:
+    async def list_resource_templates(
+        self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
         return ListResourceTemplatesResult(resourceTemplates=[])
 
     async def read_resource(self, uri: str) -> ReadResourceResult:
@@ -107,10 +109,12 @@ class FlakyServer(MCPServer):
     ) -> GetPromptResult:
         raise NotImplementedError
 
-    async def list_resources(self) -> ListResourcesResult:
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
         return ListResourcesResult(resources=[])
 
-    async def list_resource_templates(self) -> ListResourceTemplatesResult:
+    async def list_resource_templates(
+        self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
         return ListResourceTemplatesResult(resourceTemplates=[])
 
     async def read_resource(self, uri: str) -> ReadResourceResult:
@@ -156,10 +160,12 @@ class CleanupAwareServer(MCPServer):
     ) -> GetPromptResult:
         raise NotImplementedError
 
-    async def list_resources(self) -> ListResourcesResult:
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
         return ListResourcesResult(resources=[])
 
-    async def list_resource_templates(self) -> ListResourceTemplatesResult:
+    async def list_resource_templates(
+        self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
         return ListResourceTemplatesResult(resourceTemplates=[])
 
     async def read_resource(self, uri: str) -> ReadResourceResult:
@@ -198,10 +204,12 @@ class CancelledServer(MCPServer):
     ) -> GetPromptResult:
         raise NotImplementedError
 
-    async def list_resources(self) -> ListResourcesResult:
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
         return ListResourcesResult(resources=[])
 
-    async def list_resource_templates(self) -> ListResourceTemplatesResult:
+    async def list_resource_templates(
+        self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
         return ListResourceTemplatesResult(resourceTemplates=[])
 
     async def read_resource(self, uri: str) -> ReadResourceResult:
