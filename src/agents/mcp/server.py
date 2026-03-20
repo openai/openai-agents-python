@@ -245,7 +245,8 @@ class MCPServer(abc.ABC):
         """Read the contents of a specific resource by URI.
 
         Args:
-            uri: The URI of the resource to read (e.g. ``file:///path/to/file.txt``).
+            uri: The URI of the resource to read. See :class:`~pydantic.networks.AnyUrl`
+                for the supported URI formats.
 
         Returns a :class:`~mcp.types.ReadResourceResult`.  Subclasses that do not
         support resources may leave this unimplemented; it will raise
@@ -794,8 +795,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         """Read the contents of a specific resource by URI.
 
         Args:
-            uri: The URI of the resource to read (e.g. ``file:///path/to/file.txt`` or
-                ``postgres://db/table/row``).
+            uri: The URI of the resource to read. See :class:`~pydantic.networks.AnyUrl`
+                for the supported URI formats.
         """
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
