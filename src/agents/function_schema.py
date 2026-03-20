@@ -306,14 +306,15 @@ def function_schema(
             filtered_params.append((first_name, first_param))
 
     # For parameters other than the first, raise error if any use RunContextWrapper or ToolContext
-    # (unless self/cls was skipped, in which case the second param is the effective first param).
-    for name, param in params[1:]:
+    # (unless self/cls was skipped, in which case ONLY the param immediately after self/cls is
+    # treated as the effective first param).
+    for idx, (name, param) in enumerate(params[1:]):
         ann = type_hints.get(name, param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
             if origin is RunContextWrapper or origin is ToolContext:
-                if self_or_cls_skipped and not takes_context:
-                    # self/cls was the first param, so this is the effective first param
+                if self_or_cls_skipped and not takes_context and idx == 0:
+                    # self/cls was the first param and this is immediately after it
                     takes_context = True
                     self_or_cls_skipped = False
                     continue

@@ -934,6 +934,18 @@ def test_method_self_with_context_second_param():
     assert fs.takes_context is True
 
 
+def test_method_context_not_immediately_after_self_raises():
+    """Test that RunContextWrapper at position 3+ (not immediately after self) raises UserError."""
+
+    class MyTools:
+        def greet(self, name: str, ctx: RunContextWrapper[None]) -> str:
+            return f"Hello, {name}"
+
+    obj = MyTools()
+    with pytest.raises(UserError, match="non-first position"):
+        function_schema(obj.greet, use_docstring_info=False)
+
+
 def test_regular_unannotated_first_param_still_included():
     """Test that a regular unannotated first param (not self/cls) is still included."""
 
