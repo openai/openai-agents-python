@@ -273,11 +273,16 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
     def __init__(self, *, transport_config: TransportConfig | None = None) -> None:
         self.model = "gpt-realtime"  # Default model
         self._websocket: ClientConnection | None = None
+        self._detached_websocket: ClientConnection | None = None
         self._websocket_task: asyncio.Task[None] | None = None
         self._listeners: list[RealtimeModelListener] = []
         self._current_item_id: str | None = None
         self._audio_state_tracker: ModelAudioTracker = ModelAudioTracker()
         self._ongoing_response: bool = False
+        self._response_cancel_pending: bool = False
+        self._queued_response_create: bool = False
+        self._response_create_send_count: int = 0
+        self._shutdown_in_progress: bool = False
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
         self._playback_tracker: RealtimePlaybackTracker | None = None
         self._created_session: OpenAISessionCreateRequest | None = None
@@ -285,16 +290,38 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._call_id: str | None = None
         self._transport_config: TransportConfig | None = transport_config
 
+    def _reset_response_lifecycle_state(self) -> None:
+        self._ongoing_response = False
+        self._response_cancel_pending = False
+        self._queued_response_create = False
+        self._response_create_send_count = 0
+
     async def connect(self, options: RealtimeModelConfig) -> None:
         """Establish a connection to the model and keep it alive."""
+        if self._detached_websocket is not None:
+            await self._detached_websocket.close()
+            self._detached_websocket = None
         assert self._websocket is None, "Already connected"
         assert self._websocket_task is None, "Already connected"
 
         model_settings: RealtimeSessionModelSettings = options.get("initial_model_settings", {})
+        call_id = options.get("call_id")
+        reconnecting_attached_call = bool(call_id)
+        resume_queued_response_create = (
+            reconnecting_attached_call
+            and self._queued_response_create
+        )
+        self._shutdown_in_progress = False
+        self._ongoing_response = False
+        self._response_create_send_count = 0
+        # Always clear cancel-pending on reconnect: the new socket won't
+        # deliver response.done for a cancellation sent on the old socket.
+        self._response_cancel_pending = False
+        if not reconnecting_attached_call:
+            self._queued_response_create = False
 
         self._playback_tracker = options.get("playback_tracker", None)
 
-        call_id = options.get("call_id")
         model_name = model_settings.get("model_name")
         if call_id and model_name:
             error_message = (
@@ -337,6 +364,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         )
         self._websocket_task = asyncio.create_task(self._listen_for_messages())
         await self._update_session_config(model_settings)
+        if resume_queued_response_create:
+            await self._send_queued_response_create()
 
     async def _create_websocket_connection(
         self,
@@ -439,6 +468,16 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     exception=e, context="WebSocket error in message listener"
                 )
             )
+        finally:
+            current_task = asyncio.current_task()
+            if self._websocket_task is current_task:
+                self._websocket_task = None
+            if self._shutdown_in_progress:
+                self._reset_response_lifecycle_state()
+                self._shutdown_in_progress = False
+            elif self._websocket is not None:
+                self._detached_websocket = self._websocket
+                self._websocket = None
 
     async def send_event(self, event: RealtimeModelSendEvent) -> None:
         """Send an event to the model."""
@@ -446,6 +485,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             converted = _ConversionHelper.try_convert_raw_message(event)
             if converted is not None:
                 await self._send_raw_message(converted)
+                if isinstance(converted, OpenAIResponseCreateEvent):
+                    self._record_response_create_send()
             else:
                 logger.error(f"Failed to convert raw message: {event}")
         elif isinstance(event, RealtimeModelSendUserInput):
@@ -471,7 +512,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
     async def _send_user_input(self, event: RealtimeModelSendUserInput) -> None:
         converted = _ConversionHelper.convert_user_input_to_item_create(event)
         await self._send_raw_message(converted)
-        await self._send_raw_message(OpenAIResponseCreateEvent(type="response.create"))
+        await self._send_or_queue_response_create()
 
     async def _send_audio(self, event: RealtimeModelSendAudio) -> None:
         converted = _ConversionHelper.convert_audio_to_input_audio_buffer_append(event)
@@ -498,7 +539,33 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         await self._emit_event(RealtimeModelItemUpdatedEvent(item=tool_item))
 
         if event.start_response:
-            await self._send_raw_message(OpenAIResponseCreateEvent(type="response.create"))
+            await self._send_or_queue_response_create()
+
+    async def _send_or_queue_response_create(self) -> None:
+        # When a guardrail or manual interrupt requests response.cancel, the server may still
+        # consider the response active until it emits response.done. Starting the next response
+        # before that acknowledgment causes "active response in progress" errors.
+        if self._response_cancel_pending:
+            self._queued_response_create = True
+            return
+
+        await self._send_response_create()
+
+    def _record_response_create_send(self) -> None:
+        self._response_create_send_count += 1
+
+    async def _send_response_create(self) -> None:
+        await self._send_raw_message(OpenAIResponseCreateEvent(type="response.create"))
+        self._record_response_create_send()
+
+    async def _send_queued_response_create(self) -> None:
+        try:
+            await self._send_response_create()
+        except Exception:
+            self._queued_response_create = True
+            raise
+        else:
+            self._queued_response_create = False
 
     def _get_playback_state(self) -> RealtimePlaybackState:
         if self._playback_tracker:
@@ -662,21 +729,29 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def close(self) -> None:
         """Close the session."""
-        if self._websocket:
-            await self._websocket.close()
-            self._websocket = None
-        if self._websocket_task:
-            self._websocket_task.cancel()
+        self._shutdown_in_progress = True
+        self._reset_response_lifecycle_state()
+        websocket = self._websocket or self._detached_websocket
+        websocket_task = self._websocket_task
+        if websocket:
+            await websocket.close()
+        if websocket_task:
+            websocket_task.cancel()
             try:
-                await self._websocket_task
+                await websocket_task
             except asyncio.CancelledError:
                 pass
+        self._websocket = None
+        self._detached_websocket = None
+        if self._websocket_task is websocket_task:
             self._websocket_task = None
+        self._reset_response_lifecycle_state()
+        self._shutdown_in_progress = False
 
     async def _cancel_response(self) -> None:
-        if self._ongoing_response:
+        if self._ongoing_response and not self._response_cancel_pending:
             await self._send_raw_message(OpenAIResponseCancelEvent(type="response.cancel"))
-            self._ongoing_response = False
+            self._response_cancel_pending = True
 
     async def _handle_ws_event(self, event: dict[str, Any]):
         await self._emit_event(RealtimeModelRawServerEvent(data=event))
@@ -819,7 +894,24 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             await self._emit_event(RealtimeModelTurnStartedEvent())
         elif parsed.type == "response.done":
             self._ongoing_response = False
-            await self._emit_event(RealtimeModelTurnEndedEvent())
+            queued_response_create = self._queued_response_create
+            self._response_cancel_pending = False
+            self._queued_response_create = False
+            response_create_send_count = self._response_create_send_count
+            listener_exception: Exception | None = None
+            try:
+                await self._emit_event(RealtimeModelTurnEndedEvent())
+            except Exception as e:
+                listener_exception = e
+            should_send_queued_response_create = (
+                queued_response_create
+                and not self._shutdown_in_progress
+                and self._response_create_send_count == response_create_send_count
+            )
+            if should_send_queued_response_create:
+                await self._send_queued_response_create()
+            if listener_exception is not None:
+                raise listener_exception
         elif parsed.type == "session.created":
             await self._send_tracing_config(self._tracing_config)
             self._update_created_session(parsed.session)

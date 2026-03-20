@@ -20,6 +20,7 @@ from agents.realtime.model_events import (
 from agents.realtime.model_inputs import (
     RealtimeModelSendAudio,
     RealtimeModelSendInterrupt,
+    RealtimeModelSendRawMessage,
     RealtimeModelSendSessionUpdate,
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
@@ -723,7 +724,8 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert send_raw.await_count == 2
         payload_types = {call.args[0].type for call in send_raw.call_args_list}
         assert payload_types == {"conversation.item.truncate", "response.cancel"}
-        assert model._ongoing_response is False
+        assert model._ongoing_response is True
+        assert model._response_cancel_pending is True
         assert model._audio_state_tracker.get_last_audio_item() is None
 
     @pytest.mark.asyncio
@@ -749,6 +751,582 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert send_raw.call_args_list[0].args[0].type == "conversation.item.truncate"
         assert all(call.args[0].type != "response.cancel" for call in send_raw.call_args_list)
         assert model._ongoing_response is True
+        assert model._response_cancel_pending is False
+
+    @pytest.mark.asyncio
+    async def test_user_input_waits_for_response_done_after_forced_cancel(self, model, monkeypatch):
+        """Queue response.create until the cancelled response has actually finished."""
+        model._ongoing_response = True
+        send_raw = AsyncMock()
+        listener = AsyncMock()
+        model.add_listener(listener)
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        await model._send_interrupt(RealtimeModelSendInterrupt(force_response_cancel=True))
+        await model.send_event(RealtimeModelSendUserInput(user_input="safe fallback"))
+
+        assert [call.args[0].type for call in send_raw.call_args_list] == [
+            "response.cancel",
+            "conversation.item.create",
+        ]
+        assert model._response_cancel_pending is True
+        assert model._queued_response_create is True
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "event_done_1",
+                "response": {
+                    "id": "resp_1",
+                    "status": "cancelled",
+                    "object": "realtime.response",
+                    "output": [],
+                },
+            }
+        )
+
+        assert [call.args[0].type for call in send_raw.call_args_list] == [
+            "response.cancel",
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert model._ongoing_response is False
+        assert model._response_cancel_pending is False
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_tool_output_waits_for_response_done_after_forced_cancel(
+        self, model, monkeypatch
+    ):
+        """Queue tool-output response.create until the cancelled response finishes."""
+        model._ongoing_response = True
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(RealtimeModelSendInterrupt(force_response_cancel=True))
+        await model.send_event(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(name="tool", call_id="call_1", arguments="{}"),
+                output="ok",
+                start_response=True,
+            )
+        )
+
+        assert [call.args[0].type for call in send_raw.call_args_list] == [
+            "response.cancel",
+            "conversation.item.create",
+        ]
+        assert model._response_cancel_pending is True
+        assert model._queued_response_create is True
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "event_done_2",
+                "response": {
+                    "id": "resp_2",
+                    "status": "cancelled",
+                    "object": "realtime.response",
+                    "output": [],
+                },
+            }
+        )
+
+        assert [call.args[0].type for call in send_raw.call_args_list] == [
+            "response.cancel",
+            "conversation.item.create",
+            "response.create",
+        ]
+        emitted_types = [call.args[0].type for call in emit_event.await_args_list]
+        assert "item_updated" in emitted_types
+        assert "turn_ended" in emitted_types
+        assert model._response_cancel_pending is False
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_turn_ended_listener_does_not_duplicate_queued_response_create(
+        self, model, monkeypatch
+    ):
+        """A turn_ended listener should not cause the queued fallback response to start twice."""
+        model._ongoing_response = True
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        class TurnEndedListener:
+            async def on_event(self_inner, event):
+                if event.type == "turn_ended":
+                    await model.send_event(
+                        RealtimeModelSendUserInput(user_input="listener follow-up")
+                    )
+
+        model.add_listener(TurnEndedListener())
+
+        await model._send_interrupt(RealtimeModelSendInterrupt(force_response_cancel=True))
+        await model.send_event(RealtimeModelSendUserInput(user_input="safe fallback"))
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "event_done_3",
+                "response": {
+                    "id": "resp_3",
+                    "status": "cancelled",
+                    "object": "realtime.response",
+                    "output": [],
+                },
+            }
+        )
+
+        payload_types = [call.args[0].type for call in send_raw.call_args_list]
+        assert payload_types == [
+            "response.cancel",
+            "conversation.item.create",
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert payload_types.count("response.create") == 1
+        assert model._response_cancel_pending is False
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_turn_ended_raw_response_create_does_not_duplicate_queued_fallback(
+        self, model, monkeypatch
+    ):
+        """A raw response.create from turn_ended should suppress the queued fallback send."""
+        model._ongoing_response = True
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        class TurnEndedListener:
+            async def on_event(self_inner, event):
+                if event.type == "turn_ended":
+                    await model.send_event(
+                        RealtimeModelSendRawMessage(message={"type": "response.create"})
+                    )
+
+        model.add_listener(TurnEndedListener())
+
+        await model._send_interrupt(RealtimeModelSendInterrupt(force_response_cancel=True))
+        await model.send_event(RealtimeModelSendUserInput(user_input="safe fallback"))
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "event_done_4",
+                "response": {
+                    "id": "resp_4",
+                    "status": "cancelled",
+                    "object": "realtime.response",
+                    "output": [],
+                },
+            }
+        )
+
+        payload_types = [call.args[0].type for call in send_raw.call_args_list]
+        assert payload_types == [
+            "response.cancel",
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert payload_types.count("response.create") == 1
+        assert model._response_cancel_pending is False
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_turn_ended_raw_response_create_failure_replays_queued_fallback(
+        self, model, monkeypatch
+    ):
+        """A failed raw response.create from turn_ended should not suppress queued fallback."""
+        model._ongoing_response = True
+
+        send_attempts: list[str] = []
+
+        async def send_raw(event):
+            send_attempts.append(event.type)
+            if event.type == "response.create" and send_attempts.count("response.create") == 1:
+                raise RuntimeError("listener raw send failed")
+
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        class TurnEndedListener:
+            async def on_event(self_inner, event):
+                if event.type == "turn_ended":
+                    await model.send_event(
+                        RealtimeModelSendRawMessage(message={"type": "response.create"})
+                    )
+
+        model.add_listener(TurnEndedListener())
+
+        await model._send_interrupt(RealtimeModelSendInterrupt(force_response_cancel=True))
+        await model.send_event(RealtimeModelSendUserInput(user_input="safe fallback"))
+
+        with pytest.raises(RuntimeError, match="listener raw send failed"):
+            await model._handle_ws_event(
+                {
+                    "type": "response.done",
+                    "event_id": "event_done_4b",
+                    "response": {
+                        "id": "resp_4b",
+                        "status": "cancelled",
+                        "object": "realtime.response",
+                        "output": [],
+                    },
+                }
+            )
+
+        assert send_attempts == [
+            "response.cancel",
+            "conversation.item.create",
+            "response.create",
+            "response.create",
+        ]
+        assert model._response_create_send_count == 1
+        assert model._response_cancel_pending is False
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_turn_ended_listener_failure_still_sends_queued_fallback(
+        self, model, monkeypatch
+    ):
+        """A failing turn_ended listener should not drop the queued fallback response."""
+        model._ongoing_response = True
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        class FailingTurnEndedListener:
+            async def on_event(self_inner, event):
+                if event.type == "turn_ended":
+                    raise RuntimeError("listener boom")
+
+        model.add_listener(FailingTurnEndedListener())
+
+        await model._send_interrupt(RealtimeModelSendInterrupt(force_response_cancel=True))
+        await model.send_event(RealtimeModelSendUserInput(user_input="safe fallback"))
+
+        with pytest.raises(RuntimeError, match="listener boom"):
+            await model._handle_ws_event(
+                {
+                    "type": "response.done",
+                    "event_id": "event_done_5",
+                    "response": {
+                        "id": "resp_5",
+                        "status": "cancelled",
+                        "object": "realtime.response",
+                        "output": [],
+                    },
+                }
+            )
+
+        payload_types = [call.args[0].type for call in send_raw.call_args_list]
+        assert payload_types == [
+            "response.cancel",
+            "conversation.item.create",
+            "response.create",
+        ]
+        assert model._response_cancel_pending is False
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_turn_ended_listener_follow_up_send_failure_replays_queued_fallback(
+        self, model, monkeypatch
+    ):
+        """A failed listener-driven response.create should still allow queued fallback replay."""
+        model._ongoing_response = True
+
+        send_attempts: list[str] = []
+
+        async def send_raw(event):
+            send_attempts.append(event.type)
+            if event.type == "response.create" and send_attempts.count("response.create") == 1:
+                raise RuntimeError("listener helper send failed")
+
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        class TurnEndedListener:
+            async def on_event(self_inner, event):
+                if event.type == "turn_ended":
+                    await model.send_event(
+                        RealtimeModelSendUserInput(user_input="listener follow-up")
+                    )
+
+        model.add_listener(TurnEndedListener())
+
+        await model._send_interrupt(RealtimeModelSendInterrupt(force_response_cancel=True))
+        await model.send_event(RealtimeModelSendUserInput(user_input="safe fallback"))
+
+        with pytest.raises(RuntimeError, match="listener helper send failed"):
+            await model._handle_ws_event(
+                {
+                    "type": "response.done",
+                    "event_id": "event_done_5b",
+                    "response": {
+                        "id": "resp_5b",
+                        "status": "cancelled",
+                        "object": "realtime.response",
+                        "output": [],
+                    },
+                }
+            )
+
+        assert send_attempts == [
+            "response.cancel",
+            "conversation.item.create",
+            "conversation.item.create",
+            "response.create",
+            "response.create",
+        ]
+        assert model._response_create_send_count == 1
+        assert model._response_cancel_pending is False
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_close_resets_pending_cancel_state(self, model):
+        """Closing the model should clear cancel/queue state before reuse."""
+        model._ongoing_response = True
+        model._response_cancel_pending = True
+        model._queued_response_create = True
+        model._response_create_send_count = 3
+        model._websocket = AsyncMock()
+        model._websocket.close = AsyncMock()
+        model._websocket_task = asyncio.create_task(asyncio.sleep(10))
+
+        await model.close()
+
+        assert model._websocket is None
+        assert model._websocket_task is None
+        assert model._ongoing_response is False
+        assert model._response_cancel_pending is False
+        assert model._queued_response_create is False
+        assert model._response_create_send_count == 0
+
+    @pytest.mark.asyncio
+    async def test_close_clears_queued_fallback_before_websocket_shutdown(self, model, monkeypatch):
+        """Shutdown should not send a queued fallback response during the close handshake."""
+        model._ongoing_response = True
+        model._response_cancel_pending = True
+        model._queued_response_create = True
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        class ClosingWebSocket:
+            async def close(self_inner) -> None:
+                await model._handle_ws_event(
+                    {
+                        "type": "response.done",
+                        "event_id": "event_done_close",
+                        "response": {
+                            "id": "resp_close",
+                            "status": "cancelled",
+                            "object": "realtime.response",
+                            "output": [],
+                        },
+                    }
+                )
+
+        model._websocket = ClosingWebSocket()
+        model._websocket_task = asyncio.create_task(asyncio.sleep(10))
+
+        await model.close()
+
+        assert [call.args[0].type for call in send_raw.call_args_list] == []
+        assert model._response_cancel_pending is False
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_listener_exit_preserves_queued_fallback_for_call_reconnect(self, model):
+        """Unexpected listener exit should preserve queued fallback state for call_id reconnects."""
+        model._response_cancel_pending = True
+        model._queued_response_create = True
+        model._call_id = "call-123"
+
+        class FailingWebSocket:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise RuntimeError("socket dropped")
+
+        model.add_listener(AsyncMock())
+        current_task = asyncio.current_task()
+        assert current_task is not None
+        model._websocket = FailingWebSocket()
+        model._websocket_task = current_task
+
+        await model._listen_for_messages()
+
+        assert model._websocket is None
+        assert model._websocket_task is None
+        assert model._response_cancel_pending is True
+        assert model._queued_response_create is True
+
+    @pytest.mark.asyncio
+    async def test_call_id_reconnect_resumes_queued_fallback(self, model, mock_websocket):
+        """Reattaching to an existing call should resume a queued fallback response."""
+        model._response_cancel_pending = False
+        model._queued_response_create = True
+
+        sent_messages: list[dict[str, Any]] = []
+
+        async def async_websocket(*args, **kwargs):
+            async def send(payload: str):
+                sent_messages.append(json.loads(payload))
+                return None
+
+            mock_websocket.send.side_effect = send
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+                await model.connect(
+                    {
+                        "api_key": "test-api-key-123",
+                        "call_id": "call-123",
+                        "initial_model_settings": {},
+                    }
+                )
+
+        payload_types = [message["type"] for message in sent_messages]
+        assert payload_types[-1] == "response.create"
+        assert payload_types.count("response.create") == 1
+        assert model._response_cancel_pending is False
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_call_id_reconnect_clears_stale_cancel_pending(
+        self, model, mock_websocket
+    ):
+        """Reattaching after a disconnect should clear stale cancel-pending state.
+
+        The new socket will not deliver response.done for a cancellation sent
+        on the old connection, so cancel-pending must be cleared to avoid
+        stalling the queued fallback indefinitely.
+        """
+        model._response_cancel_pending = True
+        model._queued_response_create = False
+
+        async def async_websocket(*args, **kwargs):
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+                await model.connect(
+                    {
+                        "api_key": "test-api-key-123",
+                        "call_id": "call-123",
+                        "initial_model_settings": {},
+                    }
+                )
+
+        send_raw = AsyncMock()
+        monkeypatch = pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(model, "_send_raw_message", send_raw)
+            await model.send_event(RealtimeModelSendUserInput(user_input="safe fallback"))
+        finally:
+            monkeypatch.undo()
+
+        payload_types = [call.args[0].type for call in send_raw.call_args_list]
+        # cancel-pending was cleared on reconnect, so response.create sends immediately
+        assert payload_types == ["conversation.item.create", "response.create"]
+        assert model._response_cancel_pending is False
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_call_id_reconnect_resumes_queued_fallback_even_with_stale_cancel(
+        self, model, mock_websocket
+    ):
+        """Queued fallback should resume on reconnect even when cancel-pending is stale."""
+        model._response_cancel_pending = True
+        model._queued_response_create = True
+
+        sent_messages: list[dict[str, Any]] = []
+
+        async def async_websocket(*args, **kwargs):
+            async def send(payload: str):
+                sent_messages.append(json.loads(payload))
+                return None
+
+            mock_websocket.send.side_effect = send
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+                await model.connect(
+                    {
+                        "api_key": "test-api-key-123",
+                        "call_id": "call-123",
+                        "initial_model_settings": {},
+                    }
+                )
+
+        payload_types = [message["type"] for message in sent_messages]
+        assert payload_types[-1] == "response.create"
+        assert payload_types.count("response.create") == 1
+        assert model._response_cancel_pending is False
+        assert model._queued_response_create is False
+
+    @pytest.mark.asyncio
+    async def test_response_done_send_failure_preserves_queued_fallback_for_reconnect(
+        self, model, monkeypatch
+    ):
+        """A failed replay send after response.done should keep the queued fallback."""
+        model._ongoing_response = True
+
+        class TransportDropped(RuntimeError):
+            pass
+
+        send_calls: list[str] = []
+
+        async def send_raw(event):
+            send_calls.append(event.type)
+            if event.type == "response.create":
+                raise TransportDropped("send failed")
+
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        await model._send_interrupt(RealtimeModelSendInterrupt(force_response_cancel=True))
+        await model.send_event(RealtimeModelSendUserInput(user_input="safe fallback"))
+
+        with pytest.raises(TransportDropped, match="send failed"):
+            await model._handle_ws_event(
+                {
+                    "type": "response.done",
+                    "event_id": "event_done_6",
+                    "response": {
+                        "id": "resp_6",
+                        "status": "cancelled",
+                        "object": "realtime.response",
+                        "output": [],
+                    },
+                }
+            )
+
+        assert send_calls == ["response.cancel", "conversation.item.create", "response.create"]
+        assert model._response_cancel_pending is False
+        assert model._queued_response_create is True
 
     def test_add_remove_listener_and_tools_conversion(self, model):
         listener = AsyncMock()
