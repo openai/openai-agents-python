@@ -920,12 +920,14 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             await self._emit_event(RealtimeModelTurnStartedEvent())
         elif parsed.type == "response.done":
             self._pending_cancel_event_id = None
+            # Emit turn-ended before draining so listeners always see the
+            # end-of-turn notification even if the drain send fails.
+            await self._emit_event(RealtimeModelTurnEndedEvent())
             if self._pending_create_event_id:
                 # A new SDK-managed create is already in flight; stay in CREATE_SENT.
                 pass
             else:
                 await self._drain_queued_response_create()
-            await self._emit_event(RealtimeModelTurnEndedEvent())
         elif parsed.type == "session.created":
             await self._send_tracing_config(self._tracing_config)
             self._update_created_session(parsed.session)
@@ -941,29 +943,29 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 self._pending_create_event_id = None
                 if self._response_state == _ResponseLifecycle.CREATE_SENT:
                     self._response_state = _ResponseLifecycle.IDLE
-                if self._response_state == _ResponseLifecycle.IDLE and self._queued_response_create:
+                if error_code == "conversation_already_has_active_response":
+                    # Server still has an active response — re-queue so the
+                    # next response.done drains instead of retrying now
+                    # (which would hit the same rejection).
+                    self._queued_response_create = True
+                elif (
+                    self._response_state == _ResponseLifecycle.IDLE
+                    and self._queued_response_create
+                ):
                     await self._drain_queued_response_create()
             elif not error_source_id:
-                # Server omitted event_id — fall back to error code to
-                # decide whether the cancel/create we're waiting on was
-                # rejected, so the session doesn't wedge.
-                is_active_response_err = error_code in (
-                    "conversation_already_has_active_response",
-                )
+                # Server omitted event_id — only handle CANCEL_SENT
+                # fallback.  CREATE_SENT is not matched here because
+                # the event_id-based path (above) reliably identifies
+                # SDK-originated create rejections; an unscoped
+                # fallback would false-match unrelated errors (audio,
+                # rate-limit, etc.).
                 if (
                     self._response_state == _ResponseLifecycle.CANCEL_SENT
                     and self._pending_cancel_event_id
                 ):
                     self._pending_cancel_event_id = None
                     await self._drain_queued_response_create()
-                elif (
-                    self._response_state == _ResponseLifecycle.CREATE_SENT
-                    and not is_active_response_err
-                ):
-                    self._pending_create_event_id = None
-                    self._response_state = _ResponseLifecycle.IDLE
-                    if self._queued_response_create:
-                        await self._drain_queued_response_create()
             await self._emit_event(RealtimeModelErrorEvent(error=parsed.error))
         elif parsed.type == "conversation.item.deleted":
             await self._emit_event(RealtimeModelItemDeletedEvent(item_id=parsed.item_id))
