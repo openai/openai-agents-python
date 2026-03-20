@@ -63,8 +63,7 @@ A streamed run is not complete until `result.stream_events()` finishes. The SDK 
 
 If you are manually continuing from [`result.to_input_list(mode="normalized")`][agents.result.RunResultBase.to_input_list], and `cancel(mode="after_turn")` stops after a tool turn, continue that unfinished turn by rerunning `result.last_agent` with that normalized input instead of appending a fresh user turn right away.
 -   If a streamed run stopped for tool approval, do not treat that as a new turn. Finish draining the stream, inspect `result.interruptions`, and resume from `result.to_state()` instead.
--   If you are using an OpenAI Responses-based session and need to reduce long client-managed history between turns, do it only after the streamed run finishes. Use [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession] to compact stored session history.
--   Use [`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_callback] to customize how retrieved session history and the new user input are merged before the next model call. If you rewrite new-turn items there, the rewritten version is what gets persisted for that turn. It is not a replacement for compaction of previously stored session history.
+-   Use [`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_callback] to customize how retrieved session history and the new user input are merged before the next model call. If you rewrite new-turn items there, the rewritten version is what gets persisted for that turn.
 
 ## Run item events and agent events
 
