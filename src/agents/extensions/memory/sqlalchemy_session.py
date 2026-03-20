@@ -105,7 +105,11 @@ class SQLAlchemySession(SessionABC):
         self.session_id = session_id
         self.session_settings = session_settings or SessionSettings()
         self._engine = engine
-        self._init_lock = self._get_table_init_lock(engine, sessions_table, messages_table)
+        self._init_lock = (
+            self._get_table_init_lock(engine, sessions_table, messages_table)
+            if create_tables
+            else None
+        )
 
         self._metadata = MetaData()
         self._sessions = Table(
@@ -205,6 +209,7 @@ class SQLAlchemySession(SessionABC):
         if not self._create_tables:
             return
 
+        assert self._init_lock is not None
         while not self._init_lock.acquire(blocking=False):
             # Poll without handing lock acquisition to a background thread so
             # cancellation cannot strand the shared init lock in the acquired state.

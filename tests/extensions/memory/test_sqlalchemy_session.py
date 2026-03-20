@@ -434,6 +434,7 @@ async def test_add_items_cancelled_waiter_does_not_strand_table_init_lock(tmp_pa
 
     assert holder._init_lock is waiter._init_lock
     assert waiter._init_lock is follower._init_lock
+    assert holder._init_lock is not None
 
     acquired = holder._init_lock.acquire(blocking=False)
     assert acquired
@@ -459,6 +460,18 @@ async def test_add_items_cancelled_waiter_does_not_strand_table_init_lock(tmp_pa
         await holder.engine.dispose()
         await waiter.engine.dispose()
         await follower.engine.dispose()
+
+
+async def test_create_tables_false_does_not_allocate_shared_init_lock(tmp_path):
+    """Sessions that skip auto-create should not populate the shared lock map."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'no_create_tables_lock.db'}"
+    before = len(SQLAlchemySession._table_init_locks)
+    session = SQLAlchemySession.from_url("no_create_tables_lock", url=db_url, create_tables=False)
+    try:
+        assert session._init_lock is None
+        assert len(SQLAlchemySession._table_init_locks) == before
+    finally:
+        await session.engine.dispose()
 
 
 async def test_get_items_same_timestamp_consistent_order():
