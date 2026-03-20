@@ -1271,7 +1271,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
             }
         )
 
-        assert model._response_state == _ResponseLifecycle.IDLE
+        # ACTIVE — server confirmed a response is still running, so
+        # subsequent sends must queue instead of firing another create.
+        assert model._response_state == _ResponseLifecycle.ACTIVE
         assert model._pending_create_event_id is None
         # Re-queued so the next response.done will drain it
         assert model._queued_response_create is True

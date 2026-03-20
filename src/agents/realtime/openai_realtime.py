@@ -966,18 +966,21 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 await self._drain_queued_response_create()
             elif error_source_id and error_source_id == self._pending_create_event_id:
                 self._pending_create_event_id = None
-                if self._response_state == _ResponseLifecycle.CREATE_SENT:
-                    self._response_state = _ResponseLifecycle.IDLE
                 if error_code == "conversation_already_has_active_response":
-                    # Server still has an active response — re-queue so the
-                    # next response.done drains instead of retrying now
-                    # (which would hit the same rejection).
+                    # Server still has an active response — stay in
+                    # ACTIVE (not IDLE) so subsequent sends queue
+                    # instead of firing another create that would hit
+                    # the same rejection.  response.done will drain.
+                    self._response_state = _ResponseLifecycle.ACTIVE
                     self._queued_response_create = True
-                elif (
-                    self._response_state == _ResponseLifecycle.IDLE
-                    and self._queued_response_create
-                ):
-                    await self._drain_queued_response_create()
+                else:
+                    if self._response_state == _ResponseLifecycle.CREATE_SENT:
+                        self._response_state = _ResponseLifecycle.IDLE
+                    if (
+                        self._response_state == _ResponseLifecycle.IDLE
+                        and self._queued_response_create
+                    ):
+                        await self._drain_queued_response_create()
             elif not error_source_id:
                 # Server omitted event_id — only handle CANCEL_SENT
                 # fallback.  CREATE_SENT is not matched here because
