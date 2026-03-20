@@ -289,6 +289,10 @@ def function_schema(
 
     # Track whether the first real (non-self/cls) parameter has been processed for context check
     self_or_cls_skipped = False
+    # Permanent flag: True when an unannotated self/cls receiver was found and skipped.
+    # Unlike self_or_cls_skipped, this is never reset and is used to decide whether
+    # to strip self/cls from call_sig.
+    receiver_was_skipped = False
 
     if params:
         first_name, first_param = params[0]
@@ -302,6 +306,7 @@ def function_schema(
                 filtered_params.append((first_name, first_param))
         elif first_name in ("self", "cls"):
             self_or_cls_skipped = True  # Skip bound method receiver parameter
+            receiver_was_skipped = True
         else:
             filtered_params.append((first_name, first_param))
 
@@ -423,7 +428,7 @@ def function_schema(
 
     # 5. Build a signature that excludes self/cls so to_call_args iterates
     #    only the parameters the caller actually needs to pass.
-    if self_or_cls_skipped or (takes_context and params and params[0][0] in ("self", "cls")):
+    if receiver_was_skipped:
         remaining = [p for name, p in params if name not in ("self", "cls")]
         call_sig = sig.replace(parameters=remaining)
     else:
