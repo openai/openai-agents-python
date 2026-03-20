@@ -41,6 +41,7 @@ from .util import gen_span_id, gen_trace_id
 __all__ = [
     "add_trace_processor",
     "agent_span",
+    "flush_traces",
     "custom_span",
     "function_span",
     "generation_span",
@@ -108,3 +109,13 @@ def set_tracing_export_api_key(api_key: str) -> None:
     Set the OpenAI API key for the backend exporter.
     """
     default_exporter().set_api_key(api_key)
+
+
+def flush_traces() -> None:
+    """Force an immediate flush of all buffered traces and spans.
+
+    Call this at the end of each task in long-running worker processes
+    (Celery, FastAPI background tasks, RQ, etc.) to ensure traces are
+    exported to the backend rather than remaining buffered indefinitely.
+    """
+    get_trace_provider().force_flush()

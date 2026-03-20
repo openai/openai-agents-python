@@ -835,3 +835,24 @@ def test_truncate_string_for_json_limit_handles_escape_heavy_input():
     assert truncated.endswith(exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX)
     assert exporter._value_json_size_bytes(truncated) <= max_bytes
     exporter.close()
+
+
+def test_flush_traces_calls_provider_force_flush():
+    """Test that flush_traces() delegates to the global trace provider's force_flush()."""
+    from unittest.mock import MagicMock, patch
+
+    mock_provider = MagicMock()
+
+    with patch("agents.tracing.get_trace_provider", return_value=mock_provider):
+        from agents.tracing import flush_traces
+
+        flush_traces()
+
+    mock_provider.force_flush.assert_called_once()
+
+
+def test_flush_traces_importable_from_agents():
+    """Test that flush_traces is importable from the top-level agents package."""
+    from agents import flush_traces
+
+    assert callable(flush_traces)
