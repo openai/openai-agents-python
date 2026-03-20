@@ -306,6 +306,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._queued_response_create: bool = False
         self._pending_cancel_event_id: str | None = None
         self._pending_create_event_id: str | None = None
+        self._active_response_id: str | None = None
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
         self._playback_tracker: RealtimePlaybackTracker | None = None
         self._created_session: OpenAISessionCreateRequest | None = None
@@ -742,6 +743,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._response_state = _ResponseLifecycle.IDLE
         self._queued_response_create = False
         self._pending_cancel_event_id = None
+        self._active_response_id = None
         self._pending_create_event_id = None
         if self._websocket:
             await self._websocket.close()
@@ -905,6 +907,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 if not automatic_response_cancellation_enabled:
                     await self._cancel_response()
         elif parsed.type == "response.created":
+            resp_id = (
+                getattr(parsed.response, "id", None)
+                if hasattr(parsed, "response")
+                else None
+            )
+            self._active_response_id = resp_id
             if self._pending_create_event_id:
                 # This response.created corresponds to our SDK-managed
                 # create — clear the tracker so response.done/error can
@@ -920,14 +928,30 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             await self._emit_event(RealtimeModelTurnStartedEvent())
         elif parsed.type == "response.done":
             self._pending_cancel_event_id = None
-            # Emit turn-ended before draining so listeners always see the
-            # end-of-turn notification even if the drain send fails.
-            await self._emit_event(RealtimeModelTurnEndedEvent())
-            if self._pending_create_event_id:
-                # A new SDK-managed create is already in flight; stay in CREATE_SENT.
+            done_resp_id = (
+                getattr(parsed.response, "id", None)
+                if hasattr(parsed, "response")
+                else None
+            )
+            if (
+                done_resp_id
+                and self._active_response_id
+                and done_resp_id != self._active_response_id
+            ):
+                # Stale response.done from a previous turn — the
+                # replacement turn is still active.  Ignore so we
+                # don't reset state mid-turn.
                 pass
             else:
-                await self._drain_queued_response_create()
+                self._active_response_id = None
+                # Emit turn-ended before draining so listeners always
+                # see the end-of-turn notification even if drain fails.
+                await self._emit_event(RealtimeModelTurnEndedEvent())
+                if self._pending_create_event_id:
+                    # New SDK-managed create already in flight.
+                    pass
+                else:
+                    await self._drain_queued_response_create()
         elif parsed.type == "session.created":
             await self._send_tracing_config(self._tracing_config)
             self._update_created_session(parsed.session)

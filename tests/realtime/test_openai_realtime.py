@@ -16,6 +16,7 @@ from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelErrorEvent,
     RealtimeModelToolCallEvent,
+    RealtimeModelTurnEndedEvent,
 )
 from agents.realtime.model_inputs import (
     RealtimeModelSendAudio,
@@ -1390,6 +1391,43 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         assert model._response_state == _ResponseLifecycle.IDLE
         assert model._pending_cancel_event_id is None
+
+    @pytest.mark.asyncio
+    async def test_stale_response_done_ignored_when_new_turn_active(self, model, monkeypatch):
+        """A late response.done from a previous turn must not reset state
+        when the replacement turn is already active."""
+        # Replacement turn is active with a different response ID.
+        model._response_state = _ResponseLifecycle.ACTIVE
+        model._active_response_id = "resp_new_turn"
+        model._pending_create_event_id = None
+        model._queued_response_create = False
+
+        emit = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", AsyncMock())
+        monkeypatch.setattr(model, "_emit_event", emit)
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "event_id": "evt_stale_done",
+                "response": {
+                    "id": "resp_old_turn",
+                    "object": "realtime.response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        )
+
+        # State untouched — replacement turn still active.
+        assert model._response_state == _ResponseLifecycle.ACTIVE
+        assert model._active_response_id == "resp_new_turn"
+        # No TurnEndedEvent emitted for the stale done (only raw event).
+        turn_ended_calls = [
+            c for c in emit.call_args_list
+            if isinstance(c.args[0], RealtimeModelTurnEndedEvent)
+        ]
+        assert turn_ended_calls == []
 
     @pytest.mark.asyncio
     async def test_send_create_failure_drains_queued_followup(self, model, monkeypatch):
