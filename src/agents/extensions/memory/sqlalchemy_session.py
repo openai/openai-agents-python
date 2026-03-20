@@ -27,7 +27,6 @@ import asyncio
 import json
 import threading
 from typing import Any, ClassVar
-from weakref import WeakKeyDictionary
 
 from sqlalchemy import (
     TIMESTAMP,
@@ -56,22 +55,27 @@ from ...memory.session_settings import SessionSettings, resolve_session_limit
 class SQLAlchemySession(SessionABC):
     """SQLAlchemy implementation of :pyclass:`agents.memory.session.Session`."""
 
-    _engine_init_locks: ClassVar[WeakKeyDictionary[AsyncEngine, asyncio.Lock]] = (
-        WeakKeyDictionary()
-    )
-    _engine_init_locks_guard: ClassVar[threading.Lock] = threading.Lock()
+    _table_init_locks: ClassVar[dict[tuple[str, str, str], asyncio.Lock]] = {}
+    _table_init_locks_guard: ClassVar[threading.Lock] = threading.Lock()
     _metadata: MetaData
     _sessions: Table
     _messages: Table
     session_settings: SessionSettings | None = None
 
     @classmethod
-    def _get_engine_init_lock(cls, engine: AsyncEngine) -> asyncio.Lock:
-        with cls._engine_init_locks_guard:
-            lock = cls._engine_init_locks.get(engine)
+    def _get_table_init_lock(
+        cls, engine: AsyncEngine, sessions_table: str, messages_table: str
+    ) -> asyncio.Lock:
+        lock_key = (
+            engine.url.render_as_string(hide_password=True),
+            sessions_table,
+            messages_table,
+        )
+        with cls._table_init_locks_guard:
+            lock = cls._table_init_locks.get(lock_key)
             if lock is None:
                 lock = asyncio.Lock()
-                cls._engine_init_locks[engine] = lock
+                cls._table_init_locks[lock_key] = lock
             return lock
 
     def __init__(
@@ -102,7 +106,7 @@ class SQLAlchemySession(SessionABC):
         self.session_settings = session_settings or SessionSettings()
         self._engine = engine
         self._lock = asyncio.Lock()
-        self._init_lock = self._get_engine_init_lock(engine)
+        self._init_lock = self._get_table_init_lock(engine, sessions_table, messages_table)
 
         self._metadata = MetaData()
         self._sessions = Table(
