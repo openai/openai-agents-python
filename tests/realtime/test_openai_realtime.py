@@ -1484,10 +1484,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert "response.create" in sent_types
 
     @pytest.mark.asyncio
-    async def test_error_without_event_id_does_not_clear_create_pending(self, model, monkeypatch):
-        """An error without event_id must NOT clear create-pending state —
-        only the event_id-based path reliably identifies SDK create rejections.
-        Unscoped fallback would false-match unrelated errors."""
+    async def test_error_without_event_id_recovers_create_sent(self, model, monkeypatch):
+        """An error without event_id during CREATE_SENT should recover
+        to IDLE so the session doesn't wedge forever."""
         model._response_state = _ResponseLifecycle.CREATE_SENT
         model._pending_create_event_id = "agsdk_rc_123"
 
@@ -1505,9 +1504,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
             }
         )
 
-        # State preserved — only event_id-matched errors clear CREATE_SENT
-        assert model._response_state == _ResponseLifecycle.CREATE_SENT
-        assert model._pending_create_event_id == "agsdk_rc_123"
+        # Recovered to IDLE — avoids wedging in CREATE_SENT
+        assert model._response_state == _ResponseLifecycle.IDLE
+        assert model._pending_create_event_id is None
 
     @pytest.mark.asyncio
     async def test_raw_response_created_ignored_while_sdk_create_pending(

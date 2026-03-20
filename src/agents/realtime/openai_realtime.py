@@ -916,7 +916,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 else None
             )
             self._active_response_id = resp_id
-            if self._pending_create_event_id:
+            if (
+                self._pending_create_event_id
+                and self._response_state == _ResponseLifecycle.CREATE_SENT
+            ):
                 # This response.created corresponds to our SDK-managed
                 # create — clear the tracker so response.done/error can
                 # tell whether another create is still in flight.
@@ -985,18 +988,38 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     ):
                         await self._drain_queued_response_create()
             elif not error_source_id:
-                # Server omitted event_id — only handle CANCEL_SENT
-                # fallback.  CREATE_SENT is not matched here because
-                # the event_id-based path (above) reliably identifies
-                # SDK-originated create rejections; an unscoped
-                # fallback would false-match unrelated errors (audio,
-                # rate-limit, etc.).
+                # Server omitted event_id — fall back to lifecycle
+                # state to decide which pending operation was rejected.
                 if (
                     self._response_state == _ResponseLifecycle.CANCEL_SENT
                     and self._pending_cancel_event_id
                 ):
                     self._pending_cancel_event_id = None
                     await self._drain_queued_response_create()
+                elif (
+                    self._response_state == _ResponseLifecycle.CREATE_SENT
+                    and self._pending_create_event_id
+                ):
+                    # Server likely rejected our create without
+                    # echoing event_id.  Recover so the session
+                    # doesn't wedge in CREATE_SENT forever.
+                    if error_code == (
+                        "conversation_already_has_active_response"
+                    ):
+                        self._pending_create_event_id = None
+                        self._response_state = (
+                            _ResponseLifecycle.ACTIVE
+                        )
+                        self._queued_response_create = True
+                    else:
+                        self._pending_create_event_id = None
+                        self._response_state = (
+                            _ResponseLifecycle.IDLE
+                        )
+                        if self._queued_response_create:
+                            await (
+                                self._drain_queued_response_create()
+                            )
             await self._emit_event(RealtimeModelErrorEvent(error=parsed.error))
         elif parsed.type == "conversation.item.deleted":
             await self._emit_event(RealtimeModelItemDeletedEvent(item_id=parsed.item_id))
