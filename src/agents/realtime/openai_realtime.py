@@ -540,6 +540,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         if self._response_state != _ResponseLifecycle.IDLE:
             self._queued_response_create = True
             return
+        # Clear any stale queue from a previous drain failure — this
+        # fresh create supersedes it.
+        self._queued_response_create = False
         await self._send_response_create()
 
     async def _send_response_create(self) -> None:
