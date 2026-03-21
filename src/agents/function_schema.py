@@ -287,13 +287,6 @@ def function_schema(
     takes_context = False
     filtered_params = []
 
-    # Track whether the first real (non-self/cls) parameter has been processed for context check
-    self_or_cls_skipped = False
-    # Permanent flag: True when an unannotated self/cls receiver was found and skipped.
-    # Unlike self_or_cls_skipped, this is never reset and is used to decide whether
-    # to strip self/cls from call_sig.
-    receiver_was_skipped = False
-
     if params:
         first_name, first_param = params[0]
         # Prefer the evaluated type hint if available
@@ -305,24 +298,22 @@ def function_schema(
             else:
                 filtered_params.append((first_name, first_param))
         elif first_name in ("self", "cls"):
-            self_or_cls_skipped = True  # Skip bound method receiver parameter
-            receiver_was_skipped = True
+            # An unannotated self/cls means this is an unbound method or classmethod.
+            # Bound methods (e.g., instance.method) already have self stripped by Python.
+            raise UserError(
+                f"Function {func.__name__} has an unbound '{first_name}' parameter. "
+                f"Pass a bound method (e.g., instance.{func.__name__}) instead of the "
+                f"unbound class method."
+            )
         else:
             filtered_params.append((first_name, first_param))
 
     # For parameters other than the first, raise error if any use RunContextWrapper or ToolContext
-    # (unless self/cls was skipped, in which case ONLY the param immediately after self/cls is
-    # treated as the effective first param).
-    for idx, (name, param) in enumerate(params[1:]):
+    for name, param in params[1:]:
         ann = type_hints.get(name, param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
             if origin is RunContextWrapper or origin is ToolContext:
-                if self_or_cls_skipped and not takes_context and idx == 0:
-                    # self/cls was the first param and this is immediately after it
-                    takes_context = True
-                    self_or_cls_skipped = False
-                    continue
                 raise UserError(
                     f"RunContextWrapper/ToolContext param found at non-first position in function"
                     f" {func.__name__}"
@@ -426,22 +417,14 @@ def function_schema(
     if strict_json_schema:
         json_schema = ensure_strict_json_schema(json_schema)
 
-    # 5. Build a signature that excludes self/cls so to_call_args iterates
-    #    only the parameters the caller actually needs to pass.
-    if receiver_was_skipped:
-        remaining = [p for name, p in params if name not in ("self", "cls")]
-        call_sig = sig.replace(parameters=remaining)
-    else:
-        call_sig = sig
-
-    # 6. Return as a FuncSchema dataclass
+    # 5. Return as a FuncSchema dataclass
     return FuncSchema(
         name=func_name,
         # Ensure description_override takes precedence even if docstring info is disabled.
         description=description_override or (doc_info.description if doc_info else None),
         params_pydantic_model=dynamic_model,
         params_json_schema=json_schema,
-        signature=call_sig,
+        signature=sig,
         takes_context=takes_context,
         strict_json_schema=strict_json_schema,
     )

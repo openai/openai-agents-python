@@ -887,8 +887,8 @@ def test_function_with_annotated_field_multiple_constraints():
         fs.params_pydantic_model(**{"score": 50, "factor": 0.0})
 
 
-def test_method_self_param_skipped():
-    """Test that self parameter is skipped for class methods."""
+def test_bound_method_self_not_in_schema():
+    """Test that bound methods work normally (Python already strips self)."""
 
     class MyTools:
         def greet(self, name: str) -> str:
@@ -902,8 +902,8 @@ def test_method_self_param_skipped():
     assert fs.params_json_schema.get("required") == ["name"]
 
 
-def test_classmethod_cls_param_skipped():
-    """Test that cls parameter is skipped for classmethods passed as unbound."""
+def test_unbound_cls_param_raises():
+    """Test that unbound classmethods with unannotated cls raise UserError."""
 
     # Simulate a function whose first param is named cls with no annotation
     code = compile("def greet(cls, name: str) -> str: ...", "<test>", "exec")
@@ -912,14 +912,12 @@ def test_classmethod_cls_param_skipped():
     fn = ns["greet"]
     fn.__annotations__ = {"name": str, "return": str}
 
-    fs = function_schema(fn, use_docstring_info=False)
-    props = fs.params_json_schema.get("properties", {})
-    assert "cls" not in props
-    assert "name" in props
+    with pytest.raises(UserError, match="unbound 'cls' parameter"):
+        function_schema(fn, use_docstring_info=False)
 
 
-def test_method_self_with_context_second_param():
-    """Test that self is skipped and RunContextWrapper as second param is recognized."""
+def test_bound_method_with_context_second_param():
+    """Test that bound methods with RunContextWrapper as second param work correctly."""
 
     class MyTools:
         def greet(self, ctx: RunContextWrapper[None], name: str) -> str:
@@ -928,6 +926,7 @@ def test_method_self_with_context_second_param():
     obj = MyTools()
     fs = function_schema(obj.greet, use_docstring_info=False)
     props = fs.params_json_schema.get("properties", {})
+    # self is already stripped by Python for bound methods
     assert "self" not in props
     assert "ctx" not in props
     assert "name" in props
@@ -946,8 +945,8 @@ def test_method_context_not_immediately_after_self_raises():
         function_schema(obj.greet, use_docstring_info=False)
 
 
-def test_method_self_excluded_from_call_signature():
-    """Test that self/cls is excluded from the stored signature used by to_call_args."""
+def test_unbound_method_with_self_raises():
+    """Test that unbound methods with unannotated self raise UserError."""
 
     # Simulate an unbound method with self as first param
     code = compile(
@@ -958,16 +957,8 @@ def test_method_self_excluded_from_call_signature():
     fn = ns["greet"]
     fn.__annotations__ = {"ctx": RunContextWrapper[None], "name": str, "return": str}
 
-    fs = function_schema(fn, use_docstring_info=False)
-    # self should not be in the signature used by to_call_args
-    assert "self" not in fs.signature.parameters
-    assert "name" in fs.signature.parameters
-    assert fs.takes_context is True
-
-    # to_call_args should produce only the non-context, non-self params
-    parsed = fs.params_pydantic_model(name="world")
-    args, kwargs = fs.to_call_args(parsed)
-    assert args == ["world"]
+    with pytest.raises(UserError, match="unbound 'self' parameter"):
+        function_schema(fn, use_docstring_info=False)
 
 
 def test_regular_unannotated_first_param_still_included():
