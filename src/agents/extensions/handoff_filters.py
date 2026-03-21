@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from ..handoffs import (
     HandoffInputData,
     default_handoff_history_mapper,
@@ -24,6 +26,8 @@ from ..items import (
 
 __all__ = [
     "remove_all_tools",
+    "remove_reasoning_items",
+    "strip_reasoning_items",
     "nest_handoff_history",
     "default_handoff_history_mapper",
 ]
@@ -49,6 +53,45 @@ def remove_all_tools(handoff_input_data: HandoffInputData) -> HandoffInputData:
     )
 
 
+def strip_reasoning_items(items: Sequence[TResponseInputItem]) -> list[TResponseInputItem]:
+    """Remove reasoning items from plain input history.
+
+    When the last reasoning item is stripped, assistant message IDs become orphaned and can trigger
+    Responses API validation errors on the next turn. In that case, strip those assistant IDs too.
+    """
+
+    filtered_items: list[TResponseInputItem] = []
+    removed_reasoning = False
+
+    for item in items:
+        if item.get("type") == "reasoning":
+            removed_reasoning = True
+            continue
+        filtered_items.append(item)
+
+    if removed_reasoning:
+        return _strip_orphaned_assistant_ids(filtered_items)
+    return filtered_items
+
+
+def remove_reasoning_items(handoff_input_data: HandoffInputData) -> HandoffInputData:
+    """Filters out reasoning items while preserving ordinary messages."""
+
+    history = handoff_input_data.input_history
+    filtered_history = (
+        tuple(strip_reasoning_items(history)) if isinstance(history, tuple) else history
+    )
+    filtered_pre_handoff_items = _remove_reasoning_from_items(handoff_input_data.pre_handoff_items)
+    filtered_new_items = _remove_reasoning_from_items(handoff_input_data.new_items)
+
+    return HandoffInputData(
+        input_history=filtered_history,
+        pre_handoff_items=filtered_pre_handoff_items,
+        new_items=filtered_new_items,
+        run_context=handoff_input_data.run_context,
+    )
+
+
 def _remove_tools_from_items(items: tuple[RunItem, ...]) -> tuple[RunItem, ...]:
     filtered_items = []
     for item in items:
@@ -64,6 +107,15 @@ def _remove_tools_from_items(items: tuple[RunItem, ...]) -> tuple[RunItem, ...]:
             or isinstance(item, MCPApprovalRequestItem)
             or isinstance(item, MCPApprovalResponseItem)
         ):
+            continue
+        filtered_items.append(item)
+    return tuple(filtered_items)
+
+
+def _remove_reasoning_from_items(items: tuple[RunItem, ...]) -> tuple[RunItem, ...]:
+    filtered_items = []
+    for item in items:
+        if isinstance(item, ReasoningItem):
             continue
         filtered_items.append(item)
     return tuple(filtered_items)
@@ -95,3 +147,16 @@ def _remove_tool_types_from_input(
             continue
         filtered_items.append(item)
     return tuple(filtered_items)
+
+
+def _strip_orphaned_assistant_ids(items: list[TResponseInputItem]) -> list[TResponseInputItem]:
+    cleaned: list[TResponseInputItem] = []
+    for item in items:
+        if (
+            item.get("role") == "assistant"
+            and item.get("type") == "message"
+            and "id" in item
+        ):
+            item = {k: v for k, v in item.items() if k != "id"}
+        cleaned.append(item)
+    return cleaned

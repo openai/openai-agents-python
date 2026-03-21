@@ -16,7 +16,12 @@ from agents import (
     reset_conversation_history_wrappers,
     set_conversation_history_wrappers,
 )
-from agents.extensions.handoff_filters import nest_handoff_history, remove_all_tools
+from agents.extensions.handoff_filters import (
+    nest_handoff_history,
+    remove_all_tools,
+    remove_reasoning_items,
+    strip_reasoning_items,
+)
 from agents.items import (
     HandoffOutputItem,
     MCPApprovalRequestItem,
@@ -43,6 +48,17 @@ def _get_message_input_item(content: str) -> TResponseInputItem:
         "role": "assistant",
         "content": content,
     }
+
+
+def _get_assistant_message_item(content: str, item_id: str | None = None) -> TResponseInputItem:
+    item: TResponseInputItem = {
+        "type": "message",
+        "role": "assistant",
+        "content": content,
+    }
+    if item_id is not None:
+        item["id"] = item_id
+    return item
 
 
 def _get_user_input_item(content: str) -> TResponseInputItem:
@@ -1013,5 +1029,62 @@ def test_removes_mixed_mcp_and_function_items() -> None:
     )
     filtered_data = remove_all_tools(handoff_input_data)
     assert len(filtered_data.input_history) == 2
+    assert len(filtered_data.pre_handoff_items) == 1
+    assert len(filtered_data.new_items) == 1
+
+
+def test_strip_reasoning_items_removes_reasoning_and_orphaned_assistant_ids() -> None:
+    items = [
+        _get_user_input_item("Hello"),
+        _get_reasoning_input_item(),
+        _get_assistant_message_item("Hi", item_id="msg_123"),
+    ]
+
+    filtered = strip_reasoning_items(items)
+
+    assert len(filtered) == 2
+    assert all(item.get("type") != "reasoning" for item in filtered)
+    assistant = cast(dict[str, Any], filtered[-1])
+    assert assistant["role"] == "assistant"
+    assert "id" not in assistant
+
+
+def test_strip_reasoning_items_keeps_assistant_ids_when_no_reasoning_removed() -> None:
+    items = [
+        _get_user_input_item("Hello"),
+        _get_assistant_message_item("Hi", item_id="msg_456"),
+    ]
+
+    filtered = strip_reasoning_items(items)
+
+    assert len(filtered) == 2
+    assistant = cast(dict[str, Any], filtered[-1])
+    assert assistant["id"] == "msg_456"
+
+
+def test_remove_reasoning_items_filters_handoff_data() -> None:
+    handoff_input_data = handoff_data(
+        input_history=(
+            _get_user_input_item("Hello"),
+            _get_reasoning_input_item(),
+            _get_assistant_message_item("World", item_id="msg_789"),
+        ),
+        pre_handoff_items=(
+            _get_reasoning_output_run_item(),
+            _get_message_output_run_item("kept"),
+        ),
+        new_items=(
+            _get_reasoning_output_run_item(),
+            _get_message_output_run_item("kept"),
+        ),
+    )
+
+    filtered_data = remove_reasoning_items(handoff_input_data)
+
+    assert len(filtered_data.input_history) == 2
+    assert all(item.get("type") != "reasoning" for item in filtered_data.input_history)
+    assistant = cast(dict[str, Any], filtered_data.input_history[-1])
+    assert assistant["role"] == "assistant"
+    assert "id" not in assistant
     assert len(filtered_data.pre_handoff_items) == 1
     assert len(filtered_data.new_items) == 1
