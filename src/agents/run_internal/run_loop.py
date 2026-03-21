@@ -6,6 +6,7 @@ approvals, and turn processing; all symbols here are internal and not part of th
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses as _dc
 import json
 from collections.abc import Awaitable, Callable, Mapping
@@ -986,6 +987,9 @@ async def start_streaming(
                         run_state._session_items = list(streamed_result.new_items)
                         run_state._current_step = turn_result.next_step
                         run_state._current_turn = current_turn
+                        run_state._interrupted_turn_input = copy.deepcopy(
+                            context_wrapper._tool_history_input
+                        )
                         run_state._current_turn_persisted_item_count = (
                             streamed_result._current_turn_persisted_item_count
                         )
@@ -1189,6 +1193,7 @@ async def run_single_turn_streamed(
             reasoning_item_id_policy,
         )
 
+    prior_tool_history_input = list(context_wrapper._tool_history_input)
     filtered = await maybe_filter_model_input(
         agent=agent,
         run_config=run_config,
@@ -1198,6 +1203,13 @@ async def run_single_turn_streamed(
     )
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
+    context_wrapper._tool_history_input = list(filtered.input)
+    if server_conversation_tracker is not None:
+        context_wrapper._tool_history_input = prepare_model_input_items(
+            prior_tool_history_input,
+            context_wrapper._tool_history_input,
+        )
+        context_wrapper._tool_history_conversation_id = server_conversation_tracker.conversation_id
     hosted_mcp_tool_metadata = collect_mcp_list_tools_metadata(streamed_result._model_input_items)
     if isinstance(filtered.input, list):
         hosted_mcp_tool_metadata.update(collect_mcp_list_tools_metadata(filtered.input))
@@ -1529,6 +1541,7 @@ async def run_single_turn(
     else:
         input = _prepare_turn_input_items(original_input, generated_items, reasoning_item_id_policy)
 
+    prior_tool_history_input = list(context_wrapper._tool_history_input)
     new_response = await get_new_response(
         agent,
         system_prompt,
@@ -1545,6 +1558,12 @@ async def run_single_turn(
         session=session,
         session_items_to_rewind=session_items_to_rewind,
     )
+    if server_conversation_tracker is not None:
+        context_wrapper._tool_history_input = prepare_model_input_items(
+            prior_tool_history_input,
+            context_wrapper._tool_history_input,
+        )
+        context_wrapper._tool_history_conversation_id = server_conversation_tracker.conversation_id
 
     return await get_single_step_result_from_response(
         agent=agent,
@@ -1587,6 +1606,7 @@ async def get_new_response(
     )
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
+    context_wrapper._tool_history_input = list(filtered.input)
 
     model = get_model(agent, run_config)
     model_settings = agent.model_settings.resolve(run_config.model_settings)

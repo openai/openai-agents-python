@@ -814,6 +814,259 @@ async def test_tool_call_context_includes_current_agent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tool_call_context_includes_conversation_history_snapshot() -> None:
+    model = FakeModel()
+    captured_contexts: list[ToolContext[Any]] = []
+
+    @function_tool(name_override="foo")
+    def foo(context: ToolContext[Any]) -> str:
+        captured_contexts.append(context)
+        return "tool_result"
+
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[foo],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("foo", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="user_message")
+
+    assert result.final_output == "done"
+    assert len(captured_contexts) == 1
+    assert captured_contexts[0].conversation_history == [get_text_input_item("user_message")]
+
+
+@pytest.mark.asyncio
+async def test_tool_call_context_conversation_history_includes_prior_session_turns() -> None:
+    model = FakeModel()
+    captured_contexts: list[ToolContext[Any]] = []
+
+    @function_tool(name_override="foo")
+    def foo(context: ToolContext[Any]) -> str:
+        captured_contexts.append(context)
+        return "tool_result"
+
+    agent = Agent(name="test", model=model, tools=[foo])
+    session = SimpleListSession()
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_text_message("first_done")],
+            [get_function_tool_call("foo", "{}")],
+            [get_text_message("second_done")],
+        ]
+    )
+
+    first_result = await Runner.run(agent, input="first_user", session=session)
+    second_result = await Runner.run(agent, input="second_user", session=session)
+
+    assert first_result.final_output == "first_done"
+    assert second_result.final_output == "second_done"
+    assert len(captured_contexts) == 1
+    history = captured_contexts[0].conversation_history
+    assert any(isinstance(item, dict) and item.get("content") == "first_user" for item in history)
+    assert any(isinstance(item, dict) and item.get("content") == "second_user" for item in history)
+    assert (
+        sum(1 for item in history if isinstance(item, dict) and item.get("content") == "first_user")
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_context_history_does_not_leak_across_reused_context_wrapper_runs() -> None:
+    model = FakeModel()
+    captured_contexts: list[ToolContext[Any]] = []
+
+    @function_tool(name_override="foo")
+    def foo(context: ToolContext[Any]) -> str:
+        captured_contexts.append(context)
+        return "tool_result"
+
+    agent = Agent(name="test", model=model, tools=[foo])
+    shared_context = RunContextWrapper(context=None)
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("foo", "{}")],
+            [get_text_message("done1")],
+            [get_function_tool_call("foo", "{}")],
+            [get_text_message("done2")],
+        ]
+    )
+
+    first_result = await Runner.run(
+        agent,
+        input="first_user",
+        conversation_id="conv-1",
+        context=shared_context,
+    )
+    second_result = await Runner.run(
+        agent,
+        input="second_user",
+        conversation_id="conv-2",
+        context=shared_context,
+    )
+
+    assert first_result.final_output == "done1"
+    assert second_result.final_output == "done2"
+    assert len(captured_contexts) == 2
+    first_history = captured_contexts[0].conversation_history
+    second_history = captured_contexts[1].conversation_history
+    assert any(
+        isinstance(item, dict) and item.get("content") == "first_user" for item in first_history
+    )
+    assert not any(
+        isinstance(item, dict) and item.get("content") == "first_user" for item in second_history
+    )
+    assert any(
+        isinstance(item, dict) and item.get("content") == "second_user" for item in second_history
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_context_history_persists_across_reused_wrapper_same_conversation_id() -> None:
+    model = FakeModel()
+    captured_contexts: list[ToolContext[Any]] = []
+
+    @function_tool(name_override="foo")
+    def foo(context: ToolContext[Any]) -> str:
+        captured_contexts.append(context)
+        return "tool_result"
+
+    agent = Agent(name="test", model=model, tools=[foo])
+    shared_context = RunContextWrapper(context=None)
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("foo", "{}")],
+            [get_text_message("done1")],
+            [get_function_tool_call("foo", "{}")],
+            [get_text_message("done2")],
+        ]
+    )
+
+    first_result = await Runner.run(
+        agent,
+        input="first_user",
+        conversation_id="conv-same",
+        context=shared_context,
+    )
+    second_result = await Runner.run(
+        agent,
+        input="second_user",
+        conversation_id="conv-same",
+        context=shared_context,
+    )
+
+    assert first_result.final_output == "done1"
+    assert second_result.final_output == "done2"
+    assert len(captured_contexts) == 2
+    second_history = captured_contexts[1].conversation_history
+    assert any(
+        isinstance(item, dict) and item.get("content") == "first_user" for item in second_history
+    )
+    assert any(
+        isinstance(item, dict) and item.get("content") == "second_user" for item in second_history
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_call_context_conversation_history_uses_filtered_turn_input() -> None:
+    model = FakeModel()
+    captured_contexts: list[ToolContext[Any]] = []
+
+    @function_tool(name_override="foo")
+    def foo(context: ToolContext[Any]) -> str:
+        captured_contexts.append(context)
+        return "tool_result"
+
+    agent = Agent(name="test", model=model, tools=[foo])
+
+    def redact_input(data):
+        return type(data.model_data)(
+            input=[get_text_input_item("redacted_user")],
+            instructions=data.model_data.instructions,
+        )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("foo", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent,
+        input="original_user",
+        run_config=RunConfig(call_model_input_filter=redact_input),
+    )
+
+    assert result.final_output == "done"
+    assert len(captured_contexts) == 1
+    assert captured_contexts[0].conversation_history == [get_text_input_item("redacted_user")]
+
+
+@pytest.mark.asyncio
+async def test_tool_call_context_conversation_history_applies_reasoning_id_policy() -> None:
+    model = FakeModel()
+    captured_contexts: list[ToolContext[Any]] = []
+    session = SimpleListSession()
+
+    @function_tool(name_override="foo")
+    def foo(context: ToolContext[Any]) -> str:
+        captured_contexts.append(context)
+        return "tool_result"
+
+    agent = Agent(name="test", model=model, tools=[foo])
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                ResponseReasoningItem(
+                    id="rs_history",
+                    type="reasoning",
+                    summary=[Summary(text="Thinking...", type="summary_text")],
+                ),
+                get_text_message("first_done"),
+            ],
+            [get_function_tool_call("foo", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+
+    first_result = await Runner.run(
+        agent,
+        input="user_message",
+        session=session,
+        run_config=RunConfig(reasoning_item_id_policy="omit"),
+    )
+    second_result = await Runner.run(
+        agent,
+        input="follow_up",
+        session=session,
+        run_config=RunConfig(reasoning_item_id_policy="omit"),
+    )
+
+    assert first_result.final_output == "first_done"
+    assert second_result.final_output == "done"
+    assert len(captured_contexts) == 1
+    reasoning_items = [
+        item
+        for item in captured_contexts[0].conversation_history
+        if isinstance(item, dict) and item.get("type") == "reasoning"
+    ]
+    assert len(reasoning_items) == 1
+    assert "id" not in reasoning_items[0]
+
+
+@pytest.mark.asyncio
 async def test_handoffs():
     model = FakeModel()
     agent_1 = Agent(
@@ -970,6 +1223,48 @@ async def test_nested_handoff_filters_reasoning_items_from_model_input():
         item["type"] for item in handoff_input if isinstance(item.get("type"), str)
     ]
     assert "reasoning" not in handoff_input_types
+
+
+@pytest.mark.asyncio
+async def test_resumed_tool_context_conversation_history_uses_filtered_turn_input() -> None:
+    model = FakeModel()
+    captured_contexts: list[ToolContext[Any]] = []
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(context: ToolContext[Any]) -> str:
+        captured_contexts.append(context)
+        return "ok"
+
+    agent = Agent(name="test", model=model, tools=[approval_tool])
+
+    def redact_input(data):
+        return type(data.model_data)(
+            input=[get_text_input_item("redacted_user")],
+            instructions=data.model_data.instructions,
+        )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("approval_tool", "{}", call_id="approval-call")],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = await Runner.run(
+        agent,
+        input="original_user",
+        run_config=RunConfig(call_model_input_filter=redact_input),
+    )
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    resumed = await Runner.run(agent, state)
+
+    assert resumed.final_output == "done"
+    assert len(captured_contexts) == 1
+    assert captured_contexts[0].conversation_history == [get_text_input_item("redacted_user")]
 
 
 @pytest.mark.asyncio
@@ -2773,6 +3068,41 @@ async def test_previous_response_id_passed_between_runs_streamed_multi_turn():
         pass
 
     assert model.last_turn_args.get("previous_response_id") == "resp-789"
+
+
+@pytest.mark.asyncio
+async def test_tool_context_history_includes_prior_context_in_conversation_id_mode() -> None:
+    model = FakeModel()
+    captured_contexts: list[ToolContext[Any]] = []
+
+    @function_tool(name_override="first_tool")
+    def first_tool() -> str:
+        return "first_result"
+
+    @function_tool(name_override="second_tool")
+    def second_tool(context: ToolContext[Any]) -> str:
+        captured_contexts.append(context)
+        return "second_result"
+
+    agent = Agent(name="test", model=model, tools=[first_tool, second_tool])
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("first_tool", "{}")],
+            [get_function_tool_call("second_tool", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="first_user", conversation_id="conv-test")
+
+    assert result.final_output == "done"
+    assert len(captured_contexts) == 1
+    history = captured_contexts[0].conversation_history
+    assert any(isinstance(item, dict) and item.get("content") == "first_user" for item in history)
+    assert any(
+        isinstance(item, dict) and item.get("type") == "function_call_output" for item in history
+    )
 
 
 @pytest.mark.asyncio

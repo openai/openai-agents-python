@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any, cast
 
 from ..agent import Agent
@@ -311,6 +312,11 @@ def update_run_state_for_interruption(
         run_state._session_items = list(session_items)
     run_state._current_step = next_step
     run_state._current_turn = current_turn
+    run_state._interrupted_turn_input = (
+        copy.deepcopy(run_state._context._tool_history_input)
+        if run_state._context is not None
+        else None
+    )
 
 
 async def save_turn_items_if_needed(

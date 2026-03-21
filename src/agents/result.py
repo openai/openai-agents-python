@@ -100,6 +100,10 @@ def _populate_state_from_result(
 
     interruptions = list(getattr(result, "interruptions", []))
     if interruptions:
+        state._interrupted_turn_input = copy.deepcopy(result.context_wrapper._tool_history_input)
+    else:
+        state._interrupted_turn_input = None
+    if interruptions:
         state._current_step = NextStepInterruption(interruptions=interruptions)
 
     trace_state = getattr(result, "_trace_state", None)

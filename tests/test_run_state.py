@@ -3969,7 +3969,7 @@ class TestRunStateSerializationEdgeCases:
             await RunState.from_json(agent, state_json)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("schema_version", ["1.7", "2.0"])
+    @pytest.mark.parametrize("schema_version", ["1.8", "2.0"])
     async def test_from_json_unsupported_schema_version(self, schema_version: str):
         """Test that from_json raises error when schema version is unsupported."""
         agent = Agent(name="TestAgent")
@@ -4021,7 +4021,7 @@ class TestRunStateSerializationEdgeCases:
     def test_supported_schema_versions_match_released_boundary(self):
         """The support set should include released versions plus the current unreleased writer."""
         assert SUPPORTED_SCHEMA_VERSIONS == frozenset(
-            {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", CURRENT_SCHEMA_VERSION}
+            {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", CURRENT_SCHEMA_VERSION}
         )
 
     @pytest.mark.asyncio
@@ -4956,6 +4956,39 @@ class TestDeserializeItemsEdgeCases:
         state = await RunState.from_json(agent, state_json)
         # Should handle string original_input (line 762-763)
         assert state._original_input == "string_input"
+
+    async def test_run_state_round_trips_interrupted_turn_input(self):
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = make_state(agent, context=context, original_input="input", max_turns=5)
+        state._interrupted_turn_input = [{"role": "user", "content": "redacted"}]
+
+        restored = await RunState.from_json(agent, state.to_json())
+
+        assert restored._interrupted_turn_input == state._interrupted_turn_input
+        assert restored._interrupted_turn_input is not state._interrupted_turn_input
+
+    async def test_run_state_serializes_model_like_interrupted_turn_input(self):
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = make_state(agent, context=context, original_input="input", max_turns=5)
+        state._interrupted_turn_input = [
+            cast(
+                TResponseInputItem,
+                ResponseOutputMessage(
+                    id="msg_1",
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[ResponseOutputText(text="hello", annotations=[], type="output_text")],
+                ),
+            )
+        ]
+
+        json_data = state.to_json()
+
+        assert isinstance(json_data["interrupted_turn_input"], list)
+        assert isinstance(json_data["interrupted_turn_input"][0], dict)
 
     async def test_from_string_handles_non_dict_items_in_original_input(self):
         """Test that from_string handles non-dict items in original_input list."""

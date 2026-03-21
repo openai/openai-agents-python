@@ -20,6 +20,7 @@ from ..items import (
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    TResponseInputItem,
 )
 from ..run_context import RunContextWrapper
 from ..tool import FunctionTool, MCPToolApprovalRequest
@@ -522,6 +523,7 @@ async def _execute_tool_plan(
     hooks,
     context_wrapper: RunContextWrapper[Any],
     run_config,
+    conversation_history: list[TResponseInputItem] | None = None,
     parallel: bool = True,
 ) -> tuple[
     list[Any],
@@ -556,6 +558,7 @@ async def _execute_tool_plan(
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=run_config,
+                conversation_history=conversation_history,
                 isolate_parallel_failures=isolate_function_tool_failures,
             ),
             execute_computer_actions(
@@ -598,6 +601,7 @@ async def _execute_tool_plan(
             hooks=hooks,
             context_wrapper=context_wrapper,
             config=run_config,
+            conversation_history=conversation_history,
             isolate_parallel_failures=isolate_function_tool_failures,
         )
         computer_results = await execute_computer_actions(

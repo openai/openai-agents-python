@@ -73,6 +73,7 @@ from .items import (
 )
 from .logger import logger
 from .run_context import RunContextWrapper
+from .run_internal.items import normalize_input_items_for_api
 from .tool import (
     ApplyPatchTool,
     ComputerTool,
@@ -118,9 +119,9 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.6"
+CURRENT_SCHEMA_VERSION = "1.7"
 SUPPORTED_SCHEMA_VERSIONS = frozenset(
-    {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", CURRENT_SCHEMA_VERSION}
+    {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", CURRENT_SCHEMA_VERSION}
 )
 
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
@@ -187,6 +188,9 @@ class RunState(Generic[TContext, TAgent]):
     _reasoning_item_id_policy: Literal["preserve", "omit"] | None = None
     """How reasoning item IDs are represented in next-turn model input."""
 
+    _interrupted_turn_input: list[TResponseInputItem] | None = None
+    """Filtered turn input snapshot for the currently interrupted turn, if any."""
+
     _input_guardrail_results: list[InputGuardrailResult] = field(default_factory=list)
     """Results from input guardrails applied to the run."""
 
@@ -240,6 +244,7 @@ class RunState(Generic[TContext, TAgent]):
         self._previous_response_id = previous_response_id
         self._auto_previous_response_id = auto_previous_response_id
         self._reasoning_item_id_policy = None
+        self._interrupted_turn_input = None
         self._model_responses = []
         self._generated_items = []
         self._session_items = []
@@ -657,6 +662,11 @@ class RunState(Generic[TContext, TAgent]):
             "previous_response_id": self._previous_response_id,
             "auto_previous_response_id": self._auto_previous_response_id,
             "reasoning_item_id_policy": self._reasoning_item_id_policy,
+            "interrupted_turn_input": (
+                normalize_input_items_for_api(copy.deepcopy(self._interrupted_turn_input))
+                if isinstance(self._interrupted_turn_input, list)
+                else None
+            ),
         }
 
         generated_items = self._merge_generated_items_with_processed()
@@ -2288,6 +2298,11 @@ async def _build_run_state_from_json(
         state._reasoning_item_id_policy = cast(Literal["preserve", "omit"], serialized_policy)
     else:
         state._reasoning_item_id_policy = None
+    serialized_interrupted_turn_input = state_json.get("interrupted_turn_input")
+    if isinstance(serialized_interrupted_turn_input, list):
+        state._interrupted_turn_input = copy.deepcopy(serialized_interrupted_turn_input)
+    else:
+        state._interrupted_turn_input = None
     state.set_tool_use_tracker_snapshot(state_json.get("tool_use_tracker", {}))
     trace_data = state_json.get("trace")
     if isinstance(trace_data, Mapping):

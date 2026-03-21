@@ -1219,6 +1219,45 @@ async def test_execute_function_tool_calls_eager_task_factory_tracks_state_safel
 
 
 @pytest.mark.asyncio
+async def test_execute_function_tool_calls_preserves_parent_tool_context_history_when_unset():
+    captured_contexts: list[ToolContext[Any]] = []
+
+    @function_tool(name_override="history_tool")
+    def history_tool(context: ToolContext[Any]) -> str:
+        captured_contexts.append(context)
+        return "ok"
+
+    tool_run = ToolRunFunction(
+        tool_call=cast(
+            ResponseFunctionToolCall,
+            get_function_tool_call("history_tool", "{}", call_id="call-history"),
+        ),
+        function_tool=history_tool,
+    )
+    parent_history: list[TResponseInputItem] = [get_text_input_item("hello")]
+    context_wrapper = ToolContext(
+        context=None,
+        tool_name="parent_tool",
+        tool_call_id="parent-call",
+        tool_arguments="{}",
+        conversation_history=parent_history,
+    )
+
+    function_results, _, _ = await execute_function_tool_calls(
+        agent=Agent(name="test", tools=[history_tool]),
+        tool_runs=[tool_run],
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    assert [result.output for result in function_results] == ["ok"]
+    assert len(captured_contexts) == 1
+    assert captured_contexts[0].conversation_history == parent_history
+    assert captured_contexts[0].conversation_history is not parent_history
+
+
+@pytest.mark.asyncio
 async def test_execute_function_tool_calls_collapse_trace_name_for_top_level_deferred_tools():
     async def _shipping_eta(tracking_number: str) -> str:
         return f"eta:{tracking_number}"

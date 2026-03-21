@@ -602,6 +602,7 @@ class Agent(AgentBase, Generic[TContext]):
                     tool_namespace=context.tool_namespace,
                     agent=context.agent,
                     run_config=resolved_run_config,
+                    conversation_history=context.conversation_history,
                 )
                 set_agent_tool_state_scope(nested_context, tool_state_scope_id)
                 if should_capture_tool_input:

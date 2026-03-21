@@ -698,6 +698,43 @@ async def test_agent_as_tool_structured_input_sets_tool_input(
 
 
 @pytest.mark.asyncio
+async def test_agent_as_tool_preserves_conversation_history_for_nested_tool_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested ToolContext instances should inherit conversation history."""
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+            self.interruptions: list[ToolApprovalItem] = []
+
+    agent = Agent(name="history-agent")
+    tool = agent.as_tool(tool_name="history_tool", tool_description="History tool")
+    history: list[TResponseInputItem] = [{"role": "user", "content": "hello"}]
+
+    async def fake_run(cls, /, starting_agent, input, **kwargs) -> DummyResult:
+        del cls, starting_agent, input
+        nested_context = kwargs.get("context")
+        assert isinstance(nested_context, ToolContext)
+        assert nested_context.conversation_history == history
+        assert nested_context.conversation_history is not history
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="history_tool",
+        tool_call_id="history-call",
+        tool_arguments='{"input":"hello"}',
+        conversation_history=history,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input":"hello"}')
+    assert output == "ok"
+
+
+@pytest.mark.asyncio
 async def test_agent_as_tool_clears_stale_tool_input_for_plain_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

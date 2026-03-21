@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, cast
@@ -87,7 +88,10 @@ from ..util._approvals import evaluate_needs_approval_setting
 from .items import (
     REJECTION_MESSAGE,
     apply_patch_rejection_item,
+    deduplicate_input_items_preferring_latest,
     function_rejection_item,
+    prepare_model_input_items,
+    run_items_to_input_items,
     shell_rejection_item,
 )
 from .run_steps import (
@@ -139,6 +143,7 @@ from .tool_planning import (
     _make_unique_item_appender,
     _select_function_tool_runs_for_resume,
 )
+from .turn_preparation import maybe_filter_model_input
 
 __all__ = [
     "execute_final_output_step",
@@ -151,6 +156,13 @@ __all__ = [
     "get_single_step_result_from_response",
     "run_final_output_hooks",
 ]
+
+
+def _build_function_tool_conversation_history(
+    turn_input: Sequence[TResponseInputItem],
+) -> list[TResponseInputItem]:
+    """Build the visible history snapshot for a local function tool invocation."""
+    return list(turn_input)
 
 
 async def _maybe_finalize_from_tool_results(
@@ -528,6 +540,10 @@ async def execute_tools_and_side_effects(
         new_items=processed_response.new_items,
     )
 
+    conversation_history = _build_function_tool_conversation_history(
+        context_wrapper._tool_history_input
+    )
+
     (
         function_results,
         tool_input_guardrail_results,
@@ -542,6 +558,7 @@ async def execute_tools_and_side_effects(
         hooks=hooks,
         context_wrapper=context_wrapper,
         run_config=run_config,
+        conversation_history=conversation_history,
     )
     new_step_items.extend(
         _build_tool_result_items(
@@ -1103,6 +1120,35 @@ async def resolve_interrupted_turn(
         apply_patch_calls=approved_apply_patch_calls,
     )
 
+    resolved_reasoning_item_id_policy = (
+        run_config.reasoning_item_id_policy
+        if run_config.reasoning_item_id_policy is not None
+        else (run_state._reasoning_item_id_policy if run_state is not None else None)
+    )
+    if run_state is not None and isinstance(run_state._interrupted_turn_input, list):
+        context_wrapper._tool_history_input = copy.deepcopy(run_state._interrupted_turn_input)
+    else:
+        reconstructed_turn_input = prepare_model_input_items(
+            ItemHelpers.input_to_new_input_list(original_input),
+            run_items_to_input_items(original_pre_step_items, resolved_reasoning_item_id_policy),
+        )
+        system_prompt = await agent.get_system_prompt(context_wrapper)
+        filtered_model_input = await maybe_filter_model_input(
+            agent=agent,
+            run_config=run_config,
+            context_wrapper=context_wrapper,
+            input_items=reconstructed_turn_input,
+            system_instructions=system_prompt,
+        )
+        if isinstance(filtered_model_input.input, list):
+            filtered_model_input.input = deduplicate_input_items_preferring_latest(
+                filtered_model_input.input
+            )
+        context_wrapper._tool_history_input = list(filtered_model_input.input)
+    conversation_history = _build_function_tool_conversation_history(
+        context_wrapper._tool_history_input
+    )
+
     (
         function_results,
         tool_input_guardrail_results,
@@ -1117,6 +1163,7 @@ async def resolve_interrupted_turn(
         hooks=hooks,
         context_wrapper=context_wrapper,
         run_config=run_config,
+        conversation_history=conversation_history,
     )
 
     for interruption in _collect_tool_interruptions(

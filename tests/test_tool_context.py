@@ -4,6 +4,7 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall
 
 from agents import Agent
+from agents.items import TResponseInputItem
 from agents.run_config import RunConfig
 from agents.run_context import RunContextWrapper
 from agents.tool import FunctionTool, invoke_function_tool
@@ -49,6 +50,27 @@ def test_tool_context_from_agent_context_populates_fields() -> None:
     assert tool_ctx.tool_call_id == "call-123"
     assert tool_ctx.tool_arguments == '{"a": 1}'
     assert tool_ctx.agent is agent
+
+
+def test_tool_context_from_agent_context_copies_conversation_history() -> None:
+    tool_call = ResponseFunctionToolCall(
+        type="function_call",
+        name="test_tool",
+        call_id="call-history",
+        arguments="{}",
+    )
+    ctx = make_context_wrapper()
+    history: list[TResponseInputItem] = [{"role": "user", "content": "hello"}]
+
+    tool_ctx = ToolContext.from_agent_context(
+        ctx,
+        tool_call_id="call-history",
+        tool_call=tool_call,
+        conversation_history=history,
+    )
+
+    assert tool_ctx.conversation_history == history
+    assert tool_ctx.conversation_history is not history
 
 
 def test_tool_context_agent_none_by_default() -> None:
@@ -182,6 +204,39 @@ def test_tool_context_from_tool_context_inherits_run_config() -> None:
     )
 
     assert derived_context.run_config is parent_run_config
+
+
+def test_tool_context_from_tool_context_inherits_conversation_history() -> None:
+    original_call = ResponseFunctionToolCall(
+        type="function_call",
+        name="test_tool",
+        call_id="call-3",
+        arguments="{}",
+    )
+    derived_call = ResponseFunctionToolCall(
+        type="function_call",
+        name="test_tool",
+        call_id="call-4",
+        arguments="{}",
+    )
+    history: list[TResponseInputItem] = [{"role": "user", "content": "hello"}]
+    parent_context: ToolContext[dict[str, object]] = ToolContext(
+        context={},
+        tool_name="test_tool",
+        tool_call_id="call-3",
+        tool_arguments="{}",
+        tool_call=original_call,
+        conversation_history=history,
+    )
+
+    derived_context = ToolContext.from_agent_context(
+        parent_context,
+        tool_call_id="call-4",
+        tool_call=derived_call,
+    )
+
+    assert derived_context.conversation_history == history
+    assert derived_context.conversation_history is not history
 
 
 def test_tool_context_from_agent_context_prefers_explicit_run_config() -> None:

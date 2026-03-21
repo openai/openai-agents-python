@@ -126,6 +126,7 @@ plus additional fields specific to the current tool call:
 - `tool_arguments` – the raw argument string passed to the tool  
 - `tool_namespace` – the Responses namespace for the tool call, when the tool was loaded through `tool_namespace()` or another namespaced surface  
 - `qualified_tool_name` – the tool name qualified with the namespace when one is available  
+- `conversation_history` – a visible history snapshot available to the tool at invocation time. For local function tools in non-streaming runs, this includes the current input plus prior visible run items that can be represented as model input.  
 
 Use `ToolContext` when you need tool-level metadata during execution.  
 For general context sharing between agents and tools, `RunContextWrapper` remains sufficient. Because `ToolContext` extends `RunContextWrapper`, it can also expose `.tool_input` when a nested `Agent.as_tool()` run supplied structured input.

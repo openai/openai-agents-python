@@ -57,6 +57,9 @@ class ToolContext(RunContextWrapper[TContext]):
     run_config: RunConfig | None = None
     """The active run config for this tool call, when available."""
 
+    conversation_history: list[TResponseInputItem] = field(default_factory=list)
+    """Visible conversation history snapshot available when this tool is invoked."""
+
     def __init__(
         self,
         context: TContext,
@@ -69,6 +72,7 @@ class ToolContext(RunContextWrapper[TContext]):
         tool_namespace: str | None = None,
         agent: AgentBase[Any] | None = None,
         run_config: RunConfig | None = None,
+        conversation_history: list[TResponseInputItem] | None = None,
         turn_input: list[TResponseInputItem] | None = None,
         _approvals: dict[str, _ApprovalRecord] | None = None,
         tool_input: Any | None = None,
@@ -82,6 +86,7 @@ class ToolContext(RunContextWrapper[TContext]):
             _approvals={} if _approvals is None else _approvals,
             tool_input=tool_input,
         )
+        self._tool_history_input = list(turn_input or [])
         self.tool_name = (
             _assert_must_pass_tool_name() if tool_name is _MISSING else cast(str, tool_name)
         )
@@ -103,6 +108,7 @@ class ToolContext(RunContextWrapper[TContext]):
         )
         self.agent = agent
         self.run_config = run_config
+        self.conversation_history = list(conversation_history or [])
 
     @property
     def qualified_tool_name(self) -> str:
@@ -119,6 +125,7 @@ class ToolContext(RunContextWrapper[TContext]):
         *,
         tool_namespace: str | None = None,
         run_config: RunConfig | None = None,
+        conversation_history: list[TResponseInputItem] | None = None,
     ) -> ToolContext:
         """
         Create a ToolContext from a RunContextWrapper.
@@ -137,6 +144,9 @@ class ToolContext(RunContextWrapper[TContext]):
         tool_run_config = run_config
         if tool_run_config is None and isinstance(context, ToolContext):
             tool_run_config = context.run_config
+        tool_conversation_history = conversation_history
+        if tool_conversation_history is None and isinstance(context, ToolContext):
+            tool_conversation_history = context.conversation_history
 
         tool_context = cls(
             tool_name=tool_name,
@@ -155,7 +165,10 @@ class ToolContext(RunContextWrapper[TContext]):
             ),
             agent=tool_agent,
             run_config=tool_run_config,
+            conversation_history=tool_conversation_history,
             **base_values,
         )
+        tool_context._tool_history_input = list(context._tool_history_input)
+        tool_context._tool_history_conversation_id = context._tool_history_conversation_id
         set_agent_tool_state_scope(tool_context, get_agent_tool_state_scope(context))
         return tool_context

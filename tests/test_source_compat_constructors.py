@@ -22,6 +22,7 @@ from agents import (
     tool_input_guardrail,
     tool_output_guardrail,
 )
+from agents.run_context import _ApprovalRecord
 from agents.tool_context import ToolContext
 
 
@@ -157,6 +158,18 @@ def test_tool_context_supports_agent_keyword_argument() -> None:
     assert context.tool_call_id == "call_id"
     assert context.tool_arguments == '{"x":1}'
     assert context.agent is agent
+
+
+def test_run_context_wrapper_positional_constructor_preserves_legacy_slots() -> None:
+    usage = Usage()
+    turn_input: list[Any] = [{"role": "user", "content": "hello"}]
+    approvals = {"tool": _ApprovalRecord(approved=True)}
+
+    wrapper = RunContextWrapper(None, usage, turn_input, approvals)
+
+    assert wrapper.usage is usage
+    assert wrapper.turn_input == turn_input
+    assert wrapper._approvals is approvals
 
 
 def test_run_result_v070_positional_constructor_still_works() -> None:

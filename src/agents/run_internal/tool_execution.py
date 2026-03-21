@@ -55,6 +55,7 @@ from ..items import (
     RunItemBase,
     ToolApprovalItem,
     ToolCallOutputItem,
+    TResponseInputItem,
 )
 from ..logger import logger
 from ..model_settings import ModelSettings
@@ -1284,6 +1285,7 @@ class _FunctionToolBatchExecutor:
         hooks: RunHooks[Any],
         context_wrapper: RunContextWrapper[Any],
         config: RunConfig,
+        conversation_history: list[TResponseInputItem] | None,
         isolate_parallel_failures: bool | None,
     ) -> None:
         self.agent = agent
@@ -1291,6 +1293,9 @@ class _FunctionToolBatchExecutor:
         self.hooks = hooks
         self.context_wrapper = context_wrapper
         self.config = config
+        self.conversation_history = (
+            list(conversation_history) if conversation_history is not None else None
+        )
         self.isolate_parallel_failures = (
             len(tool_runs) > 1 if isolate_parallel_failures is None else isolate_parallel_failures
         )
@@ -1465,6 +1470,7 @@ class _FunctionToolBatchExecutor:
                 tool_namespace=tool_context_namespace,
                 agent=self.agent,
                 run_config=self.config,
+                conversation_history=self.conversation_history,
             )
             agent_hooks = self.agent.hooks
             if self.config.trace_include_sensitive_data:
@@ -1797,6 +1803,7 @@ async def execute_function_tool_calls(
     hooks: RunHooks[Any],
     context_wrapper: RunContextWrapper[Any],
     config: RunConfig,
+    conversation_history: list[TResponseInputItem] | None = None,
     isolate_parallel_failures: bool | None = None,
 ) -> tuple[
     list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
@@ -1808,6 +1815,7 @@ async def execute_function_tool_calls(
         hooks=hooks,
         context_wrapper=context_wrapper,
         config=config,
+        conversation_history=conversation_history,
         isolate_parallel_failures=isolate_parallel_failures,
     ).execute()
 
