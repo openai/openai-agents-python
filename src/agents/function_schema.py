@@ -35,6 +35,8 @@ class FuncSchema:
     """The signature of the function."""
     takes_context: bool = False
     """Whether the function takes a RunContextWrapper argument (must be the first argument)."""
+    self_or_cls_skipped: bool = False
+    """Whether an unannotated self/cls first parameter was skipped during schema generation."""
     strict_json_schema: bool = True
     """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
     as it increases the likelihood of correct JSON input."""
@@ -285,6 +287,7 @@ def function_schema(
     sig = inspect.signature(func)
     params = list(sig.parameters.items())
     takes_context = False
+    self_or_cls_skipped = False
     filtered_params = []
 
     if params:
@@ -298,22 +301,25 @@ def function_schema(
             else:
                 filtered_params.append((first_name, first_param))
         elif first_name in ("self", "cls"):
-            # An unannotated self/cls means this is an unbound method or classmethod.
-            # Bound methods (e.g., instance.method) already have self stripped by Python.
-            raise UserError(
-                f"Function {func.__name__} has an unbound '{first_name}' parameter. "
-                f"Pass a bound method (e.g., instance.{func.__name__}) instead of the "
-                f"unbound class method."
-            )
+            # Skip unannotated self/cls so @function_tool works on class methods.
+            # Bound methods already have self stripped by Python, so this handles
+            # the unbound case (decoration time). The caller must invoke with a
+            # bound method for correct runtime behavior.
+            self_or_cls_skipped = True
         else:
             filtered_params.append((first_name, first_param))
 
-    # For parameters other than the first, raise error if any use RunContextWrapper or ToolContext
-    for name, param in params[1:]:
+    # For remaining parameters: if self/cls was skipped, the second param is effectively first
+    # and may be a context parameter.
+    remaining_params = params[1:]
+    for idx, (name, param) in enumerate(remaining_params):
         ann = type_hints.get(name, param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
             if origin is RunContextWrapper or origin is ToolContext:
+                if self_or_cls_skipped and idx == 0:
+                    takes_context = True
+                    continue
                 raise UserError(
                     f"RunContextWrapper/ToolContext param found at non-first position in function"
                     f" {func.__name__}"
@@ -417,14 +423,21 @@ def function_schema(
     if strict_json_schema:
         json_schema = ensure_strict_json_schema(json_schema)
 
-    # 5. Return as a FuncSchema dataclass
+    # 5. Build stored signature excluding self/cls if it was skipped
+    stored_sig = sig
+    if self_or_cls_skipped:
+        new_params = [p for p in sig.parameters.values() if p.name not in ("self", "cls")]
+        stored_sig = sig.replace(parameters=new_params)
+
+    # 6. Return as a FuncSchema dataclass
     return FuncSchema(
         name=func_name,
         # Ensure description_override takes precedence even if docstring info is disabled.
         description=description_override or (doc_info.description if doc_info else None),
         params_pydantic_model=dynamic_model,
         params_json_schema=json_schema,
-        signature=sig,
+        signature=stored_sig,
         takes_context=takes_context,
+        self_or_cls_skipped=self_or_cls_skipped,
         strict_json_schema=strict_json_schema,
     )

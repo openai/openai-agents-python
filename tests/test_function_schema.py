@@ -902,8 +902,8 @@ def test_bound_method_self_not_in_schema():
     assert fs.params_json_schema.get("required") == ["name"]
 
 
-def test_unbound_cls_param_raises():
-    """Test that unbound classmethods with unannotated cls raise UserError."""
+def test_unbound_cls_param_skipped():
+    """Test that unbound classmethods with unannotated cls have cls skipped."""
 
     # Simulate a function whose first param is named cls with no annotation
     code = compile("def greet(cls, name: str) -> str: ...", "<test>", "exec")
@@ -912,8 +912,12 @@ def test_unbound_cls_param_raises():
     fn = ns["greet"]
     fn.__annotations__ = {"name": str, "return": str}
 
-    with pytest.raises(UserError, match="unbound 'cls' parameter"):
-        function_schema(fn, use_docstring_info=False)
+    fs = function_schema(fn, use_docstring_info=False)
+    props = fs.params_json_schema.get("properties", {})
+    assert "cls" not in props
+    assert "name" in props
+    assert fs.self_or_cls_skipped is True
+    assert "cls" not in fs.signature.parameters
 
 
 def test_bound_method_with_context_second_param():
@@ -945,8 +949,8 @@ def test_method_context_not_immediately_after_self_raises():
         function_schema(obj.greet, use_docstring_info=False)
 
 
-def test_unbound_method_with_self_raises():
-    """Test that unbound methods with unannotated self raise UserError."""
+def test_unbound_method_self_skipped_with_context():
+    """Test that unbound methods with self+context have self skipped and context recognized."""
 
     # Simulate an unbound method with self as first param
     code = compile(
@@ -957,8 +961,48 @@ def test_unbound_method_with_self_raises():
     fn = ns["greet"]
     fn.__annotations__ = {"ctx": RunContextWrapper[None], "name": str, "return": str}
 
-    with pytest.raises(UserError, match="unbound 'self' parameter"):
-        function_schema(fn, use_docstring_info=False)
+    fs = function_schema(fn, use_docstring_info=False)
+    props = fs.params_json_schema.get("properties", {})
+    assert "self" not in props
+    assert "ctx" not in props
+    assert "name" in props
+    assert fs.self_or_cls_skipped is True
+    assert fs.takes_context is True
+    assert "self" not in fs.signature.parameters
+
+
+def test_unbound_method_to_call_args_alignment():
+    """Test that to_call_args produces correct args when self was skipped."""
+
+    code = compile("def greet(self, name: str, count: int = 1) -> str: ...", "<test>", "exec")
+    ns: dict[str, Any] = {}
+    exec(code, ns)  # noqa: S102
+    fn = ns["greet"]
+    fn.__annotations__ = {"name": str, "count": int, "return": str}
+
+    fs = function_schema(fn, use_docstring_info=False)
+    assert fs.self_or_cls_skipped is True
+
+    parsed = fs.params_pydantic_model(name="world", count=3)
+    args, kwargs = fs.to_call_args(parsed)
+    assert args == ["world", 3]
+    assert kwargs == {}
+
+
+def test_decorator_pattern_does_not_raise():
+    """Test that function_schema works on unbound methods (decorator pattern)."""
+
+    # This simulates @function_tool applied at class definition time
+    class MyTools:
+        def search(self, query: str) -> str:
+            return query
+
+    # At decoration time, MyTools.search is unbound
+    fs = function_schema(MyTools.search, use_docstring_info=False)
+    props = fs.params_json_schema.get("properties", {})
+    assert "self" not in props
+    assert "query" in props
+    assert fs.self_or_cls_skipped is True
 
 
 def test_regular_unannotated_first_param_still_included():
