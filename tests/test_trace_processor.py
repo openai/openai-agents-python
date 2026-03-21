@@ -895,10 +895,24 @@ def test_flush_traces_tolerates_provider_without_override():
         def gen_group_id(self):
             return "g"
 
-        def create_trace(self, name, **kwargs):
+        def create_trace(  # type: ignore[override]
+            self,
+            name: str,
+            trace_id: str | None = None,
+            group_id: str | None = None,
+            metadata: dict[str, Any] | None = None,
+            disabled: bool = False,
+            tracing: Any = None,
+        ) -> Any:
             raise NotImplementedError
 
-        def create_span(self, span_data, **kwargs):
+        def create_span(  # type: ignore[override]
+            self,
+            span_data: Any,
+            span_id: str | None = None,
+            parent: Any = None,
+            disabled: bool = False,
+        ) -> Any:
             raise NotImplementedError
 
     provider = MinimalProvider()

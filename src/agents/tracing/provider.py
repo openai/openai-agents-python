@@ -195,6 +195,7 @@ class TraceProvider(ABC):
         ``TraceProvider`` subclasses continue to work without modification.
         Override this in your provider if you need custom flush behaviour.
         """
+        pass
 
     def shutdown(self) -> None:
         """Clean up any resources used by the provider.
@@ -202,6 +203,7 @@ class TraceProvider(ABC):
         The default implementation is a no-op for the same backward-
         compatibility reasons as :meth:`force_flush`.
         """
+        pass
 
 
 class DefaultTraceProvider(TraceProvider):
