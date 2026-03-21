@@ -391,6 +391,7 @@ async def test_execute_invokes_hooks_and_returns_tool_call_output() -> None:
     assert raw["output"]["type"] == "computer_screenshot"
     assert "image_url" in raw["output"]
     assert raw["output"]["image_url"].endswith("xyz")
+    assert "acknowledged_safety_checks" not in raw
 
 
 @pytest.mark.asyncio

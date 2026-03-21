@@ -169,7 +169,11 @@ class ComputerAction:
                         "image_url": image_url,
                     },
                     type="computer_call_output",
-                    acknowledged_safety_checks=acknowledged_safety_checks,
+                    **(
+                        {"acknowledged_safety_checks": acknowledged_safety_checks}
+                        if acknowledged_safety_checks is not None
+                        else {}
+                    ),
                 ),
             )
 
