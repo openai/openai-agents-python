@@ -134,11 +134,17 @@ class Handoff(Generic[TContext, TAgent]):
     input history plus ``input_items`` when provided, otherwise it receives ``new_items``. Use
     ``input_items`` to filter model input while keeping ``new_items`` intact for session history.
     IMPORTANT: in streaming mode, we will not stream anything as a result of this function. The
-    items generated before will already have been streamed.
+    items generated before will already have been streamed. Server-managed conversations
+    (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) do not support
+    handoff input filters.
     """
 
     nest_handoff_history: bool | None = None
-    """Override the run-level ``nest_handoff_history`` behavior for this handoff only."""
+    """Override the run-level ``nest_handoff_history`` behavior for this handoff only.
+
+    Server-managed conversations (`conversation_id`, `previous_response_id`, or
+    `auto_previous_response_id`) automatically disable nested handoff history with a warning.
+    """
 
     strict_json_schema: bool = True
     """Whether the input JSON schema is in strict mode. We strongly recommend setting this to True

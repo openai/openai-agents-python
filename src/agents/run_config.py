@@ -157,13 +157,17 @@ class RunConfig:
     handoff_input_filter: HandoffInputFilter | None = None
     """A global input filter to apply to all handoffs. If `Handoff.input_filter` is set, then that
     will take precedence. The input filter allows you to edit the inputs that are sent to the new
-    agent. See the documentation in `Handoff.input_filter` for more details.
+    agent. See the documentation in `Handoff.input_filter` for more details. Server-managed
+    conversations (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`)
+    do not support handoff input filters.
     """
 
     nest_handoff_history: bool = False
     """Opt-in beta: wrap prior run history in a single assistant message before handing off when no
     custom input filter is set. This is disabled by default while we stabilize nested handoffs; set
-    to True to enable the collapsed transcript behavior.
+    to True to enable the collapsed transcript behavior. Server-managed conversations
+    (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) automatically
+    disable this behavior with a warning.
     """
 
     handoff_history_mapper: HandoffHistoryMapper | None = None
