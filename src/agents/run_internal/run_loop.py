@@ -615,6 +615,7 @@ async def start_streaming(
                         context_wrapper=context_wrapper,
                         run_config=run_config,
                         run_state=run_state,
+                        server_managed_conversation=server_conversation_tracker is not None,
                     )
 
                     tool_use_tracker.record_processed_response(
@@ -1431,6 +1432,7 @@ async def run_single_turn_streamed(
         hooks=hooks,
         context_wrapper=context_wrapper,
         run_config=run_config,
+        server_managed_conversation=server_conversation_tracker is not None,
         tool_use_tracker=tool_use_tracker,
         event_queue=streamed_result._event_queue,
     )
@@ -1557,6 +1559,7 @@ async def run_single_turn(
         hooks=hooks,
         context_wrapper=context_wrapper,
         run_config=run_config,
+        server_managed_conversation=server_conversation_tracker is not None,
         tool_use_tracker=tool_use_tracker,
     )
 

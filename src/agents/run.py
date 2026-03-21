@@ -664,6 +664,9 @@ class AgentRunner:
                                 context_wrapper=context_wrapper,
                                 run_config=run_config,
                                 run_state=run_state,
+                                server_managed_conversation=(
+                                    server_conversation_tracker is not None
+                                ),
                             )
 
                             if run_state._last_processed_response is not None:

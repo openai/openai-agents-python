@@ -40,6 +40,7 @@ from agents import (
     retry_policies,
     tool_namespace,
 )
+from agents.extensions.handoff_filters import remove_all_tools
 from agents.agent import ToolsToFinalOutputResult
 from agents.computer import Computer
 from agents.items import (
@@ -2702,6 +2703,61 @@ async def test_run_streamed_rejects_session_with_resumed_conversation_state():
 
     with pytest.raises(UserError, match="Session persistence"):
         Runner.run_streamed(agent, state, session=session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "run_kwargs",
+    [
+        {"conversation_id": "conv-test"},
+        {"previous_response_id": "resp-test"},
+        {"auto_previous_response_id": True},
+    ],
+)
+async def test_run_rejects_handoff_input_filter_with_server_managed_conversation(
+    run_kwargs: dict[str, Any],
+):
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+    delegate = Agent(name="delegate", model=delegate_model)
+    triage = Agent(
+        name="triage",
+        model=triage_model,
+        handoffs=[handoff(delegate, input_filter=remove_all_tools)],
+    )
+
+    triage_model.add_multiple_turn_outputs([[get_handoff_tool_call(delegate)]])
+
+    with pytest.raises(UserError, match="Server-managed conversation cannot be combined"):
+        await Runner.run(triage, input="user_message", **run_kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "run_kwargs",
+    [
+        {"conversation_id": "conv-test"},
+        {"previous_response_id": "resp-test"},
+        {"auto_previous_response_id": True},
+    ],
+)
+async def test_run_rejects_handoff_history_nesting_with_server_managed_conversation(
+    run_kwargs: dict[str, Any],
+):
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+    delegate = Agent(name="delegate", model=delegate_model)
+    triage = Agent(name="triage", model=triage_model, handoffs=[delegate])
+
+    triage_model.add_multiple_turn_outputs([[get_handoff_tool_call(delegate)]])
+
+    with pytest.raises(UserError, match="Server-managed conversation cannot be combined"):
+        await Runner.run(
+            triage,
+            input="user_message",
+            run_config=RunConfig(nest_handoff_history=True),
+            **run_kwargs,
+        )
 
 
 @pytest.mark.asyncio
