@@ -265,11 +265,21 @@ check_for_missing_reporters() {
   local log_file=""
   local start_time=""
   local now
+  local step_status=0
 
   for idx in "${!STEP_PIDS[@]}"; do
     pid="${STEP_PIDS[$idx]}"
     if [ -z "${pid}" ] || step_pid_is_alive "${pid}"; then
       continue
+    fi
+
+    if try_finish_step_from_status_pipe 1; then
+      if [ "${STATUS_PIPE_DRAINED}" -eq 1 ]; then
+        return 0
+      fi
+    else
+      step_status=$?
+      return "${step_status}"
     fi
 
     name="${STEP_NAMES[$idx]}"
@@ -288,6 +298,29 @@ check_for_missing_reporters() {
   return 0
 }
 
+STATUS_PIPE_DRAINED=0
+
+try_finish_step_from_status_pipe() {
+  local timeout="$1"
+  local name=""
+  local status=""
+  local step_status=0
+
+  STATUS_PIPE_DRAINED=0
+  if ! IFS=$'\t' read -r -t "${timeout}" name status <&3; then
+    return 0
+  fi
+
+  STATUS_PIPE_DRAINED=1
+  finish_step "${name}" "${status}"
+  step_status=$?
+  if [ "${step_status}" -ne 0 ]; then
+    return "${step_status}"
+  fi
+
+  return 0
+}
+
 wait_for_parallel_steps() {
   local name=""
   local status=""
@@ -298,8 +331,11 @@ wait_for_parallel_steps() {
   next_heartbeat_at=$(( $(date +%s) + HEARTBEAT_INTERVAL_SECONDS ))
 
   while [ "${RUNNING_STEPS}" -gt 0 ]; do
-    if IFS=$'\t' read -r -t 1 name status <&3; then
-      finish_step "${name}" "${status}"
+    if try_finish_step_from_status_pipe 1; then
+      if [ "${STATUS_PIPE_DRAINED}" -eq 1 ]; then
+        continue
+      fi
+    else
       step_status=$?
       if [ "${step_status}" -ne 0 ]; then
         return "${step_status}"
@@ -307,8 +343,10 @@ wait_for_parallel_steps() {
       continue
     fi
 
-    if ! check_for_missing_reporters; then
-      return 1
+    check_for_missing_reporters
+    step_status=$?
+    if [ "${step_status}" -ne 0 ]; then
+      return "${step_status}"
     fi
 
     now=$(date +%s)
