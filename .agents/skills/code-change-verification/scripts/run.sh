@@ -71,7 +71,8 @@ stop_running_steps() {
   sleep 1
 
   for pid in "${STEP_PIDS[@]}"; do
-    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+    if [ -n "${pid}" ]; then
+      # A process group can remain alive after its leader exits, so escalate by group id unconditionally.
       kill -KILL -- "-${pid}" 2>/dev/null || true
     fi
   done
