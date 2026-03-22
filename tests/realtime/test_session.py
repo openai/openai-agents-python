@@ -48,6 +48,7 @@ from agents.realtime.model_events import (
     RealtimeModelItemDeletedEvent,
     RealtimeModelItemUpdatedEvent,
     RealtimeModelOtherEvent,
+    RealtimeModelRawServerEvent,
     RealtimeModelToolCallEvent,
     RealtimeModelTranscriptDeltaEvent,
     RealtimeModelTurnEndedEvent,
@@ -1555,8 +1556,13 @@ class TestGuardrailFunctionality:
 
     async def _wait_for_guardrail_tasks(self, session):
         """Wait for all pending guardrail tasks to complete."""
-        import asyncio
-
+        await asyncio.sleep(0)
+        for response_id in list(session._interrupted_response_ids):
+            await session.on_event(
+                RealtimeModelRawServerEvent(
+                    data={"type": "response.done", "response": {"id": response_id}}
+                )
+            )
         if session._guardrail_tasks:
             await asyncio.gather(*session._guardrail_tasks, return_exceptions=True)
 
@@ -1619,13 +1625,38 @@ class TestGuardrailFunctionality:
         assert guardrail_events[0].message == "this is more than ten characters"
 
     @pytest.mark.asyncio
-    async def test_guardrail_follow_up_waits_for_turn_end(
+    async def test_guardrail_follow_up_waits_for_matching_response_done(
         self, mock_model, mock_agent, triggered_guardrail
     ):
         run_config: RealtimeRunConfig = {"output_guardrails": [triggered_guardrail]}
         session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
 
-        await session.on_event(RealtimeModelTurnStartedEvent())
+        task = asyncio.create_task(
+            session._run_output_guardrails("this trips the guardrail", "resp_1")
+        )
+        await asyncio.sleep(0)
+
+        assert mock_model.interrupts_called == 1
+        assert mock_model.sent_messages == []
+        assert isinstance(mock_model.sent_events[0], RealtimeModelSendInterrupt)
+
+        await session.on_event(
+            RealtimeModelRawServerEvent(
+                data={"type": "response.done", "response": {"id": "resp_1"}}
+            )
+        )
+        await task
+
+        assert len(mock_model.sent_messages) == 1
+        assert "triggered_guardrail" in mock_model.sent_messages[0]
+        assert isinstance(mock_model.sent_events[1], RealtimeModelSendUserInput)
+
+    @pytest.mark.asyncio
+    async def test_guardrail_follow_up_ignores_unrelated_turn_completion(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        run_config: RealtimeRunConfig = {"output_guardrails": [triggered_guardrail]}
+        session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
 
         task = asyncio.create_task(
             session._run_output_guardrails("this trips the guardrail", "resp_1")
@@ -1637,18 +1668,38 @@ class TestGuardrailFunctionality:
         assert isinstance(mock_model.sent_events[0], RealtimeModelSendInterrupt)
 
         await session.on_event(RealtimeModelTurnEndedEvent())
+        await session.on_event(
+            RealtimeModelRawServerEvent(
+                data={"type": "response.done", "response": {"id": "resp_tool"}}
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert not task.done()
+        assert mock_model.sent_messages == []
+
+        await session.on_event(
+            RealtimeModelRawServerEvent(
+                data={"type": "response.done", "response": {"id": "resp_1"}}
+            )
+        )
         await task
 
         assert len(mock_model.sent_messages) == 1
-        assert "triggered_guardrail" in mock_model.sent_messages[0]
         assert isinstance(mock_model.sent_events[1], RealtimeModelSendUserInput)
 
     @pytest.mark.asyncio
-    async def test_guardrail_follow_up_sends_immediately_without_active_turn(
+    async def test_guardrail_follow_up_sends_immediately_if_response_already_done(
         self, mock_model, mock_agent, triggered_guardrail
     ):
         run_config: RealtimeRunConfig = {"output_guardrails": [triggered_guardrail]}
         session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
+
+        await session.on_event(
+            RealtimeModelRawServerEvent(
+                data={"type": "response.done", "response": {"id": "resp_1"}}
+            )
+        )
 
         await session._run_output_guardrails("this trips the guardrail", "resp_1")
 
@@ -1913,6 +1964,12 @@ class TestGuardrailFunctionality:
 
         # Wait for completion
         if session._guardrail_tasks:
+            await asyncio.sleep(0)
+            await session.on_event(
+                RealtimeModelRawServerEvent(
+                    data={"type": "response.done", "response": {"id": "resp_same"}}
+                )
+            )
             await asyncio.gather(*session._guardrail_tasks, return_exceptions=True)
 
         # Only one interrupt and one message should be sent
