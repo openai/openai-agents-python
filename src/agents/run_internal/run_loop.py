@@ -30,6 +30,7 @@ from ..exceptions import (
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     ModelBehaviorError,
+    OutputGuardrailTripwireTriggered,
     RunErrorDetails,
     UserError,
 )
@@ -344,7 +345,12 @@ async def _run_output_guardrails_for_stream(
 
     try:
         return cast(list[Any], await streamed_result._output_guardrails_task)
+    except OutputGuardrailTripwireTriggered:
+        raise
+    except asyncio.CancelledError:
+        raise
     except Exception:
+        logger.error("Unexpected error in output guardrails", exc_info=True)
         return []
 
 
