@@ -415,7 +415,7 @@ async def test_execute_emits_function_span() -> None:
             action=tool_run,
             hooks=RunHooks[Any](),
             context_wrapper=RunContextWrapper(context=None),
-            config=RunConfig(),
+            config=RunConfig(trace_include_sensitive_data=True),
         )
 
     assert isinstance(result, ToolCallOutputItem)
@@ -487,7 +487,7 @@ async def test_execute_emits_batched_actions_in_function_span() -> None:
             action=tool_run,
             hooks=RunHooks[Any](),
             context_wrapper=RunContextWrapper(context=None),
-            config=RunConfig(),
+            config=RunConfig(trace_include_sensitive_data=True),
         )
 
     assert isinstance(result, ToolCallOutputItem)

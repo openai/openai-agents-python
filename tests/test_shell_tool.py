@@ -299,7 +299,7 @@ async def test_shell_tool_emits_function_span() -> None:
             call=tool_run,
             hooks=RunHooks[Any](),
             context_wrapper=context_wrapper,
-            config=RunConfig(),
+            config=RunConfig(trace_include_sensitive_data=True),
         )
 
     assert isinstance(result, ToolCallOutputItem)

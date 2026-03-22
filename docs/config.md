@@ -73,7 +73,7 @@ from agents import set_tracing_disabled
 set_tracing_disabled(True)
 ```
 
-If you want to keep tracing enabled but exclude potentially sensitive inputs/outputs from trace payloads, set [`RunConfig.trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data] to `False`:
+Tracing is enabled by default, but potentially sensitive inputs/outputs are excluded from trace payloads by default. To include them, set [`RunConfig.trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data] to `True`:
 
 ```python
 from agents import Runner, RunConfig
@@ -81,14 +81,14 @@ from agents import Runner, RunConfig
 await Runner.run(
     agent,
     input="Hello",
-    run_config=RunConfig(trace_include_sensitive_data=False),
+    run_config=RunConfig(trace_include_sensitive_data=True),
 )
 ```
 
 You can also change the default without code by setting this environment variable before your app starts:
 
 ```bash
-export OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA=0
+export OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA=1
 ```
 
 For full tracing controls, see the [tracing guide](tracing.md).
