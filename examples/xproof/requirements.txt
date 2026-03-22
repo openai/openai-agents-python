@@ -1,0 +1,2 @@
+openai-agents>=0.0.3
+xproof>=0.1.0
