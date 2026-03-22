@@ -10,20 +10,53 @@ REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../../../.." && pwd)}"
 
 cd "${REPO_ROOT}"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "code-change-verification: python3 is required to manage parallel step process groups." >&2
-  exit 1
-fi
-
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/code-change-verification.XXXXXX")"
 STATUS_PIPE="${LOG_DIR}/status.fifo"
 HEARTBEAT_INTERVAL_SECONDS="${CODE_CHANGE_VERIFICATION_HEARTBEAT_SECONDS:-10}"
+declare -a STEP_LAUNCHER=()
 declare -a STEP_PIDS=()
 declare -a STEP_NAMES=()
 declare -a STEP_LOGS=()
 declare -a STEP_STARTS=()
 RUNNING_STEPS=0
 EXIT_STATUS=0
+
+resolve_executable_path() {
+  local name="$1"
+  type -P "${name}" 2>/dev/null || true
+}
+
+configure_step_launcher() {
+  local perl_path=""
+  local python_path=""
+  local uv_path=""
+
+  perl_path="$(resolve_executable_path perl)"
+  if [ -n "${perl_path}" ]; then
+    STEP_LAUNCHER=("${perl_path}" -MPOSIX=setsid -e 'setsid() or die $!; exec @ARGV')
+    return 0
+  fi
+
+  python_path="$(resolve_executable_path python3)"
+  if [ -z "${python_path}" ]; then
+    python_path="$(resolve_executable_path python)"
+  fi
+  if [ -n "${python_path}" ]; then
+    STEP_LAUNCHER=("${python_path}" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])')
+    return 0
+  fi
+
+  uv_path="$(resolve_executable_path uv)"
+  if [ -n "${uv_path}" ]; then
+    STEP_LAUNCHER=("${uv_path}" run --no-sync python -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])')
+    return 0
+  fi
+
+  echo "code-change-verification: perl, python3, python, or uv is required to manage parallel step process groups." >&2
+  exit 1
+}
+
+configure_step_launcher
 
 mkfifo "${STATUS_PIPE}"
 exec 3<> "${STATUS_PIPE}"
@@ -104,6 +137,34 @@ find_step_index() {
   return 1
 }
 
+clear_step() {
+  local idx="$1"
+
+  STEP_PIDS[$idx]=""
+  STEP_NAMES[$idx]=""
+  STEP_LOGS[$idx]=""
+  STEP_STARTS[$idx]=""
+  RUNNING_STEPS=$((RUNNING_STEPS - 1))
+}
+
+step_pid_is_alive() {
+  local pid="$1"
+  local state=""
+
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    return 1
+  fi
+
+  state="$(ps -o stat= -p "${pid}" 2>/dev/null | tr -d '[:space:]')"
+  case "${state}" in
+    Z*|z*|"")
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
 print_heartbeat() {
   local now
   local idx=""
@@ -140,8 +201,9 @@ start_step() {
   local log_file="${LOG_DIR}/${name}.log"
 
   echo "Running make ${name}..."
+  : > "${log_file}"
   # Start each step in its own process group so fail-fast cleanup can stop pytest worker trees too.
-  python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+  "${STEP_LAUNCHER[@]}" \
     bash -c '
       step_name="$1"
       log_file="$2"
@@ -181,14 +243,10 @@ finish_step() {
   start_time="${STEP_STARTS[$idx]}"
 
   now=$(date +%s)
-  STEP_PIDS[$idx]=""
-  STEP_NAMES[$idx]=""
-  STEP_LOGS[$idx]=""
-  STEP_STARTS[$idx]=""
-  RUNNING_STEPS=$((RUNNING_STEPS - 1))
   wait "${pid}" 2>/dev/null || true
 
   if [ "${status}" -eq 0 ]; then
+    clear_step "${idx}"
     echo "make ${name} passed in $((now - start_time))s."
     return 0
   fi
@@ -198,6 +256,36 @@ finish_step() {
   tail -n 80 "${log_file}" >&2 || true
   stop_running_steps
   return "${status}"
+}
+
+check_for_missing_reporters() {
+  local idx=""
+  local pid=""
+  local name=""
+  local log_file=""
+  local start_time=""
+  local now
+
+  for idx in "${!STEP_PIDS[@]}"; do
+    pid="${STEP_PIDS[$idx]}"
+    if [ -z "${pid}" ] || step_pid_is_alive "${pid}"; then
+      continue
+    fi
+
+    name="${STEP_NAMES[$idx]}"
+    log_file="${STEP_LOGS[$idx]}"
+    start_time="${STEP_STARTS[$idx]}"
+    now=$(date +%s)
+    wait "${pid}" 2>/dev/null || true
+
+    echo "code-change-verification: make ${name} exited before reporting completion status after $((now - start_time))s." >&2
+    echo "--- ${name} log (last 80 lines) ---" >&2
+    tail -n 80 "${log_file}" >&2 || true
+    stop_running_steps
+    return 1
+  done
+
+  return 0
 }
 
 wait_for_parallel_steps() {
@@ -217,6 +305,10 @@ wait_for_parallel_steps() {
         return "${step_status}"
       fi
       continue
+    fi
+
+    if ! check_for_missing_reporters; then
+      return 1
     fi
 
     now=$(date +%s)

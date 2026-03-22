@@ -11,7 +11,9 @@ try {
 }
 
 if (-not $repoRoot) {
-    $repoRoot = Resolve-Path (Join-Path $scriptDir "..\\..\\..\\..")
+    $repoRoot = (Resolve-Path (Join-Path $scriptDir "..\\..\\..\\..")).Path
+} else {
+    $repoRoot = ([string]$repoRoot).Trim()
 }
 
 Set-Location $repoRoot
@@ -25,13 +27,63 @@ if ($env:CODE_CHANGE_VERIFICATION_HEARTBEAT_SECONDS) {
     $heartbeatIntervalSeconds = [int]$env:CODE_CHANGE_VERIFICATION_HEARTBEAT_SECONDS
 }
 
+function Resolve-MakeInvocation {
+    $command = Get-Command make -ErrorAction Stop
+
+    while ($command.CommandType -eq [System.Management.Automation.CommandTypes]::Alias) {
+        $command = $command.ResolvedCommand
+    }
+
+    if ($command.CommandType -in @(
+        [System.Management.Automation.CommandTypes]::Application,
+        [System.Management.Automation.CommandTypes]::ExternalScript
+    )) {
+        $commandPath = if ($command.Path) { $command.Path } else { $command.Source }
+        return [PSCustomObject]@{
+            FilePath = $commandPath
+            ArgumentList = @()
+        }
+    }
+
+    if ($command.CommandType -eq [System.Management.Automation.CommandTypes]::Function) {
+        $shellPath = (Get-Process -Id $PID).Path
+        if (-not $shellPath) {
+            throw "Unable to resolve the current PowerShell executable for make wrapper launches."
+        }
+
+        $wrapperPath = Join-Path $logDir "invoke-make.ps1"
+        $escapedRepoRoot = $repoRoot -replace "'", "''"
+        $wrapperTemplate = @'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+Set-Location -LiteralPath '{0}'
+function global:make {{
+{1}
+}}
+& make @args
+exit $LASTEXITCODE
+'@
+        $wrapperScript = $wrapperTemplate -f $escapedRepoRoot, $command.Definition.TrimEnd()
+        Set-Content -Path $wrapperPath -Value $wrapperScript -Encoding UTF8
+
+        return [PSCustomObject]@{
+            FilePath = $shellPath
+            ArgumentList = @("-NoLogo", "-NoProfile", "-File", $wrapperPath)
+        }
+    }
+
+    throw "code-change-verification: make must resolve to an application, script, alias, or function."
+}
+
+$script:MakeInvocation = Resolve-MakeInvocation
+
 function Invoke-MakeStep {
     param(
         [Parameter(Mandatory = $true)][string]$Step
     )
 
     Write-Host "Running make $Step..."
-    & make $Step
+    & $script:MakeInvocation.FilePath @($script:MakeInvocation.ArgumentList + $Step)
 
     if ($LASTEXITCODE -ne 0) {
         Write-Host "code-change-verification: make $Step failed with exit code $LASTEXITCODE."
@@ -49,7 +101,7 @@ function Start-MakeStep {
     $stdoutLogPath = Join-Path $logDir "$Step.stdout.log"
     $stderrLogPath = Join-Path $logDir "$Step.stderr.log"
     Write-Host "Running make $Step..."
-    $process = Start-Process -FilePath "make" -ArgumentList $Step -RedirectStandardOutput $stdoutLogPath -RedirectStandardError $stderrLogPath -PassThru
+    $process = Start-Process -FilePath $script:MakeInvocation.FilePath -ArgumentList @($script:MakeInvocation.ArgumentList + $Step) -RedirectStandardOutput $stdoutLogPath -RedirectStandardError $stderrLogPath -PassThru
     $steps.Add([PSCustomObject]@{
         Name = $Step
         Process = $process
@@ -60,17 +112,8 @@ function Start-MakeStep {
 }
 
 function Stop-RunningSteps {
-    param(
-        [int]$ExcludePid = -1
-    )
-
     foreach ($step in $steps) {
         if ($null -eq $step.Process) {
-            continue
-        }
-
-        $step.Process.Refresh()
-        if ($step.Process.HasExited -or $step.Process.Id -eq $ExcludePid) {
             continue
         }
 
@@ -120,7 +163,7 @@ function Wait-ForParallelSteps {
                 Get-Content $step.StdoutLogPath -Tail 80
             }
 
-            Stop-RunningSteps -ExcludePid $step.Process.Id
+            Stop-RunningSteps
             return $step.Process.ExitCode
         }
 
