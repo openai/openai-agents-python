@@ -29,11 +29,11 @@ mkfifo "${STATUS_PIPE}"
 exec 3<> "${STATUS_PIPE}"
 
 cleanup() {
-  local status
-  status="${EXIT_STATUS}"
+  local trap_status="$?"
+  local status="${EXIT_STATUS}"
 
   if [ "${status}" -eq 0 ]; then
-    status=$?
+    status="${trap_status}"
   fi
 
   if [ "${#STEP_PIDS[@]}" -gt 0 ]; then
