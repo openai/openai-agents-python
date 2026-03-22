@@ -1619,6 +1619,45 @@ class TestGuardrailFunctionality:
         assert guardrail_events[0].message == "this is more than ten characters"
 
     @pytest.mark.asyncio
+    async def test_guardrail_follow_up_waits_for_turn_end(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        run_config: RealtimeRunConfig = {"output_guardrails": [triggered_guardrail]}
+        session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
+
+        await session.on_event(RealtimeModelTurnStartedEvent())
+
+        task = asyncio.create_task(
+            session._run_output_guardrails("this trips the guardrail", "resp_1")
+        )
+        await asyncio.sleep(0)
+
+        assert mock_model.interrupts_called == 1
+        assert mock_model.sent_messages == []
+        assert isinstance(mock_model.sent_events[0], RealtimeModelSendInterrupt)
+
+        await session.on_event(RealtimeModelTurnEndedEvent())
+        await task
+
+        assert len(mock_model.sent_messages) == 1
+        assert "triggered_guardrail" in mock_model.sent_messages[0]
+        assert isinstance(mock_model.sent_events[1], RealtimeModelSendUserInput)
+
+    @pytest.mark.asyncio
+    async def test_guardrail_follow_up_sends_immediately_without_active_turn(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        run_config: RealtimeRunConfig = {"output_guardrails": [triggered_guardrail]}
+        session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
+
+        await session._run_output_guardrails("this trips the guardrail", "resp_1")
+
+        assert mock_model.interrupts_called == 1
+        assert len(mock_model.sent_messages) == 1
+        assert isinstance(mock_model.sent_events[0], RealtimeModelSendInterrupt)
+        assert isinstance(mock_model.sent_events[1], RealtimeModelSendUserInput)
+
+    @pytest.mark.asyncio
     async def test_agent_and_run_config_guardrails_not_run_twice(self, mock_model):
         """Guardrails shared by agent and run config should execute once."""
 
