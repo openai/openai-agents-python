@@ -70,6 +70,10 @@ from .model_inputs import (
 REJECTION_MESSAGE = DEFAULT_APPROVAL_REJECTION_MESSAGE
 
 
+class _TurnCompletionSuperseded(Exception):
+    """Raised when a new turn starts before the waiting turn finishes."""
+
+
 def _serialize_tool_output(output: Any) -> str:
     """Serialize structured tool outputs to JSON when possible."""
     if isinstance(output, str):
@@ -157,8 +161,11 @@ class RealtimeSession(RealtimeModelListener):
         self._debounce_text_length = self._run_config.get("guardrails_settings", {}).get(
             "debounce_text_length", 100
         )
-        self._completed_response_ids: set[str] = set()
+        self._recent_completed_response_ids: dict[str, None] = {}
         self._response_done_waiters: dict[str, asyncio.Future[None]] = {}
+        self._active_turn_id: int | None = None
+        self._next_turn_id: int = 1
+        self._turn_done_waiters: dict[int, asyncio.Future[None]] = {}
 
         self._guardrail_tasks: set[asyncio.Task[Any]] = set()
         self._tool_call_tasks: set[asyncio.Task[Any]] = set()
@@ -397,6 +404,13 @@ class RealtimeSession(RealtimeModelListener):
         elif event.type == "connection_status":
             pass
         elif event.type == "turn_started":
+            self._recent_completed_response_ids.clear()
+            if self._active_turn_id is not None:
+                waiter = self._turn_done_waiters.pop(self._active_turn_id, None)
+                if waiter is not None and not waiter.done():
+                    waiter.set_exception(_TurnCompletionSuperseded())
+            self._active_turn_id = self._next_turn_id
+            self._next_turn_id += 1
             await self._put_event(
                 RealtimeAgentStartEvent(
                     agent=self._current_agent,
@@ -404,6 +418,11 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
         elif event.type == "turn_ended":
+            if self._active_turn_id is not None:
+                waiter = self._turn_done_waiters.pop(self._active_turn_id, None)
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(None)
+                self._active_turn_id = None
             # Clear guardrail state for next turn
             self._item_transcripts.clear()
             self._item_guardrail_run_counts.clear()
@@ -956,13 +975,12 @@ class RealtimeSession(RealtimeModelListener):
 
             # Interrupt the model
             await self._model.send_event(RealtimeModelSendInterrupt(force_response_cancel=True))
-            waiter = self._get_response_done_waiter(response_id)
-            try:
-                await waiter
-            finally:
-                self._response_done_waiters.pop(response_id, None)
-                self._completed_response_ids.discard(response_id)
+            can_resume = await self._wait_for_interrupted_response_completion(response_id)
+            if not can_resume:
+                self._interrupted_response_ids.discard(response_id)
+                return True
 
+            self._interrupted_response_ids.discard(response_id)
             # Send guardrail triggered message
             guardrail_names = [result.guardrail.get_name() for result in triggered_results]
             await self._model.send_event(
@@ -974,6 +992,37 @@ class RealtimeSession(RealtimeModelListener):
             return True
 
         return False
+
+    async def _wait_for_interrupted_response_completion(self, response_id: str) -> bool:
+        response_waiter = self._get_response_done_waiter(response_id)
+        turn_waiter = self._get_active_turn_done_waiter()
+        waiters: set[asyncio.Future[None]] = {response_waiter}
+        if turn_waiter is not None:
+            waiters.add(turn_waiter)
+
+        try:
+            if turn_waiter is None:
+                await response_waiter
+                return True
+
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            if response_waiter in done:
+                return True
+
+            try:
+                await turn_waiter
+                return True
+            except _TurnCompletionSuperseded:
+                logger.debug(
+                    "Skipping guardrail follow-up for response %s because a new turn started first",
+                    response_id,
+                )
+                return False
+            finally:
+                turn_waiter.cancel()
+        finally:
+            self._response_done_waiters.pop(response_id, None)
+            self._recent_completed_response_ids.pop(response_id, None)
 
     def _enqueue_guardrail_task(self, text: str, response_id: str) -> None:
         # Runs the guardrails in a separate task to avoid blocking the main loop
@@ -1021,10 +1070,14 @@ class RealtimeSession(RealtimeModelListener):
         if not isinstance(response_id, str):
             return
 
-        self._completed_response_ids.add(response_id)
         waiter = self._response_done_waiters.get(response_id)
         if waiter is not None and not waiter.done():
             waiter.set_result(None)
+        else:
+            self._recent_completed_response_ids[response_id] = None
+            while len(self._recent_completed_response_ids) > 16:
+                oldest_response_id = next(iter(self._recent_completed_response_ids))
+                self._recent_completed_response_ids.pop(oldest_response_id)
 
     def _get_response_done_waiter(self, response_id: str) -> asyncio.Future[None]:
         waiter = self._response_done_waiters.get(response_id)
@@ -1032,8 +1085,19 @@ class RealtimeSession(RealtimeModelListener):
             waiter = asyncio.get_running_loop().create_future()
             self._response_done_waiters[response_id] = waiter
 
-        if response_id in self._completed_response_ids and not waiter.done():
+        if response_id in self._recent_completed_response_ids and not waiter.done():
             waiter.set_result(None)
+
+        return waiter
+
+    def _get_active_turn_done_waiter(self) -> asyncio.Future[None] | None:
+        if self._active_turn_id is None:
+            return None
+
+        waiter = self._turn_done_waiters.get(self._active_turn_id)
+        if waiter is None:
+            waiter = asyncio.get_running_loop().create_future()
+            self._turn_done_waiters[self._active_turn_id] = waiter
 
         return waiter
 
@@ -1042,7 +1106,14 @@ class RealtimeSession(RealtimeModelListener):
             if not waiter.done():
                 waiter.cancel()
         self._response_done_waiters.clear()
-        self._completed_response_ids.clear()
+        self._recent_completed_response_ids.clear()
+
+    def _cleanup_turn_done_waiters(self) -> None:
+        for waiter in self._turn_done_waiters.values():
+            if not waiter.done():
+                waiter.cancel()
+        self._turn_done_waiters.clear()
+        self._active_turn_id = None
 
     def _enqueue_tool_call_task(
         self, event: RealtimeModelToolCallEvent, agent_snapshot: RealtimeAgent
@@ -1087,6 +1158,7 @@ class RealtimeSession(RealtimeModelListener):
         # Cancel and cleanup guardrail tasks
         self._cleanup_guardrail_tasks()
         self._cleanup_response_done_waiters()
+        self._cleanup_turn_done_waiters()
         self._cleanup_tool_call_tasks()
 
         # Remove ourselves as a listener

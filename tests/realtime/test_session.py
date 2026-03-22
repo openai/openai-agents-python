@@ -1652,6 +1652,29 @@ class TestGuardrailFunctionality:
         assert isinstance(mock_model.sent_events[1], RealtimeModelSendUserInput)
 
     @pytest.mark.asyncio
+    async def test_guardrail_follow_up_falls_back_to_typed_turn_end(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        run_config: RealtimeRunConfig = {"output_guardrails": [triggered_guardrail]}
+        session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
+
+        await session.on_event(RealtimeModelTurnStartedEvent())
+
+        task = asyncio.create_task(
+            session._run_output_guardrails("this trips the guardrail", "resp_1")
+        )
+        await asyncio.sleep(0)
+
+        assert mock_model.interrupts_called == 1
+        assert mock_model.sent_messages == []
+
+        await session.on_event(RealtimeModelTurnEndedEvent())
+        await task
+
+        assert len(mock_model.sent_messages) == 1
+        assert isinstance(mock_model.sent_events[1], RealtimeModelSendUserInput)
+
+    @pytest.mark.asyncio
     async def test_guardrail_follow_up_ignores_unrelated_turn_completion(
         self, mock_model, mock_agent, triggered_guardrail
     ):
@@ -1689,6 +1712,26 @@ class TestGuardrailFunctionality:
         assert isinstance(mock_model.sent_events[1], RealtimeModelSendUserInput)
 
     @pytest.mark.asyncio
+    async def test_guardrail_follow_up_skips_superseded_typed_turn(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        run_config: RealtimeRunConfig = {"output_guardrails": [triggered_guardrail]}
+        session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
+
+        await session.on_event(RealtimeModelTurnStartedEvent())
+
+        task = asyncio.create_task(
+            session._run_output_guardrails("this trips the guardrail", "resp_1")
+        )
+        await asyncio.sleep(0)
+
+        await session.on_event(RealtimeModelTurnStartedEvent())
+        await task
+
+        assert mock_model.interrupts_called == 1
+        assert mock_model.sent_messages == []
+
+    @pytest.mark.asyncio
     async def test_guardrail_follow_up_sends_immediately_if_response_already_done(
         self, mock_model, mock_agent, triggered_guardrail
     ):
@@ -1707,6 +1750,25 @@ class TestGuardrailFunctionality:
         assert len(mock_model.sent_messages) == 1
         assert isinstance(mock_model.sent_events[0], RealtimeModelSendInterrupt)
         assert isinstance(mock_model.sent_events[1], RealtimeModelSendUserInput)
+
+    @pytest.mark.asyncio
+    async def test_recent_completed_response_ids_are_bounded(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        run_config: RealtimeRunConfig = {"output_guardrails": [triggered_guardrail]}
+        session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
+
+        for idx in range(20):
+            await session.on_event(
+                RealtimeModelRawServerEvent(
+                    data={"type": "response.done", "response": {"id": f"resp_{idx}"}}
+                )
+            )
+
+        assert len(session._recent_completed_response_ids) == 16
+        assert "resp_0" not in session._recent_completed_response_ids
+        assert "resp_19" in session._recent_completed_response_ids
+        assert session._response_done_waiters == {}
 
     @pytest.mark.asyncio
     async def test_agent_and_run_config_guardrails_not_run_twice(self, mock_model):
