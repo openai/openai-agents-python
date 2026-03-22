@@ -46,13 +46,15 @@ function Start-MakeStep {
         [Parameter(Mandatory = $true)][string]$Step
     )
 
-    $logPath = Join-Path $logDir "$Step.log"
+    $stdoutLogPath = Join-Path $logDir "$Step.stdout.log"
+    $stderrLogPath = Join-Path $logDir "$Step.stderr.log"
     Write-Host "Running make $Step..."
-    $process = Start-Process -FilePath "make" -ArgumentList $Step -RedirectStandardOutput $logPath -RedirectStandardError $logPath -PassThru
+    $process = Start-Process -FilePath "make" -ArgumentList $Step -RedirectStandardOutput $stdoutLogPath -RedirectStandardError $stderrLogPath -PassThru
     $steps.Add([PSCustomObject]@{
         Name = $Step
         Process = $process
-        LogPath = $logPath
+        StdoutLogPath = $stdoutLogPath
+        StderrLogPath = $stderrLogPath
         StartTime = Get-Date
     })
 }
@@ -109,9 +111,13 @@ function Wait-ForParallelSteps {
             }
 
             Write-Host "code-change-verification: make $($step.Name) failed with exit code $($step.Process.ExitCode) after ${duration}s."
-            Write-Host "--- $($step.Name) log (last 80 lines) ---"
-            if (Test-Path $step.LogPath) {
-                Get-Content $step.LogPath -Tail 80
+            if (Test-Path $step.StderrLogPath) {
+                Write-Host "--- $($step.Name) stderr log (last 80 lines) ---"
+                Get-Content $step.StderrLogPath -Tail 80
+            }
+            if (Test-Path $step.StdoutLogPath) {
+                Write-Host "--- $($step.Name) stdout log (last 80 lines) ---"
+                Get-Content $step.StdoutLogPath -Tail 80
             }
 
             Stop-RunningSteps -ExcludePid $step.Process.Id
