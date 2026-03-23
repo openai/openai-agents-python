@@ -609,7 +609,6 @@ RunItem: TypeAlias = Union[
     HandoffOutputItem,
     ToolCallItem,
     ToolCallOutputItem,
-    CompactionItem,
     ReasoningItem,
     MCPListToolsItem,
     MCPApprovalRequestItem,
