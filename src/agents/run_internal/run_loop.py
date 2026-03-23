@@ -30,6 +30,7 @@ from ..exceptions import (
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     ModelBehaviorError,
+    OutputGuardrailTripwireTriggered,
     RunErrorDetails,
     UserError,
 )
@@ -230,6 +231,17 @@ __all__ = [
 ]
 
 
+def _should_attach_generic_agent_error(exc: Exception) -> bool:
+    return not isinstance(
+        exc,
+        (
+            ModelBehaviorError,
+            InputGuardrailTripwireTriggered,
+            OutputGuardrailTripwireTriggered,
+        ),
+    )
+
+
 async def _should_persist_stream_items(
     *,
     session: Session | None,
@@ -344,7 +356,12 @@ async def _run_output_guardrails_for_stream(
 
     try:
         return cast(list[Any], await streamed_result._output_guardrails_task)
+    except OutputGuardrailTripwireTriggered:
+        raise
+    except asyncio.CancelledError:
+        raise
     except Exception:
+        logger.error("Unexpected error in output guardrails", exc_info=True)
         return []
 
 
@@ -1014,7 +1031,7 @@ async def start_streaming(
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                         break
             except Exception as e:
-                if current_span and not isinstance(e, ModelBehaviorError):
+                if current_span and _should_attach_generic_agent_error(e):
                     _error_tracing.attach_error_to_span(
                         current_span,
                         SpanError(
@@ -1037,7 +1054,7 @@ async def start_streaming(
         )
         raise
     except Exception as e:
-        if current_span and not isinstance(e, ModelBehaviorError):
+        if current_span and _should_attach_generic_agent_error(e):
             _error_tracing.attach_error_to_span(
                 current_span,
                 SpanError(
