@@ -155,7 +155,7 @@ The following community and vendor integrations support the OpenAI Agents SDK tr
 -   [Pydantic Logfire](https://logfire.pydantic.dev/docs/integrations/llms/openai/#openai-agents)
 -   [AgentOps](https://docs.agentops.ai/v1/integrations/agentssdk)
 -   [Scorecard](https://docs.scorecard.io/docs/documentation/features/tracing#openai-agents-sdk-integration)
--   [Keywords AI](https://docs.keywordsai.co/integration/development-frameworks/openai-agent)
+-   [Respan](https://respan.ai/docs/integrations/tracing/openai-agents-sdk)
 -   [LangSmith](https://docs.smith.langchain.com/observability/how_to_guides/trace_with_openai_agents_sdk)
 -   [Maxim AI](https://www.getmaxim.ai/docs/observe/integrations/openai-agents-sdk)
 -   [Comet Opik](https://www.comet.com/docs/opik/tracing/integrations/openai_agents)
