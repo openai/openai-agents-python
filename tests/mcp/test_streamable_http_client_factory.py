@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
+import anyio
 import httpx
 import pytest
+from mcp.shared.message import JSONRPCMessage, SessionMessage
+from mcp.types import JSONRPCNotification, JSONRPCRequest
 
 from agents.mcp import MCPServerStreamableHttp
+from agents.mcp.server import _AgentsStreamableHTTPTransport
 
 
 class TestMCPServerStreamableHttpClientFactory:
@@ -247,3 +252,77 @@ class TestMCPServerStreamableHttpClientFactory:
                 terminate_on_close=False,
                 httpx_client_factory=comprehensive_factory,
             )
+
+
+@pytest.mark.asyncio
+async def test_initialized_notification_failure_does_not_stop_following_requests():
+    transport = _AgentsStreamableHTTPTransport(
+        "https://example.test/mcp",
+        ignore_initialized_notification_failure=True,
+    )
+    request_handled = asyncio.Event()
+
+    async def fake_handle_post_request(ctx):
+        message = ctx.session_message.message
+        if transport._is_initialized_notification(message):
+            request = httpx.Request("POST", "https://example.test/mcp")
+            response = httpx.Response(503, request=request)
+            raise httpx.HTTPStatusError("HTTP error 503", request=request, response=response)
+        request_handled.set()
+
+    transport._handle_post_request = fake_handle_post_request  # type: ignore[method-assign]
+
+    read_stream_writer, _ = anyio.create_memory_object_stream[SessionMessage | Exception](0)
+    write_stream, write_stream_reader = anyio.create_memory_object_stream[SessionMessage](0)
+
+    initialized_notification = SessionMessage(
+        JSONRPCMessage(
+            JSONRPCNotification(jsonrpc="2.0", method="notifications/initialized", params={})
+        )
+    )
+    list_tools_request = SessionMessage(
+        JSONRPCMessage(JSONRPCRequest(jsonrpc="2.0", id=1, method="tools/list", params={}))
+    )
+
+    async with httpx.AsyncClient() as client:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                transport.post_writer,
+                client,
+                write_stream_reader,
+                read_stream_writer,
+                write_stream,
+                lambda: None,
+                tg,
+            )
+            await write_stream.send(initialized_notification)
+            await write_stream.send(list_tools_request)
+
+            await asyncio.wait_for(request_handled.wait(), timeout=1)
+
+            await write_stream.aclose()
+            tg.cancel_scope.cancel()
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_server_passes_ignore_initialized_notification_failure():
+    with patch("agents.mcp.server.streamablehttp_client") as mock_client:
+        mock_client.return_value = MagicMock()
+
+        server = MCPServerStreamableHttp(
+            params={
+                "url": "http://localhost:8000/mcp",
+                "ignore_initialized_notification_failure": True,
+            }
+        )
+
+        server.create_streams()
+
+        mock_client.assert_called_once_with(
+            url="http://localhost:8000/mcp",
+            headers=None,
+            timeout=5,
+            sse_read_timeout=300,
+            terminate_on_close=True,
+            ignore_initialized_notification_failure=True,
+        )
