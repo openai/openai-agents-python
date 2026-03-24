@@ -79,6 +79,17 @@ T = TypeVar("T")
 
 
 class _AgentsStreamableHTTPTransport(StreamableHTTPTransport):
+    def __init__(
+        self,
+        url: str,
+        *,
+        ignore_initialized_notification_failure: bool = False,
+    ) -> None:
+        super().__init__(url)
+        self._ignore_initialized_notification_failure = (
+            ignore_initialized_notification_failure
+        )
+
     async def post_writer(
         self,
         client: httpx.AsyncClient,
@@ -127,7 +138,10 @@ class _AgentsStreamableHTTPTransport(StreamableHTTPTransport):
                         try:
                             await handle_request_async()
                         except Exception:
-                            if self._is_initialized_notification(message):
+                            if (
+                                self._ignore_initialized_notification_failure
+                                and self._is_initialized_notification(message)
+                            ):
                                 logger.warning(
                                     "Ignoring initialized notification failure in post_writer",
                                     exc_info=True,
@@ -150,6 +164,7 @@ async def streamablehttp_client(
     terminate_on_close: bool = True,
     httpx_client_factory: HttpClientFactory = create_mcp_http_client,
     auth: httpx.Auth | None = None,
+    ignore_initialized_notification_failure: bool = False,
 ):
     timeout_seconds = timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
     sse_read_timeout_seconds = (
@@ -163,7 +178,10 @@ async def streamablehttp_client(
         timeout=httpx.Timeout(timeout_seconds, read=sse_read_timeout_seconds),
         auth=auth,
     )
-    transport = _AgentsStreamableHTTPTransport(url)
+    transport = _AgentsStreamableHTTPTransport(
+        url,
+        ignore_initialized_notification_failure=ignore_initialized_notification_failure,
+    )
 
     async with client:
         read_stream_writer, read_stream = anyio.create_memory_object_stream[
@@ -1286,6 +1304,14 @@ class MCPServerStreamableHttpParams(TypedDict):
     transport.
     """
 
+    ignore_initialized_notification_failure: NotRequired[bool]
+    """Whether to ignore failures when sending the best-effort
+    ``notifications/initialized`` POST.
+
+    Defaults to ``False``. When set to ``True``, initialized-notification failures are
+    logged and ignored so subsequent requests on the same transport can continue.
+    """
+
 
 class MCPServerStreamableHttp(_MCPServerWithClientSession):
     """MCP server implementation that uses the Streamable HTTP transport. See the [spec]
@@ -1380,6 +1406,10 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             kwargs["httpx_client_factory"] = self.params["httpx_client_factory"]
         if "auth" in self.params:
             kwargs["auth"] = self.params["auth"]
+        if "ignore_initialized_notification_failure" in self.params:
+            kwargs["ignore_initialized_notification_failure"] = self.params[
+                "ignore_initialized_notification_failure"
+            ]
         return streamablehttp_client(**kwargs)
 
     @asynccontextmanager

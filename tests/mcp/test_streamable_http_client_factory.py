@@ -256,7 +256,10 @@ class TestMCPServerStreamableHttpClientFactory:
 
 @pytest.mark.asyncio
 async def test_initialized_notification_failure_does_not_stop_following_requests():
-    transport = _AgentsStreamableHTTPTransport("https://example.test/mcp")
+    transport = _AgentsStreamableHTTPTransport(
+        "https://example.test/mcp",
+        ignore_initialized_notification_failure=True,
+    )
     request_handled = asyncio.Event()
 
     async def fake_handle_post_request(ctx):
@@ -299,3 +302,27 @@ async def test_initialized_notification_failure_does_not_stop_following_requests
 
             await write_stream.aclose()
             tg.cancel_scope.cancel()
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_server_passes_ignore_initialized_notification_failure():
+    with patch("agents.mcp.server.streamablehttp_client") as mock_client:
+        mock_client.return_value = MagicMock()
+
+        server = MCPServerStreamableHttp(
+            params={
+                "url": "http://localhost:8000/mcp",
+                "ignore_initialized_notification_failure": True,
+            }
+        )
+
+        server.create_streams()
+
+        mock_client.assert_called_once_with(
+            url="http://localhost:8000/mcp",
+            headers=None,
+            timeout=5,
+            sse_read_timeout=300,
+            terminate_on_close=True,
+            ignore_initialized_notification_failure=True,
+        )
