@@ -10,6 +10,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar, Union, cast
 
+import anyio
 import httpx
 
 if sys.version_info < (3, 11):
@@ -19,13 +20,19 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
 from mcp.client.session import MessageHandlerFnT
 from mcp.client.sse import sse_client
-from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
+from mcp.client.streamable_http import (
+    GetSessionIdCallback,
+    RequestContext,
+    StreamableHTTPTransport,
+    create_mcp_http_client,
+)
 from mcp.shared.exceptions import McpError
-from mcp.shared.message import SessionMessage
+from mcp.shared.message import ClientMessageMetadata, SessionMessage
 from mcp.types import (
     CallToolResult,
     GetPromptResult,
     InitializeResult,
+    JSONRPCRequest,
     ListPromptsResult,
     ListResourcesResult,
     ListResourceTemplatesResult,
@@ -69,6 +76,125 @@ else:
 
 
 T = TypeVar("T")
+
+
+class _AgentsStreamableHTTPTransport(StreamableHTTPTransport):
+    async def post_writer(
+        self,
+        client: httpx.AsyncClient,
+        write_stream_reader: MemoryObjectReceiveStream[SessionMessage],
+        read_stream_writer: MemoryObjectSendStream[SessionMessage | Exception],
+        write_stream: MemoryObjectSendStream[SessionMessage],
+        start_get_stream: Callable[[], None],
+        tg: anyio.abc.TaskGroup,
+    ) -> None:
+        try:
+            async with write_stream_reader:
+                async for session_message in write_stream_reader:
+                    message = session_message.message
+                    metadata = (
+                        session_message.metadata
+                        if isinstance(session_message.metadata, ClientMessageMetadata)
+                        else None
+                    )
+                    is_resumption = bool(metadata and metadata.resumption_token)
+
+                    logger.debug(f"Sending client message: {message}")
+
+                    if self._is_initialized_notification(message):
+                        start_get_stream()
+
+                    ctx = RequestContext(
+                        client=client,
+                        session_id=self.session_id,
+                        session_message=session_message,
+                        metadata=metadata,
+                        read_stream_writer=read_stream_writer,
+                    )
+
+                    async def handle_request_async(
+                        request_ctx=ctx,
+                        request_is_resumption=is_resumption,
+                    ):
+                        if request_is_resumption:
+                            await self._handle_resumption_request(request_ctx)
+                        else:
+                            await self._handle_post_request(request_ctx)
+
+                    if isinstance(message.root, JSONRPCRequest):
+                        tg.start_soon(handle_request_async)
+                    else:
+                        try:
+                            await handle_request_async()
+                        except Exception:
+                            if self._is_initialized_notification(message):
+                                logger.warning(
+                                    "Ignoring initialized notification failure in post_writer",
+                                    exc_info=True,
+                                )
+                                continue
+                            raise
+        except Exception:
+            logger.exception("Error in post_writer")  # pragma: no cover
+        finally:
+            await read_stream_writer.aclose()
+            await write_stream.aclose()
+
+
+@asynccontextmanager
+async def streamablehttp_client(
+    url: str,
+    headers: dict[str, str] | None = None,
+    timeout: float | timedelta = 30,
+    sse_read_timeout: float | timedelta = 60 * 5,
+    terminate_on_close: bool = True,
+    httpx_client_factory: HttpClientFactory = create_mcp_http_client,
+    auth: httpx.Auth | None = None,
+):
+    timeout_seconds = timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
+    sse_read_timeout_seconds = (
+        sse_read_timeout.total_seconds()
+        if isinstance(sse_read_timeout, timedelta)
+        else sse_read_timeout
+    )
+
+    client = httpx_client_factory(
+        headers=headers,
+        timeout=httpx.Timeout(timeout_seconds, read=sse_read_timeout_seconds),
+        auth=auth,
+    )
+    transport = _AgentsStreamableHTTPTransport(url)
+
+    async with client:
+        read_stream_writer, read_stream = anyio.create_memory_object_stream[
+            SessionMessage | Exception
+        ](0)
+        write_stream, write_stream_reader = anyio.create_memory_object_stream[SessionMessage](0)
+
+        async with anyio.create_task_group() as tg:
+            try:
+                def start_get_stream() -> None:
+                    tg.start_soon(transport.handle_get_stream, client, read_stream_writer)
+
+                tg.start_soon(
+                    transport.post_writer,
+                    client,
+                    write_stream_reader,
+                    read_stream_writer,
+                    write_stream,
+                    start_get_stream,
+                    tg,
+                )
+
+                try:
+                    yield (read_stream, write_stream, transport.get_session_id)
+                finally:
+                    if transport.session_id and terminate_on_close:
+                        await transport.terminate_session(client)
+                    tg.cancel_scope.cancel()
+            finally:
+                await read_stream_writer.aclose()
+                await write_stream.aclose()
 
 
 class _SharedSessionRequestNeedsIsolation(Exception):
