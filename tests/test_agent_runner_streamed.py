@@ -4,8 +4,15 @@ import asyncio
 import json
 from typing import Any, cast
 
+import httpx
 import pytest
-from openai.types.responses import ResponseFunctionToolCall
+from openai import APIConnectionError, BadRequestError
+from openai.types.responses import (
+    ResponseCompletedEvent,
+    ResponseFailedEvent,
+    ResponseFunctionToolCall,
+    ResponseIncompleteEvent,
+)
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from typing_extensions import TypedDict
 
@@ -17,6 +24,9 @@ from agents import (
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
+    ModelRetrySettings,
+    ModelSettings,
+    OpenAIResponsesWSModel,
     OutputGuardrail,
     OutputGuardrailTripwireTriggered,
     RunContextWrapper,
@@ -24,6 +34,7 @@ from agents import (
     UserError,
     function_tool,
     handoff,
+    retry_policies,
 )
 from agents.items import RunItem, ToolApprovalItem, TResponseInputItem
 from agents.memory.openai_conversations_session import OpenAIConversationsSession
@@ -31,8 +42,9 @@ from agents.run import RunConfig
 from agents.run_internal import run_loop
 from agents.run_internal.run_loop import QueueCompleteSentinel
 from agents.stream_events import AgentUpdatedStreamEvent, StreamEvent
+from agents.usage import Usage
 
-from .fake_model import FakeModel
+from .fake_model import FakeModel, get_response_obj
 from .test_responses import (
     get_final_output_message,
     get_function_tool,
@@ -50,6 +62,22 @@ from .utils.hitl import (
 from .utils.simple_session import SimpleListSession
 
 
+def _conversation_locked_error() -> BadRequestError:
+    request = httpx.Request("POST", "https://example.com")
+    response = httpx.Response(
+        400,
+        request=request,
+        json={"error": {"code": "conversation_locked", "message": "locked"}},
+    )
+    error = BadRequestError(
+        "locked",
+        response=response,
+        body={"error": {"code": "conversation_locked"}},
+    )
+    error.code = "conversation_locked"
+    return error
+
+
 def _find_reasoning_input_item(
     items: str | list[TResponseInputItem] | Any,
 ) -> dict[str, Any] | None:
@@ -59,6 +87,17 @@ def _find_reasoning_input_item(
         if isinstance(item, dict) and item.get("type") == "reasoning":
             return cast(dict[str, Any], item)
     return None
+
+
+def _ws_terminal_response_frame(event_type: str, response_id: str, sequence_number: int) -> str:
+    response = get_response_obj([get_text_message("partial final")], response_id=response_id)
+    return json.dumps(
+        {
+            "type": event_type,
+            "response": response.model_dump(),
+            "sequence_number": sequence_number,
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -95,6 +134,250 @@ async def test_simple_first_run():
     assert result.final_output == "second"
     assert len(result.raw_responses) == 1, "exactly one model response should be generated"
     assert len(result.to_input_list()) == 3, "should have original input and generated item"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terminal_event_type", "terminal_event_cls"),
+    [
+        ("response.incomplete", ResponseIncompleteEvent),
+        ("response.failed", ResponseFailedEvent),
+    ],
+)
+async def test_streamed_run_accepts_terminal_response_payload_events(
+    terminal_event_type: str, terminal_event_cls: type[Any]
+) -> None:
+    class TerminalPayloadFakeModel(FakeModel):
+        async def stream_response(
+            self,
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            *,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            self.last_turn_args = {
+                "system_instructions": system_instructions,
+                "input": input,
+                "model_settings": model_settings,
+                "tools": tools,
+                "output_schema": output_schema,
+                "previous_response_id": previous_response_id,
+                "conversation_id": conversation_id,
+            }
+            if self.first_turn_args is None:
+                self.first_turn_args = self.last_turn_args.copy()
+
+            response = get_response_obj(
+                [get_text_message("partial final")], response_id="resp-partial"
+            )
+            yield terminal_event_cls(
+                type=terminal_event_type,
+                response=response,
+                sequence_number=0,
+            )
+
+    model = TerminalPayloadFakeModel()
+    agent = Agent(name="test", model=model)
+
+    result = Runner.run_streamed(agent, input="test")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "partial final"
+    assert len(result.raw_responses) == 1
+    assert result.raw_responses[0].response_id == "resp-partial"
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_exposes_request_id_on_raw_responses() -> None:
+    class RequestIdTerminalFakeModel(FakeModel):
+        async def stream_response(
+            self,
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            *,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            response = get_response_obj(
+                [get_text_message("partial final")], response_id="resp-partial"
+            )
+            response._request_id = "req_streamed_result_123"
+            yield ResponseCompletedEvent(
+                type="response.completed",
+                response=response,
+                sequence_number=0,
+            )
+
+    model = RequestIdTerminalFakeModel()
+    agent = Agent(name="test", model=model)
+
+    result = Runner.run_streamed(agent, input="test")
+    async for _ in result.stream_events():
+        pass
+
+    assert len(result.raw_responses) == 1
+    assert result.raw_responses[0].request_id == "req_streamed_result_123"
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_preserves_request_usage_entries_after_retry() -> None:
+    model = FakeModel()
+    model.set_hardcoded_usage(
+        Usage(
+            requests=1,
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+        )
+    )
+    model.add_multiple_turn_outputs(
+        [
+            APIConnectionError(
+                message="connection error",
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+
+    result = Runner.run_streamed(agent, input="test")
+    async for _ in result.stream_events():
+        pass
+
+    usage = result.context_wrapper.usage
+    assert usage.requests == 2
+    assert len(usage.request_usage_entries) == 2
+    assert usage.request_usage_entries[0].total_tokens == 0
+    assert usage.request_usage_entries[1].input_tokens == 10
+    assert usage.request_usage_entries[1].output_tokens == 5
+    assert usage.request_usage_entries[1].total_tokens == 15
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_preserves_request_usage_entries_after_conversation_locked_retry() -> (
+    None
+):
+    model = FakeModel()
+    model.set_hardcoded_usage(
+        Usage(
+            requests=1,
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+        )
+    )
+    model.add_multiple_turn_outputs(
+        [
+            _conversation_locked_error(),
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                policy=retry_policies.network_error(),
+            )
+        ),
+    )
+
+    result = Runner.run_streamed(agent, input="test")
+    async for _ in result.stream_events():
+        pass
+
+    usage = result.context_wrapper.usage
+    assert usage.requests == 2
+    assert len(usage.request_usage_entries) == 2
+    assert usage.request_usage_entries[0].total_tokens == 0
+    assert usage.request_usage_entries[1].input_tokens == 10
+    assert usage.request_usage_entries[1].output_tokens == 5
+    assert usage.request_usage_entries[1].total_tokens == 15
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_event_type", ["response.incomplete", "response.failed"])
+async def test_streamed_run_accepts_terminal_response_payload_events_from_ws_model(
+    monkeypatch, terminal_event_type: str
+) -> None:
+    class DummyWSConnection:
+        def __init__(self, frames: list[str]):
+            self._frames = frames
+            self.close_code: int | None = None
+
+        async def send(self, payload: str) -> None:
+            return None
+
+        async def recv(self) -> str:
+            if not self._frames:
+                raise RuntimeError("No more websocket frames configured")
+            return self._frames.pop(0)
+
+        async def close(self) -> None:
+            if self.close_code is None:
+                self.close_code = 1000
+
+    class DummyWSClient:
+        def __init__(self) -> None:
+            self.base_url = httpx.URL("https://api.openai.com/v1/")
+            self.websocket_base_url = None
+            self.default_query: dict[str, Any] = {}
+            self.default_headers = {
+                "Authorization": "Bearer test-key",
+                "User-Agent": "AsyncOpenAI/Python test",
+            }
+            self.timeout: Any = None
+
+        async def _refresh_api_key(self) -> None:
+            return None
+
+    ws = DummyWSConnection([_ws_terminal_response_frame(terminal_event_type, "resp-ws", 1)])
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=DummyWSClient())  # type: ignore[arg-type]
+
+    async def fake_open(
+        _ws_url: str,
+        _headers: dict[str, str],
+        *,
+        connect_timeout: float | None = None,
+    ) -> DummyWSConnection:
+        return ws
+
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+
+    agent = Agent(name="test", model=model)
+    result = Runner.run_streamed(agent, input="test")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "partial final"
+    assert len(result.raw_responses) == 1
+    assert result.raw_responses[0].response_id == "resp-ws"
 
 
 @pytest.mark.asyncio
@@ -161,6 +444,56 @@ async def test_tool_call_runs():
         "should have five inputs: the original input, the message, the tool call, the tool result "
         "and the done message"
     )
+
+
+@pytest.mark.asyncio
+async def test_streamed_parallel_tool_call_with_cancelled_sibling_reaches_final_output() -> None:
+    async def _ok_tool() -> str:
+        return "ok"
+
+    async def _cancel_tool() -> str:
+        raise asyncio.CancelledError("tool-cancelled")
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[
+            function_tool(_ok_tool, name_override="ok_tool"),
+            function_tool(_cancel_tool, name_override="cancel_tool"),
+        ],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call("ok_tool", "{}", call_id="call_ok"),
+                get_function_tool_call("cancel_tool", "{}", call_id="call_cancel"),
+            ],
+            [get_text_message("final answer")],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="user_message")
+    await consume_stream(result)
+
+    assert result.final_output == "final answer"
+    assert len(result.raw_responses) == 2
+
+    second_turn_input = cast(list[dict[str, Any]], model.last_turn_args["input"])
+    tool_outputs = [
+        item for item in second_turn_input if item.get("type") == "function_call_output"
+    ]
+    assert tool_outputs == [
+        {"call_id": "call_ok", "output": "ok", "type": "function_call_output"},
+        {
+            "call_id": "call_cancel",
+            "output": (
+                "An error occurred while running the tool. Please try again. Error: tool-cancelled"
+            ),
+            "type": "function_call_output",
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -335,6 +668,10 @@ async def test_structured_output():
     assert len(result.to_input_list()) == 10, (
         "should have input: conversation summary, function call, function call result, message, "
         "handoff, handoff output, preamble message, tool call, tool call result, final output"
+    )
+    assert len(result.to_input_list(mode="normalized")) == 6, (
+        "should have normalized replay input: conversation summary, carried-forward message, "
+        "preamble message, tool call, tool call result, final output"
     )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"
@@ -954,6 +1291,34 @@ async def test_output_guardrail_tripwire_triggered_causes_exception_streamed():
 
 
 @pytest.mark.asyncio
+async def test_output_guardrail_tripwire_raises_from_run_loop_task_before_stream_consumption():
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=True,
+        )
+
+    model = FakeModel(initial_output=[get_text_message("first_test")])
+
+    agent = Agent(
+        name="test",
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+        model=model,
+    )
+
+    result = Runner.run_streamed(agent, input="user_message")
+
+    assert result.run_loop_task is not None
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        await result.run_loop_task
+
+    assert result.final_output is None
+    assert result.is_complete is True
+
+
+@pytest.mark.asyncio
 async def test_run_input_guardrail_tripwire_triggered_causes_exception_streamed():
     def guardrail_function(
         context: RunContextWrapper[Any], agent: Agent[Any], input: Any
@@ -1064,6 +1429,10 @@ async def test_streaming_events():
     assert len(result.to_input_list()) == 9, (
         "should have input: conversation summary, function call, function call result, message, "
         "handoff, handoff output, tool call, tool call result, final output"
+    )
+    assert len(result.to_input_list(mode="normalized")) == 5, (
+        "should have normalized replay input: conversation summary, carried-forward message, "
+        "tool call, tool call result, final output"
     )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"

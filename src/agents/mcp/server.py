@@ -5,7 +5,7 @@ import asyncio
 import inspect
 import sys
 from collections.abc import Awaitable
-from contextlib import AbstractAsyncContextManager, AsyncExitStack
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar, Union, cast
@@ -14,13 +14,23 @@ import httpx
 
 if sys.version_info < (3, 11):
     from exceptiongroup import BaseExceptionGroup  # pyright: ignore[reportMissingImports]
+from anyio import ClosedResourceError
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
 from mcp.client.session import MessageHandlerFnT
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
+from mcp.shared.exceptions import McpError
 from mcp.shared.message import SessionMessage
-from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult
+from mcp.types import (
+    CallToolResult,
+    GetPromptResult,
+    InitializeResult,
+    ListPromptsResult,
+    ListResourcesResult,
+    ListResourceTemplatesResult,
+    ReadResourceResult,
+)
 from typing_extensions import NotRequired, TypedDict
 
 from ..exceptions import UserError
@@ -61,6 +71,14 @@ else:
 T = TypeVar("T")
 
 
+class _SharedSessionRequestNeedsIsolation(Exception):
+    """Raised when a shared-session request should be retried on an isolated session."""
+
+
+class _IsolatedSessionRetryFailed(Exception):
+    """Raised when an isolated-session retry fails after consuming retry budget."""
+
+
 class _UnsetType:
     pass
 
@@ -69,6 +87,19 @@ _UNSET = _UnsetType()
 
 if TYPE_CHECKING:
     from ..agent import AgentBase
+
+
+MCPStreamTransport = (
+    tuple[
+        MemoryObjectReceiveStream[SessionMessage | Exception],
+        MemoryObjectSendStream[SessionMessage],
+    ]
+    | tuple[
+        MemoryObjectReceiveStream[SessionMessage | Exception],
+        MemoryObjectSendStream[SessionMessage],
+        GetSessionIdCallback | None,
+    ]
+)
 
 
 class MCPServer(abc.ABC):
@@ -169,6 +200,63 @@ class MCPServer(abc.ABC):
         """Get a specific prompt from the server."""
         pass
 
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
+        """List the resources available on the server.
+
+        Args:
+            cursor: An opaque pagination cursor returned in a previous
+                :class:`~mcp.types.ListResourcesResult` as ``nextCursor``.  Pass it
+                here to fetch the next page of results.  ``None`` fetches the first
+                page.
+
+        Returns a :class:`~mcp.types.ListResourcesResult`.  When the result contains
+        a ``nextCursor`` field, call this method again with that cursor to retrieve
+        the next page.  Subclasses that do not support resources may leave this
+        unimplemented; it will raise :exc:`NotImplementedError` at call time.
+        """
+        raise NotImplementedError(
+            f"MCP server '{self.name}' does not support list_resources. "
+            "Override this method in your server implementation."
+        )
+
+    async def list_resource_templates(
+        self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
+        """List the resource templates available on the server.
+
+        Args:
+            cursor: An opaque pagination cursor returned in a previous
+                :class:`~mcp.types.ListResourceTemplatesResult` as ``nextCursor``.
+                Pass it here to fetch the next page of results.  ``None`` fetches
+                the first page.
+
+        Returns a :class:`~mcp.types.ListResourceTemplatesResult`.  When the result
+        contains a ``nextCursor`` field, call this method again with that cursor to
+        retrieve the next page.  Subclasses that do not support resource templates
+        may leave this unimplemented; it will raise :exc:`NotImplementedError` at
+        call time.
+        """
+        raise NotImplementedError(
+            f"MCP server '{self.name}' does not support list_resource_templates. "
+            "Override this method in your server implementation."
+        )
+
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        """Read the contents of a specific resource by URI.
+
+        Args:
+            uri: The URI of the resource to read. See :class:`~pydantic.networks.AnyUrl`
+                for the supported URI formats.
+
+        Returns a :class:`~mcp.types.ReadResourceResult`.  Subclasses that do not
+        support resources may leave this unimplemented; it will raise
+        :exc:`NotImplementedError` at call time.
+        """
+        raise NotImplementedError(
+            f"MCP server '{self.name}' does not support read_resource. "
+            "Override this method in your server implementation."
+        )
+
     @staticmethod
     def _normalize_needs_approval(
         *,
@@ -236,7 +324,7 @@ class MCPServer(abc.ABC):
 
         if callable(policy):
             if agent is None:
-                return False
+                return True
 
             async def _needs_approval(
                 run_context: RunContextWrapper[Any], _args: dict[str, Any], _call_id: str
@@ -323,6 +411,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
         self._cleanup_lock: asyncio.Lock = asyncio.Lock()
+        self._request_lock: asyncio.Lock = asyncio.Lock()
         self.cache_tools_list = cache_tools_list
         self.server_initialize_result: InitializeResult | None = None
 
@@ -336,6 +425,14 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self._tools_list: list[MCPTool] | None = None
 
         self.tool_filter = tool_filter
+        self._serialize_session_requests = False
+        self._get_session_id: GetSessionIdCallback | None = None
+
+    async def _maybe_serialize_request(self, func: Callable[[], Awaitable[T]]) -> T:
+        if not self._serialize_session_requests:
+            return await func()
+        async with self._request_lock:
+            return await func()
 
     async def _apply_tool_filter(
         self,
@@ -420,13 +517,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     @abc.abstractmethod
     def create_streams(
         self,
-    ) -> AbstractAsyncContextManager[
-        tuple[
-            MemoryObjectReceiveStream[SessionMessage | Exception],
-            MemoryObjectSendStream[SessionMessage],
-            GetSessionIdCallback | None,
-        ]
-    ]:
+    ) -> AbstractAsyncContextManager[MCPStreamTransport]:
         """Create the streams for the server."""
         pass
 
@@ -441,7 +532,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         """Invalidate the tools cache."""
         self._cache_dirty = True
 
-    def _extract_http_error_from_exception(self, e: Exception) -> Exception | None:
+    def _extract_http_error_from_exception(self, e: BaseException) -> Exception | None:
         """Extract HTTP error from exception or ExceptionGroup."""
         if isinstance(e, (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException)):
             return e
@@ -490,7 +581,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             # streamablehttp_client returns (read, write, get_session_id)
             # sse_client returns (read, write)
 
-            read, write, *_ = transport
+            read, write, *rest = transport
+            # Capture the session-id callback when present (streamablehttp_client only).
+            self._get_session_id = rest[0] if rest and callable(rest[0]) else None
 
             session = await self.exit_stack.enter_async_context(
                 ClientSession(
@@ -566,7 +659,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 tools = self._tools_list
             else:
                 # Fetch the tools from the server
-                result = await self._run_with_retries(lambda: session.list_tools())
+                result = await self._run_with_retries(
+                    lambda: self._maybe_serialize_request(lambda: session.list_tools())
+                )
                 self._tools_list = result.tools
                 self._cache_dirty = False
                 tools = self._tools_list
@@ -602,9 +697,15 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         try:
             self._validate_required_parameters(tool_name=tool_name, arguments=arguments)
             if meta is None:
-                return await self._run_with_retries(lambda: session.call_tool(tool_name, arguments))
+                return await self._run_with_retries(
+                    lambda: self._maybe_serialize_request(
+                        lambda: session.call_tool(tool_name, arguments)
+                    )
+                )
             return await self._run_with_retries(
-                lambda: session.call_tool(tool_name, arguments, meta=meta)
+                lambda: self._maybe_serialize_request(
+                    lambda: session.call_tool(tool_name, arguments, meta=meta)
+                )
             )
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
@@ -658,8 +759,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         """List the prompts available on the server."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
-
-        return await self.session.list_prompts()
+        session = self.session
+        assert session is not None
+        return await self._maybe_serialize_request(lambda: session.list_prompts())
 
     async def get_prompt(
         self, name: str, arguments: dict[str, Any] | None = None
@@ -667,8 +769,42 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         """Get a specific prompt from the server."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        session = self.session
+        assert session is not None
+        return await self._maybe_serialize_request(lambda: session.get_prompt(name, arguments))
 
-        return await self.session.get_prompt(name, arguments)
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
+        """List the resources available on the server."""
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        session = self.session
+        assert session is not None
+        return await self._maybe_serialize_request(lambda: session.list_resources(cursor))
+
+    async def list_resource_templates(
+        self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
+        """List the resource templates available on the server."""
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        session = self.session
+        assert session is not None
+        return await self._maybe_serialize_request(lambda: session.list_resource_templates(cursor))
+
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        """Read the contents of a specific resource by URI.
+
+        Args:
+            uri: The URI of the resource to read. See :class:`~pydantic.networks.AnyUrl`
+                for the supported URI formats.
+        """
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        session = self.session
+        assert session is not None
+        from pydantic import AnyUrl
+
+        return await self._maybe_serialize_request(lambda: session.read_resource(AnyUrl(uri)))
 
     async def cleanup(self):
         """Cleanup the server."""
@@ -745,6 +881,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     logger.error(f"Error cleaning up server: {e}")
             finally:
                 self.session = None
+                self._get_session_id = None
 
 
 class MCPServerStdioParams(TypedDict):
@@ -860,13 +997,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
 
     def create_streams(
         self,
-    ) -> AbstractAsyncContextManager[
-        tuple[
-            MemoryObjectReceiveStream[SessionMessage | Exception],
-            MemoryObjectSendStream[SessionMessage],
-            GetSessionIdCallback | None,
-        ]
-    ]:
+    ) -> AbstractAsyncContextManager[MCPStreamTransport]:
         """Create the streams for the server."""
         return stdio_client(self.params)
 
@@ -890,6 +1021,17 @@ class MCPServerSseParams(TypedDict):
 
     sse_read_timeout: NotRequired[float]
     """The timeout for the SSE connection, in seconds. Defaults to 5 minutes."""
+
+    auth: NotRequired[httpx.Auth | None]
+    """Optional httpx authentication handler (e.g. ``httpx.BasicAuth``, a custom
+    ``httpx.Auth`` subclass for OAuth token refresh, etc.).  When provided, it is
+    passed directly to the underlying ``httpx.AsyncClient`` used by the SSE transport.
+    """
+
+    httpx_client_factory: NotRequired[HttpClientFactory]
+    """Custom HTTP client factory for configuring httpx.AsyncClient behavior (e.g.
+    to set custom SSL certificates, proxies, or other transport options).
+    """
 
 
 class MCPServerSse(_MCPServerWithClientSession):
@@ -970,20 +1112,19 @@ class MCPServerSse(_MCPServerWithClientSession):
 
     def create_streams(
         self,
-    ) -> AbstractAsyncContextManager[
-        tuple[
-            MemoryObjectReceiveStream[SessionMessage | Exception],
-            MemoryObjectSendStream[SessionMessage],
-            GetSessionIdCallback | None,
-        ]
-    ]:
+    ) -> AbstractAsyncContextManager[MCPStreamTransport]:
         """Create the streams for the server."""
-        return sse_client(
-            url=self.params["url"],
-            headers=self.params.get("headers", None),
-            timeout=self.params.get("timeout", 5),
-            sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
-        )
+        kwargs: dict[str, Any] = {
+            "url": self.params["url"],
+            "headers": self.params.get("headers", None),
+            "timeout": self.params.get("timeout", 5),
+            "sse_read_timeout": self.params.get("sse_read_timeout", 60 * 5),
+        }
+        if "auth" in self.params:
+            kwargs["auth"] = self.params["auth"]
+        if "httpx_client_factory" in self.params:
+            kwargs["httpx_client_factory"] = self.params["httpx_client_factory"]
+        return sse_client(**kwargs)
 
     @property
     def name(self) -> str:
@@ -1011,6 +1152,13 @@ class MCPServerStreamableHttpParams(TypedDict):
 
     httpx_client_factory: NotRequired[HttpClientFactory]
     """Custom HTTP client factory for configuring httpx.AsyncClient behavior."""
+
+    auth: NotRequired[httpx.Auth | None]
+    """Optional httpx authentication handler (e.g. ``httpx.BasicAuth``, a custom
+    ``httpx.Auth`` subclass for OAuth token refresh, etc.).  When provided, it is
+    passed directly to the underlying ``httpx.AsyncClient`` used by the Streamable HTTP
+    transport.
+    """
 
 
 class MCPServerStreamableHttp(_MCPServerWithClientSession):
@@ -1089,37 +1237,242 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
 
         self.params = params
         self._name = name or f"streamable_http: {self.params['url']}"
+        self._serialize_session_requests = True
 
     def create_streams(
         self,
-    ) -> AbstractAsyncContextManager[
-        tuple[
-            MemoryObjectReceiveStream[SessionMessage | Exception],
-            MemoryObjectSendStream[SessionMessage],
-            GetSessionIdCallback | None,
-        ]
-    ]:
+    ) -> AbstractAsyncContextManager[MCPStreamTransport]:
         """Create the streams for the server."""
-        # Only pass httpx_client_factory if it's provided
+        kwargs: dict[str, Any] = {
+            "url": self.params["url"],
+            "headers": self.params.get("headers", None),
+            "timeout": self.params.get("timeout", 5),
+            "sse_read_timeout": self.params.get("sse_read_timeout", 60 * 5),
+            "terminate_on_close": self.params.get("terminate_on_close", True),
+        }
         if "httpx_client_factory" in self.params:
-            return streamablehttp_client(
-                url=self.params["url"],
-                headers=self.params.get("headers", None),
-                timeout=self.params.get("timeout", 5),
-                sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
-                terminate_on_close=self.params.get("terminate_on_close", True),
-                httpx_client_factory=self.params["httpx_client_factory"],
+            kwargs["httpx_client_factory"] = self.params["httpx_client_factory"]
+        if "auth" in self.params:
+            kwargs["auth"] = self.params["auth"]
+        return streamablehttp_client(**kwargs)
+
+    @asynccontextmanager
+    async def _isolated_client_session(self):
+        async with AsyncExitStack() as exit_stack:
+            transport = await exit_stack.enter_async_context(self.create_streams())
+            read, write, *_ = transport
+            session = await exit_stack.enter_async_context(
+                ClientSession(
+                    read,
+                    write,
+                    timedelta(seconds=self.client_session_timeout_seconds)
+                    if self.client_session_timeout_seconds
+                    else None,
+                    message_handler=self.message_handler,
+                )
             )
-        else:
-            return streamablehttp_client(
-                url=self.params["url"],
-                headers=self.params.get("headers", None),
-                timeout=self.params.get("timeout", 5),
-                sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
-                terminate_on_close=self.params.get("terminate_on_close", True),
+            await session.initialize()
+            yield session
+
+    async def _call_tool_with_session(
+        self,
+        session: ClientSession,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
+        if meta is None:
+            return await session.call_tool(tool_name, arguments)
+        return await session.call_tool(tool_name, arguments, meta=meta)
+
+    def _should_retry_in_isolated_session(self, exc: BaseException) -> bool:
+        if isinstance(
+            exc,
+            (
+                asyncio.CancelledError,
+                ClosedResourceError,
+                httpx.ConnectError,
+                httpx.TimeoutException,
+            ),
+        ):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code >= 500
+        if isinstance(exc, McpError):
+            return exc.error.code == httpx.codes.REQUEST_TIMEOUT
+        if isinstance(exc, BaseExceptionGroup):
+            return bool(exc.exceptions) and all(
+                self._should_retry_in_isolated_session(inner) for inner in exc.exceptions
             )
+        return False
+
+    async def _call_tool_with_shared_session(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+        *,
+        allow_isolated_retry: bool,
+    ) -> CallToolResult:
+        session = self.session
+        assert session is not None
+        try:
+            return await self._maybe_serialize_request(
+                lambda: self._call_tool_with_session(session, tool_name, arguments, meta)
+            )
+        except BaseException as exc:
+            if allow_isolated_retry and self._should_retry_in_isolated_session(exc):
+                raise _SharedSessionRequestNeedsIsolation from exc
+            raise
+
+    async def _call_tool_with_isolated_retry(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+        *,
+        allow_isolated_retry: bool,
+    ) -> tuple[CallToolResult, bool]:
+        request_task = asyncio.create_task(
+            self._call_tool_with_shared_session(
+                tool_name,
+                arguments,
+                meta,
+                allow_isolated_retry=allow_isolated_retry,
+            )
+        )
+        try:
+            return await asyncio.shield(request_task), False
+        except _SharedSessionRequestNeedsIsolation:
+            exit_stack = AsyncExitStack()
+            try:
+                session = await exit_stack.enter_async_context(self._isolated_client_session())
+            except asyncio.CancelledError:
+                await exit_stack.aclose()
+                raise
+            except BaseException as exc:
+                await exit_stack.aclose()
+                raise _IsolatedSessionRetryFailed() from exc
+            try:
+                try:
+                    result = await self._call_tool_with_session(session, tool_name, arguments, meta)
+                    return result, True
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as exc:
+                    raise _IsolatedSessionRetryFailed() from exc
+            finally:
+                await exit_stack.aclose()
+        except asyncio.CancelledError:
+            if not request_task.done():
+                request_task.cancel()
+            try:
+                await request_task
+            except BaseException:
+                pass
+            raise
+
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+
+        try:
+            self._validate_required_parameters(tool_name=tool_name, arguments=arguments)
+            retries_used = 0
+            first_attempt = True
+            while True:
+                if not first_attempt and self.max_retry_attempts != -1:
+                    retries_used += 1
+                allow_isolated_retry = (
+                    self.max_retry_attempts == -1 or retries_used < self.max_retry_attempts
+                )
+                try:
+                    result, used_isolated_retry = await self._call_tool_with_isolated_retry(
+                        tool_name,
+                        arguments,
+                        meta,
+                        allow_isolated_retry=allow_isolated_retry,
+                    )
+                    if used_isolated_retry and self.max_retry_attempts != -1:
+                        retries_used += 1
+                    return result
+                except _IsolatedSessionRetryFailed as exc:
+                    retries_used += 1
+                    if self.max_retry_attempts != -1 and retries_used >= self.max_retry_attempts:
+                        if exc.__cause__ is not None:
+                            raise exc.__cause__ from exc
+                        raise exc
+                    backoff = self.retry_backoff_seconds_base * (2 ** (retries_used - 1))
+                    await asyncio.sleep(backoff)
+                except Exception:
+                    if self.max_retry_attempts != -1 and retries_used >= self.max_retry_attempts:
+                        raise
+                    backoff = self.retry_backoff_seconds_base * (2**retries_used)
+                    await asyncio.sleep(backoff)
+                first_attempt = False
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            raise UserError(
+                f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                f"HTTP error {status_code}"
+            ) from e
+        except httpx.ConnectError as e:
+            raise UserError(
+                f"Failed to call tool '{tool_name}' on MCP server '{self.name}': Connection lost. "
+                f"The server may have disconnected."
+            ) from e
+        except BaseExceptionGroup as e:
+            http_error = self._extract_http_error_from_exception(e)
+            if isinstance(http_error, httpx.HTTPStatusError):
+                status_code = http_error.response.status_code
+                raise UserError(
+                    f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                    f"HTTP error {status_code}"
+                ) from http_error
+            if isinstance(http_error, httpx.ConnectError):
+                raise UserError(
+                    f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                    "Connection lost. The server may have disconnected."
+                ) from http_error
+            if isinstance(http_error, httpx.TimeoutException):
+                raise UserError(
+                    f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                    "Connection timeout."
+                ) from http_error
+            raise
 
     @property
     def name(self) -> str:
         """A readable name for the server."""
         return self._name
+
+    @property
+    def session_id(self) -> str | None:
+        """The MCP session ID assigned by the server, or None if not yet connected
+        or if the server did not issue a session ID.
+
+        The session ID is stable for the lifetime of this server instance's connection.
+        You can persist it and pass it back via the Mcp-Session-Id request header
+        (params["headers"]) on a new MCPServerStreamableHttp instance to resume
+        the same server-side session across process restarts or stateless workers.
+
+        Example::
+
+            async with MCPServerStreamableHttp(params={"url": url}) as server:
+                session_id = server.session_id
+
+            # In a new worker / process:
+            async with MCPServerStreamableHttp(
+                params={"url": url, "headers": {"Mcp-Session-Id": session_id}}
+            ) as server:
+                # Resumes the same server-side session.
+                ...
+        """
+        if self._get_session_id is None:
+            return None
+        return self._get_session_id()

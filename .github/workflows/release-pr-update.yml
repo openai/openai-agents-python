@@ -79,6 +79,9 @@ jobs:
           openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
           prompt-file: .github/codex/prompts/release-review.md
           output-file: ${{ steps.codex-output.outputs.output_file }}
+          # Keep the legacy Linux sandbox path until the default bubblewrap path
+          # works reliably on GitHub-hosted Ubuntu runners.
+          codex-args: '["--enable","use_legacy_landlock"]'
           safety-strategy: drop-sudo
           sandbox: read-only
       - name: Update PR body and push

@@ -15,6 +15,7 @@ from agents import (
     ToolsToFinalOutputResult,
     function_tool,
 )
+from examples.auto_mode import is_auto_mode
 
 """
 This example shows how to force the agent to use a tool. It uses `ModelSettings(tool_choice="required")`
@@ -81,6 +82,13 @@ async def main(tool_use_behavior: Literal["default", "first_tool", "custom"] = "
     print(result.final_output)
 
 
+async def auto_demo() -> None:
+    for behavior in ("default", "first_tool", "custom"):
+        print(f"=== {behavior} ===")
+        await main(behavior)
+        print()
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -98,4 +106,7 @@ if __name__ == "__main__":
         ),
     )
     args = parser.parse_args()
-    asyncio.run(main(args.tool_use_behavior))
+    if is_auto_mode():
+        asyncio.run(auto_demo())
+    else:
+        asyncio.run(main(args.tool_use_behavior))

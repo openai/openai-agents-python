@@ -1,3 +1,5 @@
+import asyncio
+import dataclasses
 import json
 import logging
 from typing import Any
@@ -8,7 +10,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent, Tool as MCPTool
 from pydantic import BaseModel, TypeAdapter
 
 from agents import Agent, FunctionTool, RunContextWrapper, default_tool_error_function
-from agents.exceptions import AgentsException, ModelBehaviorError
+from agents.exceptions import AgentsException, MCPToolCancellationError, ModelBehaviorError
 from agents.mcp import MCPServer, MCPUtil
 from agents.tool_context import ToolContext
 
@@ -174,6 +176,46 @@ class CrashingFakeMCPServer(FakeMCPServer):
         raise Exception("Crash!")
 
 
+class CancelledFakeMCPServer(FakeMCPServer):
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ):
+        raise asyncio.CancelledError("synthetic mcp cancel")
+
+
+class SlowFakeMCPServer(FakeMCPServer):
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ):
+        await asyncio.sleep(60)
+        return await super().call_tool(tool_name, arguments, meta=meta)
+
+
+class CleanupOnCancelFakeMCPServer(FakeMCPServer):
+    def __init__(self, cleanup_finished: asyncio.Event):
+        super().__init__()
+        self.cleanup_finished = cleanup_finished
+
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ):
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)
+            self.cleanup_finished.set()
+            raise
+
+
 @pytest.mark.asyncio
 async def test_mcp_invocation_crash_causes_error(caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.DEBUG)
@@ -189,6 +231,213 @@ async def test_mcp_invocation_crash_causes_error(caplog: pytest.LogCaptureFixtur
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
 
     assert "Error invoking MCP tool test_tool_1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_inner_cancellation_becomes_tool_error():
+    server = CancelledFakeMCPServer()
+    server.add_tool("cancel_tool", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="cancel_tool", inputSchema={})
+
+    with pytest.raises(MCPToolCancellationError, match="tool execution was cancelled"):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    agent = Agent(name="test-agent")
+    function_tool = MCPUtil.to_function_tool(
+        tool, server, convert_schemas_to_strict=False, agent=agent
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="cancel_tool",
+        tool_call_id="test_call_cancelled",
+        tool_arguments="{}",
+    )
+
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+    assert isinstance(result, str)
+    assert "tool execution was cancelled" in result
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_inner_cancellation_still_becomes_tool_error_with_prior_cancel_state():
+    current_task = asyncio.current_task()
+    assert current_task is not None
+
+    current_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.sleep(0)
+
+    server = CancelledFakeMCPServer()
+    server.add_tool("cancel_tool", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="cancel_tool", inputSchema={})
+
+    with pytest.raises(MCPToolCancellationError, match="tool execution was cancelled"):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_outer_cancellation_still_propagates():
+    server = SlowFakeMCPServer()
+    server.add_tool("slow_tool", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="slow_tool", inputSchema={})
+
+    task = asyncio.create_task(MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}"))
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_outer_cancellation_after_inner_completion_still_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    server = FakeMCPServer()
+    server.add_tool("fast_tool", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="fast_tool", inputSchema={})
+
+    async def fake_wait(tasks, *, return_when):
+        del return_when
+        (task,) = tuple(tasks)
+        await task
+        raise asyncio.CancelledError("synthetic outer cancellation")
+
+    monkeypatch.setattr(asyncio, "wait", fake_wait)
+
+    with pytest.raises(asyncio.CancelledError):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_outer_cancellation_after_inner_exception_still_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    server = CrashingFakeMCPServer()
+    server.add_tool("boom_tool", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="boom_tool", inputSchema={})
+
+    async def fake_wait(tasks, *, return_when):
+        del return_when
+        (task,) = tuple(tasks)
+        try:
+            await task
+        except Exception:
+            pass
+        raise asyncio.CancelledError("synthetic outer cancellation")
+
+    monkeypatch.setattr(asyncio, "wait", fake_wait)
+
+    with pytest.raises(asyncio.CancelledError):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_outer_cancellation_after_inner_cancellation_still_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    server = SlowFakeMCPServer()
+    server.add_tool("slow_tool", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="slow_tool", inputSchema={})
+
+    async def fake_wait(tasks, *, return_when):
+        del return_when
+        (task,) = tuple(tasks)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        raise asyncio.CancelledError("synthetic combined cancellation")
+
+    monkeypatch.setattr(asyncio, "wait", fake_wait)
+
+    with pytest.raises(asyncio.CancelledError):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_outer_cancellation_waits_for_inner_cleanup():
+    cleanup_finished = asyncio.Event()
+    server = CleanupOnCancelFakeMCPServer(cleanup_finished)
+    server.add_tool("slow_tool", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="slow_tool", inputSchema={})
+
+    task = asyncio.create_task(MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}"))
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cleanup_finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_mcp_invocation_mcp_error_reraises(caplog: pytest.LogCaptureFixture):
+    """Test that McpError from server.call_tool is re-raised so the FunctionTool failure
+    pipeline (failure_error_function) can handle it.
+
+    When an MCP server raises McpError (e.g. upstream HTTP 4xx/5xx), invoke_mcp_tool
+    re-raises so the configured failure_error_function shapes the model-visible error.
+    With the default failure_error_function the FunctionTool returns a string error
+    result; with failure_error_function=None the error is propagated to the caller.
+    """
+    caplog.set_level(logging.DEBUG)
+
+    from mcp.shared.exceptions import McpError
+    from mcp.types import ErrorData
+
+    class McpErrorFakeMCPServer(FakeMCPServer):
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None = None,
+        ):
+            raise McpError(ErrorData(code=-32000, message="upstream 422 Unprocessable Entity"))
+
+    server = McpErrorFakeMCPServer()
+    server.add_tool("search", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="search", inputSchema={})
+
+    # invoke_mcp_tool itself should re-raise McpError
+    with pytest.raises(McpError):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    # Warning (not error) should be logged before re-raising
+    assert "returned an error" in caplog.text
+
+    # Via FunctionTool with default failure_error_function: error becomes a string result
+    mcp_tool = MCPTool(name="search", inputSchema={})
+    agent = Agent(name="test-agent")
+    function_tool = MCPUtil.to_function_tool(
+        mcp_tool, server, convert_schemas_to_strict=False, agent=agent
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="search",
+        tool_call_id="test_call_mcp_error",
+        tool_arguments="{}",
+    )
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+    assert isinstance(result, str)
+    assert "upstream 422 Unprocessable Entity" in result or "error" in result.lower()
 
 
 @pytest.mark.asyncio
@@ -291,6 +540,30 @@ async def test_mcp_tool_timeout_handling():
 
 
 @pytest.mark.asyncio
+async def test_mcp_tool_cancellation_returns_error_message():
+    server = CancelledFakeMCPServer()
+    server.add_tool("cancelled_tool", {})
+
+    mcp_tool = MCPTool(name="cancelled_tool", inputSchema={})
+    agent = Agent(name="test-agent")
+    function_tool = MCPUtil.to_function_tool(
+        mcp_tool, server, convert_schemas_to_strict=False, agent=agent
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="cancelled_tool",
+        tool_call_id="test_call_cancelled",
+        tool_arguments="{}",
+    )
+
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+
+    assert isinstance(result, str)
+    assert "cancelled" in result.lower()
+
+
+@pytest.mark.asyncio
 async def test_to_function_tool_legacy_call_without_agent_uses_server_policy():
     """Legacy three-argument to_function_tool calls should honor server policy."""
 
@@ -320,6 +593,31 @@ async def test_to_function_tool_legacy_call_without_agent_uses_server_policy():
         assert "result_legacy_tool_" in str(result.get("text", ""))
     else:
         pytest.fail(f"Unexpected tool result type: {type(result).__name__}")
+
+
+@pytest.mark.asyncio
+async def test_to_function_tool_legacy_call_callable_policy_requires_approval():
+    """Legacy to_function_tool calls should default to approval for callable policies."""
+
+    server = FakeMCPServer()
+    server.add_tool("legacy_callable_tool", {})
+
+    def require_approval(
+        _run_context: RunContextWrapper[Any],
+        _agent: Agent,
+        _tool: MCPTool,
+    ) -> bool:
+        return False
+
+    server._needs_approval_policy = require_approval  # type: ignore[assignment]
+
+    function_tool = MCPUtil.to_function_tool(
+        MCPTool(name="legacy_callable_tool", inputSchema={}),
+        server,
+        convert_schemas_to_strict=False,
+    )
+
+    assert function_tool.needs_approval is True
 
 
 @pytest.mark.asyncio
@@ -413,6 +711,38 @@ async def test_mcp_tool_failure_error_function_server_none_raises():
 
     with pytest.raises(AgentsException):
         await function_tool.on_invoke_tool(tool_context, "{}")
+
+
+@pytest.mark.asyncio
+async def test_replaced_mcp_tool_normal_failure_uses_replaced_policy():
+    server = CrashingFakeMCPServer()
+    server.add_tool("crashing_tool", {})
+
+    agent = Agent(
+        name="test-agent",
+        mcp_servers=[server],
+        mcp_config={"failure_error_function": default_tool_error_function},
+    )
+    run_context = RunContextWrapper(context=None)
+    function_tools = await agent.get_mcp_tools(run_context)
+    original_tool = next(tool for tool in function_tools if tool.name == "crashing_tool")
+    assert isinstance(original_tool, FunctionTool)
+
+    replaced_tool = dataclasses.replace(
+        original_tool,
+        _failure_error_function=None,
+        _use_default_failure_error_function=False,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name=replaced_tool.name,
+        tool_call_id="test_call_custom_4",
+        tool_arguments="{}",
+    )
+
+    with pytest.raises(AgentsException):
+        await replaced_tool.on_invoke_tool(tool_context, "{}")
 
 
 @pytest.mark.asyncio
@@ -967,3 +1297,33 @@ async def test_multiple_content_items_without_structured():
     assert result[0]["text"] == "First"
     assert result[1]["type"] == "text"
     assert result[1]["text"] == "Second"
+
+
+def test_to_function_tool_preserves_mcp_title_metadata():
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="search_docs",
+        inputSchema={},
+        description="Search the docs.",
+        title="Search Docs",
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+
+    assert function_tool.description == "Search the docs."
+    assert function_tool._mcp_title == "Search Docs"
+
+
+def test_to_function_tool_description_falls_back_to_mcp_title():
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="search_docs",
+        inputSchema={},
+        description=None,
+        title="Search Docs",
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+
+    assert function_tool.description == "Search Docs"
+    assert function_tool._mcp_title == "Search Docs"

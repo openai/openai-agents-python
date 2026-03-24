@@ -25,7 +25,7 @@ class WebSearchPlan(BaseModel):
 planner_agent = Agent(
     name="PlannerAgent",
     instructions=PROMPT,
-    model="gpt-5",
+    model="gpt-5.4",
     model_settings=ModelSettings(reasoning=Reasoning(effort="medium")),
     output_type=WebSearchPlan,
 )

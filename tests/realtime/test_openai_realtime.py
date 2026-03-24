@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 import websockets
 
-from agents import Agent
+from agents import Agent, function_tool
 from agents.exceptions import UserError
 from agents.handoffs import handoff
 from agents.realtime.model import RealtimeModelConfig
@@ -112,6 +112,36 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
                 assert model._websocket == mock_websocket
         assert model._websocket_task is not None
         assert model.model == "gpt-4o-realtime-preview"
+
+    @pytest.mark.asyncio
+    async def test_connect_defaults_to_gpt_realtime_1_5(self, model, mock_websocket):
+        """Test that connect() uses gpt-realtime-1.5 when no model is provided."""
+        config = {
+            "api_key": "test-api-key-123",
+            "initial_model_settings": {},
+        }
+
+        async def async_websocket(*args, **kwargs):
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket) as mock_connect:
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                await model.connect(config)
+
+                mock_connect.assert_called_once()
+                call_args = mock_connect.call_args
+                assert call_args[0][0] == "wss://api.openai.com/v1/realtime?model=gpt-realtime-1.5"
+                assert model.model == "gpt-realtime-1.5"
+
+        assert model._websocket_task is not None
 
     @pytest.mark.asyncio
     async def test_session_update_includes_noise_reduction(self, model, mock_websocket):
@@ -788,6 +818,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
     def test_session_config_defaults_audio_formats_when_not_call(self, model):
         settings: dict[str, Any] = {}
         cfg = model._get_session_config(settings)
+        assert cfg.model == "gpt-realtime-1.5"
         assert cfg.audio is not None
         assert cfg.audio.input is not None
         assert cfg.audio.input.format is not None
@@ -795,6 +826,15 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert cfg.audio.output is not None
         assert cfg.audio.output.format is not None
         assert cfg.audio.output.format.type == "audio/pcm"
+
+    def test_session_config_allows_tool_search_as_named_function_tool_choice(self, model):
+        cfg = model._get_session_config(
+            {
+                "tool_choice": "tool_search",
+                "tools": [function_tool(lambda city: city, name_override="tool_search")],
+            }
+        )
+        assert cfg.tool_choice == "tool_search"
 
     def test_session_config_preserves_sip_audio_formats(self, model):
         model._call_id = "call-123"
@@ -1007,13 +1047,14 @@ class TestTransportIntegration:
     async def test_connect_to_local_server(self):
         """Test connecting to a real local server with transport config."""
         received_messages = []
-        import asyncio
+        session_update_received = asyncio.Event()
 
         async def handler(websocket):
             try:
                 # Use async iteration for compatibility with newer websockets
                 async for message in websocket:
                     received_messages.append(json.loads(message))
+                    session_update_received.set()
                     # Respond to session update
                     # We need to provide a minimally valid session object
                     response = {
@@ -1069,9 +1110,7 @@ class TestTransportIntegration:
 
             await model.connect(config)
 
-            # Wait briefly for the connection logic to send session.update
-            # In a real scenario we'd wait for an event, but here we just sleep briefly
-            await asyncio.sleep(0.2)
+            await asyncio.wait_for(session_update_received.wait(), timeout=1.0)
 
             # Verify we are connected
             assert model._websocket is not None
@@ -1118,7 +1157,7 @@ class TestTransportIntegration:
             await model.connect(config)
 
             # Wait for multiple ping/pong cycles
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.2)
 
             # Connection should still be open
             assert model._websocket is not None
@@ -1323,7 +1362,7 @@ class TestTransportIntegration:
         import hashlib
 
         # Server handshake delay threshold (in seconds)
-        SERVER_HANDSHAKE_DELAY = 0.3
+        SERVER_HANDSHAKE_DELAY = 0.05
 
         shutdown_event = asyncio.Event()
         connections_attempted = []
@@ -1369,8 +1408,11 @@ class TestTransportIntegration:
                 writer.write(response.encode())
                 await writer.drain()
 
-                # Keep connection open until shutdown
+                # Keep connection open until shutdown, then send a close frame so
+                # the client can complete close() without waiting for a timeout.
                 await shutdown_event.wait()
+                writer.write(b"\x88\x00")
+                await writer.drain()
 
             except asyncio.TimeoutError:
                 pass
@@ -1387,7 +1429,7 @@ class TestTransportIntegration:
             # Test 1: FAILURE - Client timeout < server delay
             # Client gives up before server completes handshake
             transport_fail: TransportConfig = {
-                "handshake_timeout": 0.1,  # 100ms < 300ms server delay → will timeout
+                "handshake_timeout": 0.01,
             }
             model_fail = OpenAIRealtimeWebSocketModel(transport_config=transport_fail)
             config_fail: RealtimeModelConfig = {
@@ -1405,7 +1447,7 @@ class TestTransportIntegration:
             # Test 2: SUCCESS - Client timeout > server delay
             # Client waits long enough for server to complete handshake
             transport_success: TransportConfig = {
-                "handshake_timeout": 1.0,  # 1000ms > 300ms server delay → will succeed
+                "handshake_timeout": 0.2,
             }
             model_success = OpenAIRealtimeWebSocketModel(transport_config=transport_success)
             config_success: RealtimeModelConfig = {
@@ -1420,6 +1462,7 @@ class TestTransportIntegration:
             assert model_success._websocket is not None
             assert model_success._websocket.close_code is None
 
+            shutdown_event.set()
             await model_success.close()
 
         finally:
@@ -1459,7 +1502,7 @@ class TestTransportIntegration:
                 await model.connect(config)
 
                 # Let it run for a bit
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.1)
 
                 end = asyncio.get_event_loop().time()
                 connection_durations[label] = end - start

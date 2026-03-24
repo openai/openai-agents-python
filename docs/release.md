@@ -19,6 +19,35 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.13.0
+
+This minor release does **not** introduce a breaking change, but it includes a notable Realtime default update plus new MCP capabilities and runtime stability fixes.
+
+Highlights:
+
+-   The default websocket Realtime model is now `gpt-realtime-1.5`, so new Realtime agent setups use the newer model without extra configuration.
+-   `MCPServer` now exposes `list_resources()`, `list_resource_templates()`, and `read_resource()`, and `MCPServerStreamableHttp` now exposes `session_id` so streamable HTTP sessions can be resumed across reconnects or stateless workers.
+-   Chat Completions integrations can now opt into reasoning-content replay via `should_replay_reasoning_content`, improving provider-specific reasoning/tool-call continuity for adapters such as LiteLLM/DeepSeek.
+-   Fixed several runtime and session edge cases, including concurrent first writes in `SQLAlchemySession`, compaction requests with orphaned assistant message IDs after reasoning stripping, `remove_all_tools()` leaving MCP/reasoning items behind, and a race in the function-tool batch executor.
+
+### 0.12.0
+
+This minor release does **not** introduce a breaking change. Check [the release notes](https://github.com/openai/openai-agents-python/releases/tag/v0.12.0) for major feature additions.
+
+### 0.11.0
+
+This minor release does **not** introduce a breaking change. Check [the release notes](https://github.com/openai/openai-agents-python/releases/tag/v0.11.0) for major feature additions.
+
+### 0.10.0
+
+This minor release does **not** introduce a breaking change, but it includes a significant new feature area for OpenAI Responses users: websocket transport support for the Responses API.
+
+Highlights:
+
+-   Added websocket transport support for OpenAI Responses models (opt-in; HTTP remains the default transport).
+-   Added a `responses_websocket_session()` helper / `ResponsesWebSocketSession` for reusing a shared websocket-capable provider and `RunConfig` across multi-turn runs.
+-   Added a new websocket streaming example (`examples/basic/stream_ws.py`) covering streaming, tools, approvals, and follow-up turns.
+
 ### 0.9.0
 
 In this version, Python 3.9 is no longer supported, as this major version reached EOL three months ago. Please upgrade to a newer runtime version.

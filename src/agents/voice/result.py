@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import deque
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -52,9 +53,9 @@ class StreamedAudioResult:
         self._turn_text_buffer = ""
         self._queue: asyncio.Queue[VoiceStreamEvent] = asyncio.Queue()
         self._tasks: list[asyncio.Task[Any]] = []
-        self._ordered_tasks: list[
-            asyncio.Queue[VoiceStreamEvent | None]
-        ] = []  # New: list to hold local queues for each text segment
+        self._ordered_tasks: deque[asyncio.Queue[VoiceStreamEvent | None]] = (
+            deque()
+        )  # New: deque to hold local queues for each text segment
         self._dispatcher_task: asyncio.Task[Any] | None = (
             None  # Task to dispatch audio chunks in order
         )
@@ -248,7 +249,7 @@ class StreamedAudioResult:
                     break
                 await asyncio.sleep(0)
                 continue
-            local_queue = self._ordered_tasks.pop(0)
+            local_queue = self._ordered_tasks.popleft()
             while True:
                 chunk = await local_queue.get()
                 if chunk is None:

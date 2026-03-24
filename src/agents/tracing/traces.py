@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import abc
 import contextvars
+import hashlib
+import threading
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -148,6 +151,14 @@ class Trace(abc.ABC):
         return payload
 
 
+def _hash_tracing_api_key(tracing_api_key: str | None) -> str | None:
+    # Persist only a fingerprint so resumed runs can verify the same explicit
+    # tracing key without storing the secret.
+    if tracing_api_key is None:
+        return None
+    return hashlib.sha256(tracing_api_key.encode("utf-8")).hexdigest()
+
+
 @dataclass
 class TraceState:
     """Serializable trace metadata for run state persistence."""
@@ -157,6 +168,7 @@ class TraceState:
     group_id: str | None = None
     metadata: dict[str, Any] | None = None
     tracing_api_key: str | None = None
+    tracing_api_key_hash: str | None = None
     object_type: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -179,12 +191,20 @@ class TraceState:
         metadata_value = data.pop("metadata", None)
         metadata = metadata_value if isinstance(metadata_value, dict) else None
         tracing_api_key = data.pop("tracing_api_key", None)
+        tracing_api_key_hash = data.pop("tracing_api_key_hash", None)
+        resolved_tracing_api_key = tracing_api_key if isinstance(tracing_api_key, str) else None
+        resolved_tracing_api_key_hash = _hash_tracing_api_key(resolved_tracing_api_key)
+        # Secure snapshots may strip the raw key, so keep the stored
+        # fingerprint for resume-time matching.
+        if resolved_tracing_api_key_hash is None and isinstance(tracing_api_key_hash, str):
+            resolved_tracing_api_key_hash = tracing_api_key_hash
         return cls(
             trace_id=trace_id if isinstance(trace_id, str) else None,
             workflow_name=workflow_name if isinstance(workflow_name, str) else None,
             group_id=group_id if isinstance(group_id, str) else None,
             metadata=metadata,
-            tracing_api_key=tracing_api_key if isinstance(tracing_api_key, str) else None,
+            tracing_api_key=resolved_tracing_api_key,
+            tracing_api_key_hash=resolved_tracing_api_key_hash,
             object_type=object_type if isinstance(object_type, str) else None,
             extra=data,
         )
@@ -196,6 +216,7 @@ class TraceState:
             and self.group_id is None
             and self.metadata is None
             and self.tracing_api_key is None
+            and self.tracing_api_key_hash is None
             and self.object_type is None
             and not self.extra
         ):
@@ -213,10 +234,138 @@ class TraceState:
             payload["metadata"] = dict(self.metadata)
         if include_tracing_api_key and self.tracing_api_key:
             payload["tracing_api_key"] = self.tracing_api_key
+        if self.tracing_api_key_hash:
+            # Always persist the fingerprint so default RunState snapshots
+            # can still validate explicit resume keys.
+            payload["tracing_api_key_hash"] = self.tracing_api_key_hash
         for key, value in self.extra.items():
             if key not in payload:
                 payload[key] = value
         return payload
+
+
+_MAX_STARTED_TRACE_IDS = 4096
+_started_trace_ids: OrderedDict[str, None] = OrderedDict()
+_started_trace_ids_lock = threading.Lock()
+
+
+def _mark_trace_id_started(trace_id: str | None) -> None:
+    if not trace_id or trace_id == "no-op":
+        return
+    with _started_trace_ids_lock:
+        if trace_id in _started_trace_ids:
+            _started_trace_ids.move_to_end(trace_id)
+        else:
+            _started_trace_ids[trace_id] = None
+
+        while len(_started_trace_ids) > _MAX_STARTED_TRACE_IDS:
+            _started_trace_ids.popitem(last=False)
+
+
+def _trace_id_was_started(trace_id: str | None) -> bool:
+    if not trace_id or trace_id == "no-op":
+        return False
+    with _started_trace_ids_lock:
+        return trace_id in _started_trace_ids
+
+
+class ReattachedTrace(Trace):
+    """A trace context rebuilt from persisted state without re-emitting trace start events."""
+
+    __slots__ = (
+        "_name",
+        "_trace_id",
+        "_tracing_api_key",
+        "group_id",
+        "metadata",
+        "_prev_context_token",
+        "_started",
+    )
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        trace_id: str,
+        group_id: str | None,
+        metadata: dict[str, Any] | None,
+        tracing_api_key: str | None,
+    ) -> None:
+        self._name = name
+        self._trace_id = trace_id
+        self._tracing_api_key = tracing_api_key
+        self.group_id = group_id
+        self.metadata = metadata
+        self._prev_context_token: contextvars.Token[Trace | None] | None = None
+        self._started = False
+
+    @property
+    def trace_id(self) -> str:
+        return self._trace_id
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def tracing_api_key(self) -> str | None:
+        return self._tracing_api_key
+
+    def start(self, mark_as_current: bool = False):
+        if self._started:
+            return
+
+        self._started = True
+        _mark_trace_id_started(self.trace_id)
+
+        if mark_as_current:
+            self._prev_context_token = Scope.set_current_trace(self)
+
+    def finish(self, reset_current: bool = False):
+        if not self._started:
+            return
+
+        if reset_current and self._prev_context_token is not None:
+            Scope.reset_current_trace(self._prev_context_token)
+            self._prev_context_token = None
+
+    def __enter__(self) -> Trace:
+        if self._started:
+            if not self._prev_context_token:
+                logger.error("Trace already started but no context token set")
+            return self
+
+        self.start(mark_as_current=True)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.finish(reset_current=exc_type is not GeneratorExit)
+
+    def export(self) -> dict[str, Any] | None:
+        return {
+            "object": "trace",
+            "id": self.trace_id,
+            "workflow_name": self.name,
+            "group_id": self.group_id,
+            "metadata": self.metadata,
+        }
+
+
+def reattach_trace(trace_state: TraceState, *, tracing_api_key: str | None = None) -> Trace | None:
+    """Build a live trace context from persisted state without notifying processors."""
+    if trace_state.trace_id is None:
+        return None
+    return ReattachedTrace(
+        name=trace_state.workflow_name or "Agent workflow",
+        trace_id=trace_state.trace_id,
+        group_id=trace_state.group_id,
+        metadata=dict(trace_state.metadata) if trace_state.metadata is not None else None,
+        tracing_api_key=(
+            trace_state.tracing_api_key
+            if trace_state.tracing_api_key is not None
+            else tracing_api_key
+        ),
+    )
 
 
 class NoOpTrace(Trace):
@@ -347,6 +496,7 @@ class TraceImpl(Trace):
 
         self._started = True
         self._processor.on_trace_start(self)
+        _mark_trace_id_started(self.trace_id)
 
         if mark_as_current:
             self._prev_context_token = Scope.set_current_trace(self)

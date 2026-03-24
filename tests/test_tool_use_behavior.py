@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from openai.types.responses.response_input_item_param import FunctionCallOutput
@@ -14,6 +14,8 @@ from agents import (
     ToolCallOutputItem,
     ToolsToFinalOutputResult,
     UserError,
+    function_tool,
+    tool_namespace,
 )
 from agents.run_internal import run_loop
 
@@ -21,10 +23,14 @@ from .test_responses import get_function_tool
 
 
 def _make_function_tool_result(
-    agent: Agent, output: str, tool_name: str | None = None
+    agent: Agent,
+    output: str,
+    tool_name: str | None = None,
+    *,
+    tool: Any | None = None,
 ) -> FunctionToolResult:
     # Construct a FunctionToolResult with the given output using a simple function tool.
-    tool = get_function_tool(tool_name or "dummy", return_value=output)
+    tool = tool or get_function_tool(tool_name or "dummy", return_value=output)
     raw_item: FunctionCallOutput = cast(
         FunctionCallOutput,
         {
@@ -183,3 +189,38 @@ async def test_tool_names_to_stop_at_behavior() -> None:
     )
     assert result.is_final_output is True, "We should have stopped at tool1"
     assert result.final_output == "output1"
+
+
+@pytest.mark.asyncio
+async def test_stop_at_tool_names_supports_public_and_qualified_names_for_namespaced_tools() -> (
+    None
+):
+    namespaced_tool = tool_namespace(
+        name="billing",
+        description="Billing tools",
+        tools=[function_tool(lambda account_id: account_id, name_override="lookup_account")],
+    )[0]
+    agent = Agent(
+        name="test",
+        tools=[namespaced_tool],
+        tool_use_behavior={"stop_at_tool_names": ["lookup_account"]},
+    )
+
+    tool_results = [
+        _make_function_tool_result(agent, "billing-output", tool=namespaced_tool),
+    ]
+    result = await run_loop.check_for_final_output_from_tools(
+        agent=agent,
+        tool_results=tool_results,
+        context_wrapper=RunContextWrapper(context=None),
+    )
+    assert result.is_final_output is True
+    assert result.final_output == "billing-output"
+
+    agent.tool_use_behavior = {"stop_at_tool_names": ["billing.lookup_account"]}
+    result = await run_loop.check_for_final_output_from_tools(
+        agent=agent,
+        tool_results=tool_results,
+        context_wrapper=RunContextWrapper(context=None),
+    )
+    assert result.is_final_output is True

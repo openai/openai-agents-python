@@ -24,6 +24,7 @@ _TOOL_CALL_TO_OUTPUT_TYPE: dict[str, str] = {
     "apply_patch_call": "apply_patch_call_output",
     "computer_call": "computer_call_output",
     "local_shell_call": "local_shell_call_output",
+    "tool_search_call": "tool_search_output",
 }
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "copy_input_items",
     "drop_orphan_function_calls",
     "ensure_input_item_format",
+    "prepare_model_input_items",
     "run_item_to_input_item",
     "run_items_to_input_items",
     "normalize_input_items_for_api",
@@ -85,16 +87,21 @@ def run_items_to_input_items(
     return converted
 
 
-def drop_orphan_function_calls(items: list[TResponseInputItem]) -> list[TResponseInputItem]:
+def drop_orphan_function_calls(
+    items: list[TResponseInputItem],
+    *,
+    pruning_indexes: set[int] | None = None,
+) -> list[TResponseInputItem]:
     """
     Remove tool call items that do not have corresponding outputs so resumptions or retries do not
     replay stale tool calls.
     """
 
     completed_call_ids = _completed_call_ids_by_type(items)
+    matched_anonymous_tool_search_calls = _matched_anonymous_tool_search_call_indexes(items)
 
     filtered: list[TResponseInputItem] = []
-    for entry in items:
+    for index, entry in enumerate(items):
         if not isinstance(entry, dict):
             filtered.append(entry)
             continue
@@ -106,8 +113,18 @@ def drop_orphan_function_calls(items: list[TResponseInputItem]) -> list[TRespons
         if output_type is None:
             filtered.append(entry)
             continue
+        if pruning_indexes is not None and index not in pruning_indexes:
+            filtered.append(entry)
+            continue
         call_id = entry.get("call_id")
         if isinstance(call_id, str) and call_id in completed_call_ids.get(output_type, set()):
+            filtered.append(entry)
+            continue
+        if (
+            entry_type == "tool_search_call"
+            and not isinstance(call_id, str)
+            and index in matched_anonymous_tool_search_calls
+        ):
             filtered.append(entry)
     return filtered
 
@@ -134,6 +151,20 @@ def normalize_input_items_for_api(items: list[TResponseInputItem]) -> list[TResp
         normalized_item = dict(coerced)
         normalized.append(cast(TResponseInputItem, normalized_item))
     return normalized
+
+
+def prepare_model_input_items(
+    caller_items: Sequence[TResponseInputItem],
+    generated_items: Sequence[TResponseInputItem] = (),
+) -> list[TResponseInputItem]:
+    """Normalize model input while pruning orphans only from runner-generated history."""
+    normalized_caller_items = normalize_input_items_for_api(list(caller_items))
+    if not generated_items:
+        return normalized_caller_items
+
+    normalized_generated_items = normalize_input_items_for_api(list(generated_items))
+    filtered_generated_items = drop_orphan_function_calls(normalized_generated_items)
+    return normalized_caller_items + filtered_generated_items
 
 
 def normalize_resumed_input(
@@ -363,6 +394,32 @@ def _completed_call_ids_by_type(payload: list[TResponseInputItem]) -> dict[str, 
         if isinstance(call_id, str):
             completed[item_type].add(call_id)
     return completed
+
+
+def _matched_anonymous_tool_search_call_indexes(payload: list[TResponseInputItem]) -> set[int]:
+    """Return anonymous tool_search_call indexes that have a later anonymous output."""
+    matched_indexes: set[int] = set()
+    pending_anonymous_outputs = 0
+
+    for index in range(len(payload) - 1, -1, -1):
+        entry = payload[index]
+        if not isinstance(entry, dict):
+            continue
+
+        item_type = entry.get("type")
+        if item_type == "tool_search_output" and not isinstance(entry.get("call_id"), str):
+            pending_anonymous_outputs += 1
+            continue
+
+        if (
+            item_type == "tool_search_call"
+            and not isinstance(entry.get("call_id"), str)
+            and pending_anonymous_outputs > 0
+        ):
+            matched_indexes.add(index)
+            pending_anonymous_outputs -= 1
+
+    return matched_indexes
 
 
 def _coerce_to_dict(value: object) -> dict[str, Any] | None:

@@ -73,6 +73,7 @@ async def test_streamed_audio_result_preserves_cross_chunk_sample_boundaries() -
     audio_chunks: list[bytes] = []
     while True:
         event = await local_queue.get()
+        assert event is not None
         if isinstance(event, VoiceStreamEventAudio) and event.data is not None:
             audio_chunks.append(event.data.tobytes())
         if isinstance(event, VoiceStreamEventLifecycle) and event.event == "turn_ended":

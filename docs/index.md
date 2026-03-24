@@ -26,7 +26,7 @@ Here are the main features of the SDK:
 -   **Sessions**: A persistent memory layer for maintaining working context within an agent loop.
 -   **Human in the loop**: Built-in mechanisms for involving humans across agent runs.
 -   **Tracing**: Built-in tracing for visualizing, debugging, and monitoring workflows, with support for the OpenAI suite of evaluation, fine-tuning, and distillation tools.
--   **Realtime Agents**: Build powerful voice agents with features such as automatic interruption detection, context management, guardrails, and more.
+-   **Realtime Agents**: Build powerful voice agents with `gpt-realtime-1.5`, automatic interruption detection, context management, guardrails, and more.
 
 ## Installation
 
@@ -54,3 +54,24 @@ print(result.final_output)
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
+
+## Start here
+
+-   Build your first text-based agent with the [Quickstart](quickstart.md).
+-   Then decide how you want to carry state across turns in [Running agents](running_agents.md#choose-a-memory-strategy).
+-   If you are deciding between handoffs and manager-style orchestration, read [Agent orchestration](multi_agent.md).
+
+## Choose your path
+
+Use this table when you know the job you want to do, but not which page explains it.
+
+| Goal | Start here |
+| --- | --- |
+| Build the first text agent and see one complete run | [Quickstart](quickstart.md) |
+| Add function tools, hosted tools, or agents as tools | [Tools](tools.md) |
+| Decide between handoffs and manager-style orchestration | [Agent orchestration](multi_agent.md) |
+| Keep memory across turns | [Running agents](running_agents.md#choose-a-memory-strategy) and [Sessions](sessions/index.md) |
+| Use OpenAI models, websocket transport, or non-OpenAI providers | [Models](models/index.md) |
+| Review outputs, run items, interruptions, and resume state | [Results](results.md) |
+| Build a low-latency voice agent with `gpt-realtime-1.5` | [Realtime agents quickstart](realtime/quickstart.md) and [Realtime transport](realtime/transport.md) |
+| Build a speech-to-text / agent / text-to-speech pipeline | [Voice pipeline quickstart](voice/quickstart.md) |

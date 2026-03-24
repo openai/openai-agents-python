@@ -1,6 +1,7 @@
 from typing import Any
 
 import pytest
+from mcp.types import ListResourcesResult, ListResourceTemplatesResult, ReadResourceResult
 
 from agents import Agent, Runner
 from agents.mcp import MCPServer, MCPToolMetaResolver
@@ -76,6 +77,17 @@ class FakeMCPPromptServer(MCPServer):
     ):
         raise NotImplementedError("This fake server doesn't support tools")
 
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
+        return ListResourcesResult(resources=[])
+
+    async def list_resource_templates(
+        self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
+        return ListResourceTemplatesResult(resourceTemplates=[])
+
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        return ReadResourceResult(contents=[])
+
     @property
     def name(self) -> str:
         return self._server_name
@@ -93,6 +105,7 @@ async def test_list_prompts():
 
     assert len(result.prompts) == 1
     assert result.prompts[0].name == "generate_code_review_instructions"
+    assert result.prompts[0].description is not None
     assert "code review" in result.prompts[0].description
 
 

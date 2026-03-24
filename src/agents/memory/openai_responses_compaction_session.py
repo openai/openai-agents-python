@@ -224,6 +224,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                         item.model_dump(exclude_unset=True, warnings=False)  # type: ignore
                     )
 
+        output_items = _strip_orphaned_assistant_ids(output_items)
+
         if output_items:
             await self.underlying_session.add_items(output_items)
 
@@ -303,6 +305,35 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             f"candidates: initialized (history={len(history)}, candidates={len(candidates)})"
         )
         return (candidates[:], history[:])
+
+
+def _strip_orphaned_assistant_ids(
+    items: list[TResponseInputItem],
+) -> list[TResponseInputItem]:
+    """Remove ``id`` from assistant messages when their paired reasoning items are missing.
+
+    Some models (e.g. gpt-5.4) return compacted output that retains assistant
+    message IDs even after stripping the reasoning items those IDs reference.
+    Sending these orphaned IDs back to ``responses.create`` causes a 400 error
+    because the API expects the paired reasoning item for each assistant message
+    ID.  This function detects and removes those orphaned IDs so the compacted
+    history can be used safely.
+    """
+    if not items:
+        return items
+
+    has_reasoning = any(
+        isinstance(item, dict) and item.get("type") == "reasoning" for item in items
+    )
+    if has_reasoning:
+        return items
+
+    cleaned: list[TResponseInputItem] = []
+    for item in items:
+        if isinstance(item, dict) and item.get("role") == "assistant" and "id" in item:
+            item = {k: v for k, v in item.items() if k != "id"}  # type: ignore[assignment]
+        cleaned.append(item)
+    return cleaned
 
 
 _ResolvedCompactionMode = Literal["previous_response_id", "input"]

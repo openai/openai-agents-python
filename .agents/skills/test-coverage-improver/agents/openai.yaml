@@ -1,0 +1,4 @@
+interface:
+  display_name: "Test Coverage Improver"
+  short_description: "Analyze coverage gaps and propose high-impact tests"
+  default_prompt: "Use $test-coverage-improver to analyze coverage gaps, propose high-impact tests, and update coverage after approval."

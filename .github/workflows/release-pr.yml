@@ -21,7 +21,7 @@ jobs:
           fetch-depth: 0
           ref: main
       - name: Setup uv
-        uses: astral-sh/setup-uv@803947b9bd8e9f986429fa0c5a41c367cd732b41
+        uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098
         with:
           enable-cache: true
       - name: Fetch tags
@@ -106,6 +106,9 @@ jobs:
           openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
           prompt-file: .github/codex/prompts/release-review.md
           output-file: ${{ steps.codex-output.outputs.output_file }}
+          # Keep the legacy Linux sandbox path until the default bubblewrap path
+          # works reliably on GitHub-hosted Ubuntu runners.
+          codex-args: '["--enable","use_legacy_landlock"]'
           safety-strategy: drop-sudo
           sandbox: read-only
       - name: Build PR body

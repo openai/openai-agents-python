@@ -1,10 +1,10 @@
 import logging
-from typing import Any
+from typing import Any, cast
 
 from agents.tracing.processor_interface import TracingProcessor
 from agents.tracing.scope import Scope
 from agents.tracing.spans import Span
-from agents.tracing.traces import NoOpTrace, Trace, TraceImpl
+from agents.tracing.traces import NoOpTrace, Trace, TraceImpl, TraceState, reattach_trace
 
 
 class DummyProcessor(TracingProcessor):
@@ -99,3 +99,29 @@ def test_trace_impl_double_start_and_finish_without_start(caplog) -> None:
         processor=processor,
     )
     fresh.finish(reset_current=True)  # should not raise when never started
+
+
+def test_reattached_trace_restores_scope_without_reemitting_processor_events() -> None:
+    Scope.set_current_trace(None)
+    processor = DummyProcessor()
+    original = TraceImpl(
+        name="test-trace",
+        trace_id="trace-123",
+        group_id="group-1",
+        metadata={"k": "v"},
+        processor=processor,
+    )
+
+    with original:
+        pass
+
+    restored = reattach_trace(cast(TraceState, TraceState.from_trace(original)))
+    assert restored is not None
+
+    with restored as current:
+        assert current.trace_id == "trace-123"
+        assert Scope.get_current_trace() is restored
+
+    assert processor.started == ["trace-123"]
+    assert processor.ended == ["trace-123"]
+    assert Scope.get_current_trace() is None

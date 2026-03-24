@@ -87,7 +87,12 @@ from agents.handoffs import Handoff
 from agents.prompts import Prompt
 from agents.realtime._default_tracker import ModelAudioTracker
 from agents.realtime.audio_formats import to_realtime_audio_format
-from agents.tool import FunctionTool, Tool
+from agents.tool import (
+    FunctionTool,
+    Tool,
+    ensure_function_tool_supports_responses_only_features,
+    ensure_tool_choice_supports_backend,
+)
 from agents.util._types import MaybeAwaitable
 
 from ..exceptions import UserError
@@ -153,6 +158,7 @@ OpenAIRealtimeAudioOutput = _rt_audio_config.RealtimeAudioConfigOutput  # type: 
 
 
 _USER_AGENT = f"Agents/Python {__version__}"
+DEFAULT_REALTIME_MODEL = "gpt-realtime-1.5"
 
 DEFAULT_MODEL_SETTINGS: RealtimeSessionModelSettings = {
     "voice": "ash",
@@ -266,7 +272,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
     """A model that uses OpenAI's WebSocket API."""
 
     def __init__(self, *, transport_config: TransportConfig | None = None) -> None:
-        self.model = "gpt-realtime"  # Default model
+        self.model = DEFAULT_REALTIME_MODEL
         self._websocket: ClientConnection | None = None
         self._websocket_task: asyncio.Task[None] | None = None
         self._listeners: list[RealtimeModelListener] = []
@@ -1100,7 +1106,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         # Construct full session object. `type` will be excluded at serialization time for updates.
         session_create_request = OpenAISessionCreateRequest(
             type="realtime",
-            model=(model_settings.get("model_name") or self.model) or "gpt-realtime",
+            model=(model_settings.get("model_name") or self.model) or DEFAULT_REALTIME_MODEL,
             output_modalities=output_modalities,
             audio=OpenAIRealtimeAudioConfig(
                 input=OpenAIRealtimeAudioInput(**audio_input_args),
@@ -1133,7 +1139,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             )
 
         if "tool_choice" in model_settings:
-            session_create_request.tool_choice = cast(Any, model_settings.get("tool_choice"))
+            tool_choice = model_settings.get("tool_choice")
+            ensure_tool_choice_supports_backend(
+                tool_choice,
+                backend_name="OpenAI Responses models",
+            )
+            session_create_request.tool_choice = cast(Any, tool_choice)
 
         return session_create_request
 
@@ -1144,6 +1155,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         for tool in tools:
             if not isinstance(tool, FunctionTool):
                 raise UserError(f"Tool {tool.name} is unsupported. Must be a function tool.")
+            ensure_function_tool_supports_responses_only_features(
+                tool,
+                backend_name="Realtime models",
+            )
             converted_tools.append(
                 OpenAISessionFunction(
                     name=tool.name,

@@ -149,6 +149,15 @@ async def test_no_error_on_invalid_json_async():
     assert result == "error_ModelBehaviorError"
 
 
+@function_tool(defer_loading=True)
+def deferred_lookup(customer_id: str) -> str:
+    return customer_id
+
+
+def test_function_tool_defer_loading():
+    assert deferred_lookup.defer_loading is True
+
+
 @function_tool(strict_mode=False)
 def optional_param_function(a: int, b: Optional[int] = None) -> str:
     if b is None:

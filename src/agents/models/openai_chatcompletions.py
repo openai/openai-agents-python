@@ -20,37 +20,81 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from .. import _debug
 from ..agent_output import AgentOutputSchemaBase
+from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..logger import logger
+from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import Tool
 from ..tracing import generation_span
 from ..tracing.span_data import GenerationSpanData
 from ..tracing.spans import Span
 from ..usage import Usage
 from ..util._json import _to_dump_compatible
+from ._openai_retry import get_openai_retry_advice
+from ._retry_runtime import should_disable_provider_managed_retries
 from .chatcmpl_converter import Converter
 from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
 from .openai_responses import Converter as OpenAIResponsesConverter
+from .reasoning_content_replay import ShouldReplayReasoningContent
 
 if TYPE_CHECKING:
     from ..model_settings import ModelSettings
 
 
 class OpenAIChatCompletionsModel(Model):
+    _OFFICIAL_OPENAI_SUPPORTED_INPUT_CONTENT_TYPES = frozenset(
+        {"input_text", "input_image", "input_audio", "input_file"}
+    )
+
     def __init__(
         self,
         model: str | ChatModel,
         openai_client: AsyncOpenAI,
+        should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
     ) -> None:
         self.model = model
         self._client = openai_client
+        self.should_replay_reasoning_content = should_replay_reasoning_content
 
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
+
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
+        return get_openai_retry_advice(request)
+
+    def _validate_official_openai_input_content_types(
+        self, request_input: str | list[TResponseInputItem]
+    ) -> None:
+        if not ChatCmplHelpers.is_openai(self._client) or isinstance(request_input, str):
+            return
+
+        for item in request_input:
+            message = Converter.maybe_easy_input_message(item) or Converter.maybe_input_message(
+                item
+            )
+            if message is None or message["role"] != "user":
+                continue
+
+            content_parts = message["content"]
+            if isinstance(content_parts, str):
+                continue
+
+            for part in content_parts:
+                if not isinstance(part, dict):
+                    continue
+
+                content_type = part.get("type")
+                if content_type in self._OFFICIAL_OPENAI_SUPPORTED_INPUT_CONTENT_TYPES:
+                    continue
+
+                raise UserError(
+                    "Unsupported content type for official OpenAI Chat Completions: "
+                    f"{content_type!r} in {part}"
+                )
 
     async def get_response(
         self,
@@ -272,7 +316,13 @@ class OpenAIChatCompletionsModel(Model):
         stream: bool = False,
         prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
-        converted_messages = Converter.items_to_messages(input, model=self.model)
+        self._validate_official_openai_input_content_types(input)
+        converted_messages = Converter.items_to_messages(
+            input,
+            model=self.model,
+            base_url=str(self._client.base_url),
+            should_replay_reasoning_content=self.should_replay_reasoning_content,
+        )
 
         if system_instructions:
             converted_messages.insert(
@@ -394,6 +444,10 @@ class OpenAIChatCompletionsModel(Model):
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
             self._client = AsyncOpenAI()
+        if should_disable_provider_managed_retries():
+            with_options = getattr(self._client, "with_options", None)
+            if callable(with_options):
+                return cast(AsyncOpenAI, with_options(max_retries=0))
         return self._client
 
     def _merge_headers(self, model_settings: ModelSettings):

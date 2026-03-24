@@ -32,6 +32,24 @@ from .test_responses import (
 from .testing_processor import fetch_normalized_spans
 
 
+async def wait_for_normalized_spans(timeout: float = 0.2):
+    deadline = asyncio.get_running_loop().time() + timeout
+    last_error: AssertionError | None = None
+
+    while True:
+        try:
+            return fetch_normalized_spans()
+        except AssertionError as exc:
+            last_error = exc
+
+        if asyncio.get_running_loop().time() >= deadline:
+            if last_error is not None:
+                raise last_error
+            raise AssertionError("Timed out waiting for normalized spans.")
+
+        await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_single_turn_model_error():
     model = FakeModel(tracing_enabled=True)
@@ -547,9 +565,7 @@ async def test_input_guardrail_error():
         async for _ in result.stream_events():
             pass
 
-    await asyncio.sleep(1)
-
-    assert fetch_normalized_spans() == snapshot(
+    assert await wait_for_normalized_spans() == snapshot(
         [
             {
                 "workflow_name": "Agent workflow",
@@ -602,9 +618,7 @@ async def test_output_guardrail_error():
         async for _ in result.stream_events():
             pass
 
-    await asyncio.sleep(1)
-
-    assert fetch_normalized_spans() == snapshot(
+    assert await wait_for_normalized_spans() == snapshot(
         [
             {
                 "workflow_name": "Agent workflow",

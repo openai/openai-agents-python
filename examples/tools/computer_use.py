@@ -15,8 +15,6 @@ from agents import (
     Button,
     ComputerProvider,
     ComputerTool,
-    Environment,
-    ModelSettings,
     RunContextWrapper,
     Runner,
     trace,
@@ -112,10 +110,6 @@ class LocalPlaywrightComputer(AsyncComputer):
         return self._page
 
     @property
-    def environment(self) -> Environment:
-        return "browser"
-
-    @property
     def dimensions(self) -> tuple[int, int]:
         return (1024, 768)
 
@@ -174,9 +168,8 @@ async def run_agent(
             name="Browser user",
             instructions="You are a helpful agent. Find the current weather in Tokyo.",
             tools=[ComputerTool(computer=computer_config)],
-            # Use the computer using model, and set truncation to auto because it is required.
-            model="computer-use-preview",
-            model_settings=ModelSettings(truncation="auto"),
+            # GPT-5.4 uses the built-in Responses API computer tool.
+            model="gpt-5.4",
         )
         result = await Runner.run(agent, "What is the weather in Tokyo right now?")
         print(result.final_output)

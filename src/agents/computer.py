@@ -10,14 +10,14 @@ class Computer(abc.ABC):
     operations needed to control a computer or browser."""
 
     @property
-    @abc.abstractmethod
-    def environment(self) -> Environment:
-        pass
+    def environment(self) -> Environment | None:
+        """Return preview tool metadata when the preview computer payload is required."""
+        return None
 
     @property
-    @abc.abstractmethod
-    def dimensions(self) -> tuple[int, int]:
-        pass
+    def dimensions(self) -> tuple[int, int] | None:
+        """Return preview display dimensions when the preview computer payload is required."""
+        return None
 
     @abc.abstractmethod
     def screenshot(self) -> str:
@@ -61,14 +61,14 @@ class AsyncComputer(abc.ABC):
     operations needed to control a computer or browser."""
 
     @property
-    @abc.abstractmethod
-    def environment(self) -> Environment:
-        pass
+    def environment(self) -> Environment | None:
+        """Return preview tool metadata when the preview computer payload is required."""
+        return None
 
     @property
-    @abc.abstractmethod
-    def dimensions(self) -> tuple[int, int]:
-        pass
+    def dimensions(self) -> tuple[int, int] | None:
+        """Return preview display dimensions when the preview computer payload is required."""
+        return None
 
     @abc.abstractmethod
     async def screenshot(self) -> str:

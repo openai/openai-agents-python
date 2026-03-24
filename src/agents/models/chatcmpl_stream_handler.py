@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -60,6 +60,8 @@ class StreamingState:
     text_content_index_and_output: tuple[int, ResponseOutputText] | None = None
     refusal_content_index_and_output: tuple[int, ResponseOutputRefusal] | None = None
     reasoning_content_index_and_output: tuple[int, ResponseReasoningItem] | None = None
+    active_reasoning_summary_index: int | None = None
+    reasoning_item_done: bool = False
     function_calls: dict[int, ResponseFunctionToolCall] = field(default_factory=dict)
     # Fields for real-time function call streaming
     function_call_streaming: dict[int, bool] = field(default_factory=dict)
@@ -82,6 +84,67 @@ class SequenceNumber:
 
 
 class ChatCmplStreamHandler:
+    @classmethod
+    def _finish_reasoning_summary_part(
+        cls,
+        state: StreamingState,
+        sequence_number: SequenceNumber,
+    ) -> Iterator[TResponseStreamEvent]:
+        if (
+            not state.reasoning_content_index_and_output
+            or state.active_reasoning_summary_index is None
+        ):
+            return
+
+        reasoning_item = state.reasoning_content_index_and_output[1]
+        summary_index = state.active_reasoning_summary_index
+        if not reasoning_item.summary or summary_index >= len(reasoning_item.summary):
+            state.active_reasoning_summary_index = None
+            return
+
+        yield ResponseReasoningSummaryPartDoneEvent(
+            item_id=FAKE_RESPONSES_ID,
+            output_index=0,
+            summary_index=summary_index,
+            part=DoneEventPart(
+                text=reasoning_item.summary[summary_index].text,
+                type="summary_text",
+            ),
+            type="response.reasoning_summary_part.done",
+            sequence_number=sequence_number.get_and_increment(),
+        )
+        state.active_reasoning_summary_index = None
+
+    @classmethod
+    def _finish_reasoning_item(
+        cls,
+        state: StreamingState,
+        sequence_number: SequenceNumber,
+    ) -> Iterator[TResponseStreamEvent]:
+        if not state.reasoning_content_index_and_output or state.reasoning_item_done:
+            return
+
+        reasoning_item = state.reasoning_content_index_and_output[1]
+        if reasoning_item.summary and len(reasoning_item.summary) > 0:
+            yield from cls._finish_reasoning_summary_part(state, sequence_number)
+        elif reasoning_item.content is not None:
+            yield ResponseReasoningTextDoneEvent(
+                item_id=FAKE_RESPONSES_ID,
+                output_index=0,
+                content_index=0,
+                text=reasoning_item.content[0].text,
+                type="response.reasoning_text.done",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+
+        yield ResponseOutputItemDoneEvent(
+            item=reasoning_item,
+            output_index=0,
+            type="response.output_item.done",
+            sequence_number=sequence_number.get_and_increment(),
+        )
+        state.reasoning_item_done = True
+
     @classmethod
     async def handle_stream(
         cls,
@@ -149,7 +212,7 @@ class ChatCmplStreamHandler:
                 if reasoning_content and not state.reasoning_content_index_and_output:
                     reasoning_item = ResponseReasoningItem(
                         id=FAKE_RESPONSES_ID,
-                        summary=[Summary(text="", type="summary_text")],
+                        summary=[],
                         type="reasoning",
                     )
                     if state.provider_data:
@@ -162,36 +225,37 @@ class ChatCmplStreamHandler:
                         sequence_number=sequence_number.get_and_increment(),
                     )
 
-                    yield ResponseReasoningSummaryPartAddedEvent(
-                        item_id=FAKE_RESPONSES_ID,
-                        output_index=0,
-                        summary_index=0,
-                        part=AddedEventPart(text="", type="summary_text"),
-                        type="response.reasoning_summary_part.added",
-                        sequence_number=sequence_number.get_and_increment(),
-                    )
-
                 if reasoning_content and state.reasoning_content_index_and_output:
-                    # Ensure summary list has at least one element
-                    if not state.reasoning_content_index_and_output[1].summary:
-                        state.reasoning_content_index_and_output[1].summary = [
-                            Summary(text="", type="summary_text")
-                        ]
+                    reasoning_item = state.reasoning_content_index_and_output[1]
+                    if state.active_reasoning_summary_index is None:
+                        summary_index = len(reasoning_item.summary)
+                        reasoning_item.summary.append(Summary(text="", type="summary_text"))
+                        state.active_reasoning_summary_index = summary_index
+
+                        yield ResponseReasoningSummaryPartAddedEvent(
+                            item_id=FAKE_RESPONSES_ID,
+                            output_index=0,
+                            summary_index=summary_index,
+                            part=AddedEventPart(text="", type="summary_text"),
+                            type="response.reasoning_summary_part.added",
+                            sequence_number=sequence_number.get_and_increment(),
+                        )
+
+                    summary_index = state.active_reasoning_summary_index
 
                     yield ResponseReasoningSummaryTextDeltaEvent(
                         delta=reasoning_content,
                         item_id=FAKE_RESPONSES_ID,
                         output_index=0,
-                        summary_index=0,
+                        summary_index=summary_index,
                         type="response.reasoning_summary_text.delta",
                         sequence_number=sequence_number.get_and_increment(),
                     )
 
-                    # Create a new summary with updated text
-                    current_content = state.reasoning_content_index_and_output[1].summary[0]
+                    current_content = reasoning_item.summary[summary_index]
                     updated_text = current_content.text + reasoning_content
                     new_content = Summary(text=updated_text, type="summary_text")
-                    state.reasoning_content_index_and_output[1].summary[0] = new_content
+                    reasoning_item.summary[summary_index] = new_content
 
             # Handle reasoning content from 3rd party platforms
             if hasattr(delta, "reasoning"):
@@ -232,6 +296,19 @@ class ChatCmplStreamHandler:
                     updated_text = current_text.text + reasoning_text
                     new_text_content = Content(text=updated_text, type="reasoning_text")
                     state.reasoning_content_index_and_output[1].content[0] = new_text_content
+
+            if (
+                state.reasoning_content_index_and_output
+                and state.active_reasoning_summary_index is not None
+                and not (hasattr(delta, "reasoning_content") and delta.reasoning_content)
+                and (
+                    delta.content is not None
+                    or (hasattr(delta, "refusal") and delta.refusal)
+                    or bool(delta.tool_calls)
+                )
+            ):
+                for event in cls._finish_reasoning_summary_part(state, sequence_number):
+                    yield event
 
             # Handle regular content
             if delta.content is not None:
@@ -513,37 +590,8 @@ class ChatCmplStreamHandler:
                             sequence_number=sequence_number.get_and_increment(),
                         )
 
-        if state.reasoning_content_index_and_output:
-            if (
-                state.reasoning_content_index_and_output[1].summary
-                and len(state.reasoning_content_index_and_output[1].summary) > 0
-            ):
-                yield ResponseReasoningSummaryPartDoneEvent(
-                    item_id=FAKE_RESPONSES_ID,
-                    output_index=0,
-                    summary_index=0,
-                    part=DoneEventPart(
-                        text=state.reasoning_content_index_and_output[1].summary[0].text,
-                        type="summary_text",
-                    ),
-                    type="response.reasoning_summary_part.done",
-                    sequence_number=sequence_number.get_and_increment(),
-                )
-            elif state.reasoning_content_index_and_output[1].content is not None:
-                yield ResponseReasoningTextDoneEvent(
-                    item_id=FAKE_RESPONSES_ID,
-                    output_index=0,
-                    content_index=0,
-                    text=state.reasoning_content_index_and_output[1].content[0].text,
-                    type="response.reasoning_text.done",
-                    sequence_number=sequence_number.get_and_increment(),
-                )
-            yield ResponseOutputItemDoneEvent(
-                item=state.reasoning_content_index_and_output[1],
-                output_index=0,
-                type="response.output_item.done",
-                sequence_number=sequence_number.get_and_increment(),
-            )
+        for event in cls._finish_reasoning_item(state, sequence_number):
+            yield event
 
         function_call_starting_index = 0
         if state.reasoning_content_index_and_output:

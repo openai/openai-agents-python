@@ -8,6 +8,7 @@ from typing import Union, cast
 from typing_extensions import Unpack
 
 from . import _debug
+from ._tool_identity import get_tool_trace_name_for_tool
 from .agent import Agent
 from .agent_tool_state import set_agent_tool_state_scope
 from .exceptions import (
@@ -107,8 +108,8 @@ from .run_internal.tool_use_tracker import (
 from .run_state import RunState
 from .tool import dispose_resolved_computers
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
-from .tracing import Span, SpanError, agent_span, get_current_trace, trace
-from .tracing.context import TraceCtxManager
+from .tracing import Span, SpanError, agent_span, get_current_trace
+from .tracing.context import TraceCtxManager, create_trace_for_run
 from .tracing.span_data import AgentSpanData
 from .util import _error_tracing
 
@@ -549,6 +550,8 @@ class AgentRunner:
             metadata=trace_metadata,
             tracing=trace_config,
             disabled=run_config.tracing_disabled,
+            trace_state=run_state._trace_state if run_state is not None else None,
+            reattach_resumed_trace=is_resumed_state,
         ):
             if is_resumed_state and run_state is not None:
                 run_state.set_trace(get_current_trace())
@@ -664,9 +667,9 @@ class AgentRunner:
                             )
 
                             if run_state._last_processed_response is not None:
-                                tool_use_tracker.add_tool_use(
+                                tool_use_tracker.record_processed_response(
                                     current_agent,
-                                    run_state._last_processed_response.tools_used,
+                                    run_state._last_processed_response,
                                 )
 
                             original_input = turn_result.original_input
@@ -795,6 +798,11 @@ class AgentRunner:
                                 )
                                 result._current_turn = current_turn
                                 result._model_input_items = list(generated_items)
+                                # Keep normalized replay aligned with the model-facing
+                                # continuation whenever session history preserved extra items.
+                                result._replay_from_model_input_items = list(
+                                    generated_items
+                                ) != list(session_items)
                                 if run_state is not None:
                                     result._trace_state = run_state._trace_state
                                 if session_persistence_enabled:
@@ -856,7 +864,11 @@ class AgentRunner:
                             output_type=output_type_name,
                         )
                         current_span.start(mark_as_current=True)
-                        current_span.span_data.tools = [t.name for t in all_tools]
+                        current_span.span_data.tools = [
+                            tool_name
+                            for tool in all_tools
+                            if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
+                        ]
 
                     current_turn += 1
                     if current_turn > max_turns:
@@ -925,6 +937,9 @@ class AgentRunner:
                         )
                         result._current_turn = max_turns
                         result._model_input_items = list(generated_items)
+                        result._replay_from_model_input_items = list(generated_items) != list(
+                            session_items
+                        )
                         if run_state is not None:
                             result._trace_state = run_state._trace_state
                         if session_persistence_enabled and include_in_history:
@@ -1193,6 +1208,9 @@ class AgentRunner:
                             )
                             result._current_turn = current_turn
                             result._model_input_items = list(generated_items)
+                            result._replay_from_model_input_items = list(generated_items) != list(
+                                session_items
+                            )
                             if run_state is not None:
                                 result._current_turn_persisted_item_count = (
                                     run_state._current_turn_persisted_item_count
@@ -1519,17 +1537,15 @@ class AgentRunner:
         # If there's already a trace, we don't create a new one. In addition, we can't end the
         # trace here, because the actual work is done in `stream_events` and this method ends
         # before that.
-        new_trace = (
-            None
-            if get_current_trace()
-            else trace(
-                workflow_name=trace_workflow_name,
-                trace_id=trace_id,
-                group_id=trace_group_id,
-                metadata=trace_metadata,
-                tracing=trace_config,
-                disabled=run_config.tracing_disabled,
-            )
+        new_trace = create_trace_for_run(
+            workflow_name=trace_workflow_name,
+            trace_id=trace_id,
+            group_id=trace_group_id,
+            metadata=trace_metadata,
+            tracing=trace_config,
+            disabled=run_config.tracing_disabled,
+            trace_state=run_state._trace_state if run_state is not None else None,
+            reattach_resumed_trace=is_resumed_state,
         )
         if run_state is not None:
             run_state.set_trace(new_trace or get_current_trace())
@@ -1585,6 +1601,11 @@ class AgentRunner:
         )
         streamed_result._model_input_items = (
             list(run_state._generated_items) if run_state is not None else []
+        )
+        streamed_result._replay_from_model_input_items = (
+            list(run_state._generated_items) != list(run_state._session_items)
+            if run_state is not None
+            else False
         )
         streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
         if run_state is not None:

@@ -242,6 +242,63 @@ async def test_stream_response_creates_trace(monkeypatch):
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_event_type", ["response.failed", "response.incomplete"])
+async def test_stream_response_failed_or_incomplete_terminal_event_creates_trace(
+    monkeypatch, terminal_event_type: str
+):
+    with trace(workflow_name="test"):
+        model = OpenAIResponsesModel(model="test-model", openai_client=AsyncOpenAI(api_key="test"))
+
+        async def dummy_fetch_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            previous_response_id,
+            conversation_id,
+            stream,
+            prompt,
+        ):
+            class DummyTerminalEvent:
+                def __init__(self):
+                    self.type = terminal_event_type
+                    self.response = fake_model.get_response_obj([], "dummy-id-terminal")
+                    self.sequence_number = 0
+
+            class DummyStream:
+                async def __aiter__(self):
+                    yield DummyTerminalEvent()
+
+            return DummyStream()
+
+        monkeypatch.setattr(model, "_fetch_response", dummy_fetch_response)
+
+        async for _ in model.stream_response(
+            "instr",
+            "input",
+            ModelSettings(),
+            [],
+            None,
+            [],
+            ModelTracing.ENABLED,
+            previous_response_id=None,
+        ):
+            pass
+
+    assert fetch_normalized_spans() == snapshot(
+        [
+            {
+                "workflow_name": "test",
+                "children": [{"type": "response", "data": {"response_id": "dummy-id-terminal"}}],
+            }
+        ]
+    )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_stream_non_data_tracing_doesnt_set_response_id(monkeypatch):
     with trace(workflow_name="test"):
         # Create an instance of the model

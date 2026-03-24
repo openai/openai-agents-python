@@ -9,7 +9,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from ..items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
+from ..items import (
+    ItemHelpers,
+    ModelResponse,
+    RunItem,
+    TResponseInputItem,
+    _output_item_to_input_item,
+)
 from ..logger import logger
 from ..models.fake_id import FAKE_RESPONSES_ID
 from .items import (
@@ -17,6 +23,7 @@ from .items import (
     drop_orphan_function_calls,
     fingerprint_input_item,
     normalize_input_items_for_api,
+    prepare_model_input_items,
     run_item_to_input_item,
 )
 
@@ -35,25 +42,85 @@ def _normalize_server_item_id(value: Any) -> str | None:
 
 def _fingerprint_for_tracker(item: Any) -> str | None:
     """Return a stable fingerprint for dedupe, ignoring failures."""
+    if _is_tool_search_item(item):
+        try:
+            replayable_item = _output_item_to_input_item(item)
+            item_id = _normalize_server_item_id(
+                replayable_item.get("id")
+                if isinstance(replayable_item, dict)
+                else getattr(replayable_item, "id", None)
+            )
+            call_id = (
+                replayable_item.get("call_id")
+                if isinstance(replayable_item, dict)
+                else getattr(replayable_item, "call_id", None)
+            )
+            return fingerprint_input_item(
+                replayable_item,
+                ignore_ids_for_matching=item_id is None and not isinstance(call_id, str),
+            )
+        except Exception:
+            return None
     return fingerprint_input_item(item)
+
+
+def _anonymous_tool_search_fingerprint(item: Any) -> str | None:
+    """Return a content-only fingerprint for restored anonymous tool_search items."""
+    if not _is_tool_search_item(item):
+        return None
+
+    try:
+        return fingerprint_input_item(
+            _output_item_to_input_item(item),
+            ignore_ids_for_matching=True,
+        )
+    except Exception:
+        return None
+
+
+def _is_tool_search_item(item: Any) -> bool:
+    """Return True for tool_search items that currently lack stable provider identifiers."""
+    item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+    return item_type in {"tool_search_call", "tool_search_output"}
 
 
 @dataclass
 class OpenAIServerConversationTracker:
-    """Track server-side conversation state for conversation-aware runs."""
+    """Track server-side conversation state for conversation-aware runs.
+
+    This tracker keeps three complementary views of what has already been acknowledged:
+
+    - Object identity for prepared items in the current Python process.
+    - Stable server item IDs and tool call IDs returned by the provider.
+    - Content fingerprints for retry/resume paths where object identity changes.
+
+    The runner uses these sets together to decide which deltas are still safe to send when a
+    run is resumed, retried after a transient failure, or rebuilt from serialized RunState.
+    """
 
     conversation_id: str | None = None
     previous_response_id: str | None = None
     auto_previous_response_id: bool = False
+
+    # In-process object identity for items that have already been delivered or acknowledged.
     sent_items: set[int] = field(default_factory=set)
     server_items: set[int] = field(default_factory=set)
+
+    # Stable provider identifiers returned by the Responses API.
     server_item_ids: set[str] = field(default_factory=set)
     server_tool_call_ids: set[str] = field(default_factory=set)
+    server_output_fingerprints: set[str] = field(default_factory=set)
+
+    # Content-based dedupe for resume/retry paths where objects are reconstructed.
     sent_item_fingerprints: set[str] = field(default_factory=set)
+    restored_anonymous_tool_search_fingerprints: set[str] = field(default_factory=set)
     sent_initial_input: bool = False
     remaining_initial_input: list[TResponseInputItem] | None = None
     primed_from_state: bool = False
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None
+
+    # Mapping from normalized prepared items back to their original source objects so that
+    # mark_input_as_sent() can mark the right object identities after the model call succeeds.
     prepared_item_sources: dict[int, TResponseInputItem] = field(default_factory=dict)
     prepared_item_sources_by_fingerprint: dict[str, list[TResponseInputItem]] = field(
         default_factory=dict
@@ -75,14 +142,19 @@ class OpenAIServerConversationTracker:
         model_responses: list[ModelResponse],
         session_items: list[TResponseInputItem] | None = None,
     ) -> None:
-        """Seed tracking from prior state so resumed runs do not replay already-sent content."""
+        """Seed tracking from prior state so resumed runs do not replay already-sent content.
+
+        This reconstructs the tracker from the original input, saved model responses, generated
+        run items, and optional session history. After hydration, retry logic can treat rebuilt
+        items as already acknowledged even though their Python object identities may differ from
+        the original run.
+        """
         if self.sent_initial_input:
             return
 
         normalized_input = original_input
         if isinstance(original_input, list):
-            normalized = normalize_input_items_for_api(original_input)
-            normalized_input = drop_orphan_function_calls(normalized)
+            normalized_input = prepare_model_input_items(original_input)
 
         for item in ItemHelpers.input_to_new_input_list(normalized_input):
             if item is None:
@@ -96,6 +168,9 @@ class OpenAIServerConversationTracker:
             fp = _fingerprint_for_tracker(item)
             if fp:
                 self.sent_item_fingerprints.add(fp)
+            anonymous_tool_search_fp = _anonymous_tool_search_fingerprint(item)
+            if anonymous_tool_search_fp:
+                self.restored_anonymous_tool_search_fingerprints.add(anonymous_tool_search_fp)
 
         self.sent_initial_input = True
         self.remaining_initial_input = None
@@ -145,12 +220,19 @@ class OpenAIServerConversationTracker:
                 fp = _fingerprint_for_tracker(item)
                 if fp:
                     self.sent_item_fingerprints.add(fp)
+                anonymous_tool_search_fp = _anonymous_tool_search_fingerprint(item)
+                if anonymous_tool_search_fp:
+                    self.restored_anonymous_tool_search_fingerprints.add(anonymous_tool_search_fp)
         for item in generated_items:  # type: ignore[assignment]
             run_item: RunItem = cast(RunItem, item)
             raw_item = run_item.raw_item
             if raw_item is None:
                 continue
             is_tool_call_item = run_item.type in {"tool_call_item", "handoff_call_item"}
+            is_tool_search_item = run_item.type in {
+                "tool_search_call_item",
+                "tool_search_output_item",
+            }
 
             if isinstance(raw_item, dict):
                 item_id = _normalize_server_item_id(raw_item.get("id"))
@@ -158,8 +240,10 @@ class OpenAIServerConversationTracker:
                 has_output_payload = "output" in raw_item
                 has_output_payload = has_output_payload or hasattr(raw_item, "output")
                 has_call_id = isinstance(call_id, str)
-                should_mark = item_id is not None or (
-                    has_call_id and (has_output_payload or is_tool_call_item)
+                should_mark = (
+                    item_id is not None
+                    or (has_call_id and (has_output_payload or is_tool_call_item))
+                    or is_tool_search_item
                 )
                 if not should_mark:
                     continue
@@ -169,6 +253,11 @@ class OpenAIServerConversationTracker:
                 fp = _fingerprint_for_tracker(raw_item)
                 if fp:
                     self.sent_item_fingerprints.add(fp)
+                    if is_tool_search_item:
+                        self.server_output_fingerprints.add(fp)
+                anonymous_tool_search_fp = _anonymous_tool_search_fingerprint(raw_item)
+                if anonymous_tool_search_fp:
+                    self.restored_anonymous_tool_search_fingerprints.add(anonymous_tool_search_fp)
 
                 if item_id is not None:
                     self.server_item_ids.add(item_id)
@@ -179,8 +268,10 @@ class OpenAIServerConversationTracker:
                 call_id = getattr(raw_item, "call_id", None)
                 has_output_payload = hasattr(raw_item, "output")
                 has_call_id = isinstance(call_id, str)
-                should_mark = item_id is not None or (
-                    has_call_id and (has_output_payload or is_tool_call_item)
+                should_mark = (
+                    item_id is not None
+                    or (has_call_id and (has_output_payload or is_tool_call_item))
+                    or is_tool_search_item
                 )
                 if not should_mark:
                     continue
@@ -189,6 +280,11 @@ class OpenAIServerConversationTracker:
                 fp = _fingerprint_for_tracker(raw_item)
                 if fp:
                     self.sent_item_fingerprints.add(fp)
+                    if is_tool_search_item:
+                        self.server_output_fingerprints.add(fp)
+                anonymous_tool_search_fp = _anonymous_tool_search_fingerprint(raw_item)
+                if anonymous_tool_search_fp:
+                    self.restored_anonymous_tool_search_fingerprints.add(anonymous_tool_search_fp)
                 if item_id is not None:
                     self.server_item_ids.add(item_id)
                 if isinstance(call_id, str) and has_output_payload:
@@ -225,6 +321,8 @@ class OpenAIServerConversationTracker:
             if fp:
                 self.sent_item_fingerprints.add(fp)
                 server_item_fingerprints.add(fp)
+                if _is_tool_search_item(output_item):
+                    self.server_output_fingerprints.add(fp)
 
         if self.remaining_initial_input and server_item_fingerprints:
             remaining: list[TResponseInputItem] = []
@@ -306,13 +404,17 @@ class OpenAIServerConversationTracker:
         generated_items: list[RunItem],
     ) -> list[TResponseInputItem]:
         """Assemble the next model input while skipping duplicates and approvals."""
-        input_items: list[TResponseInputItem] = []
+        prepared_initial_items: list[TResponseInputItem] = []
+        prepared_generated_items: list[TResponseInputItem] = []
+        generated_item_sources: dict[int, TResponseInputItem] = {}
 
         if not self.sent_initial_input:
             initial_items = ItemHelpers.input_to_new_input_list(original_input)
-            input_items.extend(initial_items)
-            for item in initial_items:
-                self._register_prepared_item_source(item)
+            prepared_initial_items = normalize_input_items_for_api(initial_items)
+            for prepared_item, source_item in zip(
+                prepared_initial_items, initial_items, strict=False
+            ):
+                self._register_prepared_item_source(prepared_item, source_item)
             filtered_initials = []
             for item in initial_items:
                 if item is None or isinstance(item, (str, bytes)):
@@ -321,9 +423,11 @@ class OpenAIServerConversationTracker:
             self.remaining_initial_input = filtered_initials or None
             self.sent_initial_input = True
         elif self.remaining_initial_input:
-            input_items.extend(self.remaining_initial_input)
-            for item in self.remaining_initial_input:
-                self._register_prepared_item_source(item)
+            prepared_initial_items = normalize_input_items_for_api(self.remaining_initial_input)
+            for prepared_item, source_item in zip(
+                prepared_initial_items, self.remaining_initial_input, strict=False
+            ):
+                self._register_prepared_item_source(prepared_item, source_item)
 
         for item in generated_items:  # type: ignore[assignment]
             run_item: RunItem = cast(RunItem, item)
@@ -362,16 +466,37 @@ class OpenAIServerConversationTracker:
             if converted_input_item is None:
                 continue
             fp = _fingerprint_for_tracker(converted_input_item)
+            if fp and fp in self.server_output_fingerprints:
+                continue
             if fp and self.primed_from_state and fp in self.sent_item_fingerprints:
                 continue
+            anonymous_tool_search_fp = _anonymous_tool_search_fingerprint(converted_input_item)
+            if (
+                self.primed_from_state
+                and anonymous_tool_search_fp
+                and item_id is None
+                and not isinstance(call_id, str)
+                and anonymous_tool_search_fp in self.restored_anonymous_tool_search_fingerprints
+            ):
+                continue
 
-            input_items.append(converted_input_item)
-            self._register_prepared_item_source(
-                converted_input_item,
-                cast(TResponseInputItem, raw_item),
+            prepared_generated_items.append(converted_input_item)
+            generated_item_sources[id(converted_input_item)] = cast(TResponseInputItem, raw_item)
+
+        normalized_generated_items = normalize_input_items_for_api(prepared_generated_items)
+        normalized_generated_sources = {
+            id(normalized_item): generated_item_sources[id(source_item)]
+            for normalized_item, source_item in zip(
+                normalized_generated_items, prepared_generated_items, strict=False
             )
+        }
+        filtered_generated_items = drop_orphan_function_calls(normalized_generated_items)
+        for item in filtered_generated_items:
+            prepared_source_item = normalized_generated_sources.get(id(item))
+            if prepared_source_item is not None:
+                self._register_prepared_item_source(item, prepared_source_item)
 
-        return input_items
+        return prepared_initial_items + filtered_generated_items
 
     def _register_prepared_item_source(
         self, prepared_item: TResponseInputItem, source_item: TResponseInputItem | None = None

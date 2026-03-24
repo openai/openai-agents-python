@@ -24,6 +24,7 @@ from agents import (
     ShellTool,
     ToolApprovalItem,
     function_tool,
+    tool_namespace,
 )
 from agents.computer import Computer, Environment
 from agents.exceptions import ModelBehaviorError, UserError
@@ -48,11 +49,13 @@ from agents.run_internal.run_loop import (
     ToolRunShellCall,
     extract_tool_call_id,
 )
+from agents.run_internal.tool_planning import _select_function_tool_runs_for_resume
 from agents.run_state import RunState as RunStateClass
 from agents.tool import HostedMCPTool
 from agents.usage import Usage
 
 from .fake_model import FakeModel
+from .mcp.helpers import FakeMCPServer
 from .test_responses import get_text_message
 from .utils.hitl import (
     HITL_REJECTION_MSG,
@@ -1027,6 +1030,142 @@ async def test_resume_rebuilds_function_runs_from_pending_approvals() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_rebuilds_deferred_function_runs_from_lookup_key_without_raw_namespace() -> (
+    None
+):
+    """Resumed approvals should use persisted lookup identity when raw namespace is missing."""
+
+    @function_tool(needs_approval=True, name_override="lookup_account")
+    async def visible_lookup_account(customer_id: str) -> str:
+        return f"visible:{customer_id}"
+
+    @function_tool(
+        needs_approval=True,
+        name_override="lookup_account",
+        defer_loading=True,
+    )
+    async def deferred_lookup_account(customer_id: str) -> str:
+        return f"deferred:{customer_id}"
+
+    _model, agent = make_model_and_agent(tools=[visible_lookup_account, deferred_lookup_account])
+    approval_item = ToolApprovalItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call",
+            "name": "lookup_account",
+            "call_id": "call-deferred-rebuild",
+            "arguments": '{"customer_id":"customer_1"}',
+            "status": "completed",
+        },
+        tool_name="lookup_account",
+        tool_namespace="lookup_account",
+        tool_lookup_key=("deferred_top_level", "lookup_account"),
+    )
+    context_wrapper = make_context_wrapper()
+    context_wrapper.approve_tool(approval_item)
+
+    run_state = make_state_with_interruptions(agent, [approval_item])
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    result = await run_loop.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume approvals",
+        original_pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+        run_state=run_state,
+    )
+
+    assert not isinstance(result.next_step, NextStepInterruption)
+    deferred_outputs = [
+        item.output
+        for item in result.new_step_items
+        if isinstance(item, ToolCallOutputItem) and item.output == "deferred:customer_1"
+    ]
+    assert deferred_outputs == ["deferred:customer_1"]
+
+
+@pytest.mark.asyncio
+async def test_resume_honors_permanent_namespaced_function_approval_with_new_call_id() -> None:
+    @function_tool(needs_approval=True, name_override="lookup_account")
+    async def lookup_account(customer_id: str) -> str:
+        return customer_id
+
+    namespaced_tool = tool_namespace(
+        name="billing",
+        description="Billing tools",
+        tools=[lookup_account],
+    )[0]
+    context_wrapper = make_context_wrapper()
+    approved_item = ToolApprovalItem(
+        agent=Agent(name="billing-agent"),
+        raw_item=make_function_tool_call(
+            "lookup_account",
+            call_id="approved-call",
+            arguments='{"customer_id":"customer_1"}',
+            namespace="billing",
+        ),
+    )
+    context_wrapper.approve_tool(approved_item, always_approve=True)
+
+    resumed_run = ToolRunFunction(
+        tool_call=make_function_tool_call(
+            "lookup_account",
+            call_id="resumed-call",
+            arguments='{"customer_id":"customer_2"}',
+            namespace="billing",
+        ),
+        function_tool=namespaced_tool,
+    )
+    pending: list[ToolApprovalItem] = []
+    rejections: list[str | None] = []
+
+    async def _needs_approval_checker(_run: ToolRunFunction) -> bool:
+        return True
+
+    async def _record_rejection(
+        call_id: str | None,
+        _tool_call: ResponseFunctionToolCall,
+        _tool: Any,
+    ) -> None:
+        rejections.append(call_id)
+
+    selected = await _select_function_tool_runs_for_resume(
+        [resumed_run],
+        approval_items_by_call_id={},
+        context_wrapper=context_wrapper,
+        needs_approval_checker=_needs_approval_checker,
+        output_exists_checker=lambda _run: False,
+        record_rejection=_record_rejection,
+        pending_interruption_adder=pending.append,
+        pending_item_builder=lambda run: ToolApprovalItem(
+            agent=Agent(name="billing-agent"),
+            raw_item=run.tool_call,
+            tool_name=run.function_tool.name,
+            tool_namespace="billing",
+        ),
+    )
+
+    assert selected == [resumed_run]
+    assert pending == []
+    assert rejections == []
+
+
+@pytest.mark.asyncio
 async def test_resume_rebuilds_function_runs_from_object_approvals() -> None:
     """Rebuild should handle ResponseFunctionToolCall approval items."""
 
@@ -1080,6 +1219,124 @@ async def test_resume_rebuilds_function_runs_from_object_approvals() -> None:
     assert "call-rebuild-obj" in executed_call_ids, (
         "Function should be rebuilt from ResponseFunctionToolCall approval"
     )
+
+
+@pytest.mark.asyncio
+async def test_resume_rebuilds_local_mcp_function_runs_from_approvals() -> None:
+    """Rebuild should resolve approved MCP-backed function tools from agent.mcp_servers."""
+
+    server = FakeMCPServer(require_approval="always")
+    server.add_tool("add", {"type": "object", "properties": {}})
+
+    agent = Agent(name="TestAgent", mcp_servers=[server])
+    tool_call = make_function_tool_call(
+        "add",
+        call_id="call-mcp-rebuild",
+        arguments='{"value": 1}',
+    )
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call, tool_name="add")
+    context_wrapper = make_context_wrapper()
+    context_wrapper.approve_tool(approval_item)
+
+    run_state = make_state_with_interruptions(agent, [approval_item])
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    result = await run_loop.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume approvals",
+        original_pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+        run_state=run_state,
+    )
+
+    assert not isinstance(result.next_step, NextStepInterruption)
+    assert server.tool_calls == ["add"]
+    executed_call_ids = {
+        extract_tool_call_id(item.raw_item)
+        for item in result.new_step_items
+        if isinstance(item, ToolCallOutputItem)
+    }
+    assert "call-mcp-rebuild" in executed_call_ids, (
+        "Approved local MCP tool should be rebuilt and executed from pending approvals"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_rebuild_rejections_use_deferred_tool_display_name() -> None:
+    """Resume-time rejection formatting should collapse synthetic deferred namespaces."""
+
+    async def get_weather() -> str:
+        return "sunny"
+
+    _model, agent = make_model_and_agent(
+        tools=[function_tool(get_weather, name_override="get_weather", defer_loading=True)]
+    )
+    context_wrapper = make_context_wrapper()
+
+    rejected_call = make_function_tool_call(
+        "get_weather",
+        call_id="call-deferred-reject",
+        namespace="get_weather",
+    )
+    assert isinstance(rejected_call, ResponseFunctionToolCall)
+
+    rejected_item = ToolApprovalItem(
+        agent=agent,
+        raw_item=rejected_call,
+        tool_name="get_weather",
+        tool_namespace="get_weather",
+    )
+    context_wrapper.reject_tool(rejected_item)
+
+    run_state = make_state_with_interruptions(agent, [rejected_item])
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    result = await run_loop.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume approvals",
+        original_pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(
+            tool_error_formatter=lambda args: (
+                f"resume-level {args.tool_name} denied ({args.call_id})"
+            )
+        ),
+        run_state=run_state,
+    )
+
+    rejection_outputs = [
+        item.output for item in result.new_step_items if isinstance(item, ToolCallOutputItem)
+    ]
+    assert rejection_outputs == ["resume-level get_weather denied (call-deferred-reject)"]
 
 
 @pytest.mark.asyncio

@@ -77,15 +77,27 @@ class FinancialResearchManager:
             tasks = [asyncio.create_task(self._search(item)) for item in search_plan.searches]
             results: list[str] = []
             num_completed = 0
+            num_succeeded = 0
+            num_failed = 0
             for task in asyncio.as_completed(tasks):
                 result = await task
                 if result is not None:
                     results.append(result)
+                    num_succeeded += 1
+                else:
+                    num_failed += 1
                 num_completed += 1
+                status = f"Searching... {num_completed}/{len(tasks)} finished"
+                if num_failed:
+                    status += f" ({num_succeeded} succeeded, {num_failed} failed)"
                 self.printer.update_item(
-                    "searching", f"Searching... {num_completed}/{len(tasks)} completed"
+                    "searching",
+                    status,
                 )
-            self.printer.mark_item_done("searching")
+            summary = f"Searches finished: {num_succeeded}/{len(tasks)} succeeded"
+            if num_failed:
+                summary += f", {num_failed} failed"
+            self.printer.update_item("searching", summary, is_done=True)
             return results
 
     async def _search(self, item: FinancialSearchItem) -> str | None:

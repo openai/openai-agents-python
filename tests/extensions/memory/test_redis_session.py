@@ -11,8 +11,8 @@ from agents.extensions.memory.redis_session import RedisSession
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 
-# Mark all tests in this file as asyncio
-pytestmark = pytest.mark.asyncio
+# Keep the fallback-to-real-Redis path isolated from xdist workers.
+pytestmark = [pytest.mark.asyncio, pytest.mark.serial]
 
 # Try to use fakeredis for in-memory testing, fall back to real Redis if not available
 try:

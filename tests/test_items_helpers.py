@@ -5,6 +5,7 @@ import json
 import weakref
 from typing import cast
 
+from openai.types.responses.computer_action import Click as BatchedClick, Type as BatchedType
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
     ResponseComputerToolCall,
@@ -29,6 +30,8 @@ from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.response_output_text_param import ResponseOutputTextParam
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from openai.types.responses.response_reasoning_item_param import ResponseReasoningItemParam
+from openai.types.responses.response_tool_search_call import ResponseToolSearchCall
+from openai.types.responses.response_tool_search_output_item import ResponseToolSearchOutputItem
 from pydantic import TypeAdapter
 
 from agents import (
@@ -102,6 +105,27 @@ def test_extract_last_text_returns_text_only() -> None:
     # Whereas when last content is a refusal, extract_last_text returns None.
     message2 = make_message([first_text, ResponseOutputRefusal(refusal="no", type="refusal")])
     assert ItemHelpers.extract_last_text(message2) is None
+
+
+def test_extract_text_concatenates_all_text_segments() -> None:
+    first_text = ResponseOutputText(annotations=[], text="part1", type="output_text", logprobs=[])
+    second_text = ResponseOutputText(annotations=[], text="part2", type="output_text", logprobs=[])
+    refusal = ResponseOutputRefusal(refusal="no", type="refusal")
+    message = make_message([first_text, refusal, second_text])
+
+    assert ItemHelpers.extract_text(message) == "part1part2"
+    assert (
+        ItemHelpers.extract_text(
+            ResponseFunctionToolCall(
+                id="tool123",
+                arguments="{}",
+                call_id="call123",
+                name="func",
+                type="function_call",
+            )
+        )
+        is None
+    )
 
 
 def test_input_to_new_input_list_from_string() -> None:
@@ -416,6 +440,35 @@ def test_to_input_items_for_computer_call_click() -> None:
     assert converted_dict == expected
 
 
+def test_to_input_items_for_computer_call_batched_actions() -> None:
+    """A batched computer call should preserve its actions list when replayed as input."""
+    comp_call = ResponseComputerToolCall(
+        id="comp2",
+        actions=[
+            BatchedClick(type="click", x=3, y=4, button="left"),
+            BatchedType(type="type", text="hello"),
+        ],
+        type="computer_call",
+        call_id="comp2",
+        pending_safety_checks=[],
+        status="completed",
+    )
+    resp = ModelResponse(output=[comp_call], usage=Usage(), response_id=None)
+    input_items = resp.to_input_items()
+    assert isinstance(input_items, list) and len(input_items) == 1
+    assert input_items[0] == {
+        "id": "comp2",
+        "type": "computer_call",
+        "actions": [
+            {"type": "click", "x": 3, "y": 4, "button": "left"},
+            {"type": "type", "text": "hello"},
+        ],
+        "call_id": "comp2",
+        "pending_safety_checks": [],
+        "status": "completed",
+    }
+
+
 def test_to_input_items_for_reasoning() -> None:
     """A reasoning output should produce the same dict as a reasoning input item."""
     rc = Summary(text="why", type="summary_text")
@@ -433,6 +486,52 @@ def test_to_input_items_for_reasoning() -> None:
     print(converted_dict)
     print(expected)
     assert converted_dict == expected
+
+
+def test_to_input_items_for_tool_search_strips_created_by() -> None:
+    """Tool-search output items should reuse the replay sanitizer before round-tripping."""
+    tool_search_call = ResponseToolSearchCall(
+        id="tsc_123",
+        call_id="call_tsc_123",
+        arguments={"query": "profile"},
+        execution="server",
+        status="completed",
+        type="tool_search_call",
+        created_by="server",
+    )
+    tool_search_output = ResponseToolSearchOutputItem(
+        id="tso_123",
+        call_id="call_tsc_123",
+        execution="server",
+        status="completed",
+        tools=[],
+        type="tool_search_output",
+        created_by="server",
+    )
+
+    resp = ModelResponse(
+        output=[tool_search_call, tool_search_output], usage=Usage(), response_id=None
+    )
+    input_items = resp.to_input_items()
+
+    assert input_items == [
+        {
+            "id": "tsc_123",
+            "call_id": "call_tsc_123",
+            "arguments": {"query": "profile"},
+            "execution": "server",
+            "status": "completed",
+            "type": "tool_search_call",
+        },
+        {
+            "id": "tso_123",
+            "call_id": "call_tsc_123",
+            "execution": "server",
+            "status": "completed",
+            "tools": [],
+            "type": "tool_search_output",
+        },
+    ]
 
 
 def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:

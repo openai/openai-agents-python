@@ -151,3 +151,6 @@ cython_debug/
 dump.rdb
 
 tmp/
+
+# execplans
+plans/

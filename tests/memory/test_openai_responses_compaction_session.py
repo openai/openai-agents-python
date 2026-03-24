@@ -16,6 +16,7 @@ from agents.memory import (
 )
 from agents.memory.openai_responses_compaction_session import (
     DEFAULT_COMPACTION_THRESHOLD,
+    _strip_orphaned_assistant_ids,
     is_openai_model_name,
     select_compaction_candidate_items,
 )
@@ -611,6 +612,145 @@ class TestOpenAIResponsesCompactionSession:
         await Runner.run(agent, "final", session=session)
 
         mock_client.responses.compact.assert_awaited_once()
+
+
+class TestStripOrphanedAssistantIds:
+    def test_noop_when_empty(self) -> None:
+        assert _strip_orphaned_assistant_ids([]) == []
+
+    def test_strips_id_from_assistant_when_no_reasoning(self) -> None:
+        items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "id": "msg_abc", "content": "hi"},
+            ),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "user", "content": "hello"},
+            ),
+        ]
+        result = _strip_orphaned_assistant_ids(items)
+        assert "id" not in result[0]
+        # user message untouched
+        assert result[1] == items[1]
+
+    def test_preserves_id_when_reasoning_present(self) -> None:
+        items: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "reasoning", "id": "rs_123", "content": "..."}),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "id": "msg_abc", "content": "hi"},
+            ),
+        ]
+        result = _strip_orphaned_assistant_ids(items)
+        assert result[1].get("id") == "msg_abc"
+
+    def test_preserves_assistant_without_id(self) -> None:
+        items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "hi"},
+            ),
+        ]
+        result = _strip_orphaned_assistant_ids(items)
+        assert result == items
+
+    def test_strips_multiple_assistant_ids(self) -> None:
+        items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "id": "msg_1", "content": "a"},
+            ),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "id": "msg_2", "content": "b"},
+            ),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "id": "msg_3", "content": "c"},
+            ),
+        ]
+        result = _strip_orphaned_assistant_ids(items)
+        for item in result:
+            assert "id" not in item
+
+
+class TestCompactionStripsOrphanedIds:
+    """Regression test for #2727: gpt-5.4 compact retains assistant msg IDs after
+    stripping reasoning items, causing 400 errors on the next responses.create call."""
+
+    def create_mock_session(self) -> MagicMock:
+        mock = MagicMock(spec=Session)
+        mock.session_id = "test-session"
+        mock.get_items = AsyncMock(return_value=[])
+        mock.add_items = AsyncMock()
+        mock.pop_item = AsyncMock(return_value=None)
+        mock.clear_session = AsyncMock()
+        return mock
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_strips_orphaned_assistant_ids(self) -> None:
+        """Compacted output with assistant IDs but no reasoning items should
+        have those IDs removed before being stored."""
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": f"m{i}"})
+            for i in range(DEFAULT_COMPACTION_THRESHOLD)
+        ]
+
+        # Simulate gpt-5.4 compact output: assistant msgs WITH ids, NO reasoning items
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "id": "msg_aaa", "content": "summary 1"},
+            {"type": "message", "role": "assistant", "id": "msg_bbb", "content": "summary 2"},
+            {"type": "message", "role": "assistant", "id": "msg_ccc", "content": "summary 3"},
+        ]
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+        )
+
+        await session.run_compaction({"response_id": "resp-123"})
+
+        # Verify stored items have no orphaned ids
+        stored_items = mock_session.add_items.call_args[0][0]
+        for item in stored_items:
+            assert "id" not in item, f"orphaned id not stripped: {item}"
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_keeps_ids_when_reasoning_present(self) -> None:
+        """When compact output includes reasoning items, assistant IDs should be kept."""
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": f"m{i}"})
+            for i in range(DEFAULT_COMPACTION_THRESHOLD)
+        ]
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "reasoning", "id": "rs_111", "content": "thinking..."},
+            {"type": "message", "role": "assistant", "id": "msg_aaa", "content": "answer"},
+        ]
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+        )
+
+        await session.run_compaction({"response_id": "resp-123"})
+
+        stored_items = mock_session.add_items.call_args[0][0]
+        assistant_items = [i for i in stored_items if i.get("role") == "assistant"]
+        assert assistant_items[0]["id"] == "msg_aaa"
 
 
 class TestTypeGuard:

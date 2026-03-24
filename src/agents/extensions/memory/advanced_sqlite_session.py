@@ -11,6 +11,7 @@ from typing import Any, Union, cast
 from agents.result import RunResult
 from agents.usage import Usage
 
+from ..._tool_identity import is_reserved_synthetic_tool_namespace, tool_qualified_name
 from ...items import TResponseInputItem
 from ...memory import SQLiteSession
 from ...memory.session_settings import SessionSettings, resolve_session_limit
@@ -58,7 +59,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         conn = self._get_connection()
 
         # Message structure with branch support
-        conn.execute("""
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS message_structure (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -70,13 +71,15 @@ class AdvancedSQLiteSession(SQLiteSession):
                 branch_turn_number INTEGER,
                 tool_name TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id) ON DELETE CASCADE,
-                FOREIGN KEY (message_id) REFERENCES agent_messages(id) ON DELETE CASCADE
+                FOREIGN KEY (session_id)
+                    REFERENCES {self.sessions_table}(session_id) ON DELETE CASCADE,
+                FOREIGN KEY (message_id)
+                    REFERENCES {self.messages_table}(id) ON DELETE CASCADE
             )
         """)
 
         # Turn-level usage tracking with branch support and full JSON details
-        conn.execute("""
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS turn_usage (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -89,7 +92,8 @@ class AdvancedSQLiteSession(SQLiteSession):
                 input_tokens_details JSON,
                 output_tokens_details JSON,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id) ON DELETE CASCADE,
+                FOREIGN KEY (session_id)
+                    REFERENCES {self.sessions_table}(session_id) ON DELETE CASCADE,
                 UNIQUE(session_id, branch_id, user_turn_number)
             )
         """)
@@ -159,9 +163,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                     with closing(conn.cursor()) as cursor:
                         if session_limit is None:
                             cursor.execute(
-                                """
+                                f"""
                                 SELECT m.message_data
-                                FROM agent_messages m
+                                FROM {self.messages_table} m
                                 JOIN message_structure s ON m.id = s.message_id
                                 WHERE m.session_id = ? AND s.branch_id = ?
                                 ORDER BY s.sequence_number ASC
@@ -170,9 +174,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                             )
                         else:
                             cursor.execute(
-                                """
+                                f"""
                                 SELECT m.message_data
-                                FROM agent_messages m
+                                FROM {self.messages_table} m
                                 JOIN message_structure s ON m.id = s.message_id
                                 WHERE m.session_id = ? AND s.branch_id = ?
                                 ORDER BY s.sequence_number DESC
@@ -205,9 +209,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                     # Get message IDs in correct order for this branch
                     if session_limit is None:
                         cursor.execute(
-                            """
+                            f"""
                             SELECT m.message_data
-                            FROM agent_messages m
+                            FROM {self.messages_table} m
                             JOIN message_structure s ON m.id = s.message_id
                             WHERE m.session_id = ? AND s.branch_id = ?
                             ORDER BY s.sequence_number ASC
@@ -216,9 +220,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                         )
                     else:
                         cursor.execute(
-                            """
+                            f"""
                             SELECT m.message_data
-                            FROM agent_messages m
+                            FROM {self.messages_table} m
                             JOIN message_structure s ON m.id = s.message_id
                             WHERE m.session_id = ? AND s.branch_id = ?
                             ORDER BY s.sequence_number DESC
@@ -437,8 +441,8 @@ class AdvancedSQLiteSession(SQLiteSession):
                 self._logger.error(f"Failed to cleanup orphaned messages: {cleanup_error}")
             # Don't re-raise - structure metadata is supplementary
 
-    async def _cleanup_orphaned_messages(self) -> None:
-        """Remove messages that exist in agent_messages but not in message_structure.
+    async def _cleanup_orphaned_messages(self) -> int:
+        """Remove messages that exist in the configured message table but not in message_structure.
 
         This can happen if _add_structure_metadata fails after super().add_items() succeeds.
         Used for maintaining data consistency.
@@ -452,9 +456,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                 with closing(conn.cursor()) as cursor:
                     # Find messages without structure metadata
                     cursor.execute(
-                        """
+                        f"""
                         SELECT am.id
-                        FROM agent_messages am
+                        FROM {self.messages_table} am
                         LEFT JOIN message_structure ms ON am.id = ms.message_id
                         WHERE am.session_id = ? AND ms.message_id IS NULL
                     """,
@@ -467,7 +471,8 @@ class AdvancedSQLiteSession(SQLiteSession):
                         # Delete orphaned messages
                         placeholders = ",".join("?" * len(orphaned_ids))
                         cursor.execute(
-                            f"DELETE FROM agent_messages WHERE id IN ({placeholders})", orphaned_ids
+                            f"DELETE FROM {self.messages_table} WHERE id IN ({placeholders})",
+                            orphaned_ids,
                         )
 
                         deleted_count = cursor.rowcount
@@ -527,13 +532,28 @@ class AdvancedSQLiteSession(SQLiteSession):
                 "file_search_call",
                 "web_search_call",
                 "code_interpreter_call",
+                "tool_search_call",
+                "tool_search_output",
             }:
+                if item_type in {"tool_search_call", "tool_search_output"}:
+                    return "tool_search"
                 return item_type
 
             # Most other tool calls have a 'name' field
             elif "name" in item:
                 name = item.get("name")
-                return str(name) if name is not None else None
+                namespace = item.get("namespace")
+                if name is not None:
+                    name_str = str(name)
+                    namespace_str = str(namespace) if namespace is not None else None
+                    if is_reserved_synthetic_tool_namespace(name_str, namespace_str):
+                        return name_str
+                    qualified_name = tool_qualified_name(
+                        name_str,
+                        namespace_str,
+                    )
+                    return qualified_name or name_str
+                return None
 
         return None
 
@@ -571,10 +591,10 @@ class AdvancedSQLiteSession(SQLiteSession):
             conn = self._get_connection()
             with closing(conn.cursor()) as cursor:
                 cursor.execute(
-                    """
+                    f"""
                     SELECT am.message_data
                     FROM message_structure ms
-                    JOIN agent_messages am ON ms.message_id = am.id
+                    JOIN {self.messages_table} am ON ms.message_id = am.id
                     WHERE ms.session_id = ? AND ms.branch_id = ?
                     AND ms.branch_turn_number = ? AND ms.message_type = 'user'
                     """,
@@ -904,13 +924,13 @@ class AdvancedSQLiteSession(SQLiteSession):
             conn = self._get_connection()
             with closing(conn.cursor()) as cursor:
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         ms.branch_turn_number,
                         am.message_data,
                         ms.created_at
                     FROM message_structure ms
-                    JOIN agent_messages am ON ms.message_id = am.id
+                    JOIN {self.messages_table} am ON ms.message_id = am.id
                     WHERE ms.session_id = ? AND ms.branch_id = ?
                     AND ms.message_type = 'user'
                     ORDER BY ms.branch_turn_number
@@ -959,13 +979,13 @@ class AdvancedSQLiteSession(SQLiteSession):
             conn = self._get_connection()
             with closing(conn.cursor()) as cursor:
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         ms.branch_turn_number,
                         am.message_data,
                         ms.created_at
                     FROM message_structure ms
-                    JOIN agent_messages am ON ms.message_id = am.id
+                    JOIN {self.messages_table} am ON ms.message_id = am.id
                     WHERE ms.session_id = ? AND ms.branch_id = ?
                     AND ms.message_type = 'user'
                     AND am.message_data LIKE ?
@@ -1051,17 +1071,41 @@ class AdvancedSQLiteSession(SQLiteSession):
             with closing(conn.cursor()) as cursor:
                 cursor.execute(
                     """
-                    SELECT tool_name, COUNT(*), user_turn_number
-                    FROM message_structure
-                    WHERE session_id = ? AND branch_id = ? AND message_type IN (
-                        'tool_call', 'function_call', 'computer_call', 'file_search_call',
-                        'web_search_call', 'code_interpreter_call', 'custom_tool_call',
-                        'mcp_call', 'mcp_approval_request'
+                    SELECT tool_name, SUM(usage_count), user_turn_number
+                    FROM (
+                        SELECT tool_name, 1 AS usage_count, user_turn_number
+                        FROM message_structure
+                        WHERE session_id = ? AND branch_id = ? AND message_type IN (
+                            'tool_call', 'function_call', 'computer_call', 'file_search_call',
+                            'web_search_call', 'code_interpreter_call', 'tool_search_call',
+                            'custom_tool_call', 'mcp_call', 'mcp_approval_request'
+                        )
+
+                        UNION ALL
+
+                        SELECT ms.tool_name, 1 AS usage_count, ms.user_turn_number
+                        FROM message_structure ms
+                        WHERE ms.session_id = ? AND ms.branch_id = ?
+                          AND ms.message_type = 'tool_search_output'
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM message_structure calls
+                              WHERE calls.session_id = ms.session_id
+                                AND calls.branch_id = ms.branch_id
+                                AND calls.user_turn_number = ms.user_turn_number
+                                AND calls.tool_name = ms.tool_name
+                                AND calls.message_type = 'tool_search_call'
+                          )
                     )
                     GROUP BY tool_name, user_turn_number
                     ORDER BY user_turn_number
                 """,
-                    (self.session_id, branch_id),
+                    (
+                        self.session_id,
+                        branch_id,
+                        self.session_id,
+                        branch_id,
+                    ),
                 )
                 return cursor.fetchall()
 

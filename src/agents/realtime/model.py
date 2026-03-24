@@ -143,7 +143,8 @@ class RealtimeModelConfig(TypedDict):
     """Attach to an existing realtime call instead of creating a new session.
 
     When provided, the transport connects using the `call_id` query string parameter rather than a
-    model name. This is used for SIP-originated calls that are accepted via the Realtime Calls API.
+    model name. In this repository, the shipped example for this flow is SIP via the Realtime
+    Calls API.
     """
 
 

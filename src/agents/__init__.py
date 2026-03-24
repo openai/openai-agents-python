@@ -82,10 +82,22 @@ from .models.interface import Model, ModelProvider, ModelTracing
 from .models.multi_provider import MultiProvider
 from .models.openai_chatcompletions import OpenAIChatCompletionsModel
 from .models.openai_provider import OpenAIProvider
-from .models.openai_responses import OpenAIResponsesModel
+from .models.openai_responses import OpenAIResponsesModel, OpenAIResponsesWSModel
 from .prompts import DynamicPromptFunction, GenerateDynamicPromptData, Prompt
 from .repl import run_demo_loop
-from .result import RunResult, RunResultStreaming
+from .responses_websocket_session import ResponsesWebSocketSession, responses_websocket_session
+from .result import AgentToolInvocation, RunResult, RunResultStreaming
+from .retry import (
+    ModelRetryAdvice,
+    ModelRetryAdviceRequest,
+    ModelRetryBackoffSettings,
+    ModelRetryNormalizedError,
+    ModelRetrySettings,
+    RetryDecision,
+    RetryPolicy,
+    RetryPolicyContext,
+    retry_policies,
+)
 from .run import (
     ReasoningItemIdPolicy,
     RunConfig,
@@ -153,11 +165,13 @@ from .tool import (
     ToolOutputImageDict,
     ToolOutputText,
     ToolOutputTextDict,
+    ToolSearchTool,
     WebSearchTool,
     default_tool_error_function,
     dispose_resolved_computers,
     function_tool,
     resolve_computer,
+    tool_namespace,
 )
 from .tool_guardrails import (
     ToolGuardrailFunctionOutput,
@@ -246,6 +260,15 @@ def set_default_openai_api(api: Literal["chat_completions", "responses"]) -> Non
     _config.set_default_openai_api(api)
 
 
+def set_default_openai_responses_transport(transport: Literal["http", "websocket"]) -> None:
+    """Set the default transport for OpenAI Responses API requests.
+
+    By default, the Responses API uses the HTTP transport. Set this to ``"websocket"`` to use
+    websocket transport when the OpenAI provider resolves a Responses model.
+    """
+    _config.set_default_openai_responses_transport(transport)
+
+
 def enable_verbose_stdout_logging():
     """Enables verbose logging to stdout. This is useful for debugging."""
     logger = logging.getLogger("openai.agents")
@@ -272,10 +295,20 @@ __all__ = [
     "ModelProvider",
     "ModelTracing",
     "ModelSettings",
+    "ModelRetryAdvice",
+    "ModelRetryAdviceRequest",
+    "ModelRetryBackoffSettings",
+    "ModelRetryNormalizedError",
+    "ModelRetrySettings",
+    "RetryDecision",
+    "RetryPolicy",
+    "RetryPolicyContext",
+    "retry_policies",
     "OpenAIChatCompletionsModel",
     "MultiProvider",
     "OpenAIProvider",
     "OpenAIResponsesModel",
+    "OpenAIResponsesWSModel",
     "AgentOutputSchema",
     "AgentOutputSchemaBase",
     "Computer",
@@ -348,8 +381,10 @@ __all__ = [
     "RunErrorHandlerInput",
     "RunErrorHandlerResult",
     "RunErrorHandlers",
+    "AgentToolInvocation",
     "RunResult",
     "RunResultStreaming",
+    "ResponsesWebSocketSession",
     "RunConfig",
     "ReasoningItemIdPolicy",
     "ToolErrorFormatter",
@@ -407,7 +442,9 @@ __all__ = [
     "ToolOutputImageDict",
     "ToolOutputFileContent",
     "ToolOutputFileContentDict",
+    "ToolSearchTool",
     "function_tool",
+    "tool_namespace",
     "resolve_computer",
     "dispose_resolved_computers",
     "Usage",
@@ -446,6 +483,8 @@ __all__ = [
     "set_default_openai_key",
     "set_default_openai_client",
     "set_default_openai_api",
+    "set_default_openai_responses_transport",
+    "responses_websocket_session",
     "set_tracing_export_api_key",
     "enable_verbose_stdout_logging",
     "gen_trace_id",
