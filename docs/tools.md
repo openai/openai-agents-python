@@ -828,4 +828,4 @@ Reference:
 -   [Codex tool API reference](ref/extensions/experimental/codex/codex_tool.md)
 -   [ThreadOptions reference](ref/extensions/experimental/codex/thread_options.md)
 -   [TurnOptions reference](ref/extensions/experimental/codex/turn_options.md)
--   See `examples/tools/codex.py` and `examples/tools/codex_same_thread.py` for complete runnable samples.
+-   See `examples/tools/codex.py`, `examples/tools/codex_same_thread.py`, and `examples/tools/codex_builder_qa.py` for complete runnable samples.

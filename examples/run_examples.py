@@ -44,6 +44,7 @@ DEFAULT_AUTO_SKIP = {
     "examples/model_providers/custom_example_provider.py",
     "examples/realtime/app/server.py",
     "examples/realtime/cli/demo.py",
+    "examples/tools/codex_builder_qa.py",
     "examples/realtime/twilio/server.py",
     "examples/voice/static/main.py",
     "examples/voice/streamed/main.py",
