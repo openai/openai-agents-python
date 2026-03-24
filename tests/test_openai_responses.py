@@ -347,7 +347,7 @@ async def test_fetch_response_stream_attaches_request_id_to_terminal_response():
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_fetch_response_stream_uses_client_timeout_without_read_deadline():
+async def test_stream_read_timeout_disable_uses_client_timeout():
     class DummyHTTPStream:
         def __aiter__(self):
             return self
@@ -359,6 +359,138 @@ async def test_fetch_response_stream_uses_client_timeout_without_read_deadline()
 
     class DummyAPIResponse:
         request_id = "req_stream_timeout_client"
+
+        async def parse(self):
+            return inner_stream
+
+    api_response = DummyAPIResponse()
+    captured_kwargs: dict[str, Any] = {}
+
+    class DummyStreamingContextManager:
+        async def __aenter__(self):
+            return api_response
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyResponses:
+        def __init__(self):
+            self.with_streaming_response = SimpleNamespace(create=self.create_streaming)
+
+        def create_streaming(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            return DummyStreamingContextManager()
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+            self.timeout = httpx.Timeout(connect=5.0, read=600.0, write=600.0, pool=600.0)
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
+
+    stream = await model._fetch_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(disable_stream_read_timeout=True),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=True,
+    )
+
+    with pytest.raises(StopAsyncIteration):
+        await cast(Any, stream).__anext__()
+
+    timeout = captured_kwargs["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 5.0
+    assert timeout.read is None
+    assert timeout.write == 600.0
+    assert timeout.pool == 600.0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_read_timeout_disable_uses_override_timeout():
+    class DummyHTTPStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    inner_stream = DummyHTTPStream()
+
+    class DummyAPIResponse:
+        request_id = "req_stream_timeout_override"
+
+        async def parse(self):
+            return inner_stream
+
+    api_response = DummyAPIResponse()
+    captured_kwargs: dict[str, Any] = {}
+
+    class DummyStreamingContextManager:
+        async def __aenter__(self):
+            return api_response
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyResponses:
+        def __init__(self):
+            self.with_streaming_response = SimpleNamespace(create=self.create_streaming)
+
+        def create_streaming(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            return DummyStreamingContextManager()
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+            self.timeout = httpx.Timeout(connect=5.0, read=600.0, write=600.0, pool=600.0)
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
+
+    stream = await model._fetch_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(
+            disable_stream_read_timeout=True,
+            extra_args={"timeout": 30.0},
+        ),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=True,
+    )
+
+    with pytest.raises(StopAsyncIteration):
+        await cast(Any, stream).__anext__()
+
+    timeout = captured_kwargs["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 30.0
+    assert timeout.read is None
+    assert timeout.write == 30.0
+    assert timeout.pool == 30.0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fetch_response_stream_preserves_timeout_by_default():
+    class DummyInnerStream:
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    inner_stream = DummyInnerStream()
+
+    class DummyAPIResponse:
+        request_id = "req_stream_123"
 
         async def parse(self):
             return inner_stream
@@ -403,78 +535,7 @@ async def test_fetch_response_stream_uses_client_timeout_without_read_deadline()
     with pytest.raises(StopAsyncIteration):
         await cast(Any, stream).__anext__()
 
-    timeout = captured_kwargs["timeout"]
-    assert isinstance(timeout, httpx.Timeout)
-    assert timeout.connect == 5.0
-    assert timeout.read is None
-    assert timeout.write == 600.0
-    assert timeout.pool == 600.0
-
-
-@pytest.mark.allow_call_model_methods
-@pytest.mark.asyncio
-async def test_fetch_response_stream_uses_override_timeout_without_read_deadline():
-    class DummyHTTPStream:
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            raise StopAsyncIteration
-
-    inner_stream = DummyHTTPStream()
-
-    class DummyAPIResponse:
-        request_id = "req_stream_timeout_override"
-
-        async def parse(self):
-            return inner_stream
-
-    api_response = DummyAPIResponse()
-    captured_kwargs: dict[str, Any] = {}
-
-    class DummyStreamingContextManager:
-        async def __aenter__(self):
-            return api_response
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-    class DummyResponses:
-        def __init__(self):
-            self.with_streaming_response = SimpleNamespace(create=self.create_streaming)
-
-        def create_streaming(self, **kwargs):
-            captured_kwargs.update(kwargs)
-            return DummyStreamingContextManager()
-
-    class DummyResponsesClient:
-        def __init__(self):
-            self.responses = DummyResponses()
-            self.timeout = httpx.Timeout(connect=5.0, read=600.0, write=600.0, pool=600.0)
-
-    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
-
-    stream = await model._fetch_response(
-        system_instructions=None,
-        input="hi",
-        model_settings=ModelSettings(extra_args={"timeout": 30.0}),
-        tools=[],
-        output_schema=None,
-        handoffs=[],
-        previous_response_id=None,
-        conversation_id=None,
-        stream=True,
-    )
-
-    with pytest.raises(StopAsyncIteration):
-        await cast(Any, stream).__anext__()
-
-    timeout = captured_kwargs["timeout"]
-    assert isinstance(timeout, httpx.Timeout)
-    assert timeout.connect == 30.0
-    assert timeout.read is None
-    assert timeout.write == 30.0
-    assert timeout.pool == 30.0
+    assert "timeout" not in captured_kwargs
 
 
 @pytest.mark.allow_call_model_methods

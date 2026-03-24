@@ -65,6 +65,7 @@ def test_all_fields_serialization() -> None:
         extra_query={"foo": "bar"},
         extra_body={"foo": "bar"},
         extra_headers={"foo": "bar"},
+        disable_stream_read_timeout=True,
         extra_args={"custom_param": "value", "another_param": 42},
         retry=ModelRetrySettings(
             max_retries=2,
@@ -181,6 +182,7 @@ def test_pydantic_serialization() -> None:
         extra_query={"foo": "bar"},
         extra_body={"foo": "bar"},
         extra_headers={"foo": "bar"},
+        disable_stream_read_timeout=True,
         extra_args={"custom_param": "value", "another_param": 42},
     )
 

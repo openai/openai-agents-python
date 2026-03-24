@@ -155,6 +155,14 @@ class ModelSettings:
     """Additional headers to provide with the request.
     Defaults to None if not provided."""
 
+    disable_stream_read_timeout: bool | None = None
+    """Whether streamed Responses HTTP requests should disable the transport read deadline.
+
+    When set to ``True``, streamed Responses requests keep connect/write/pool timeouts but
+    remove the read timeout so long-lived SSE streams are not interrupted by transport-level
+    read deadlines. Defaults to ``None`` and preserves the SDK default behavior.
+    """
+
     extra_args: dict[str, Any] | None = None
     """Arbitrary keyword arguments to pass to the model API call.
     These will be passed directly to the underlying model provider's API.

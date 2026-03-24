@@ -718,10 +718,11 @@ class OpenAIResponsesModel(Model):
         request_timeout = create_kwargs.get("timeout", omit)
         if _is_openai_omitted_value(request_timeout):
             request_timeout = getattr(client, "timeout", None)
-        stream_request_timeout = _streaming_timeout_without_read_deadline(request_timeout)
-        if not _is_openai_omitted_value(stream_request_timeout):
-            create_kwargs = dict(create_kwargs)
-            create_kwargs["timeout"] = stream_request_timeout
+        if model_settings.disable_stream_read_timeout:
+            stream_request_timeout = _streaming_timeout_without_read_deadline(request_timeout)
+            if not _is_openai_omitted_value(stream_request_timeout):
+                create_kwargs = dict(create_kwargs)
+                create_kwargs["timeout"] = stream_request_timeout
         api_response_cm = stream_create(**create_kwargs)
         api_response = await api_response_cm.__aenter__()
         try:
