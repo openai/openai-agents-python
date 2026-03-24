@@ -328,6 +328,9 @@ class FunctionTool:
 
     _mcp_title: str | None = field(default=None, kw_only=True, repr=False)
     """Internal MCP display title used for ToolCallItem metadata."""
+    
+    _meta: dict[str, Any] | None = field(default=None, kw_only=True, repr=False)
+    """Internal metadata used for ToolCallItem metadata."""
 
     @property
     def qualified_name(self) -> str:
@@ -431,6 +434,7 @@ def _build_wrapped_function_tool(
     defer_loading: bool = False,
     sync_invoker: bool = False,
     mcp_title: str | None = None,
+    meta: dict[str, Any] | None = None,
 ) -> FunctionTool:
     """Create a FunctionTool with copied-tool-aware failure handling bound in one place."""
     on_invoke_tool = with_function_tool_failure_error_handler(
@@ -456,6 +460,7 @@ def _build_wrapped_function_tool(
             timeout_error_function=timeout_error_function,
             defer_loading=defer_loading,
             _mcp_title=mcp_title,
+            _meta=meta,
         ),
         failure_error_function,
     )
