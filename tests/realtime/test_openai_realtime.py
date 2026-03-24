@@ -1054,6 +1054,48 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         ]
 
     @pytest.mark.asyncio
+    async def test_missing_error_event_id_releases_in_flight_response_create(
+        self, model, monkeypatch
+    ):
+        """Missing nested error.event_id should not wedge a rejected response.create."""
+        payload_types: list[str] = []
+
+        async def fake_send_raw(event):
+            payload_types.append(event.type)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="first"))
+
+        assert model._pending_response_create_event_id is not None
+        assert model._response_control == "create_requested"
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "event_err_missing_nested",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "bad_response_create",
+                    "message": "bad response.create",
+                },
+            }
+        )
+
+        assert model._pending_response_create_event_id is None
+        assert model._response_control == "free"
+
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="second"))
+
+        assert payload_types == [
+            "conversation.item.create",
+            "response.create",
+            "conversation.item.create",
+            "response.create",
+        ]
+
+    @pytest.mark.asyncio
     async def test_release_response_waiters_clears_active_response_state(self, model):
         """Releasing waiters should also clear local active-response bookkeeping."""
         await model._mark_response_created()
