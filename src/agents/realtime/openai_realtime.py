@@ -282,6 +282,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         # Keep local response control in one place so create/cancel sequencing
         # stays readable without multiple overlapping boolean flags.
         self._response_control: Literal["free", "create_requested", "cancel_requested"] = "free"
+        self._response_create_request_version = 0
+        self._response_create_sent_version = 0
         self._response_control_condition = asyncio.Condition()
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
         self._playback_tracker: RealtimePlaybackTracker | None = None
@@ -492,25 +494,74 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         await self._set_response_control("free")
 
     async def _release_response_waiters(self) -> None:
+        # Connection teardown means no response.done will arrive, so local
+        # response sequencing must be released explicitly.
+        self._ongoing_response = False
         await self._set_response_control("free")
 
-    async def _send_response_create_when_idle(self) -> None:
+    async def _reserve_response_create_request(self) -> int:
         async with self._response_control_condition:
-            await self._response_control_condition.wait_for(
-                lambda: not self._ongoing_response and self._response_control == "free"
-            )
-            self._response_control = "create_requested"
+            self._response_create_request_version += 1
+            request_version = self._response_create_request_version
+            self._response_control_condition.notify_all()
+            return request_version
 
+    async def _send_response_create_when_idle(self, request_version: int) -> None:
+        while True:
+            async with self._response_control_condition:
+                await self._response_control_condition.wait_for(
+                    lambda: self._response_create_sent_version >= request_version
+                    or (not self._ongoing_response and self._response_control == "free")
+                )
+                if self._response_create_sent_version >= request_version:
+                    return
+
+                self._response_control = "create_requested"
+
+            try:
+                await self._send_raw_message(OpenAIResponseCreateEvent(type="response.create"))
+            except Exception:
+                await self._set_response_control("free")
+                raise
+            # Include requests whose conversation items finished sending while
+            # this response.create frame was still in flight.
+            covered_version = self._response_create_request_version
+
+            async with self._response_control_condition:
+                self._response_create_sent_version = max(
+                    self._response_create_sent_version, covered_version
+                )
+                self._response_control_condition.notify_all()
+                return
+
+    def _is_running_in_websocket_listener_task(self) -> bool:
+        current_task = asyncio.current_task()
+        return current_task is not None and current_task is self._websocket_task
+
+    async def _send_response_create_in_background(self, request_version: int) -> None:
         try:
-            await self._send_raw_message(OpenAIResponseCreateEvent(type="response.create"))
-        except Exception:
-            await self._set_response_control("free")
-            raise
+            await self._send_response_create_when_idle(request_version)
+        except AssertionError as exc:
+            if str(exc) != "Not connected":
+                await self._emit_event(
+                    RealtimeModelExceptionEvent(
+                        exception=exc, context="Error sending deferred response.create"
+                    )
+                )
+        except websockets.exceptions.ConnectionClosed:
+            logger.debug("Skipping deferred response.create because the websocket is closed")
+        except Exception as exc:
+            await self._emit_event(
+                RealtimeModelExceptionEvent(
+                    exception=exc, context="Error sending deferred response.create"
+                )
+            )
 
     async def _send_user_input(self, event: RealtimeModelSendUserInput) -> None:
         converted = _ConversionHelper.convert_user_input_to_item_create(event)
         await self._send_raw_message(converted)
-        await self._send_response_create_when_idle()
+        request_version = await self._reserve_response_create_request()
+        await self._send_response_create_when_idle(request_version)
 
     async def _send_audio(self, event: RealtimeModelSendAudio) -> None:
         converted = _ConversionHelper.convert_audio_to_input_audio_buffer_append(event)
@@ -537,7 +588,11 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         await self._emit_event(RealtimeModelItemUpdatedEvent(item=tool_item))
 
         if event.start_response:
-            await self._send_response_create_when_idle()
+            request_version = await self._reserve_response_create_request()
+            if self._is_running_in_websocket_listener_task():
+                asyncio.create_task(self._send_response_create_in_background(request_version))
+            else:
+                await self._send_response_create_when_idle(request_version)
 
     def _get_playback_state(self) -> RealtimePlaybackState:
         if self._playback_tracker:
@@ -701,7 +756,6 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def close(self) -> None:
         """Close the session."""
-        await self._release_response_waiters()
         if self._websocket:
             await self._websocket.close()
             self._websocket = None
@@ -712,6 +766,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             except asyncio.CancelledError:
                 pass
             self._websocket_task = None
+        await self._release_response_waiters()
 
     async def _cancel_response(self) -> None:
         async with self._response_control_condition:
