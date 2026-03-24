@@ -712,6 +712,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         monkeypatch.setattr(model, "_send_raw_message", send_raw)
 
         await model.send_event(RealtimeModelSendUserInput(user_input="hi"))
+        await model._mark_response_done()
         await model.send_event(RealtimeModelSendAudio(audio=b"a", commit=False))
         await model.send_event(RealtimeModelSendAudio(audio=b"a", commit=True))
         await model.send_event(
@@ -736,7 +737,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         """Interrupt should send response.cancel even when auto cancel is enabled."""
         model._audio_state_tracker.set_audio_format("pcm16")
         model._audio_state_tracker.on_audio_delta("item_1", 0, b"\x00" * 4800)
-        model._ongoing_response = True
+        await model._mark_response_created()
         model._created_session = SimpleNamespace(
             audio=SimpleNamespace(
                 input=SimpleNamespace(turn_detection=SimpleNamespace(interrupt_response=True))
@@ -753,7 +754,12 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert send_raw.await_count == 2
         payload_types = {call.args[0].type for call in send_raw.call_args_list}
         assert payload_types == {"conversation.item.truncate", "response.cancel"}
+        assert model._ongoing_response is True
+        assert model._response_control == "cancel_requested"
+
+        await model._mark_response_done()
         assert model._ongoing_response is False
+        assert model._response_control == "free"
         assert model._audio_state_tracker.get_last_audio_item() is None
 
     @pytest.mark.asyncio
@@ -779,6 +785,65 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert send_raw.call_args_list[0].args[0].type == "conversation.item.truncate"
         assert all(call.args[0].type != "response.cancel" for call in send_raw.call_args_list)
         assert model._ongoing_response is True
+
+    @pytest.mark.asyncio
+    async def test_send_user_input_waits_for_response_done_before_response_create(
+        self, model, monkeypatch
+    ):
+        """Active turns should delay the next response.create until response.done arrives."""
+        payload_types: list[str] = []
+
+        async def fake_send_raw(event):
+            payload_types.append(event.type)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        await model._mark_response_created()
+
+        task = asyncio.create_task(
+            model._send_user_input(RealtimeModelSendUserInput(user_input="hi"))
+        )
+        await asyncio.sleep(0)
+
+        assert payload_types == ["conversation.item.create"]
+        assert task.done() is False
+
+        await model._mark_response_done()
+        await asyncio.wait_for(task, timeout=1)
+
+        assert payload_types == ["conversation.item.create", "response.create"]
+
+    @pytest.mark.asyncio
+    async def test_tool_output_start_response_waits_for_response_done_before_response_create(
+        self, model, monkeypatch
+    ):
+        """Tool outputs that restart the model should also wait for the prior turn to finish."""
+        payload_types: list[str] = []
+
+        async def fake_send_raw(event):
+            payload_types.append(event.type)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+        await model._mark_response_created()
+
+        task = asyncio.create_task(
+            model._send_tool_output(
+                RealtimeModelSendToolOutput(
+                    tool_call=RealtimeModelToolCallEvent(name="t", call_id="c", arguments="{}"),
+                    output="ok",
+                    start_response=True,
+                )
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert "response.create" not in payload_types
+        assert task.done() is False
+
+        await model._mark_response_done()
+        await asyncio.wait_for(task, timeout=1)
+
+        assert payload_types[-1] == "response.create"
 
     def test_add_remove_listener_and_tools_conversion(self, model):
         listener = AsyncMock()

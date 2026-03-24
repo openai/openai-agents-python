@@ -279,6 +279,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._current_item_id: str | None = None
         self._audio_state_tracker: ModelAudioTracker = ModelAudioTracker()
         self._ongoing_response: bool = False
+        # Keep local response control in one place so create/cancel sequencing
+        # stays readable without multiple overlapping boolean flags.
+        self._response_control: Literal["free", "create_requested", "cancel_requested"] = "free"
+        self._response_control_condition = asyncio.Condition()
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
         self._playback_tracker: RealtimePlaybackTracker | None = None
         self._created_session: OpenAISessionCreateRequest | None = None
@@ -427,14 +431,17 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
         except websockets.exceptions.ConnectionClosedOK:
             # Normal connection closure - no exception event needed
+            await self._release_response_waiters()
             logger.debug("WebSocket connection closed normally")
         except websockets.exceptions.ConnectionClosed as e:
+            await self._release_response_waiters()
             await self._emit_event(
                 RealtimeModelExceptionEvent(
                     exception=e, context="WebSocket connection closed unexpectedly"
                 )
             )
         except Exception as e:
+            await self._release_response_waiters()
             await self._emit_event(
                 RealtimeModelExceptionEvent(
                     exception=e, context="WebSocket error in message listener"
@@ -469,10 +476,41 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         payload = event.model_dump_json(exclude_unset=True)
         await self._websocket.send(payload)
 
+    async def _set_response_control(
+        self, control: Literal["free", "create_requested", "cancel_requested"]
+    ) -> None:
+        async with self._response_control_condition:
+            self._response_control = control
+            self._response_control_condition.notify_all()
+
+    async def _mark_response_created(self) -> None:
+        self._ongoing_response = True
+        await self._set_response_control("free")
+
+    async def _mark_response_done(self) -> None:
+        self._ongoing_response = False
+        await self._set_response_control("free")
+
+    async def _release_response_waiters(self) -> None:
+        await self._set_response_control("free")
+
+    async def _send_response_create_when_idle(self) -> None:
+        async with self._response_control_condition:
+            await self._response_control_condition.wait_for(
+                lambda: not self._ongoing_response and self._response_control == "free"
+            )
+            self._response_control = "create_requested"
+
+        try:
+            await self._send_raw_message(OpenAIResponseCreateEvent(type="response.create"))
+        except Exception:
+            await self._set_response_control("free")
+            raise
+
     async def _send_user_input(self, event: RealtimeModelSendUserInput) -> None:
         converted = _ConversionHelper.convert_user_input_to_item_create(event)
         await self._send_raw_message(converted)
-        await self._send_raw_message(OpenAIResponseCreateEvent(type="response.create"))
+        await self._send_response_create_when_idle()
 
     async def _send_audio(self, event: RealtimeModelSendAudio) -> None:
         converted = _ConversionHelper.convert_audio_to_input_audio_buffer_append(event)
@@ -499,7 +537,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         await self._emit_event(RealtimeModelItemUpdatedEvent(item=tool_item))
 
         if event.start_response:
-            await self._send_raw_message(OpenAIResponseCreateEvent(type="response.create"))
+            await self._send_response_create_when_idle()
 
     def _get_playback_state(self) -> RealtimePlaybackState:
         if self._playback_tracker:
@@ -663,6 +701,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def close(self) -> None:
         """Close the session."""
+        await self._release_response_waiters()
         if self._websocket:
             await self._websocket.close()
             self._websocket = None
@@ -675,9 +714,16 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             self._websocket_task = None
 
     async def _cancel_response(self) -> None:
-        if self._ongoing_response:
+        async with self._response_control_condition:
+            if not self._ongoing_response or self._response_control == "cancel_requested":
+                return
+            self._response_control = "cancel_requested"
+
+        try:
             await self._send_raw_message(OpenAIResponseCancelEvent(type="response.cancel"))
-            self._ongoing_response = False
+        except Exception:
+            await self._set_response_control("free")
+            raise
 
     async def _handle_ws_event(self, event: dict[str, Any]):
         await self._emit_event(RealtimeModelRawServerEvent(data=event))
@@ -816,10 +862,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 if not automatic_response_cancellation_enabled:
                     await self._cancel_response()
         elif parsed.type == "response.created":
-            self._ongoing_response = True
+            await self._mark_response_created()
             await self._emit_event(RealtimeModelTurnStartedEvent())
         elif parsed.type == "response.done":
-            self._ongoing_response = False
+            await self._mark_response_done()
             await self._emit_event(RealtimeModelTurnEndedEvent())
         elif parsed.type == "session.created":
             await self._send_tracing_config(self._tracing_config)
@@ -827,6 +873,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         elif parsed.type == "session.updated":
             self._update_created_session(parsed.session)
         elif parsed.type == "error":
+            if not self._ongoing_response and self._response_control == "create_requested":
+                await self._set_response_control("free")
             await self._emit_event(RealtimeModelErrorEvent(error=parsed.error))
         elif parsed.type == "conversation.item.deleted":
             await self._emit_event(RealtimeModelItemDeletedEvent(item_id=parsed.item_id))
