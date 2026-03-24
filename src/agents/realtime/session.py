@@ -952,8 +952,14 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
 
-            # Interrupt the model
-            await self._model.send_event(RealtimeModelSendInterrupt(force_response_cancel=True))
+            # Wait until the cancelled response is fully finished before sending
+            # the guardrail follow-up, otherwise the server can reject the new turn.
+            await self._model.send_event(
+                RealtimeModelSendInterrupt(
+                    force_response_cancel=True,
+                    wait_for_response_done=True,
+                )
+            )
 
             # Send guardrail triggered message
             guardrail_names = [result.guardrail.get_name() for result in triggered_results]

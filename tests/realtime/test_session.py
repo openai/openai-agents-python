@@ -1880,6 +1880,42 @@ class TestGuardrailFunctionality:
         assert mock_model.interrupts_called == 1
         assert len(mock_model.sent_messages) == 1
 
+    @pytest.mark.asyncio
+    async def test_guardrail_follow_up_waits_for_interrupt_completion(
+        self, mock_agent, triggered_guardrail
+    ):
+        """Guardrail follow-up should wait for the interrupt call to finish."""
+
+        class BlockingInterruptModel(MockRealtimeModel):
+            def __init__(self):
+                super().__init__()
+                self.release_interrupt = asyncio.Event()
+
+            async def send_event(self, event):
+                await super().send_event(event)
+                if isinstance(event, RealtimeModelSendInterrupt) and event.wait_for_response_done:
+                    await self.release_interrupt.wait()
+
+        model = BlockingInterruptModel()
+        run_config: RealtimeRunConfig = {"output_guardrails": [triggered_guardrail]}
+        session = RealtimeSession(model, mock_agent, None, run_config=run_config)
+
+        task = asyncio.create_task(
+            session._run_output_guardrails("this trips the guardrail", "resp_1")
+        )
+        await asyncio.sleep(0)
+
+        assert model.interrupts_called == 1
+        assert model.sent_messages == []
+        assert isinstance(model.sent_events[0], RealtimeModelSendInterrupt)
+        assert model.sent_events[0].wait_for_response_done is True
+
+        model.release_interrupt.set()
+        await task
+
+        assert len(model.sent_messages) == 1
+        assert "triggered_guardrail" in model.sent_messages[0]
+
 
 class TestModelSettingsIntegration:
     """Test suite for model settings integration in RealtimeSession."""

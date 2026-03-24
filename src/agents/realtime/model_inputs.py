@@ -98,6 +98,9 @@ class RealtimeModelSendInterrupt:
     force_response_cancel: bool = False
     """Force sending a response.cancel event even if automatic cancellation is enabled."""
 
+    wait_for_response_done: bool = False
+    """Wait for the interrupted response to finish before returning."""
+
 
 @dataclass
 class RealtimeModelSendSessionUpdate:

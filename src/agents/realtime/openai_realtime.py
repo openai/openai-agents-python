@@ -279,6 +279,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._current_item_id: str | None = None
         self._audio_state_tracker: ModelAudioTracker = ModelAudioTracker()
         self._ongoing_response: bool = False
+        self._ongoing_response_done: asyncio.Event | None = None
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
         self._playback_tracker: RealtimePlaybackTracker | None = None
         self._created_session: OpenAISessionCreateRequest | None = None
@@ -587,6 +588,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         if should_cancel_response:
             await self._cancel_response()
 
+        if event.wait_for_response_done and self._ongoing_response_done is not None:
+            await self._ongoing_response_done.wait()
+
         if current_item_id is not None and elapsed_ms is not None:
             self._audio_state_tracker.on_interrupted()
             if self._playback_tracker:
@@ -817,9 +821,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     await self._cancel_response()
         elif parsed.type == "response.created":
             self._ongoing_response = True
+            self._ongoing_response_done = asyncio.Event()
             await self._emit_event(RealtimeModelTurnStartedEvent())
         elif parsed.type == "response.done":
             self._ongoing_response = False
+            if self._ongoing_response_done is not None:
+                self._ongoing_response_done.set()
+                self._ongoing_response_done = None
             await self._emit_event(RealtimeModelTurnEndedEvent())
         elif parsed.type == "session.created":
             await self._send_tracing_config(self._tracing_config)
