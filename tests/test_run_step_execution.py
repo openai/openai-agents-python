@@ -741,6 +741,29 @@ async def test_multiple_tool_calls_use_default_failure_error_function_for_manual
 
 
 @pytest.mark.asyncio
+async def test_single_tool_call_uses_default_failure_error_function_for_cancelled_tool():
+    async def _cancel_tool() -> str:
+        raise asyncio.CancelledError("tool-cancelled")
+
+    cancel_tool = function_tool(_cancel_tool, name_override="cancel_tool")
+    agent = Agent(name="test", tools=[cancel_tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("cancel_tool", "{}", call_id="1")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    result = await get_execute_result(agent, response)
+
+    assert len(result.generated_items) == 2
+    assert isinstance(result.next_step, NextStepRunAgain)
+    assert_item_is_function_tool_call_output(
+        result.generated_items[1],
+        "An error occurred while running the tool. Please try again. Error: tool-cancelled",
+    )
+
+
+@pytest.mark.asyncio
 async def test_multiple_tool_calls_surface_hook_failure_over_sibling_cancellation():
     hook_started = asyncio.Event()
 

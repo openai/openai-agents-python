@@ -1400,9 +1400,10 @@ class _FunctionToolBatchExecutor:
         self,
         tasks: set[asyncio.Task[Any]],
     ) -> tuple[_FunctionToolFailure | None, set[asyncio.Task[Any]]]:
-        late_failure_sources: dict[asyncio.Task[Any], _FunctionToolFailureSource] = {
-            task: "cancelled_teardown" for task in tasks
-        }
+        late_failure_sources: dict[asyncio.Task[Any], _FunctionToolFailureSource] = dict.fromkeys(
+            tasks,
+            "cancelled_teardown",
+        )
         return await _drain_cancelled_function_tool_tasks(
             pending_tasks=tasks,
             task_states=self.task_states,
@@ -1415,9 +1416,9 @@ class _FunctionToolBatchExecutor:
         self,
         tasks: set[asyncio.Task[Any]],
     ) -> tuple[_FunctionToolFailure | None, set[asyncio.Task[Any]]]:
-        post_invoke_failure_sources: dict[asyncio.Task[Any], _FunctionToolFailureSource] = {
-            task: "post_invoke" for task in tasks
-        }
+        post_invoke_failure_sources: dict[asyncio.Task[Any], _FunctionToolFailureSource] = (
+            dict.fromkeys(tasks, "post_invoke")
+        )
         return await _wait_pending_function_tool_tasks_for_timeout(
             pending_tasks=tasks,
             task_states=self.task_states,
@@ -1638,7 +1639,7 @@ class _FunctionToolBatchExecutor:
                 arguments=tool_call.arguments,
             )
         except asyncio.CancelledError as e:
-            if not self.isolate_parallel_failures or outer_task in self.teardown_cancelled_tasks:
+            if outer_task in self.teardown_cancelled_tasks:
                 raise
 
             result = await maybe_invoke_function_tool_failure_error_function(
