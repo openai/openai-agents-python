@@ -20,6 +20,7 @@ from agents.realtime.model_events import (
 from agents.realtime.model_inputs import (
     RealtimeModelSendAudio,
     RealtimeModelSendInterrupt,
+    RealtimeModelSendRawMessage,
     RealtimeModelSendSessionUpdate,
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
@@ -712,6 +713,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         monkeypatch.setattr(model, "_send_raw_message", send_raw)
 
         await model.send_event(RealtimeModelSendUserInput(user_input="hi"))
+        await asyncio.sleep(0)
         await model._mark_response_done()
         await model.send_event(RealtimeModelSendAudio(audio=b"a", commit=False))
         await model.send_event(RealtimeModelSendAudio(audio=b"a", commit=True))
@@ -722,6 +724,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
                 start_response=True,
             )
         )
+        await asyncio.sleep(0)
         await model.send_event(RealtimeModelSendInterrupt())
         await model.send_event(RealtimeModelSendSessionUpdate(session_settings={"voice": "nova"}))
 
@@ -787,10 +790,10 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert model._ongoing_response is True
 
     @pytest.mark.asyncio
-    async def test_send_user_input_waits_for_response_done_before_response_create(
+    async def test_send_user_input_defers_response_create_without_blocking_caller(
         self, model, monkeypatch
     ):
-        """Active turns should delay the next response.create until response.done arrives."""
+        """Active turns should delay response.create without blocking the caller."""
         payload_types: list[str] = []
 
         async def fake_send_raw(event):
@@ -805,10 +808,10 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         await asyncio.sleep(0)
 
         assert payload_types == ["conversation.item.create"]
-        assert task.done() is False
+        assert task.done() is True
 
         await model._mark_response_done()
-        await asyncio.wait_for(task, timeout=1)
+        await asyncio.sleep(0)
 
         assert payload_types == ["conversation.item.create", "response.create"]
 
@@ -863,11 +866,11 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         assert payload_types.count("conversation.item.create") == 2
         assert "response.create" not in payload_types
-        assert first_task.done() is False
-        assert second_task.done() is False
+        assert first_task.done() is True
+        assert second_task.done() is True
 
         await model._mark_response_done()
-        await asyncio.wait_for(asyncio.gather(first_task, second_task), timeout=1)
+        await asyncio.sleep(0)
 
         assert payload_types.count("response.create") == 1
         assert payload_types[-1] == "response.create"
@@ -885,6 +888,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
 
         await model._send_user_input(RealtimeModelSendUserInput(user_input="first"))
+        await asyncio.sleep(0)
         assert payload_types == ["conversation.item.create", "response.create"]
 
         await model._mark_response_created()
@@ -896,10 +900,10 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         assert payload_types.count("conversation.item.create") == 2
         assert payload_types.count("response.create") == 1
-        assert second_task.done() is False
+        assert second_task.done() is True
 
         await model._mark_response_done()
-        await asyncio.wait_for(second_task, timeout=1)
+        await asyncio.sleep(0)
 
         assert payload_types.count("response.create") == 2
         assert payload_types[-1] == "response.create"
@@ -933,22 +937,19 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         assert payload_types.count("conversation.item.create") == 2
         assert payload_types.count("response.create") == 1
-        assert first_task.done() is False
-        assert second_task.done() is False
+        assert first_task.done() is True
+        assert second_task.done() is True
 
         allow_response_create_send.set()
-        await asyncio.wait_for(first_task, timeout=1)
         await asyncio.sleep(0)
 
         assert payload_types.count("response.create") == 1
-        assert second_task.done() is False
 
         await model._mark_response_created()
         await asyncio.sleep(0)
-        assert second_task.done() is False
 
         await model._mark_response_done()
-        await asyncio.wait_for(second_task, timeout=1)
+        await asyncio.sleep(0)
 
         assert payload_types.count("response.create") == 2
         assert payload_types[-1] == "response.create"
@@ -957,7 +958,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
     async def test_response_create_cancellation_releases_create_requested_state(
         self, model, monkeypatch
     ):
-        """Cancelled response.create sends should not leave sequencing stuck."""
+        """Cancelled response.create sends should not leave deferred sequencing stuck."""
         payload_types: list[str] = []
         first_response_create = True
 
@@ -970,13 +971,14 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
 
-        with pytest.raises(asyncio.CancelledError):
-            await model._send_user_input(RealtimeModelSendUserInput(user_input="first"))
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="first"))
+        await asyncio.sleep(0)
 
         assert model._response_control == "free"
         assert model._pending_response_create_event_id is None
 
         await model._send_user_input(RealtimeModelSendUserInput(user_input="second"))
+        await asyncio.sleep(0)
 
         assert payload_types == [
             "conversation.item.create",
@@ -999,6 +1001,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         monkeypatch.setattr(model, "_emit_event", AsyncMock())
 
         await model._send_user_input(RealtimeModelSendUserInput(user_input="first"))
+        await asyncio.sleep(0)
 
         pending_event_id = model._pending_response_create_event_id
         assert pending_event_id is not None
@@ -1025,7 +1028,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         )
         await asyncio.sleep(0)
 
-        assert waiting_task.done() is False
+        assert waiting_task.done() is True
         assert payload_types == [
             "conversation.item.create",
             "response.create",
@@ -1044,7 +1047,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
                 },
             }
         )
-        await asyncio.wait_for(waiting_task, timeout=1)
+        await asyncio.sleep(0)
 
         assert payload_types == [
             "conversation.item.create",
@@ -1054,10 +1057,10 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         ]
 
     @pytest.mark.asyncio
-    async def test_missing_error_event_id_releases_in_flight_response_create(
+    async def test_missing_unrelated_error_event_id_does_not_release_in_flight_response_create(
         self, model, monkeypatch
     ):
-        """Missing nested error.event_id should not wedge a rejected response.create."""
+        """Uncorrelated errors without nested event_id should not release create_requested."""
         payload_types: list[str] = []
 
         async def fake_send_raw(event):
@@ -1067,6 +1070,58 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         monkeypatch.setattr(model, "_emit_event", AsyncMock())
 
         await model._send_user_input(RealtimeModelSendUserInput(user_input="first"))
+        await asyncio.sleep(0)
+
+        pending_event_id = model._pending_response_create_event_id
+        assert pending_event_id is not None
+        assert model._response_control == "create_requested"
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "event_err_missing_nested",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "bad_item",
+                    "message": "bad item",
+                },
+            }
+        )
+
+        assert model._response_control == "create_requested"
+        assert model._pending_response_create_event_id == pending_event_id
+
+        await model._handle_ws_event(
+            {
+                "type": "error",
+                "event_id": "event_err_matching",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "bad_response_create",
+                    "message": "bad response.create",
+                    "event_id": pending_event_id,
+                },
+            }
+        )
+
+        assert model._response_control == "free"
+        assert model._pending_response_create_event_id is None
+
+    @pytest.mark.asyncio
+    async def test_missing_error_event_id_releases_in_flight_response_create(
+        self, model, monkeypatch
+    ):
+        """Missing nested error.event_id should release response.create-like failures."""
+        payload_types: list[str] = []
+
+        async def fake_send_raw(event):
+            payload_types.append(event.type)
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        monkeypatch.setattr(model, "_emit_event", AsyncMock())
+
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="first"))
+        await asyncio.sleep(0)
 
         assert model._pending_response_create_event_id is not None
         assert model._response_control == "create_requested"
@@ -1087,6 +1142,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert model._response_control == "free"
 
         await model._send_user_input(RealtimeModelSendUserInput(user_input="second"))
+        await asyncio.sleep(0)
 
         assert payload_types == [
             "conversation.item.create",
@@ -1104,18 +1160,23 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         assert model._ongoing_response is False
         assert model._response_control == "free"
+        assert model._pending_response_create_event_id is None
 
     @pytest.mark.asyncio
-    async def test_close_unblocks_waiting_response_create_after_active_response(self, model):
-        """Closing should unblock waiters without sending a new response.create."""
-        sent_types: list[str] = []
+    async def test_close_cancels_waiting_response_create_after_active_response(self, model):
+        """Closing should cancel deferred response.create work for the old connection."""
+        old_connection_types: list[str] = []
+        new_connection_types: list[str] = []
         websocket_closed = False
 
         async def send(payload: str) -> None:
             nonlocal websocket_closed
             if websocket_closed:
                 raise AssertionError("send should not run after close")
-            sent_types.append(json.loads(payload)["type"])
+            old_connection_types.append(json.loads(payload)["type"])
+
+        async def send_new(payload: str) -> None:
+            new_connection_types.append(json.loads(payload)["type"])
 
         async def close() -> None:
             nonlocal websocket_closed
@@ -1124,29 +1185,69 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         model._websocket = SimpleNamespace(send=send, close=close)
         await model._mark_response_created()
 
-        task = asyncio.create_task(
-            model._send_user_input(RealtimeModelSendUserInput(user_input="hi"))
-        )
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="hi"))
         await asyncio.sleep(0)
 
-        assert sent_types == ["conversation.item.create"]
-        assert task.done() is False
+        assert old_connection_types == ["conversation.item.create"]
 
         await model.close()
+        model._websocket = SimpleNamespace(send=send_new, close=AsyncMock())
+        await model._mark_response_done()
+        await asyncio.sleep(0)
 
-        with pytest.raises(AssertionError, match="Not connected"):
-            await asyncio.wait_for(task, timeout=1)
-
-        assert sent_types == ["conversation.item.create"]
+        assert old_connection_types == ["conversation.item.create"]
+        assert new_connection_types == []
         assert model._ongoing_response is False
         assert model._response_control == "free"
-        assert model._websocket is None
 
     @pytest.mark.asyncio
-    async def test_tool_output_start_response_waits_for_response_done_before_response_create(
+    async def test_graceful_listener_exit_releases_waiters(self, model):
+        """A clean websocket loop exit should still release deferred response.create work."""
+
+        class GracefulCloseWebSocket:
+            def __init__(self) -> None:
+                self._stop = asyncio.Event()
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self) -> str:
+                await self._stop.wait()
+                raise StopAsyncIteration
+
+            async def send(self, payload: str) -> None:
+                del payload
+
+            async def close(self) -> None:
+                self._stop.set()
+
+            def finish(self) -> None:
+                self._stop.set()
+
+        websocket = GracefulCloseWebSocket()
+        model._websocket = websocket
+        model._websocket_task = asyncio.create_task(model._listen_for_messages())
+        await model._mark_response_created()
+
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="hi"))
+        await asyncio.sleep(0)
+
+        assert model._response_control == "free"
+        assert len(model._response_create_tasks) == 1
+
+        websocket.finish()
+        await asyncio.wait_for(model._websocket_task, timeout=1)
+        model._websocket_task = None
+
+        assert len(model._response_create_tasks) == 0
+        assert model._ongoing_response is False
+        assert model._response_control == "free"
+
+    @pytest.mark.asyncio
+    async def test_tool_output_start_response_defers_response_create_without_blocking_caller(
         self, model, monkeypatch
     ):
-        """Tool outputs that restart the model should also wait for the prior turn to finish."""
+        """Tool outputs that restart the model should not block while waiting for response.done."""
         payload_types: list[str] = []
 
         async def fake_send_raw(event):
@@ -1168,10 +1269,10 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         await asyncio.sleep(0)
 
         assert "response.create" not in payload_types
-        assert task.done() is False
+        assert task.done() is True
 
         await model._mark_response_done()
-        await asyncio.wait_for(task, timeout=1)
+        await asyncio.sleep(0)
 
         assert payload_types[-1] == "response.create"
 
@@ -1246,13 +1347,57 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         assert payload_types.count("conversation.item.create") == 2
         assert "response.create" not in payload_types
-        assert first_task.done() is False
-        assert second_task.done() is False
+        assert first_task.done() is True
+        assert second_task.done() is True
 
         await model._mark_response_done()
-        await asyncio.wait_for(asyncio.gather(first_task, second_task), timeout=1)
+        await asyncio.sleep(0)
 
         assert payload_types.count("response.create") == 1
+        assert payload_types[-1] == "response.create"
+
+    @pytest.mark.asyncio
+    async def test_raw_response_create_is_sequenced_with_follow_up_user_input(
+        self, model, monkeypatch
+    ):
+        """Raw response.create should block later auto response.create until the turn ends."""
+        payload_types: list[str] = []
+        response_create_started = asyncio.Event()
+        allow_response_create_send = asyncio.Event()
+
+        async def fake_send_raw(event):
+            payload_types.append(event.type)
+            if event.type == "response.create" and not response_create_started.is_set():
+                response_create_started.set()
+                await allow_response_create_send.wait()
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+
+        await model.send_event(
+            RealtimeModelSendRawMessage(
+                message={
+                    "type": "response.create",
+                    "other_data": {"response": {"instructions": "Say hello."}},
+                }
+            )
+        )
+        await response_create_started.wait()
+
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="hi"))
+        await asyncio.sleep(0)
+
+        assert payload_types == ["response.create", "conversation.item.create"]
+
+        allow_response_create_send.set()
+        await asyncio.sleep(0)
+
+        assert payload_types.count("response.create") == 1
+
+        await model._mark_response_created()
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        assert payload_types.count("response.create") == 2
         assert payload_types[-1] == "response.create"
 
     def test_add_remove_listener_and_tools_conversion(self, model):
