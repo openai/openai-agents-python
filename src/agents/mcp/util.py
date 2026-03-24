@@ -177,6 +177,28 @@ def create_static_tool_filter(
 class MCPUtil:
     """Set of utilities for interop between MCP and Agents SDK tools."""
 
+    @staticmethod
+    def _extract_static_meta(tool: Any) -> dict[str, Any] | None:
+        meta = getattr(tool, "meta", None)
+        if isinstance(meta, dict):
+            return copy.deepcopy(meta)
+
+        model_extra = getattr(tool, "model_extra", None)
+        if isinstance(model_extra, dict):
+            extra_meta = model_extra.get("meta")
+            if isinstance(extra_meta, dict):
+                return copy.deepcopy(extra_meta)
+
+        model_dump = getattr(tool, "model_dump", None)
+        if callable(model_dump):
+            dumped = model_dump()
+            if isinstance(dumped, dict):
+                dumped_meta = dumped.get("meta")
+                if isinstance(dumped_meta, dict):
+                    return copy.deepcopy(dumped_meta)
+
+        return None
+
     @classmethod
     async def get_all_function_tools(
         cls,
@@ -251,7 +273,13 @@ class MCPUtil:
         policies. If the server uses a callable approval policy, approvals default
         to required to avoid bypassing dynamic checks.
         """
-        invoke_func_impl = functools.partial(cls.invoke_mcp_tool, server, tool)
+        static_meta = cls._extract_static_meta(tool)
+        invoke_func_impl = functools.partial(
+            cls.invoke_mcp_tool,
+            server,
+            tool,
+            meta=static_meta,
+        )
         effective_failure_error_function = server._get_failure_error_function(
             failure_error_function
         )
