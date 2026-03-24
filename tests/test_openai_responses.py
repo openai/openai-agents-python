@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 from types import SimpleNamespace
 from typing import Any, cast
@@ -32,6 +33,7 @@ from agents.models.openai_responses import (
     OpenAIResponsesModel,
     OpenAIResponsesWSModel,
     ResponsesWebSocketError,
+    _ResponseStreamWithRequestId,
     _should_retry_pre_event_websocket_disconnect,
 )
 from agents.retry import ModelRetryAdviceRequest
@@ -107,6 +109,50 @@ def _connection_closed_error(message: str) -> Exception:
 
     ConnectionClosedError.__module__ = "websockets.client"
     return ConnectionClosedError(message)
+
+
+class _ReadTimeoutAfterOneEventStream:
+    def __init__(self):
+        self._yielded = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._yielded:
+            self._yielded = True
+            return SimpleNamespace(type="response.in_progress", response=SimpleNamespace())
+        raise httpx.ReadTimeout("timed out")
+
+
+@pytest.mark.asyncio
+async def test_response_stream_with_request_id_logs_read_timeout_context(caplog, monkeypatch):
+    monotonic_values = itertools.chain([100.0, 700.5], itertools.repeat(700.5))
+    monkeypatch.setattr(
+        "agents.models.openai_responses.time.monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    stream = _ResponseStreamWithRequestId(
+        _ReadTimeoutAfterOneEventStream(),
+        request_id="req_123",
+        read_timeout_seconds=600.0,
+        cleanup=lambda: asyncio.sleep(0),
+    )
+
+    first_event = await stream.__anext__()
+    assert first_event.type == "response.in_progress"
+
+    with caplog.at_level("WARNING"):
+        with pytest.raises(httpx.ReadTimeout):
+            await stream.__anext__()
+
+    assert "responses_stream_read_timeout" in caplog.text
+    assert "request_id=req_123" in caplog.text
+    assert "read_timeout_seconds=600.0" in caplog.text
+    assert "event_count=1" in caplog.text
+    assert "last_event_type=response.in_progress" in caplog.text
+    assert "seconds_since_last_event=600.5" in caplog.text
 
 
 @pytest.mark.allow_call_model_methods
@@ -297,6 +343,138 @@ async def test_fetch_response_stream_attaches_request_id_to_terminal_response():
     assert api_response.parse_calls == 1
     assert api_response.close_calls == 1
     assert aexit_calls == [(None, None, None)]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fetch_response_stream_uses_client_timeout_without_read_deadline():
+    class DummyHTTPStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    inner_stream = DummyHTTPStream()
+
+    class DummyAPIResponse:
+        request_id = "req_stream_timeout_client"
+
+        async def parse(self):
+            return inner_stream
+
+    api_response = DummyAPIResponse()
+    captured_kwargs: dict[str, Any] = {}
+
+    class DummyStreamingContextManager:
+        async def __aenter__(self):
+            return api_response
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyResponses:
+        def __init__(self):
+            self.with_streaming_response = SimpleNamespace(create=self.create_streaming)
+
+        def create_streaming(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            return DummyStreamingContextManager()
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+            self.timeout = httpx.Timeout(connect=5.0, read=600.0, write=600.0, pool=600.0)
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
+
+    stream = await model._fetch_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=True,
+    )
+
+    with pytest.raises(StopAsyncIteration):
+        await cast(Any, stream).__anext__()
+
+    timeout = captured_kwargs["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 5.0
+    assert timeout.read is None
+    assert timeout.write == 600.0
+    assert timeout.pool == 600.0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fetch_response_stream_uses_override_timeout_without_read_deadline():
+    class DummyHTTPStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    inner_stream = DummyHTTPStream()
+
+    class DummyAPIResponse:
+        request_id = "req_stream_timeout_override"
+
+        async def parse(self):
+            return inner_stream
+
+    api_response = DummyAPIResponse()
+    captured_kwargs: dict[str, Any] = {}
+
+    class DummyStreamingContextManager:
+        async def __aenter__(self):
+            return api_response
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyResponses:
+        def __init__(self):
+            self.with_streaming_response = SimpleNamespace(create=self.create_streaming)
+
+        def create_streaming(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            return DummyStreamingContextManager()
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+            self.timeout = httpx.Timeout(connect=5.0, read=600.0, write=600.0, pool=600.0)
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
+
+    stream = await model._fetch_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(extra_args={"timeout": 30.0}),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=True,
+    )
+
+    with pytest.raises(StopAsyncIteration):
+        await cast(Any, stream).__anext__()
+
+    timeout = captured_kwargs["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 30.0
+    assert timeout.read is None
+    assert timeout.write == 30.0
+    assert timeout.pool == 30.0
 
 
 @pytest.mark.allow_call_model_methods

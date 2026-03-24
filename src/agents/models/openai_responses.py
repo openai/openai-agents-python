@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import inspect
 import json
+import time
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar
@@ -188,6 +189,39 @@ class _WebsocketRequestTimeouts:
     recv: float | None
 
 
+def _extract_httpx_read_timeout(timeout: Any) -> float | None:
+    if timeout is None or _is_openai_omitted_value(timeout):
+        return None
+
+    if isinstance(timeout, httpx.Timeout):
+        return None if timeout.read is None else float(timeout.read)
+
+    if isinstance(timeout, (int, float)):
+        return float(timeout)
+
+    return None
+
+
+def _streaming_timeout_without_read_deadline(timeout: Any) -> Any:
+    if timeout is None or _is_openai_omitted_value(timeout):
+        return timeout
+
+    if isinstance(timeout, httpx.Timeout):
+        if timeout.read is None:
+            return timeout
+        return httpx.Timeout(
+            connect=timeout.connect,
+            read=None,
+            write=timeout.write,
+            pool=timeout.pool,
+        )
+
+    if isinstance(timeout, (int, float)):
+        return httpx.Timeout(float(timeout), read=None)
+
+    return timeout
+
+
 class _ResponseStreamWithRequestId:
     """Wrap an SDK event stream and retain the originating request ID."""
 
@@ -203,15 +237,20 @@ class _ResponseStreamWithRequestId:
         stream: AsyncIterator[ResponseStreamEvent],
         *,
         request_id: str | None,
+        read_timeout_seconds: float | None,
         cleanup: Callable[[], Awaitable[object]],
     ) -> None:
         self._stream = stream
         self.request_id = request_id
+        self._read_timeout_seconds = read_timeout_seconds
         self._cleanup = cleanup
         self._closed = False
         self._stream_close_complete = False
         self._cleanup_complete = False
         self._yielded_terminal_event = False
+        self._event_count = 0
+        self._last_event_type: str | None = None
+        self._last_event_monotonic: float | None = None
 
     def __aiter__(self) -> _ResponseStreamWithRequestId:
         return self
@@ -222,6 +261,26 @@ class _ResponseStreamWithRequestId:
 
         try:
             event = await self._stream.__anext__()
+        except httpx.ReadTimeout:
+            seconds_since_last_event = (
+                None
+                if self._last_event_monotonic is None
+                else time.monotonic() - self._last_event_monotonic
+            )
+            logger.warning(
+                "responses_stream_read_timeout "
+                "request_id=%s "
+                "read_timeout_seconds=%s "
+                "event_count=%s "
+                "last_event_type=%s "
+                "seconds_since_last_event=%s",
+                self.request_id,
+                self._read_timeout_seconds,
+                self._event_count,
+                self._last_event_type,
+                seconds_since_last_event,
+            )
+            raise
         except StopAsyncIteration:
             self._closed = True
             await self._cleanup_after_exhaustion()
@@ -229,6 +288,9 @@ class _ResponseStreamWithRequestId:
 
         self._attach_request_id(event)
         event_type = getattr(event, "type", None)
+        self._event_count += 1
+        self._last_event_type = event_type if isinstance(event_type, str) else None
+        self._last_event_monotonic = time.monotonic()
         if event_type in self._TERMINAL_EVENT_TYPES:
             self._yielded_terminal_event = True
         return event
@@ -653,6 +715,13 @@ class OpenAIResponsesModel(Model):
 
         # Keep the raw API response open while callers consume the SSE stream so we can expose
         # its request ID on terminal response payloads before cleanup closes the transport.
+        request_timeout = create_kwargs.get("timeout", omit)
+        if _is_openai_omitted_value(request_timeout):
+            request_timeout = getattr(client, "timeout", None)
+        stream_request_timeout = _streaming_timeout_without_read_deadline(request_timeout)
+        if not _is_openai_omitted_value(stream_request_timeout):
+            create_kwargs = dict(create_kwargs)
+            create_kwargs["timeout"] = stream_request_timeout
         api_response_cm = stream_create(**create_kwargs)
         api_response = await api_response_cm.__aenter__()
         try:
@@ -664,6 +733,7 @@ class OpenAIResponsesModel(Model):
         return _ResponseStreamWithRequestId(
             cast(AsyncIterator[ResponseStreamEvent], stream_response),
             request_id=getattr(api_response, "request_id", None),
+            read_timeout_seconds=_extract_httpx_read_timeout(request_timeout),
             cleanup=lambda: api_response_cm.__aexit__(None, None, None),
         )
 
