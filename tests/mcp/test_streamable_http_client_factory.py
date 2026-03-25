@@ -263,9 +263,7 @@ async def test_initialized_notification_failure_returns_synthetic_success():
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, request=request)
 
-    transport = _InitializedNotificationTolerantStreamableHTTPTransport(
-        "https://example.test/mcp"
-    )
+    transport = _InitializedNotificationTolerantStreamableHTTPTransport("https://example.test/mcp")
     read_stream_writer, _ = create_memory_object_stream[SessionMessage | Exception](0)
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
@@ -293,9 +291,7 @@ async def test_initialized_notification_transport_exception_returns_synthetic_su
     async def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("boom", request=request)
 
-    transport = _InitializedNotificationTolerantStreamableHTTPTransport(
-        "https://example.test/mcp"
-    )
+    transport = _InitializedNotificationTolerantStreamableHTTPTransport("https://example.test/mcp")
     read_stream_writer, _ = create_memory_object_stream[SessionMessage | Exception](0)
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
@@ -339,8 +335,7 @@ async def test_streamable_http_server_passes_ignore_initialized_notification_fai
         assert kwargs["sse_read_timeout"] == 300
         assert kwargs["terminate_on_close"] is True
         assert (
-            kwargs["transport_factory"]
-            is _InitializedNotificationTolerantStreamableHTTPTransport
+            kwargs["transport_factory"] is _InitializedNotificationTolerantStreamableHTTPTransport
         )
 
 
@@ -349,9 +344,7 @@ async def test_transport_preserves_non_initialized_failures():
     async def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("boom", request=request)
 
-    transport = _InitializedNotificationTolerantStreamableHTTPTransport(
-        "https://example.test/mcp"
-    )
+    transport = _InitializedNotificationTolerantStreamableHTTPTransport("https://example.test/mcp")
     read_stream_writer, _ = create_memory_object_stream[SessionMessage | Exception](0)
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
@@ -382,9 +375,7 @@ async def test_stream_client_preserves_custom_factory_headers_timeout_and_auth()
 
     class RecordingAuth(httpx.Auth):
         def auth_flow(self, request: httpx.Request):
-            request.headers["Authorization"] = (
-                f"Basic {base64.b64encode(b'user:pass').decode()}"
-            )
+            request.headers["Authorization"] = f"Basic {base64.b64encode(b'user:pass').decode()}"
             yield request
 
     async def handler(request: httpx.Request) -> httpx.Response:

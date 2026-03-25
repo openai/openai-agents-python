@@ -133,9 +133,9 @@ async def _streamablehttp_client_with_transport(
         auth=auth,
     )
     transport = transport_factory(url)
-    read_stream_writer, read_stream = anyio.create_memory_object_stream[
-        SessionMessage | Exception
-    ](0)
+    read_stream_writer, read_stream = anyio.create_memory_object_stream[SessionMessage | Exception](
+        0
+    )
     write_stream, write_stream_reader = anyio.create_memory_object_stream[SessionMessage](0)
 
     async with client:
