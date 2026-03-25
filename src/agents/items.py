@@ -358,6 +358,16 @@ class ToolCallItem(RunItemBase[Any]):
     title: str | None = None
     """Optional short display label if known at item creation time."""
 
+    def to_input_item(self) -> TResponseInputItem:
+        """Converts this item into an input item, including title and description metadata."""
+        result = super().to_input_item()
+        if isinstance(result, dict):
+            if self.title is not None:
+                result["title"] = self.title
+            if self.description is not None:
+                result["description"] = self.description
+        return result
+
 
 ToolCallOutputTypes: TypeAlias = Union[
     FunctionCallOutput,

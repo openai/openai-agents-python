@@ -45,7 +45,7 @@ from agents import (
     TResponseInputItem,
     Usage,
 )
-from agents.items import ToolCallOutputItem
+from agents.items import ToolCallItem, ToolCallOutputItem
 
 
 def make_message(
@@ -568,3 +568,62 @@ def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:
 
     # This used to fail when validated payloads retained ValidatorIterator fields.
     json.dumps(new_list)
+
+
+def test_to_input_item_preserves_title_and_description() -> None:
+    # ToolCallItem.to_input_item() must include title and description in the output dict.
+    agent = Agent(name="test", instructions="test")
+    raw_item = ResponseFunctionToolCall(
+        id="fc_1",
+        call_id="call_1",
+        name="my_tool",
+        arguments="{}",
+        type="function_call",
+        status="completed",
+    )
+    item = ToolCallItem(
+        agent=agent,
+        raw_item=raw_item,
+        title="My Tool",
+        description="A helpful tool",
+    )
+    result = item.to_input_item()
+    assert isinstance(result, dict)
+    assert result["title"] == "My Tool"
+    assert result["description"] == "A helpful tool"
+
+
+def test_to_input_item_omits_none_metadata() -> None:
+    # When title/description are None, to_input_item() should not inject them.
+    agent = Agent(name="test", instructions="test")
+    raw_item = ResponseFunctionToolCall(
+        id="fc_2",
+        call_id="call_2",
+        name="bare_tool",
+        arguments="{}",
+        type="function_call",
+        status="completed",
+    )
+    item = ToolCallItem(agent=agent, raw_item=raw_item)
+    result = item.to_input_item()
+    assert isinstance(result, dict)
+    assert "title" not in result
+    assert "description" not in result
+
+
+def test_to_input_item_preserves_empty_string_metadata() -> None:
+    # Empty-string metadata must be preserved, not treated as missing.
+    agent = Agent(name="test", instructions="test")
+    raw_item = ResponseFunctionToolCall(
+        id="fc_3",
+        call_id="call_3",
+        name="blank_meta_tool",
+        arguments="{}",
+        type="function_call",
+        status="completed",
+    )
+    item = ToolCallItem(agent=agent, raw_item=raw_item, title="", description="")
+    result = item.to_input_item()
+    assert isinstance(result, dict)
+    assert result["title"] == ""
+    assert result["description"] == ""
