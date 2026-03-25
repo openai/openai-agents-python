@@ -857,7 +857,6 @@ class Agent(AgentBase, Generic[TContext]):
 
             from .items import ItemHelpers, MessageOutputItem, ToolCallOutputItem
 
-            latest_tool_output: str | None = None
             for item in reversed(run_result.new_items):
                 if isinstance(item, MessageOutputItem):
                     text_output = ItemHelpers.text_message_output(item)
@@ -865,15 +864,11 @@ class Agent(AgentBase, Generic[TContext]):
                         return text_output
 
                 if (
-                    latest_tool_output is None
-                    and isinstance(item, ToolCallOutputItem)
+                    isinstance(item, ToolCallOutputItem)
                     and isinstance(item.output, str)
                     and item.output
                 ):
-                    latest_tool_output = item.output
-
-            if latest_tool_output is not None:
-                return latest_tool_output
+                    return item.output
 
             return run_result.final_output
 

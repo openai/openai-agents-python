@@ -502,6 +502,90 @@ async def test_agent_as_tool_fallback_uses_current_run_items_only(
 
 
 @pytest.mark.asyncio
+async def test_agent_as_tool_fallback_returns_most_recent_current_run_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="summarizer")
+
+    older_message = ResponseOutputMessage(
+        id="msg_older",
+        role="assistant",
+        status="completed",
+        type="message",
+        content=[
+            ResponseOutputText(
+                annotations=[],
+                text="Older message output",
+                type="output_text",
+                logprobs=[],
+            )
+        ],
+    )
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = ""
+            self.new_items = [
+                MessageOutputItem(agent=agent, raw_item=older_message),
+                ToolCallOutputItem(
+                    agent=agent,
+                    raw_item={
+                        "call_id": "call_current",
+                        "output": "Newest tool output",
+                        "type": "function_call_output",
+                    },
+                    output="Newest tool output",
+                ),
+            ]
+
+    run_result = DummyResult()
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        del (
+            cls,
+            starting_agent,
+            input,
+            context,
+            max_turns,
+            hooks,
+            run_config,
+            previous_response_id,
+            conversation_id,
+            session,
+        )
+        return run_result
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    tool = agent.as_tool(
+        tool_name="summary_tool",
+        tool_description="Summarize current run output",
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="summary_tool",
+        tool_call_id="call_1",
+        tool_arguments='{"input": "hello"}',
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "hello"}')
+
+    assert output == "Newest tool output"
+
+
+@pytest.mark.asyncio
 async def test_agent_as_tool_extractor_can_access_agent_tool_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
