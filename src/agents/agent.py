@@ -855,18 +855,25 @@ class Agent(AgentBase, Generic[TContext]):
             ):
                 return run_result.final_output
 
-            from .items import ItemHelpers
+            from .items import ItemHelpers, MessageOutputItem, ToolCallOutputItem
 
-            text_output = ItemHelpers.text_message_outputs(run_result.new_items)
-            if text_output:
-                return text_output
+            latest_tool_output: str | None = None
+            for item in reversed(run_result.new_items):
+                if isinstance(item, MessageOutputItem):
+                    text_output = ItemHelpers.text_message_output(item)
+                    if text_output:
+                        return text_output
 
-            for item in reversed(run_result.to_input_list()):
-                if item.get("type") != "function_call_output":
-                    continue
-                output = item.get("output")
-                if isinstance(output, str) and output:
-                    return output
+                if (
+                    latest_tool_output is None
+                    and isinstance(item, ToolCallOutputItem)
+                    and isinstance(item.output, str)
+                    and item.output
+                ):
+                    latest_tool_output = item.output
+
+            if latest_tool_output is not None:
+                return latest_tool_output
 
             return run_result.final_output
 

@@ -30,6 +30,7 @@ from agents import (
     Session,
     SessionSettings,
     ToolApprovalItem,
+    ToolCallOutputItem,
     TResponseInputItem,
     Usage,
     tool_namespace,
@@ -405,6 +406,99 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
     output = await tool.on_invoke_tool(tool_context, '{"input": "summarize this"}')
 
     assert output == "custom output"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_fallback_uses_current_run_items_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="summarizer")
+
+    message = ResponseOutputMessage(
+        id="msg_current",
+        role="assistant",
+        status="completed",
+        type="message",
+        content=[
+            ResponseOutputText(
+                annotations=[],
+                text="Current run summary",
+                type="output_text",
+                logprobs=[],
+            )
+        ],
+    )
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = ""
+            self.new_items = [
+                ToolCallOutputItem(
+                    agent=agent,
+                    raw_item={
+                        "call_id": "call_current",
+                        "output": "Current tool output",
+                        "type": "function_call_output",
+                    },
+                    output="Current tool output",
+                ),
+                MessageOutputItem(agent=agent, raw_item=message),
+            ]
+
+        def to_input_list(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "call_id": "call_old",
+                    "output": "Old output from prior history",
+                    "type": "function_call_output",
+                }
+            ]
+
+    run_result = DummyResult()
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        del (
+            cls,
+            starting_agent,
+            input,
+            context,
+            max_turns,
+            hooks,
+            run_config,
+            previous_response_id,
+            conversation_id,
+            session,
+        )
+        return run_result
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    tool = agent.as_tool(
+        tool_name="summary_tool",
+        tool_description="Summarize current run output",
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="summary_tool",
+        tool_call_id="call_1",
+        tool_arguments='{"input": "hello"}',
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "hello"}')
+
+    assert output == "Current run summary"
 
 
 @pytest.mark.asyncio
