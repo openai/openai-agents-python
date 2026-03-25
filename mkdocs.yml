@@ -157,7 +157,6 @@ plugins:
                     - ref/extensions/handoff_filters.md
                     - ref/extensions/handoff_prompt.md
                     - Third-party adapters:
-                        - Overview: ref/extensions/third_party_adapters.md
                         - Any-LLM model: ref/extensions/models/any_llm_model.md
                         - Any-LLM provider: ref/extensions/models/any_llm_provider.md
                         - LiteLLM model: ref/extensions/models/litellm_model.md
