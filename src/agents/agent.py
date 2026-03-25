@@ -850,6 +850,24 @@ class Agent(AgentBase, Generic[TContext]):
             if custom_output_extractor:
                 return await custom_output_extractor(run_result)
 
+            if run_result.final_output is not None and (
+                not isinstance(run_result.final_output, str) or run_result.final_output != ""
+            ):
+                return run_result.final_output
+
+            from .items import ItemHelpers
+
+            text_output = ItemHelpers.text_message_outputs(run_result.new_items)
+            if text_output:
+                return text_output
+
+            for item in reversed(run_result.to_input_list()):
+                if item.get("type") != "function_call_output":
+                    continue
+                output = item.get("output")
+                if isinstance(output, str) and output:
+                    return output
+
             return run_result.final_output
 
         run_agent_tool = _build_wrapped_function_tool(
