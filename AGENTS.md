@@ -34,6 +34,12 @@ When working on OpenAI API or OpenAI platform integrations in this repo (Respons
 
 Before changing runtime code, exported APIs, external configuration, persisted schemas, wire protocols, or other user-facing behavior, use `$implementation-strategy` to decide the compatibility boundary and implementation shape. Judge breaking changes against the latest release tag, not unreleased branch-local churn. Interfaces introduced or changed after the latest release tag may be rewritten without compatibility shims unless they define a released or explicitly supported durable external state boundary, or the user explicitly asks for a migration path. Unreleased persisted formats on `main` may be renumbered or squashed before release when intermediate snapshots are intentionally unsupported.
 
+#### `$pr-draft-summary`
+
+When a task in this repo finishes with moderate-or-larger code changes, invoke `$pr-draft-summary` in the final handoff to generate the required PR summary block, branch suggestion, title, and draft description. Treat this as the default close-out step after runtime code, tests, examples, build/test configuration, or docs with behavior impact are changed.
+
+Skip `$pr-draft-summary` only for trivial or conversation-only tasks, repo-meta/doc-only tasks without behavior impact, or when the user explicitly says not to include the PR draft block.
+
 ### ExecPlans
 
 Call out compatibility risk early in your plan only when the change affects behavior shipped in the latest release tag or a released or explicitly supported durable external state boundary, and confirm the approach before implementing changes that could impact users.
@@ -109,7 +115,7 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
    ```
 6. When `$code-change-verification` applies, run it to execute the full verification stack before marking work complete.
 7. Commit with concise, imperative messages; keep commits small and focused, then open a pull request.
-8. When reporting code changes as complete (after substantial code work), invoke `$pr-draft-summary` to generate the required PR summary block with change summary, PR title, and draft description.
+8. When reporting code changes as complete (after substantial code work), invoke `$pr-draft-summary` as the final handoff step unless the task falls under the documented skip cases.
 
 ### Testing & Automated Checks
 

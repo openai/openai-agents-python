@@ -8,6 +8,9 @@ from ..handoffs import (
 from ..items import (
     HandoffCallItem,
     HandoffOutputItem,
+    MCPApprovalRequestItem,
+    MCPApprovalResponseItem,
+    MCPListToolsItem,
     ReasoningItem,
     RunItem,
     ToolCallItem,
@@ -57,6 +60,9 @@ def _remove_tools_from_items(items: tuple[RunItem, ...]) -> tuple[RunItem, ...]:
             or isinstance(item, ToolCallItem)
             or isinstance(item, ToolCallOutputItem)
             or isinstance(item, ReasoningItem)
+            or isinstance(item, MCPListToolsItem)
+            or isinstance(item, MCPApprovalRequestItem)
+            or isinstance(item, MCPApprovalResponseItem)
         ):
             continue
         filtered_items.append(item)
@@ -75,6 +81,11 @@ def _remove_tool_types_from_input(
         "tool_search_call",
         "tool_search_output",
         "web_search_call",
+        "mcp_call",
+        "mcp_list_tools",
+        "mcp_approval_request",
+        "mcp_approval_response",
+        "reasoning",
     ]
 
     filtered_items: list[TResponseInputItem] = []

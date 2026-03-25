@@ -55,6 +55,12 @@ from ..tool import (
     ensure_tool_choice_supports_backend,
 )
 from .fake_id import FAKE_RESPONSES_ID
+from .reasoning_content_replay import (
+    ReasoningContentReplayContext,
+    ReasoningContentSource,
+    ShouldReplayReasoningContent,
+    default_should_replay_reasoning_content,
+)
 
 ResponseInputContentWithAudioParam = Union[
     ResponseInputContentParam,
@@ -422,6 +428,8 @@ class Converter:
         model: str | None = None,
         preserve_thinking_blocks: bool = False,
         preserve_tool_output_all_content: bool = False,
+        base_url: str | None = None,
+        should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
     ) -> list[ChatCompletionMessageParam]:
         """
         Convert a sequence of 'Item' objects into a list of ChatCompletionMessageParam.
@@ -441,6 +449,12 @@ class Converter:
                 When True, all content types including images are preserved. This is useful
                 for model providers (e.g. Anthropic via LiteLLM) that support processing
                 non-text content in tool results.
+            base_url: The request base URL, if the caller knows the concrete endpoint.
+                This is used by reasoning-content replay hooks to distinguish direct
+                provider calls from proxy or gateway requests.
+            should_replay_reasoning_content: Optional hook that decides whether a
+                reasoning item should be replayed into the next assistant message as
+                `reasoning_content`.
 
         Rules:
         - EasyInputMessage or InputMessage (role=user) => ChatCompletionUserMessageParam
@@ -464,8 +478,9 @@ class Converter:
         current_assistant_msg: ChatCompletionAssistantMessageParam | None = None
         pending_thinking_blocks: list[dict[str, str]] | None = None
         pending_reasoning_content: str | None = None  # For DeepSeek reasoning_content
+        normalized_base_url = base_url.rstrip("/") if base_url is not None else None
 
-        def flush_assistant_message() -> None:
+        def flush_assistant_message(*, clear_pending_reasoning_content: bool = True) -> None:
             nonlocal current_assistant_msg, pending_reasoning_content
             if current_assistant_msg is not None:
                 # The API doesn't support empty arrays for tool_calls
@@ -475,7 +490,15 @@ class Converter:
                     pending_reasoning_content = None
                 result.append(current_assistant_msg)
                 current_assistant_msg = None
-            else:
+            elif clear_pending_reasoning_content:
+                pending_reasoning_content = None
+
+        def apply_pending_reasoning_content(
+            assistant_msg: ChatCompletionAssistantMessageParam,
+        ) -> None:
+            nonlocal pending_reasoning_content
+            if pending_reasoning_content:
+                assistant_msg["reasoning_content"] = pending_reasoning_content  # type: ignore[typeddict-unknown-key]
                 pending_reasoning_content = None
 
         def ensure_assistant_message() -> ChatCompletionAssistantMessageParam:
@@ -484,6 +507,8 @@ class Converter:
                 current_assistant_msg = ChatCompletionAssistantMessageParam(role="assistant")
                 current_assistant_msg["content"] = None
                 current_assistant_msg["tool_calls"] = []
+
+            apply_pending_reasoning_content(current_assistant_msg)
 
             return current_assistant_msg
 
@@ -553,7 +578,9 @@ class Converter:
 
             # 3) response output message => assistant
             elif resp_msg := cls.maybe_response_output_message(item):
-                flush_assistant_message()
+                # A reasoning item can be followed by an assistant message and then tool calls
+                # in the same turn, so preserve pending reasoning_content across this flush.
+                flush_assistant_message(clear_pending_reasoning_content=False)
                 new_asst = ChatCompletionAssistantMessageParam(role="assistant")
                 contents = resp_msg["content"]
 
@@ -594,6 +621,7 @@ class Converter:
                     pending_thinking_blocks = None  # Clear after using
 
                 new_asst["tool_calls"] = []
+                apply_pending_reasoning_content(new_asst)
                 current_assistant_msg = new_asst
 
             # 4) function/file-search calls => attach to assistant
@@ -618,11 +646,6 @@ class Converter:
 
             elif func_call := cls.maybe_function_tool_call(item):
                 asst = ensure_assistant_message()
-
-                # If we have pending reasoning content for DeepSeek, add it to the assistant message
-                if pending_reasoning_content:
-                    asst["reasoning_content"] = pending_reasoning_content  # type: ignore[typeddict-unknown-key]
-                    pending_reasoning_content = None  # Clear after using
 
                 # If we have pending thinking blocks, use them as the content
                 # This is required for Anthropic API tool calls with interleaved thinking
@@ -708,6 +731,7 @@ class Converter:
 
                 item_provider_data: dict[str, Any] = reasoning_item.get("provider_data", {})  # type: ignore[assignment]
                 item_model = item_provider_data.get("model", "")
+                should_replay = False
 
                 if (
                     model
@@ -740,17 +764,23 @@ class Converter:
                     # This preserves the original behavior
                     pending_thinking_blocks = reconstructed_thinking_blocks
 
-                # DeepSeek requires reasoning_content field in assistant messages with tool calls
-                # Items may not all originate from DeepSeek, so need to check for model match.
-                # For backward compatibility, if provider_data is missing, ignore the check.
-                elif (
-                    model
-                    and "deepseek" in model.lower()
-                    and (
-                        (item_model and "deepseek" in item_model.lower())
-                        or item_provider_data == {}
+                if model is not None:
+                    replay_context = ReasoningContentReplayContext(
+                        model=model,
+                        base_url=normalized_base_url,
+                        reasoning=ReasoningContentSource(
+                            item=reasoning_item,
+                            origin_model=item_model or None,
+                            provider_data=item_provider_data,
+                        ),
                     )
-                ):
+                    should_replay = (
+                        should_replay_reasoning_content(replay_context)
+                        if should_replay_reasoning_content is not None
+                        else default_should_replay_reasoning_content(replay_context)
+                    )
+
+                if should_replay:
                     summary_items = reasoning_item.get("summary", [])
                     if summary_items:
                         reasoning_texts = []

@@ -52,6 +52,7 @@ class RealtimeWebSocketManager:
         # runner = RealtimeRunner(agent, config=runner_config)
         model_config: RealtimeModelConfig = {
             "initial_model_settings": {
+                "model_name": "gpt-realtime-1.5",
                 "turn_detection": {
                     "type": "server_vad",
                     "prefix_padding_ms": 300,

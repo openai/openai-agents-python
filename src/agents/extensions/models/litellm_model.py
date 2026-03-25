@@ -49,6 +49,7 @@ from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
 from ...models.fake_id import FAKE_RESPONSES_ID
 from ...models.interface import Model, ModelTracing
 from ...models.openai_responses import Converter as OpenAIResponsesConverter
+from ...models.reasoning_content_replay import ShouldReplayReasoningContent
 from ...retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ...tool import Tool
 from ...tracing import generation_span
@@ -146,10 +147,12 @@ class LitellmModel(Model):
         model: str,
         base_url: str | None = None,
         api_key: str | None = None,
+        should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
     ):
         self.model = model
         self.base_url = base_url
         self.api_key = api_key
+        self.should_replay_reasoning_content = should_replay_reasoning_content
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         # LiteLLM exceptions mirror OpenAI-style status/header fields.
@@ -383,9 +386,11 @@ class LitellmModel(Model):
 
         converted_messages = Converter.items_to_messages(
             input,
+            base_url=self.base_url,
             preserve_thinking_blocks=preserve_thinking_blocks,
             preserve_tool_output_all_content=True,
             model=self.model,
+            should_replay_reasoning_content=self.should_replay_reasoning_content,
         )
 
         # Fix message ordering: reorder to ensure tool_use comes before tool_result.

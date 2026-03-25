@@ -107,6 +107,27 @@ def test_extract_last_text_returns_text_only() -> None:
     assert ItemHelpers.extract_last_text(message2) is None
 
 
+def test_extract_text_concatenates_all_text_segments() -> None:
+    first_text = ResponseOutputText(annotations=[], text="part1", type="output_text", logprobs=[])
+    second_text = ResponseOutputText(annotations=[], text="part2", type="output_text", logprobs=[])
+    refusal = ResponseOutputRefusal(refusal="no", type="refusal")
+    message = make_message([first_text, refusal, second_text])
+
+    assert ItemHelpers.extract_text(message) == "part1part2"
+    assert (
+        ItemHelpers.extract_text(
+            ResponseFunctionToolCall(
+                id="tool123",
+                arguments="{}",
+                call_id="call123",
+                name="func",
+                type="function_call",
+            )
+        )
+        is None
+    )
+
+
 def test_input_to_new_input_list_from_string() -> None:
     result = ItemHelpers.input_to_new_input_list("hi")
     # Should wrap the string into a list with a single dict containing content and user role.

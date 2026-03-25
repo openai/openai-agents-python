@@ -45,14 +45,14 @@ agent = RealtimeAgent(
 
 ### 3. Configure the runner
 
-Prefer the nested `audio.input` / `audio.output` session settings shape for new code.
+Prefer the nested `audio.input` / `audio.output` session settings shape for new code. For new realtime agents, start with `gpt-realtime-1.5`.
 
 ```python
 runner = RealtimeRunner(
     starting_agent=agent,
     config={
         "model_settings": {
-            "model_name": "gpt-realtime",
+            "model_name": "gpt-realtime-1.5",
             "audio": {
                 "input": {
                     "format": "pcm16",

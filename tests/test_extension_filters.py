@@ -19,8 +19,12 @@ from agents import (
 from agents.extensions.handoff_filters import nest_handoff_history, remove_all_tools
 from agents.items import (
     HandoffOutputItem,
+    MCPApprovalRequestItem,
+    MCPApprovalResponseItem,
+    MCPListToolsItem,
     MessageOutputItem,
     ReasoningItem,
+    ToolCallItem,
     ToolCallOutputItem,
     ToolSearchCallItem,
     ToolSearchOutputItem,
@@ -259,7 +263,8 @@ def test_removes_tools_from_new_items_and_history():
         ),
     )
     filtered_data = remove_all_tools(handoff_input_data)
-    assert len(filtered_data.input_history) == 3
+    # reasoning items are also removed (they become orphaned after tool calls are stripped)
+    assert len(filtered_data.input_history) == 2
     assert len(filtered_data.pre_handoff_items) == 1
     assert len(filtered_data.new_items) == 1
 
@@ -802,3 +807,211 @@ def test_nest_handoff_history_parse_summary_line_empty_stripped() -> None:
     assert isinstance(nested.input_history, tuple)
     final_summary = _as_message(nested.input_history[0])
     assert "Hello" in final_summary["content"] or "Reply" in final_summary["content"]
+
+
+def _get_mcp_call_input_item() -> TResponseInputItem:
+    return cast(
+        TResponseInputItem,
+        {
+            "id": "mc1",
+            "arguments": "{}",
+            "name": "test_tool",
+            "server_label": "server1",
+            "type": "mcp_call",
+        },
+    )
+
+
+def _get_mcp_list_tools_input_item() -> TResponseInputItem:
+    return cast(
+        TResponseInputItem,
+        {
+            "id": "ml1",
+            "server_label": "server1",
+            "tools": [],
+            "type": "mcp_list_tools",
+        },
+    )
+
+
+def _get_mcp_approval_request_input_item() -> TResponseInputItem:
+    return cast(
+        TResponseInputItem,
+        {
+            "id": "ma1",
+            "arguments": "{}",
+            "name": "test_tool",
+            "server_label": "server1",
+            "type": "mcp_approval_request",
+        },
+    )
+
+
+def _get_mcp_approval_response_input_item() -> TResponseInputItem:
+    return cast(
+        TResponseInputItem,
+        {
+            "approval_request_id": "ma1",
+            "approve": True,
+            "type": "mcp_approval_response",
+        },
+    )
+
+
+def _get_mcp_call_run_item() -> ToolCallItem:
+    from openai.types.responses.response_output_item import McpCall
+
+    return ToolCallItem(
+        agent=fake_agent(),
+        raw_item=McpCall(
+            id="mc1",
+            arguments="{}",
+            name="test_tool",
+            server_label="server1",
+            type="mcp_call",
+        ),
+    )
+
+
+def _get_mcp_list_tools_run_item() -> MCPListToolsItem:
+    from openai.types.responses.response_output_item import McpListTools
+
+    return MCPListToolsItem(
+        agent=fake_agent(),
+        raw_item=McpListTools(
+            id="ml1",
+            server_label="server1",
+            tools=[],
+            type="mcp_list_tools",
+        ),
+    )
+
+
+def _get_mcp_approval_request_run_item() -> MCPApprovalRequestItem:
+    from openai.types.responses.response_output_item import McpApprovalRequest
+
+    return MCPApprovalRequestItem(
+        agent=fake_agent(),
+        raw_item=McpApprovalRequest(
+            id="ma1",
+            arguments="{}",
+            name="test_tool",
+            server_label="server1",
+            type="mcp_approval_request",
+        ),
+    )
+
+
+def _get_mcp_approval_response_run_item() -> MCPApprovalResponseItem:
+    from openai.types.responses.response_input_param import McpApprovalResponse
+
+    return MCPApprovalResponseItem(
+        agent=fake_agent(),
+        raw_item=cast(
+            McpApprovalResponse,
+            {
+                "approval_request_id": "ma1",
+                "approve": True,
+                "type": "mcp_approval_response",
+            },
+        ),
+    )
+
+
+def test_removes_reasoning_from_input_history() -> None:
+    """Reasoning items in raw input history should be removed by remove_all_tools.
+
+    When tool calls are stripped, orphaned reasoning items should also be removed
+    to stay consistent with _remove_tools_from_items which filters ReasoningItem.
+    """
+    handoff_input_data = handoff_data(
+        input_history=(
+            _get_message_input_item("Hello"),
+            _get_reasoning_input_item(),
+            _get_function_result_input_item("tool output"),
+            _get_message_input_item("World"),
+        ),
+    )
+    filtered_data = remove_all_tools(handoff_input_data)
+    # reasoning and function_call_output should both be removed, leaving 2 messages
+    assert len(filtered_data.input_history) == 2
+    for item in filtered_data.input_history:
+        assert not isinstance(item, str)
+        assert item.get("type") != "reasoning"
+        assert item.get("type") != "function_call_output"
+
+
+def test_removes_mcp_items_from_input_history() -> None:
+    """MCP-related items in raw input history should be removed by remove_all_tools."""
+    handoff_input_data = handoff_data(
+        input_history=(
+            _get_message_input_item("Hello"),
+            _get_mcp_call_input_item(),
+            _get_mcp_list_tools_input_item(),
+            _get_mcp_approval_request_input_item(),
+            _get_mcp_approval_response_input_item(),
+            _get_message_input_item("World"),
+        ),
+    )
+    filtered_data = remove_all_tools(handoff_input_data)
+    # All MCP items should be removed, leaving only the 2 message items
+    assert len(filtered_data.input_history) == 2
+    for item in filtered_data.input_history:
+        assert not isinstance(item, str)
+        itype = item.get("type")
+        assert itype not in {
+            "mcp_call",
+            "mcp_list_tools",
+            "mcp_approval_request",
+            "mcp_approval_response",
+        }
+
+
+def test_removes_mcp_run_items_from_new_items() -> None:
+    """MCP RunItem types should be removed from new_items and pre_handoff_items."""
+    handoff_input_data = handoff_data(
+        pre_handoff_items=(
+            _get_mcp_list_tools_run_item(),
+            _get_mcp_approval_request_run_item(),
+            _get_message_output_run_item("kept"),
+        ),
+        new_items=(
+            _get_mcp_call_run_item(),
+            _get_mcp_approval_response_run_item(),
+            _get_message_output_run_item("also kept"),
+        ),
+    )
+    filtered_data = remove_all_tools(handoff_input_data)
+    # Only message items should remain
+    assert len(filtered_data.pre_handoff_items) == 1
+    assert len(filtered_data.new_items) == 1
+
+
+def test_removes_mixed_mcp_and_function_items() -> None:
+    """Both MCP and function tool items should be removed together."""
+    handoff_input_data = handoff_data(
+        input_history=(
+            _get_message_input_item("Start"),
+            _get_mcp_call_input_item(),
+            _get_function_result_input_item("fn output"),
+            _get_reasoning_input_item(),
+            _get_mcp_approval_response_input_item(),
+            _get_message_input_item("End"),
+        ),
+        pre_handoff_items=(
+            _get_mcp_list_tools_run_item(),
+            _get_tool_output_run_item("fn output"),
+            _get_reasoning_output_run_item(),
+            _get_message_output_run_item("kept"),
+        ),
+        new_items=(
+            _get_mcp_call_run_item(),
+            _get_mcp_approval_request_run_item(),
+            _get_mcp_approval_response_run_item(),
+            _get_message_output_run_item("also kept"),
+        ),
+    )
+    filtered_data = remove_all_tools(handoff_input_data)
+    assert len(filtered_data.input_history) == 2
+    assert len(filtered_data.pre_handoff_items) == 1
+    assert len(filtered_data.new_items) == 1

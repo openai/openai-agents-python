@@ -55,6 +55,16 @@ if result.interruptions:
 
 For a full pause/resume walkthrough, see the [human-in-the-loop guide](human_in_the_loop.md).
 
+## Cancel streaming after the current turn
+
+If you need to stop a streaming run in the middle, call [`result.cancel()`][agents.result.RunResultStreaming.cancel]. By default this stops the run immediately. To let the current turn finish cleanly before stopping, call `result.cancel(mode="after_turn")` instead.
+
+A streamed run is not complete until `result.stream_events()` finishes. The SDK may still be persisting session items, finalizing approval state, or compacting history after the last visible token.
+
+If you are manually continuing from [`result.to_input_list(mode="normalized")`][agents.result.RunResultBase.to_input_list], and `cancel(mode="after_turn")` stops after a tool turn, continue that unfinished turn by rerunning `result.last_agent` with that normalized input instead of appending a fresh user turn right away.
+-   If a streamed run stopped for tool approval, do not treat that as a new turn. Finish draining the stream, inspect `result.interruptions`, and resume from `result.to_state()` instead.
+-   Use [`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_callback] to customize how retrieved session history and the new user input are merged before the next model call. If you rewrite new-turn items there, the rewritten version is what gets persisted for that turn.
+
 ## Run item events and agent events
 
 [`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent]s are higher level events. They inform you when an item has been fully generated. This allows you to push progress updates at the level of "message generated", "tool ran", etc, instead of each token. Similarly, [`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] gives you updates when the current agent changes (e.g. as the result of a handoff).

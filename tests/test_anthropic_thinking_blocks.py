@@ -248,6 +248,63 @@ def test_anthropic_thinking_blocks_with_tool_calls():
     assert cast(list[Any], tool_calls)[0]["function"]["name"] == "get_weather"
 
 
+def test_items_to_messages_preserves_positional_bool_arguments():
+    """
+    Preserve positional compatibility for the released items_to_messages signature.
+    """
+    message = InternalChatCompletionMessage(
+        role="assistant",
+        content="I'll check the weather for you.",
+        reasoning_content="The user wants weather information, I need to call the weather function",
+        thinking_blocks=[
+            {
+                "type": "thinking",
+                "thinking": (
+                    "The user is asking about weather. "
+                    "Let me use the weather tool to get this information."
+                ),
+                "signature": "TestSignature123",
+            }
+        ],
+        tool_calls=[
+            ChatCompletionMessageToolCall(
+                id="call_123",
+                type="function",
+                function=Function(name="get_weather", arguments='{"city": "Tokyo"}'),
+            )
+        ],
+    )
+
+    output_items = Converter.message_to_output_items(message)
+    items_as_dicts: list[dict[str, Any]] = []
+    for item in output_items:
+        if hasattr(item, "model_dump"):
+            items_as_dicts.append(item.model_dump())
+        else:
+            items_as_dicts.append(cast(dict[str, Any], item))
+
+    messages = Converter.items_to_messages(
+        items_as_dicts,  # type: ignore[arg-type]
+        "anthropic/claude-4-opus",
+        True,
+        True,
+    )
+
+    assistant_messages = [
+        msg for msg in messages if msg.get("role") == "assistant" and msg.get("tool_calls")
+    ]
+    assert len(assistant_messages) == 1, "Should have exactly one assistant message with tool calls"
+
+    assistant_msg = assistant_messages[0]
+    content = assistant_msg.get("content")
+    assert isinstance(content, list) and len(content) > 0, (
+        "Positional bool arguments should still preserve thinking blocks"
+    )
+    assert content[0].get("type") == "thinking", (
+        "The third positional argument must continue to map to preserve_thinking_blocks"
+    )
+
+
 def test_anthropic_thinking_blocks_without_tool_calls():
     """
     Test for models with extended thinking WITHOUT tool calls.

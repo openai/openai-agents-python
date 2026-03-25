@@ -20,8 +20,17 @@ from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_cli
 from mcp.client.session import MessageHandlerFnT
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
+from mcp.shared.exceptions import McpError
 from mcp.shared.message import SessionMessage
-from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult
+from mcp.types import (
+    CallToolResult,
+    GetPromptResult,
+    InitializeResult,
+    ListPromptsResult,
+    ListResourcesResult,
+    ListResourceTemplatesResult,
+    ReadResourceResult,
+)
 from typing_extensions import NotRequired, TypedDict
 
 from ..exceptions import UserError
@@ -190,6 +199,63 @@ class MCPServer(abc.ABC):
     ) -> GetPromptResult:
         """Get a specific prompt from the server."""
         pass
+
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
+        """List the resources available on the server.
+
+        Args:
+            cursor: An opaque pagination cursor returned in a previous
+                :class:`~mcp.types.ListResourcesResult` as ``nextCursor``.  Pass it
+                here to fetch the next page of results.  ``None`` fetches the first
+                page.
+
+        Returns a :class:`~mcp.types.ListResourcesResult`.  When the result contains
+        a ``nextCursor`` field, call this method again with that cursor to retrieve
+        the next page.  Subclasses that do not support resources may leave this
+        unimplemented; it will raise :exc:`NotImplementedError` at call time.
+        """
+        raise NotImplementedError(
+            f"MCP server '{self.name}' does not support list_resources. "
+            "Override this method in your server implementation."
+        )
+
+    async def list_resource_templates(
+        self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
+        """List the resource templates available on the server.
+
+        Args:
+            cursor: An opaque pagination cursor returned in a previous
+                :class:`~mcp.types.ListResourceTemplatesResult` as ``nextCursor``.
+                Pass it here to fetch the next page of results.  ``None`` fetches
+                the first page.
+
+        Returns a :class:`~mcp.types.ListResourceTemplatesResult`.  When the result
+        contains a ``nextCursor`` field, call this method again with that cursor to
+        retrieve the next page.  Subclasses that do not support resource templates
+        may leave this unimplemented; it will raise :exc:`NotImplementedError` at
+        call time.
+        """
+        raise NotImplementedError(
+            f"MCP server '{self.name}' does not support list_resource_templates. "
+            "Override this method in your server implementation."
+        )
+
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        """Read the contents of a specific resource by URI.
+
+        Args:
+            uri: The URI of the resource to read. See :class:`~pydantic.networks.AnyUrl`
+                for the supported URI formats.
+
+        Returns a :class:`~mcp.types.ReadResourceResult`.  Subclasses that do not
+        support resources may leave this unimplemented; it will raise
+        :exc:`NotImplementedError` at call time.
+        """
+        raise NotImplementedError(
+            f"MCP server '{self.name}' does not support read_resource. "
+            "Override this method in your server implementation."
+        )
 
     @staticmethod
     def _normalize_needs_approval(
@@ -360,6 +426,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         self.tool_filter = tool_filter
         self._serialize_session_requests = False
+        self._get_session_id: GetSessionIdCallback | None = None
 
     async def _maybe_serialize_request(self, func: Callable[[], Awaitable[T]]) -> T:
         if not self._serialize_session_requests:
@@ -514,7 +581,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             # streamablehttp_client returns (read, write, get_session_id)
             # sse_client returns (read, write)
 
-            read, write, *_ = transport
+            read, write, *rest = transport
+            # Capture the session-id callback when present (streamablehttp_client only).
+            self._get_session_id = rest[0] if rest and callable(rest[0]) else None
 
             session = await self.exit_stack.enter_async_context(
                 ClientSession(
@@ -704,6 +773,39 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         assert session is not None
         return await self._maybe_serialize_request(lambda: session.get_prompt(name, arguments))
 
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
+        """List the resources available on the server."""
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        session = self.session
+        assert session is not None
+        return await self._maybe_serialize_request(lambda: session.list_resources(cursor))
+
+    async def list_resource_templates(
+        self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
+        """List the resource templates available on the server."""
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        session = self.session
+        assert session is not None
+        return await self._maybe_serialize_request(lambda: session.list_resource_templates(cursor))
+
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        """Read the contents of a specific resource by URI.
+
+        Args:
+            uri: The URI of the resource to read. See :class:`~pydantic.networks.AnyUrl`
+                for the supported URI formats.
+        """
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        session = self.session
+        assert session is not None
+        from pydantic import AnyUrl
+
+        return await self._maybe_serialize_request(lambda: session.read_resource(AnyUrl(uri)))
+
     async def cleanup(self):
         """Cleanup the server."""
         async with self._cleanup_lock:
@@ -779,6 +881,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     logger.error(f"Error cleaning up server: {e}")
             finally:
                 self.session = None
+                self._get_session_id = None
 
 
 class MCPServerStdioParams(TypedDict):
@@ -919,6 +1022,17 @@ class MCPServerSseParams(TypedDict):
     sse_read_timeout: NotRequired[float]
     """The timeout for the SSE connection, in seconds. Defaults to 5 minutes."""
 
+    auth: NotRequired[httpx.Auth | None]
+    """Optional httpx authentication handler (e.g. ``httpx.BasicAuth``, a custom
+    ``httpx.Auth`` subclass for OAuth token refresh, etc.).  When provided, it is
+    passed directly to the underlying ``httpx.AsyncClient`` used by the SSE transport.
+    """
+
+    httpx_client_factory: NotRequired[HttpClientFactory]
+    """Custom HTTP client factory for configuring httpx.AsyncClient behavior (e.g.
+    to set custom SSL certificates, proxies, or other transport options).
+    """
+
 
 class MCPServerSse(_MCPServerWithClientSession):
     """MCP server implementation that uses the HTTP with SSE transport. See the [spec]
@@ -1000,12 +1114,17 @@ class MCPServerSse(_MCPServerWithClientSession):
         self,
     ) -> AbstractAsyncContextManager[MCPStreamTransport]:
         """Create the streams for the server."""
-        return sse_client(
-            url=self.params["url"],
-            headers=self.params.get("headers", None),
-            timeout=self.params.get("timeout", 5),
-            sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
-        )
+        kwargs: dict[str, Any] = {
+            "url": self.params["url"],
+            "headers": self.params.get("headers", None),
+            "timeout": self.params.get("timeout", 5),
+            "sse_read_timeout": self.params.get("sse_read_timeout", 60 * 5),
+        }
+        if "auth" in self.params:
+            kwargs["auth"] = self.params["auth"]
+        if "httpx_client_factory" in self.params:
+            kwargs["httpx_client_factory"] = self.params["httpx_client_factory"]
+        return sse_client(**kwargs)
 
     @property
     def name(self) -> str:
@@ -1033,6 +1152,13 @@ class MCPServerStreamableHttpParams(TypedDict):
 
     httpx_client_factory: NotRequired[HttpClientFactory]
     """Custom HTTP client factory for configuring httpx.AsyncClient behavior."""
+
+    auth: NotRequired[httpx.Auth | None]
+    """Optional httpx authentication handler (e.g. ``httpx.BasicAuth``, a custom
+    ``httpx.Auth`` subclass for OAuth token refresh, etc.).  When provided, it is
+    passed directly to the underlying ``httpx.AsyncClient`` used by the Streamable HTTP
+    transport.
+    """
 
 
 class MCPServerStreamableHttp(_MCPServerWithClientSession):
@@ -1117,24 +1243,18 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         self,
     ) -> AbstractAsyncContextManager[MCPStreamTransport]:
         """Create the streams for the server."""
-        # Only pass httpx_client_factory if it's provided
+        kwargs: dict[str, Any] = {
+            "url": self.params["url"],
+            "headers": self.params.get("headers", None),
+            "timeout": self.params.get("timeout", 5),
+            "sse_read_timeout": self.params.get("sse_read_timeout", 60 * 5),
+            "terminate_on_close": self.params.get("terminate_on_close", True),
+        }
         if "httpx_client_factory" in self.params:
-            return streamablehttp_client(
-                url=self.params["url"],
-                headers=self.params.get("headers", None),
-                timeout=self.params.get("timeout", 5),
-                sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
-                terminate_on_close=self.params.get("terminate_on_close", True),
-                httpx_client_factory=self.params["httpx_client_factory"],
-            )
-        else:
-            return streamablehttp_client(
-                url=self.params["url"],
-                headers=self.params.get("headers", None),
-                timeout=self.params.get("timeout", 5),
-                sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
-                terminate_on_close=self.params.get("terminate_on_close", True),
-            )
+            kwargs["httpx_client_factory"] = self.params["httpx_client_factory"]
+        if "auth" in self.params:
+            kwargs["auth"] = self.params["auth"]
+        return streamablehttp_client(**kwargs)
 
     @asynccontextmanager
     async def _isolated_client_session(self):
@@ -1178,6 +1298,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             return True
         if isinstance(exc, httpx.HTTPStatusError):
             return exc.response.status_code >= 500
+        if isinstance(exc, McpError):
+            return exc.error.code == httpx.codes.REQUEST_TIMEOUT
         if isinstance(exc, BaseExceptionGroup):
             return bool(exc.exceptions) and all(
                 self._should_retry_in_isolated_session(inner) for inner in exc.exceptions
@@ -1328,3 +1450,29 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
     def name(self) -> str:
         """A readable name for the server."""
         return self._name
+
+    @property
+    def session_id(self) -> str | None:
+        """The MCP session ID assigned by the server, or None if not yet connected
+        or if the server did not issue a session ID.
+
+        The session ID is stable for the lifetime of this server instance's connection.
+        You can persist it and pass it back via the Mcp-Session-Id request header
+        (params["headers"]) on a new MCPServerStreamableHttp instance to resume
+        the same server-side session across process restarts or stateless workers.
+
+        Example::
+
+            async with MCPServerStreamableHttp(params={"url": url}) as server:
+                session_id = server.session_id
+
+            # In a new worker / process:
+            async with MCPServerStreamableHttp(
+                params={"url": url, "headers": {"Mcp-Session-Id": session_id}}
+            ) as server:
+                # Resumes the same server-side session.
+                ...
+        """
+        if self._get_session_id is None:
+            return None
+        return self._get_session_id()

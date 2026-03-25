@@ -61,6 +61,7 @@ class MultiProvider(ModelProvider):
     mapping is:
     - "openai/" prefix or no prefix -> OpenAIProvider. e.g. "openai/gpt-4.1", "gpt-4.1"
     - "litellm/" prefix -> LitellmProvider. e.g. "litellm/openai/gpt-4.1"
+    - "any-llm/" prefix -> AnyLLMProvider. e.g. "any-llm/openrouter/openai/gpt-4.1"
 
     You can override or customize this mapping. The ``openai`` prefix is ambiguous for some
     OpenAI-compatible backends because a string like ``openai/gpt-4.1`` could mean either "route
@@ -143,6 +144,10 @@ class MultiProvider(ModelProvider):
             from ..extensions.models.litellm_provider import LitellmProvider
 
             return LitellmProvider()
+        elif prefix == "any-llm":
+            from ..extensions.models.any_llm_provider import AnyLLMProvider
+
+            return AnyLLMProvider()
         else:
             raise UserError(f"Unknown prefix: {prefix}")
 
@@ -181,7 +186,7 @@ class MultiProvider(ModelProvider):
         if self.provider_map and (provider := self.provider_map.get_provider(prefix)):
             return provider, stripped_model_name
 
-        if prefix == "litellm":
+        if prefix in {"litellm", "any-llm"}:
             return self._get_fallback_provider(prefix), stripped_model_name
 
         if prefix == "openai":

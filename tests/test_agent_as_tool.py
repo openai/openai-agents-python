@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 from typing import Any, cast
 
 import pytest
+from mcp.shared.exceptions import McpError
+from mcp.types import ErrorData
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from pydantic import BaseModel, Field
@@ -17,6 +20,7 @@ from agents import (
     FunctionTool,
     MessageOutputItem,
     ModelBehaviorError,
+    ModelResponse,
     RunConfig,
     RunContextWrapper,
     RunHooks,
@@ -27,6 +31,7 @@ from agents import (
     SessionSettings,
     ToolApprovalItem,
     TResponseInputItem,
+    Usage,
     tool_namespace,
 )
 from agents.agent_tool_input import StructuredToolInputBuilderOptions
@@ -39,6 +44,9 @@ from agents.run_context import _ApprovalRecord
 from agents.run_state import _build_agent_map
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
 from agents.tool_context import ToolContext
+from tests.fake_model import FakeModel
+from tests.mcp.helpers import FakeMCPServer
+from tests.test_responses import get_function_tool_call, get_text_message
 from tests.utils.hitl import make_function_tool_call
 
 
@@ -1669,6 +1677,338 @@ async def test_agent_as_tool_streaming_works_with_custom_extractor(
     assert output == "custom value"
     assert received == [streamed_instance]
     assert callbacks == stream_events
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_settles_multi_segment_text_output() -> None:
+    agent = Agent(
+        name="streamer",
+        model=FakeModel(
+            initial_output=[
+                ResponseOutputMessage(
+                    id="msg_multi_segment",
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                    content=[
+                        ResponseOutputText(
+                            annotations=[],
+                            text="first ",
+                            type="output_text",
+                            logprobs=[],
+                        ),
+                        ResponseOutputText(
+                            annotations=[],
+                            text="second",
+                            type="output_text",
+                            logprobs=[],
+                        ),
+                    ],
+                )
+            ]
+        ),
+    )
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        del payload
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_settle_text",
+        arguments='{"input": "go"}',
+        call_id="call-settle-text",
+        name="stream_tool",
+        type="function_call",
+    )
+
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "go"}')
+
+    assert output == "first second"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_settles_multi_segment_structured_output() -> None:
+    class StructuredOutput(BaseModel):
+        answer: str
+
+    agent = Agent(
+        name="streamer",
+        model=FakeModel(
+            initial_output=[
+                ResponseOutputMessage(
+                    id="msg_multi_segment_structured",
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                    content=[
+                        ResponseOutputText(
+                            annotations=[],
+                            text='{"answer":"str',
+                            type="output_text",
+                            logprobs=[],
+                        ),
+                        ResponseOutputText(
+                            annotations=[],
+                            text='uctured"}',
+                            type="output_text",
+                            logprobs=[],
+                        ),
+                    ],
+                )
+            ]
+        ),
+        output_type=StructuredOutput,
+    )
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        del payload
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_settle_structured",
+        arguments='{"input": "go"}',
+        call_id="call-settle-structured",
+        name="stream_tool",
+        type="function_call",
+    )
+
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "go"}')
+
+    assert output == StructuredOutput(answer="structured")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("server", "tool_name"),
+    [
+        pytest.param(
+            "cancelled",
+            "cancel_tool",
+            id="mcp-cancellation",
+        ),
+        pytest.param(
+            "error",
+            "error_tool",
+            id="mcp-error",
+        ),
+    ],
+)
+async def test_agent_as_tool_streaming_settles_final_text_after_nested_mcp_failure(
+    server: str,
+    tool_name: str,
+) -> None:
+    class CancelledNestedMCPServer(FakeMCPServer):
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None = None,
+        ):
+            self.tool_calls.append(tool_name)
+            del arguments, meta
+            raise asyncio.CancelledError("synthetic nested mcp cancellation")
+
+    class ErrorNestedMCPServer(FakeMCPServer):
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None = None,
+        ):
+            self.tool_calls.append(tool_name)
+            del arguments, meta
+            raise McpError(ErrorData(code=-32000, message="synthetic upstream 422"))
+
+    nested_server: FakeMCPServer
+    if server == "cancelled":
+        nested_server = CancelledNestedMCPServer()
+    else:
+        nested_server = ErrorNestedMCPServer()
+    nested_server.add_tool(tool_name, {})
+
+    agent = Agent(
+        name="streamer",
+        model=FakeModel(),
+        mcp_servers=[nested_server],
+    )
+    cast(FakeModel, agent.model).add_multiple_turn_outputs(
+        [
+            [get_function_tool_call(tool_name, "{}")],
+            [
+                ResponseOutputMessage(
+                    id=f"msg_after_{server}_failure",
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                    content=[
+                        ResponseOutputText(
+                            annotations=[],
+                            text="first ",
+                            type="output_text",
+                            logprobs=[],
+                        ),
+                        ResponseOutputText(
+                            annotations=[],
+                            text="second",
+                            type="output_text",
+                            logprobs=[],
+                        ),
+                    ],
+                )
+            ],
+        ]
+    )
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        del payload
+
+    tool_call = ResponseFunctionToolCall(
+        id=f"call_nested_{server}",
+        arguments='{"input": "go"}',
+        call_id=f"call-nested-{server}",
+        name="stream_tool",
+        type="function_call",
+    )
+
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "go"}')
+
+    assert nested_server.tool_calls == [tool_name]
+    assert output == "first second"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_reraises_parent_cancellation_without_waiting_for_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="streamer")
+    stream_event = RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+    handler_started = asyncio.Event()
+    release_handler = asyncio.Event()
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = ""
+            self.current_agent = agent
+            self.new_items: list[Any] = []
+            self.raw_responses = [
+                ModelResponse(
+                    output=[get_text_message("Recovered nested summary")],
+                    usage=Usage(),
+                    response_id="resp_nested",
+                )
+            ]
+            self.run_loop_task = asyncio.create_task(asyncio.sleep(0))
+
+        async def stream_events(self):
+            yield stream_event
+            await asyncio.sleep(60)
+
+    streaming_result = DummyStreamingResult()
+    await streaming_result.run_loop_task
+
+    def fake_run_streamed(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        auto_previous_response_id=False,
+        conversation_id,
+        session,
+    ):
+        return streaming_result
+
+    async def unexpected_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Runner.run should not be called when on_stream is provided.")
+
+    monkeypatch.setattr(Runner, "run_streamed", classmethod(fake_run_streamed))
+    monkeypatch.setattr(Runner, "run", classmethod(unexpected_run))
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        assert payload["event"] is stream_event
+        handler_started.set()
+        await release_handler.wait()
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_cancelled",
+        arguments='{"input": "recover"}',
+        call_id="call-cancelled",
+        name="stream_tool",
+        type="function_call",
+    )
+
+    tool = agent.as_tool(
+        tool_name="stream_tool",
+        tool_description="Streams events",
+        on_stream=on_stream,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    async def _invoke_tool() -> Any:
+        return await tool.on_invoke_tool(tool_context, '{"input": "recover"}')
+
+    invoke_task: asyncio.Task[Any] = asyncio.create_task(_invoke_tool())
+    await asyncio.wait_for(handler_started.wait(), timeout=1.0)
+    invoke_task.cancel()
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(invoke_task, timeout=1.0)
+    finally:
+        release_handler.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await invoke_task
 
 
 @pytest.mark.asyncio

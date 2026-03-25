@@ -1,6 +1,6 @@
 ---
 name: pr-draft-summary
-description: Create a PR title and draft description after substantive code changes are finished. Trigger when wrapping up a moderate-or-larger change (runtime code, tests, build config, docs with behavior impact) and you need the PR-ready summary block with change summary plus PR draft text.
+description: Create the required PR-ready summary block, branch suggestion, title, and draft description for openai-agents-python. Use in the final handoff after moderate-or-larger changes to runtime code, tests, examples, build/test configuration, or docs with behavior impact; skip only for trivial or conversation-only tasks, repo-meta/doc-only tasks without behavior impact, or when the user explicitly says not to include the PR draft block.
 ---
 
 # PR Draft Summary
@@ -10,8 +10,8 @@ Produce the PR-ready summary required in this repository after substantive code 
 
 ## When to Trigger
 - The task for this repo is finished (or ready for review) and it touched runtime code, tests, examples, docs with behavior impact, or build/test configuration.
-- You are about to send the "work complete" response and need the PR block included.
-- Skip only for trivial or conversation-only tasks where no PR-style summary is expected.
+- Treat this as the default final handoff step for substantive code work. Run it after any required verification or changeset work and before sending the "work complete" response.
+- Skip only for trivial or conversation-only tasks, repo-meta/doc-only tasks without behavior impact, or when the user explicitly says not to include the PR draft block.
 
 ## Inputs to Collect Automatically (do not ask the user)
 - Current branch: `git rev-parse --abbrev-ref HEAD`.
@@ -37,7 +37,7 @@ Produce the PR-ready summary required in this repository after substantive code 
 9) Output only the block in "Output Format". Keep any surrounding status note minimal and in English.
 
 ## Output Format
-When closing out a task and the summary block is desired, add this concise Markdown block (English only) after any brief status note. If the user says they do not want it, skip this section.
+When closing out a task, add this concise Markdown block (English only) after any brief status note unless the task falls under the documented skip cases or the user says they do not want it.
 
 ```
 # Pull Request Draft

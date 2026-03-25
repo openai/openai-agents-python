@@ -7,6 +7,7 @@ import json
 import math
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Any, Callable, Literal, Union, cast
 
@@ -158,6 +159,7 @@ OpenAIRealtimeAudioOutput = _rt_audio_config.RealtimeAudioConfigOutput  # type: 
 
 
 _USER_AGENT = f"Agents/Python {__version__}"
+DEFAULT_REALTIME_MODEL = "gpt-realtime-1.5"
 
 DEFAULT_MODEL_SETTINGS: RealtimeSessionModelSettings = {
     "voice": "ash",
@@ -189,6 +191,183 @@ AllRealtimeServerEvents = Annotated[
 ]
 
 ServerEventTypeAdapter: TypeAdapter[AllRealtimeServerEvents] | None = None
+
+
+@dataclass(frozen=True)
+class _PendingResponseCreate:
+    event_id: str
+    request_version: int
+    target_version: int
+    is_manual: bool
+
+
+class _ResponseCreateSequencer:
+    """Tracks local response sequencing around response.create and response.cancel."""
+
+    def __init__(self) -> None:
+        self._ongoing_response = False
+        self._response_control: Literal["free", "create_requested", "cancel_requested"] = "free"
+        self._response_create_request_version = 0
+        self._response_create_event_counter = 0
+        self._pending_request_versions: set[int] = set()
+        self._manual_response_create_versions: set[int] = set()
+        self._pending_response_create: _PendingResponseCreate | None = None
+        self._condition = asyncio.Condition()
+
+    @property
+    def ongoing_response(self) -> bool:
+        return self._ongoing_response
+
+    @property
+    def response_control(self) -> Literal["free", "create_requested", "cancel_requested"]:
+        return self._response_control
+
+    @property
+    def pending_response_create_event_id(self) -> str | None:
+        return self._pending_response_create.event_id if self._pending_response_create else None
+
+    def _next_pending_request_version(self) -> int | None:
+        return min(self._pending_request_versions) if self._pending_request_versions else None
+
+    def _auto_response_create_target_version(self, request_version: int) -> int:
+        next_manual_version = min(
+            (
+                version
+                for version in self._manual_response_create_versions
+                if version >= request_version
+            ),
+            default=None,
+        )
+        if next_manual_version is None:
+            eligible_versions = self._pending_request_versions
+        else:
+            eligible_versions = {
+                version
+                for version in self._pending_request_versions
+                if version < next_manual_version
+            }
+        return max(eligible_versions)
+
+    def set_ongoing_response_for_test(self, value: bool) -> None:
+        self._ongoing_response = value
+
+    async def set_response_control(
+        self, control: Literal["free", "create_requested", "cancel_requested"]
+    ) -> None:
+        async with self._condition:
+            self._response_control = control
+            self._condition.notify_all()
+
+    async def mark_response_created(self) -> None:
+        async with self._condition:
+            self._ongoing_response = True
+            self._pending_response_create = None
+            self._response_control = "free"
+            self._condition.notify_all()
+
+    async def mark_response_done(self) -> None:
+        async with self._condition:
+            self._ongoing_response = False
+            self._pending_response_create = None
+            self._response_control = "free"
+            self._condition.notify_all()
+
+    async def release_waiters(self) -> None:
+        async with self._condition:
+            self._ongoing_response = False
+            self._pending_response_create = None
+            self._pending_request_versions.clear()
+            self._manual_response_create_versions.clear()
+            self._response_create_request_version = 0
+            self._response_create_event_counter = 0
+            self._response_control = "free"
+            self._condition.notify_all()
+
+    async def reserve_response_create_request(self, *, manual: bool = False) -> int:
+        async with self._condition:
+            self._response_create_request_version += 1
+            request_version = self._response_create_request_version
+            self._pending_request_versions.add(request_version)
+            if manual:
+                self._manual_response_create_versions.add(request_version)
+            self._condition.notify_all()
+            return request_version
+
+    async def clear_pending_response_create(self, event_id: str | None = None) -> bool:
+        async with self._condition:
+            if (
+                self._response_control != "create_requested"
+                or self._pending_response_create is None
+            ):
+                return False
+            if event_id is not None and self._pending_response_create.event_id != event_id:
+                return False
+            # The caller only uses the no-event-id path for response.create-like
+            # server errors, so clearing here won't release unrelated requests.
+            self._pending_request_versions.discard(self._pending_response_create.request_version)
+            if self._pending_response_create.is_manual:
+                self._manual_response_create_versions.discard(
+                    self._pending_response_create.request_version
+                )
+            self._pending_response_create = None
+            self._response_control = "free"
+            self._condition.notify_all()
+            return True
+
+    async def wait_for_response_create_slot(
+        self, request_version: int, *, manual: bool = False, event_id: str | None = None
+    ) -> _PendingResponseCreate | None:
+        while True:
+            async with self._condition:
+                await self._condition.wait_for(
+                    lambda: request_version not in self._pending_request_versions
+                    or (
+                        not self._ongoing_response
+                        and self._response_control == "free"
+                        and self._next_pending_request_version() == request_version
+                    )
+                )
+                if request_version not in self._pending_request_versions:
+                    return None
+
+                self._response_control = "create_requested"
+                resolved_event_id = event_id
+                if resolved_event_id is None:
+                    self._response_create_event_counter += 1
+                    resolved_event_id = (
+                        f"agents_py_response_create_{self._response_create_event_counter}"
+                    )
+                target_version = (
+                    request_version
+                    if manual
+                    else self._auto_response_create_target_version(request_version)
+                )
+                pending = _PendingResponseCreate(
+                    event_id=resolved_event_id,
+                    request_version=request_version,
+                    target_version=target_version,
+                    is_manual=manual,
+                )
+                self._pending_response_create = pending
+                return pending
+
+    async def mark_response_create_sent(self, pending: _PendingResponseCreate) -> None:
+        async with self._condition:
+            covered_versions = {
+                version
+                for version in self._pending_request_versions
+                if version <= pending.target_version
+            }
+            self._pending_request_versions.difference_update(covered_versions)
+            self._manual_response_create_versions.difference_update(covered_versions)
+            self._condition.notify_all()
+
+    async def begin_cancel_response(self) -> bool:
+        async with self._condition:
+            if not self._ongoing_response or self._response_control == "cancel_requested":
+                return False
+            self._response_control = "cancel_requested"
+            return True
 
 
 def get_server_event_type_adapter() -> TypeAdapter[AllRealtimeServerEvents]:
@@ -271,19 +450,36 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
     """A model that uses OpenAI's WebSocket API."""
 
     def __init__(self, *, transport_config: TransportConfig | None = None) -> None:
-        self.model = "gpt-realtime"  # Default model
+        self.model = DEFAULT_REALTIME_MODEL
         self._websocket: ClientConnection | None = None
         self._websocket_task: asyncio.Task[None] | None = None
+        self._response_create_tasks: set[asyncio.Task[None]] = set()
         self._listeners: list[RealtimeModelListener] = []
         self._current_item_id: str | None = None
         self._audio_state_tracker: ModelAudioTracker = ModelAudioTracker()
-        self._ongoing_response: bool = False
+        self._response_create_sequencer = _ResponseCreateSequencer()
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
         self._playback_tracker: RealtimePlaybackTracker | None = None
         self._created_session: OpenAISessionCreateRequest | None = None
         self._server_event_type_adapter = get_server_event_type_adapter()
         self._call_id: str | None = None
         self._transport_config: TransportConfig | None = transport_config
+
+    @property
+    def _ongoing_response(self) -> bool:
+        return self._response_create_sequencer.ongoing_response
+
+    @_ongoing_response.setter
+    def _ongoing_response(self, value: bool) -> None:
+        self._response_create_sequencer.set_ongoing_response_for_test(value)
+
+    @property
+    def _response_control(self) -> Literal["free", "create_requested", "cancel_requested"]:
+        return self._response_create_sequencer.response_control
+
+    @property
+    def _pending_response_create_event_id(self) -> str | None:
+        return self._response_create_sequencer.pending_response_create_event_id
 
     async def connect(self, options: RealtimeModelConfig) -> None:
         """Establish a connection to the model and keep it alive."""
@@ -439,13 +635,24 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     exception=e, context="WebSocket error in message listener"
                 )
             )
+        finally:
+            await self._cancel_response_create_tasks()
+            await self._release_response_waiters()
 
     async def send_event(self, event: RealtimeModelSendEvent) -> None:
         """Send an event to the model."""
         if isinstance(event, RealtimeModelSendRawMessage):
             converted = _ConversionHelper.try_convert_raw_message(event)
             if converted is not None:
-                await self._send_raw_message(converted)
+                if converted.type == "response.create":
+                    request_version = await self._reserve_response_create_request(manual=True)
+                    self._start_response_create(
+                        request_version,
+                        response_create=converted,
+                        manual=True,
+                    )
+                else:
+                    await self._send_raw_message(converted)
             else:
                 logger.error(f"Failed to convert raw message: {event}")
         elif isinstance(event, RealtimeModelSendUserInput):
@@ -468,10 +675,123 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         payload = event.model_dump_json(exclude_unset=True)
         await self._websocket.send(payload)
 
+    async def _set_response_control(
+        self, control: Literal["free", "create_requested", "cancel_requested"]
+    ) -> None:
+        await self._response_create_sequencer.set_response_control(control)
+
+    async def _mark_response_created(self) -> None:
+        await self._response_create_sequencer.mark_response_created()
+
+    async def _mark_response_done(self) -> None:
+        await self._response_create_sequencer.mark_response_done()
+
+    async def _release_response_waiters(self) -> None:
+        # Connection teardown means no response.done will arrive, so local
+        # response sequencing must be released explicitly.
+        await self._response_create_sequencer.release_waiters()
+
+    async def _reserve_response_create_request(self, *, manual: bool = False) -> int:
+        return await self._response_create_sequencer.reserve_response_create_request(manual=manual)
+
+    async def _clear_pending_response_create(self, event_id: str | None = None) -> bool:
+        return await self._response_create_sequencer.clear_pending_response_create(event_id)
+
+    async def _send_response_create_when_idle(
+        self,
+        request_version: int,
+        *,
+        response_create: OpenAIResponseCreateEvent | None = None,
+        manual: bool = False,
+    ) -> None:
+        pending = await self._response_create_sequencer.wait_for_response_create_slot(
+            request_version,
+            manual=manual,
+            event_id=response_create.event_id if response_create is not None else None,
+        )
+        if pending is None:
+            return
+
+        try:
+            response_create_event = (
+                response_create.model_copy(update={"event_id": pending.event_id})
+                if response_create is not None
+                else OpenAIResponseCreateEvent(type="response.create", event_id=pending.event_id)
+            )
+            await self._send_raw_message(response_create_event)
+        except BaseException:
+            await self._clear_pending_response_create(pending.event_id)
+            raise
+
+        await self._response_create_sequencer.mark_response_create_sent(pending)
+
+    async def _send_response_create_in_background(
+        self,
+        request_version: int,
+        *,
+        response_create: OpenAIResponseCreateEvent | None = None,
+        manual: bool = False,
+    ) -> None:
+        try:
+            await self._send_response_create_when_idle(
+                request_version,
+                response_create=response_create,
+                manual=manual,
+            )
+        except asyncio.CancelledError:
+            logger.debug("Deferred response.create task was cancelled")
+        except AssertionError as exc:
+            if str(exc) != "Not connected":
+                await self._emit_event(
+                    RealtimeModelExceptionEvent(
+                        exception=exc, context="Error sending deferred response.create"
+                    )
+                )
+        except websockets.exceptions.ConnectionClosed:
+            logger.debug("Skipping deferred response.create because the websocket is closed")
+        except Exception as exc:
+            await self._emit_event(
+                RealtimeModelExceptionEvent(
+                    exception=exc, context="Error sending deferred response.create"
+                )
+            )
+
+    def _start_response_create(
+        self,
+        request_version: int,
+        *,
+        response_create: OpenAIResponseCreateEvent | None = None,
+        manual: bool = False,
+    ) -> None:
+        task = asyncio.create_task(
+            self._send_response_create_in_background(
+                request_version,
+                response_create=response_create,
+                manual=manual,
+            )
+        )
+        self._response_create_tasks.add(task)
+        task.add_done_callback(self._response_create_tasks.discard)
+
+    async def _cancel_response_create_tasks(self) -> None:
+        if not self._response_create_tasks:
+            return
+
+        current_task = asyncio.current_task()
+        tasks_to_await = []
+        for task in list(self._response_create_tasks):
+            task.cancel()
+            if task is not current_task:
+                tasks_to_await.append(task)
+
+        if tasks_to_await:
+            await asyncio.gather(*tasks_to_await, return_exceptions=True)
+
     async def _send_user_input(self, event: RealtimeModelSendUserInput) -> None:
         converted = _ConversionHelper.convert_user_input_to_item_create(event)
         await self._send_raw_message(converted)
-        await self._send_raw_message(OpenAIResponseCreateEvent(type="response.create"))
+        request_version = await self._reserve_response_create_request()
+        self._start_response_create(request_version)
 
     async def _send_audio(self, event: RealtimeModelSendAudio) -> None:
         converted = _ConversionHelper.convert_audio_to_input_audio_buffer_append(event)
@@ -498,7 +818,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         await self._emit_event(RealtimeModelItemUpdatedEvent(item=tool_item))
 
         if event.start_response:
-            await self._send_raw_message(OpenAIResponseCreateEvent(type="response.create"))
+            request_version = await self._reserve_response_create_request()
+            self._start_response_create(request_version)
 
     def _get_playback_state(self) -> RealtimePlaybackState:
         if self._playback_tracker:
@@ -662,6 +983,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def close(self) -> None:
         """Close the session."""
+        await self._cancel_response_create_tasks()
         if self._websocket:
             await self._websocket.close()
             self._websocket = None
@@ -672,11 +994,26 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             except asyncio.CancelledError:
                 pass
             self._websocket_task = None
+        else:
+            await self._release_response_waiters()
 
     async def _cancel_response(self) -> None:
-        if self._ongoing_response:
+        if not await self._response_create_sequencer.begin_cancel_response():
+            return
+
+        try:
             await self._send_raw_message(OpenAIResponseCancelEvent(type="response.cancel"))
-            self._ongoing_response = False
+        except Exception:
+            await self._set_response_control("free")
+            raise
+
+    def _error_matches_pending_response_create(self, error: Any) -> bool:
+        if error.event_id is not None:
+            return True
+
+        code = getattr(error, "code", None)
+        message = (getattr(error, "message", None) or "").lower()
+        return code == "bad_response_create" or "response.create" in message
 
     async def _handle_ws_event(self, event: dict[str, Any]):
         await self._emit_event(RealtimeModelRawServerEvent(data=event))
@@ -815,10 +1152,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 if not automatic_response_cancellation_enabled:
                     await self._cancel_response()
         elif parsed.type == "response.created":
-            self._ongoing_response = True
+            await self._mark_response_created()
             await self._emit_event(RealtimeModelTurnStartedEvent())
         elif parsed.type == "response.done":
-            self._ongoing_response = False
+            await self._mark_response_done()
             await self._emit_event(RealtimeModelTurnEndedEvent())
         elif parsed.type == "session.created":
             await self._send_tracing_config(self._tracing_config)
@@ -826,6 +1163,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         elif parsed.type == "session.updated":
             self._update_created_session(parsed.session)
         elif parsed.type == "error":
+            if (
+                not self._ongoing_response
+                and self._response_control == "create_requested"
+                and self._error_matches_pending_response_create(parsed.error)
+            ):
+                await self._clear_pending_response_create(parsed.error.event_id)
             await self._emit_event(RealtimeModelErrorEvent(error=parsed.error))
         elif parsed.type == "conversation.item.deleted":
             await self._emit_event(RealtimeModelItemDeletedEvent(item_id=parsed.item_id))
@@ -1105,7 +1448,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         # Construct full session object. `type` will be excluded at serialization time for updates.
         session_create_request = OpenAISessionCreateRequest(
             type="realtime",
-            model=(model_settings.get("model_name") or self.model) or "gpt-realtime",
+            model=(model_settings.get("model_name") or self.model) or DEFAULT_REALTIME_MODEL,
             output_modalities=output_modalities,
             audio=OpenAIRealtimeAudioConfig(
                 input=OpenAIRealtimeAudioInput(**audio_input_args),

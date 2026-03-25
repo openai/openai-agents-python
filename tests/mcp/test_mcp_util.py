@@ -150,6 +150,62 @@ async def test_mcp_meta_resolver_does_not_mutate_arguments():
 
 
 @pytest.mark.asyncio
+async def test_to_function_tool_passes_static_mcp_meta():
+    server = FakeMCPServer()
+    tool = MCPTool(
+        name="test_tool_1",
+        inputSchema={},
+        _meta={"locale": "en", "extra": "value"},
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+    tool_context = ToolContext(
+        context=None,
+        tool_name="test_tool_1",
+        tool_call_id="test_call_static_meta",
+        tool_arguments="{}",
+    )
+
+    await function_tool.on_invoke_tool(tool_context, "{}")
+
+    assert server.tool_metas[-1] == {"locale": "en", "extra": "value"}
+
+
+@pytest.mark.asyncio
+async def test_to_function_tool_merges_static_mcp_meta_with_resolver():
+    captured: dict[str, Any] = {}
+
+    def resolve_meta(context):
+        captured["run_context"] = context.run_context
+        captured["server_name"] = context.server_name
+        captured["tool_name"] = context.tool_name
+        captured["arguments"] = context.arguments
+        return {"request_id": "req-123", "locale": "ja"}
+
+    server = FakeMCPServer(tool_meta_resolver=resolve_meta)
+    tool = MCPTool(
+        name="test_tool_1",
+        inputSchema={},
+        _meta={"locale": "en", "extra": "value"},
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+    tool_context = ToolContext(
+        context={"request_id": "req-123"},
+        tool_name="test_tool_1",
+        tool_call_id="test_call_static_meta_with_resolver",
+        tool_arguments="{}",
+    )
+
+    await function_tool.on_invoke_tool(tool_context, "{}")
+
+    assert server.tool_metas[-1] == {"request_id": "req-123", "locale": "en", "extra": "value"}
+    assert captured["server_name"] == server.name
+    assert captured["tool_name"] == "test_tool_1"
+    assert captured["arguments"] == {}
+
+
+@pytest.mark.asyncio
 async def test_mcp_invoke_bad_json_errors(caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.DEBUG)
 

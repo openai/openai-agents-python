@@ -1,6 +1,7 @@
 from typing import Any
 
 import pytest
+from mcp.types import ListResourcesResult, ListResourceTemplatesResult, ReadResourceResult
 
 from agents import Agent, Runner
 from agents.mcp import MCPServer, MCPToolMetaResolver
@@ -75,6 +76,17 @@ class FakeMCPPromptServer(MCPServer):
         meta: dict[str, Any] | None = None,
     ):
         raise NotImplementedError("This fake server doesn't support tools")
+
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
+        return ListResourcesResult(resources=[])
+
+    async def list_resource_templates(
+        self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
+        return ListResourceTemplatesResult(resourceTemplates=[])
+
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        return ReadResourceResult(contents=[])
 
     @property
     def name(self) -> str:

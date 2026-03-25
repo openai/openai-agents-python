@@ -33,7 +33,7 @@ class TestConversionHelperTryConvertRawMessage:
                 "type": "session.update",
                 "other_data": {
                     "session": {
-                        "model": "gpt-realtime",
+                        "model": "gpt-realtime-1.5",
                         "type": "realtime",
                         "modalities": ["text", "audio"],
                         "voice": "ash",
