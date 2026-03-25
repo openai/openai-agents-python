@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import inspect
+import json
 import sys
 from collections.abc import Awaitable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
@@ -10,7 +11,6 @@ from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar, Union, cast
 
-import anyio
 import httpx
 
 if sys.version_info < (3, 11):
@@ -22,17 +22,15 @@ from mcp.client.session import MessageHandlerFnT
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import (
     GetSessionIdCallback,
-    RequestContext,
-    StreamableHTTPTransport,
     create_mcp_http_client,
+    streamablehttp_client,
 )
 from mcp.shared.exceptions import McpError
-from mcp.shared.message import ClientMessageMetadata, SessionMessage
+from mcp.shared.message import SessionMessage
 from mcp.types import (
     CallToolResult,
     GetPromptResult,
     InitializeResult,
-    JSONRPCRequest,
     ListPromptsResult,
     ListResourcesResult,
     ListResourceTemplatesResult,
@@ -78,141 +76,69 @@ else:
 T = TypeVar("T")
 
 
-class _AgentsStreamableHTTPTransport(StreamableHTTPTransport):
-    def __init__(
-        self,
-        url: str,
-        *,
-        ignore_initialized_notification_failure: bool = False,
-    ) -> None:
-        super().__init__(url)
-        self._ignore_initialized_notification_failure = (
-            ignore_initialized_notification_failure
-        )
+class _InitializedNotificationTolerantTransport(httpx.AsyncBaseTransport):
+    def __init__(self, wrapped_transport: httpx.AsyncBaseTransport) -> None:
+        self._wrapped_transport = wrapped_transport
 
-    async def post_writer(
-        self,
-        client: httpx.AsyncClient,
-        write_stream_reader: MemoryObjectReceiveStream[SessionMessage],
-        read_stream_writer: MemoryObjectSendStream[SessionMessage | Exception],
-        write_stream: MemoryObjectSendStream[SessionMessage],
-        start_get_stream: Callable[[], None],
-        tg: anyio.abc.TaskGroup,
-    ) -> None:
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        is_initialized_notification = _is_initialized_notification_request(request)
         try:
-            async with write_stream_reader:
-                async for session_message in write_stream_reader:
-                    message = session_message.message
-                    metadata = (
-                        session_message.metadata
-                        if isinstance(session_message.metadata, ClientMessageMetadata)
-                        else None
-                    )
-                    is_resumption = bool(metadata and metadata.resumption_token)
-
-                    logger.debug(f"Sending client message: {message}")
-
-                    if self._is_initialized_notification(message):
-                        start_get_stream()
-
-                    ctx = RequestContext(
-                        client=client,
-                        session_id=self.session_id,
-                        session_message=session_message,
-                        metadata=metadata,
-                        read_stream_writer=read_stream_writer,
-                    )
-
-                    async def handle_request_async(
-                        request_ctx=ctx,
-                        request_is_resumption=is_resumption,
-                    ):
-                        if request_is_resumption:
-                            await self._handle_resumption_request(request_ctx)
-                        else:
-                            await self._handle_post_request(request_ctx)
-
-                    if isinstance(message.root, JSONRPCRequest):
-                        tg.start_soon(handle_request_async)
-                    else:
-                        try:
-                            await handle_request_async()
-                        except Exception:
-                            if (
-                                self._ignore_initialized_notification_failure
-                                and self._is_initialized_notification(message)
-                            ):
-                                logger.warning(
-                                    "Ignoring initialized notification failure in post_writer",
-                                    exc_info=True,
-                                )
-                                continue
-                            raise
+            response = await self._wrapped_transport.handle_async_request(request)
         except Exception:
-            logger.exception("Error in post_writer")  # pragma: no cover
-        finally:
-            await read_stream_writer.aclose()
-            await write_stream.aclose()
+            if not is_initialized_notification:
+                raise
+            logger.warning(
+                "Ignoring initialized notification transport failure",
+                exc_info=True,
+            )
+            return httpx.Response(202, request=request)
+
+        if is_initialized_notification and response.is_error:
+            logger.warning(
+                "Ignoring initialized notification HTTP failure: %s",
+                response.status_code,
+            )
+            await response.aclose()
+            return httpx.Response(202, request=request)
+
+        return response
+
+    async def aclose(self) -> None:
+        await self._wrapped_transport.aclose()
 
 
-@asynccontextmanager
-async def streamablehttp_client(
-    url: str,
-    headers: dict[str, str] | None = None,
-    timeout: float | timedelta = 30,
-    sse_read_timeout: float | timedelta = 60 * 5,
-    terminate_on_close: bool = True,
-    httpx_client_factory: HttpClientFactory = create_mcp_http_client,
-    auth: httpx.Auth | None = None,
-    ignore_initialized_notification_failure: bool = False,
-):
-    timeout_seconds = timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
-    sse_read_timeout_seconds = (
-        sse_read_timeout.total_seconds()
-        if isinstance(sse_read_timeout, timedelta)
-        else sse_read_timeout
+def _is_initialized_notification_request(request: httpx.Request) -> bool:
+    if request.method != "POST":
+        return False
+
+    try:
+        body = json.loads(request.content.decode())
+    except Exception:
+        return False
+
+    return (
+        isinstance(body, dict)
+        and body.get("method") == "notifications/initialized"
+        and "id" not in body
     )
 
-    client = httpx_client_factory(
-        headers=headers,
-        timeout=httpx.Timeout(timeout_seconds, read=sse_read_timeout_seconds),
-        auth=auth,
-    )
-    transport = _AgentsStreamableHTTPTransport(
-        url,
-        ignore_initialized_notification_failure=ignore_initialized_notification_failure,
-    )
 
-    async with client:
-        read_stream_writer, read_stream = anyio.create_memory_object_stream[
-            SessionMessage | Exception
-        ](0)
-        write_stream, write_stream_reader = anyio.create_memory_object_stream[SessionMessage](0)
+def _wrap_httpx_client_factory_for_initialized_notification_tolerance(
+    httpx_client_factory: HttpClientFactory,
+) -> HttpClientFactory:
+    def wrapped_factory(
+        headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
+    ) -> httpx.AsyncClient:
+        client = httpx_client_factory(headers=headers, timeout=timeout, auth=auth)
+        # httpx exposes transport customization only at client construction time. Replacing the
+        # transport after factory creation keeps the existing client settings intact while
+        # scoping the tolerance to this one request type.
+        client._transport = _InitializedNotificationTolerantTransport(client._transport)
+        return client
 
-        async with anyio.create_task_group() as tg:
-            try:
-                def start_get_stream() -> None:
-                    tg.start_soon(transport.handle_get_stream, client, read_stream_writer)
-
-                tg.start_soon(
-                    transport.post_writer,
-                    client,
-                    write_stream_reader,
-                    read_stream_writer,
-                    write_stream,
-                    start_get_stream,
-                    tg,
-                )
-
-                try:
-                    yield (read_stream, write_stream, transport.get_session_id)
-                finally:
-                    if transport.session_id and terminate_on_close:
-                        await transport.terminate_session(client)
-                    tg.cancel_scope.cancel()
-            finally:
-                await read_stream_writer.aclose()
-                await write_stream.aclose()
+    return wrapped_factory
 
 
 class _SharedSessionRequestNeedsIsolation(Exception):
@@ -1402,14 +1328,17 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             "sse_read_timeout": self.params.get("sse_read_timeout", 60 * 5),
             "terminate_on_close": self.params.get("terminate_on_close", True),
         }
-        if "httpx_client_factory" in self.params:
-            kwargs["httpx_client_factory"] = self.params["httpx_client_factory"]
+        httpx_client_factory = self.params.get("httpx_client_factory")
+        if self.params.get("ignore_initialized_notification_failure", False):
+            httpx_client_factory = (
+                _wrap_httpx_client_factory_for_initialized_notification_tolerance(
+                    httpx_client_factory or create_mcp_http_client
+                )
+            )
+        if httpx_client_factory is not None:
+            kwargs["httpx_client_factory"] = httpx_client_factory
         if "auth" in self.params:
             kwargs["auth"] = self.params["auth"]
-        if "ignore_initialized_notification_failure" in self.params:
-            kwargs["ignore_initialized_notification_failure"] = self.params[
-                "ignore_initialized_notification_failure"
-            ]
         return streamablehttp_client(**kwargs)
 
     @asynccontextmanager

@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import MagicMock, patch
 
-import anyio
 import httpx
 import pytest
-from mcp.shared.message import JSONRPCMessage, SessionMessage
-from mcp.types import JSONRPCNotification, JSONRPCRequest
 
 from agents.mcp import MCPServerStreamableHttp
-from agents.mcp.server import _AgentsStreamableHTTPTransport
+from agents.mcp.server import (
+    _InitializedNotificationTolerantTransport,
+    _wrap_httpx_client_factory_for_initialized_notification_tolerance,
+)
 
 
 class TestMCPServerStreamableHttpClientFactory:
@@ -255,53 +254,49 @@ class TestMCPServerStreamableHttpClientFactory:
 
 
 @pytest.mark.asyncio
-async def test_initialized_notification_failure_does_not_stop_following_requests():
-    transport = _AgentsStreamableHTTPTransport(
+async def test_initialized_notification_failure_returns_synthetic_success():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.content == b'{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}':
+            return httpx.Response(503, request=request)
+        return httpx.Response(200, request=request)
+
+    transport = _InitializedNotificationTolerantTransport(httpx.MockTransport(handler))
+
+    initialized_request = httpx.Request(
+        "POST",
         "https://example.test/mcp",
-        ignore_initialized_notification_failure=True,
+        content=b'{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
     )
-    request_handled = asyncio.Event()
-
-    async def fake_handle_post_request(ctx):
-        message = ctx.session_message.message
-        if transport._is_initialized_notification(message):
-            request = httpx.Request("POST", "https://example.test/mcp")
-            response = httpx.Response(503, request=request)
-            raise httpx.HTTPStatusError("HTTP error 503", request=request, response=response)
-        request_handled.set()
-
-    transport._handle_post_request = fake_handle_post_request  # type: ignore[method-assign]
-
-    read_stream_writer, _ = anyio.create_memory_object_stream[SessionMessage | Exception](0)
-    write_stream, write_stream_reader = anyio.create_memory_object_stream[SessionMessage](0)
-
-    initialized_notification = SessionMessage(
-        JSONRPCMessage(
-            JSONRPCNotification(jsonrpc="2.0", method="notifications/initialized", params={})
-        )
-    )
-    list_tools_request = SessionMessage(
-        JSONRPCMessage(JSONRPCRequest(jsonrpc="2.0", id=1, method="tools/list", params={}))
+    normal_request = httpx.Request(
+        "POST",
+        "https://example.test/mcp",
+        content=b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}',
     )
 
-    async with httpx.AsyncClient() as client:
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(
-                transport.post_writer,
-                client,
-                write_stream_reader,
-                read_stream_writer,
-                write_stream,
-                lambda: None,
-                tg,
-            )
-            await write_stream.send(initialized_notification)
-            await write_stream.send(list_tools_request)
+    initialized_response = await transport.handle_async_request(initialized_request)
+    normal_response = await transport.handle_async_request(normal_request)
 
-            await asyncio.wait_for(request_handled.wait(), timeout=1)
+    assert initialized_response.status_code == 202
+    assert normal_response.status_code == 200
 
-            await write_stream.aclose()
-            tg.cancel_scope.cancel()
+
+@pytest.mark.asyncio
+async def test_initialized_notification_transport_exception_returns_synthetic_success():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.content == b'{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}':
+            raise httpx.ConnectError("boom", request=request)
+        return httpx.Response(200, request=request)
+
+    transport = _InitializedNotificationTolerantTransport(httpx.MockTransport(handler))
+    request = httpx.Request(
+        "POST",
+        "https://example.test/mcp",
+        content=b'{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
+    )
+
+    response = await transport.handle_async_request(request)
+
+    assert response.status_code == 202
 
 
 @pytest.mark.asyncio
@@ -318,11 +313,44 @@ async def test_streamable_http_server_passes_ignore_initialized_notification_fai
 
         server.create_streams()
 
-        mock_client.assert_called_once_with(
-            url="http://localhost:8000/mcp",
-            headers=None,
-            timeout=5,
-            sse_read_timeout=300,
-            terminate_on_close=True,
-            ignore_initialized_notification_failure=True,
-        )
+        kwargs = mock_client.call_args.kwargs
+        assert kwargs["url"] == "http://localhost:8000/mcp"
+        assert kwargs["headers"] is None
+        assert kwargs["timeout"] == 5
+        assert kwargs["sse_read_timeout"] == 300
+        assert kwargs["terminate_on_close"] is True
+
+        factory = kwargs["httpx_client_factory"]
+        client = factory()
+        try:
+            assert isinstance(client._transport, _InitializedNotificationTolerantTransport)
+        finally:
+            await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_factory_wrapper_preserves_non_initialized_failures():
+    def base_factory(
+        headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
+    ) -> httpx.AsyncClient:
+        del headers, timeout, auth
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("boom", request=request)
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    wrapped_factory = _wrap_httpx_client_factory_for_initialized_notification_tolerance(
+        base_factory
+    )
+    client = wrapped_factory()
+    try:
+        with pytest.raises(httpx.ConnectError):
+            await client.post(
+                "https://example.test/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            )
+    finally:
+        await client.aclose()
