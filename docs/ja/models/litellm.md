@@ -5,9 +5,9 @@ search:
 # LiteLLM
 
 <script>
-  window.location.replace("../#litellm");
+  window.location.replace("../#third-party-adapters");
 </script>
 
-このページは [Models の LiteLLM セクション](index.md#litellm)に移動しました。
+このページは [Models の Third-party adapters セクション](index.md#third-party-adapters)に移動しました。
 
 自動的にリダイレクトされない場合は、上記のリンクを使用してください。
