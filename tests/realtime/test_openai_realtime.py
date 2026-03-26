@@ -1864,6 +1864,40 @@ class TestTransportIntegration:
         assert captured_kwargs_long.get("ping_timeout") == 10.0
 
     @pytest.mark.asyncio
+    async def test_handshake_timeout_config_is_applied(self):
+        """Test that handshake_timeout is passed through as websockets open_timeout."""
+        captured_kwargs: dict[str, Any] = {}
+
+        async def capture_connect(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            mock_ws = AsyncMock()
+            mock_ws.close_code = None
+            return mock_ws
+
+        transport: TransportConfig = {
+            "handshake_timeout": 0.75,
+        }
+        model = OpenAIRealtimeWebSocketModel(transport_config=transport)
+        with patch("websockets.connect", side_effect=capture_connect):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                config: RealtimeModelConfig = {
+                    "api_key": "test-key",
+                    "url": "ws://localhost:8080/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+                }
+                await model.connect(config)
+
+        assert captured_kwargs.get("open_timeout") == 0.75
+
+    @pytest.mark.asyncio
     async def test_ping_timeout_disabled_vs_enabled(self):
         """Test that ping timeout can be disabled (None) vs enabled with a value."""
         from unittest.mock import AsyncMock, patch
@@ -1978,78 +2012,37 @@ class TestTransportIntegration:
         - Success: client timeout > server delay
         - Failure: client timeout < server delay
         """
-        import base64
-        import hashlib
-
         # Server handshake delay threshold (in seconds)
-        SERVER_HANDSHAKE_DELAY = 0.05
+        SERVER_HANDSHAKE_DELAY = 0.5
 
         shutdown_event = asyncio.Event()
-        connections_attempted = []
+        handshake_started = asyncio.Event()
+        handshake_attempts = 0
 
-        async def delayed_websocket_server(reader, writer):
-            """A WebSocket server that delays the handshake by a fixed amount."""
-            connections_attempted.append(True)
-            try:
-                # Read HTTP upgrade request
-                request = b""
-                while b"\r\n\r\n" not in request:
-                    chunk = await asyncio.wait_for(reader.read(1024), timeout=5.0)
-                    if not chunk:
-                        return
-                    request += chunk
+        async def process_request(_connection, _request):
+            nonlocal handshake_attempts
+            handshake_attempts += 1
+            handshake_started.set()
+            await asyncio.sleep(SERVER_HANDSHAKE_DELAY)
+            return None
 
-                # Extract Sec-WebSocket-Key
-                key = None
-                for line in request.decode().split("\r\n"):
-                    if line.lower().startswith("sec-websocket-key:"):
-                        key = line.split(":", 1)[1].strip()
-                        break
+        async def delayed_handler(_websocket):
+            await shutdown_event.wait()
 
-                if not key:
-                    writer.close()
-                    return
+        async with websockets.serve(
+            delayed_handler,
+            "127.0.0.1",
+            0,
+            process_request=process_request,
+        ) as server:
+            sockets = list(server.sockets)
+            port = sockets[0].getsockname()[1]
+            url = f"ws://127.0.0.1:{port}/v1/realtime"
 
-                # Intentional delay before completing handshake
-                await asyncio.sleep(SERVER_HANDSHAKE_DELAY)
-
-                # Generate accept key
-                GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-                accept = base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
-
-                # Send HTTP 101 Switching Protocols response
-                response = (
-                    "HTTP/1.1 101 Switching Protocols\r\n"
-                    "Upgrade: websocket\r\n"
-                    "Connection: Upgrade\r\n"
-                    f"Sec-WebSocket-Accept: {accept}\r\n"
-                    "\r\n"
-                )
-                writer.write(response.encode())
-                await writer.drain()
-
-                # Keep connection open until shutdown, then send a close frame so
-                # the client can complete close() without waiting for a timeout.
-                await shutdown_event.wait()
-                writer.write(b"\x88\x00")
-                await writer.drain()
-
-            except asyncio.TimeoutError:
-                pass
-            except Exception:
-                pass
-            finally:
-                writer.close()
-
-        server = await asyncio.start_server(delayed_websocket_server, "127.0.0.1", 0)
-        port = server.sockets[0].getsockname()[1]
-        url = f"ws://127.0.0.1:{port}/v1/realtime"
-
-        try:
             # Test 1: FAILURE - Client timeout < server delay
             # Client gives up before server completes handshake
             transport_fail: TransportConfig = {
-                "handshake_timeout": 0.01,
+                "handshake_timeout": 0.2,
             }
             model_fail = OpenAIRealtimeWebSocketModel(transport_config=transport_fail)
             config_fail: RealtimeModelConfig = {
@@ -2061,13 +2054,14 @@ class TestTransportIntegration:
             with pytest.raises((TimeoutError, asyncio.TimeoutError)):
                 await model_fail.connect(config_fail)
 
-            # Verify connection was attempted
-            assert len(connections_attempted) >= 1
+            # Wait briefly for the server to observe the request before asserting.
+            await asyncio.wait_for(handshake_started.wait(), timeout=1.0)
+            assert handshake_attempts >= 1
 
             # Test 2: SUCCESS - Client timeout > server delay
             # Client waits long enough for server to complete handshake
             transport_success: TransportConfig = {
-                "handshake_timeout": 0.2,
+                "handshake_timeout": 1.0,
             }
             model_success = OpenAIRealtimeWebSocketModel(transport_config=transport_success)
             config_success: RealtimeModelConfig = {
@@ -2084,11 +2078,6 @@ class TestTransportIntegration:
 
             shutdown_event.set()
             await model_success.close()
-
-        finally:
-            shutdown_event.set()
-            server.close()
-            await server.wait_closed()
 
     @pytest.mark.asyncio
     async def test_ping_interval_comparison_fast_vs_slow(self):
