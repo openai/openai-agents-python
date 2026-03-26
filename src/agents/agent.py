@@ -151,8 +151,8 @@ class MCPConfig(TypedDict):
     """
 
     include_server_in_tool_names: NotRequired[bool]
-    """If True, MCP tools are exposed as `<server_name>_<tool_name>` to avoid collisions across
-    servers that publish the same tool names. Defaults to False.
+    """If True, MCP tools are exposed with an unambiguous server-specific prefix to avoid
+    collisions across servers that publish the same tool names. Defaults to False.
     """
 
 

@@ -120,10 +120,12 @@ async def test_get_all_function_tools_can_prefix_with_server_name():
 
     tools = await agent.get_mcp_tools(run_context)
     tool_names = {tool.name for tool in tools}
-    assert tool_names == {"GitHub_MCP_Server_create_issue", "linear_create_issue"}
+    assert tool_names == {"mcp_18_GitHub_MCP_Server_create_issue", "mcp_7_linear_create_issue"}
 
-    github_tool = next(tool for tool in tools if tool.name == "GitHub_MCP_Server_create_issue")
-    linear_tool = next(tool for tool in tools if tool.name == "linear_create_issue")
+    github_tool = next(
+        tool for tool in tools if tool.name == "mcp_18_GitHub_MCP_Server_create_issue"
+    )
+    linear_tool = next(tool for tool in tools if tool.name == "mcp_7_linear_create_issue")
     assert isinstance(github_tool, FunctionTool)
     assert isinstance(linear_tool, FunctionTool)
 
@@ -165,7 +167,7 @@ async def test_get_all_function_tools_prefix_falls_back_for_empty_server_name_sl
     assert len(tools) == 1
     prefixed_tool = tools[0]
     assert isinstance(prefixed_tool, FunctionTool)
-    assert prefixed_tool.name == "server_search"
+    assert prefixed_tool.name == "mcp_7_server_search"
 
     tool_context = ToolContext(
         context=None,
@@ -197,7 +199,7 @@ async def test_get_all_function_tools_disambiguates_colliding_server_name_prefix
     tools = await agent.get_mcp_tools(run_context)
     tool_names = {tool.name for tool in tools}
     assert len(tool_names) == 2
-    assert all(tool_name.startswith("GitHub_MCP_Server_") for tool_name in tool_names)
+    assert all(tool_name.startswith("mcp_27_GitHub_MCP_Server_") for tool_name in tool_names)
     assert all(tool_name.endswith("_create_issue") for tool_name in tool_names)
 
     for idx, tool in enumerate(tools, start=1):
@@ -287,7 +289,7 @@ async def test_mcp_meta_resolver_uses_original_tool_name_with_prefixed_display_n
 
     prefixed_tool = tools[0]
     assert isinstance(prefixed_tool, FunctionTool)
-    assert prefixed_tool.name == "GitHub_MCP_Server_create_issue"
+    assert prefixed_tool.name == "mcp_18_GitHub_MCP_Server_create_issue"
 
     tool_context = ToolContext(
         context=None,

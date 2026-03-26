@@ -265,7 +265,11 @@ class MCPUtil:
                 convert_schemas_to_strict,
                 agent,
                 failure_error_function=failure_error_function,
-                tool_name_override=f"{tool_name_prefix}{tool.name}" if tool_name_prefix else None,
+                tool_name_override=(
+                    cls._prefixed_tool_name(tool_name_prefix, tool.name)
+                    if tool_name_prefix
+                    else None
+                ),
             )
             for tool in tools
         ]
@@ -279,6 +283,10 @@ class MCPUtil:
         if not normalized:
             normalized = "server"
         return f"{normalized}_"
+
+    @staticmethod
+    def _prefixed_tool_name(tool_name_prefix: str, tool_name: str) -> str:
+        return f"mcp_{len(tool_name_prefix)}_{tool_name_prefix}{tool_name}"
 
     @classmethod
     def _server_tool_name_prefixes(cls, servers: list[MCPServer]) -> dict[int, str]:
