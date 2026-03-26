@@ -162,10 +162,7 @@ async def test_extra_body_reasoning_effort_overrides_extra_args(monkeypatch):
 @pytest.mark.asyncio
 async def test_reasoning_summary_is_preserved_for_openai_style_models(monkeypatch):
     """
-    Preserve structured reasoning_effort for OpenAI-style LiteLLM routes.
-
-    This test verifies the fix for GitHub issue:
-    https://github.com/BerriAI/litellm/issues/17428
+    Preserve structured reasoning_effort for OpenAI-style LiteLLM routes when summary is set.
     """
     from openai.types.shared import Reasoning
 

@@ -159,12 +159,12 @@ class LitellmModel(Model):
         # Reuse the same normalization to expose retry-after and explicit retry/no-retry hints.
         return get_openai_retry_advice(request)
 
-    def _should_use_structured_reasoning_effort(self) -> bool:
+    def _should_downgrade_reasoning_effort_for_anthropic(self) -> bool:
         model_name = self.model.lower()
 
         # LiteLLM's Anthropic routes currently expect a string-valued reasoning_effort, not the
         # OpenAI-style {"effort", "summary"} object.
-        return not any(provider in model_name for provider in ("anthropic", "claude"))
+        return any(provider in model_name for provider in ("anthropic", "claude"))
 
     async def get_response(
         self,
@@ -463,18 +463,19 @@ class LitellmModel(Model):
                 f"Response format: {response_format}\n"
             )
 
-        # Build reasoning_effort. Summary is an OpenAI-style extension, so keep the structured
-        # shape for OpenAI-style routes but downgrade to string effort on providers like Anthropic.
+        # Build reasoning_effort. Summary is an OpenAI-style extension, so Anthropic/Claude
+        # routes downgrade to string effort while other LiteLLM routes keep the structured shape.
         reasoning_effort: dict[str, Any] | str | None = None
         if model_settings.reasoning:
             if model_settings.reasoning.summary is not None:
-                if self._should_use_structured_reasoning_effort():
+                if self._should_downgrade_reasoning_effort_for_anthropic():
+                    if model_settings.reasoning.effort is not None:
+                        reasoning_effort = model_settings.reasoning.effort
+                else:
                     reasoning_effort = {
                         "effort": model_settings.reasoning.effort,
                         "summary": model_settings.reasoning.summary,
                     }
-                elif model_settings.reasoning.effort is not None:
-                    reasoning_effort = model_settings.reasoning.effort
             elif model_settings.reasoning.effort is not None:
                 # String format for compatibility with all providers
                 reasoning_effort = model_settings.reasoning.effort
