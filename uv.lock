@@ -1992,7 +1992,7 @@ requires-dist = [
     { name = "graphviz", marker = "extra == 'viz'", specifier = ">=0.17" },
     { name = "griffe", specifier = ">=1.5.6,<2" },
     { name = "grpcio", marker = "extra == 'dapr'", specifier = ">=1.60.0" },
-    { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.81.0,<2" },
+    { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.81.0,<=1.82.6" },
     { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.19.0,<2" },
     { name = "numpy", marker = "python_full_version >= '3.10' and extra == 'voice'", specifier = ">=2.2.0,<3" },
     { name = "openai", specifier = ">=2.26.0,<3" },

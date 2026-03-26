@@ -58,6 +58,10 @@ async def test_mcp_tracing():
                         },
                         "children": [
                             {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                            },
+                            {
                                 "type": "function",
                                 "data": {
                                     "name": "test_tool_1",
@@ -69,6 +73,10 @@ async def test_mcp_tracing():
                             {
                                 "type": "mcp_tools",
                                 "data": {"server": "fake_mcp_server", "result": ["test_tool_1"]},
+                            },
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
                             },
                         ],
                     },
@@ -121,6 +129,10 @@ async def test_mcp_tracing():
                         },
                         "children": [
                             {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                            },
+                            {
                                 "type": "function",
                                 "data": {
                                     "name": "non_mcp_tool",
@@ -143,6 +155,10 @@ async def test_mcp_tracing():
                                     "server": "fake_mcp_server",
                                     "result": ["test_tool_1", "test_tool_2"],
                                 },
+                            },
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
                             },
                         ],
                     },
@@ -193,6 +209,10 @@ async def test_mcp_tracing():
                         },
                         "children": [
                             {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                            },
+                            {
                                 "type": "function",
                                 "data": {
                                     "name": "test_tool_3",
@@ -207,6 +227,10 @@ async def test_mcp_tracing():
                                     "server": "fake_mcp_server",
                                     "result": ["test_tool_1", "test_tool_2", "test_tool_3"],
                                 },
+                            },
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
                             },
                         ],
                     },
