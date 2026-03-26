@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import functools
+import hashlib
 import inspect
 import json
 from collections.abc import Awaitable
@@ -212,6 +213,9 @@ class MCPUtil:
         """Get all function tools from a list of MCP servers."""
         tools = []
         tool_names: set[str] = set()
+        server_tool_name_prefixes = (
+            cls._server_tool_name_prefixes(servers) if include_server_in_tool_names else {}
+        )
         for server in servers:
             server_tools = await cls.get_function_tools(
                 server,
@@ -220,6 +224,7 @@ class MCPUtil:
                 agent,
                 failure_error_function=failure_error_function,
                 include_server_in_tool_names=include_server_in_tool_names,
+                tool_name_prefix=server_tool_name_prefixes.get(id(server)),
             )
             server_tool_names = {tool.name for tool in server_tools}
             if len(server_tool_names & tool_names) > 0:
@@ -241,6 +246,7 @@ class MCPUtil:
         agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
         include_server_in_tool_names: bool = False,
+        tool_name_prefix: str | None = None,
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
 
@@ -248,9 +254,10 @@ class MCPUtil:
             tools = await server.list_tools(run_context, agent)
             span.span_data.result = [tool.name for tool in tools]
 
-        tool_name_prefix = (
-            cls._server_tool_name_prefix(server.name) if include_server_in_tool_names else ""
-        )
+        if tool_name_prefix is None:
+            tool_name_prefix = (
+                cls._server_tool_name_prefix(server.name) if include_server_in_tool_names else ""
+            )
         return [
             cls.to_function_tool(
                 tool,
@@ -272,6 +279,30 @@ class MCPUtil:
         if not normalized:
             normalized = "server"
         return f"{normalized}_"
+
+    @classmethod
+    def _server_tool_name_prefixes(cls, servers: list[MCPServer]) -> dict[int, str]:
+        normalized_to_servers: dict[str, list[MCPServer]] = {}
+        for server in servers:
+            normalized_prefix = cls._server_tool_name_prefix(server.name)[:-1]
+            normalized_to_servers.setdefault(normalized_prefix, []).append(server)
+
+        prefixes: dict[int, str] = {}
+        for normalized_prefix, grouped_servers in normalized_to_servers.items():
+            if len(grouped_servers) == 1:
+                prefixes[id(grouped_servers[0])] = f"{normalized_prefix}_"
+                continue
+
+            seen_prefixes: set[str] = set()
+            for index, server in enumerate(grouped_servers, start=1):
+                hash_suffix = hashlib.sha1(server.name.encode("utf-8")).hexdigest()[:8]
+                prefix = f"{normalized_prefix}_{hash_suffix}"
+                if prefix in seen_prefixes:
+                    prefix = f"{prefix}_{index}"
+                seen_prefixes.add(prefix)
+                prefixes[id(server)] = f"{prefix}_"
+
+        return prefixes
 
     @classmethod
     def to_function_tool(

@@ -179,6 +179,43 @@ async def test_get_all_function_tools_prefix_falls_back_for_empty_server_name_sl
 
 
 @pytest.mark.asyncio
+async def test_get_all_function_tools_disambiguates_colliding_server_name_prefixes():
+    server1 = FakeMCPServer(server_name="GitHub MCP Server")
+    server1.add_tool("create_issue", {})
+
+    server2 = FakeMCPServer(server_name="GitHub_MCP_Server")
+    server2.add_tool("create_issue", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(
+        name="test_agent",
+        instructions="Test agent",
+        mcp_servers=[server1, server2],
+        mcp_config={"include_server_in_tool_names": True},
+    )
+
+    tools = await agent.get_mcp_tools(run_context)
+    tool_names = {tool.name for tool in tools}
+    assert len(tool_names) == 2
+    assert all(tool_name.startswith("GitHub_MCP_Server_") for tool_name in tool_names)
+    assert all(tool_name.endswith("_create_issue") for tool_name in tool_names)
+
+    for idx, tool in enumerate(tools, start=1):
+        assert isinstance(tool, FunctionTool)
+        tool_context = ToolContext(
+            context=None,
+            tool_name=tool.name,
+            tool_call_id=f"prefixed_collision_{idx}",
+            tool_arguments='{"title":"collision"}',
+        )
+        result = await tool.on_invoke_tool(tool_context, '{"title":"collision"}')
+        assert isinstance(result, dict)
+
+    assert server1.tool_calls == ["create_issue"]
+    assert server2.tool_calls == ["create_issue"]
+
+
+@pytest.mark.asyncio
 async def test_invoke_mcp_tool():
     """Test that the invoke_mcp_tool function invokes an MCP tool and returns the result."""
     server = FakeMCPServer()
