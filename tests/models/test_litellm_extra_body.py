@@ -1,3 +1,5 @@
+import logging
+
 import litellm
 import pytest
 from litellm.types.utils import Choices, Message, ModelResponse, Usage
@@ -160,15 +162,22 @@ async def test_extra_body_reasoning_effort_overrides_extra_args(monkeypatch):
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_reasoning_summary_is_preserved(monkeypatch):
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "openai/gpt-5-mini",
+        "anthropic/claude-sonnet-4-5",
+        "gemini/gemini-2.5-pro",
+    ],
+)
+async def test_reasoning_summary_uses_scalar_effort_and_warns(
+    monkeypatch, caplog: pytest.LogCaptureFixture, model_name: str
+):
     """
-    Ensure reasoning.summary is preserved when passing ModelSettings.reasoning.
+    Ensure reasoning.summary does not change the LiteLLM chat-completions argument shape.
 
-    This test verifies the fix for GitHub issue:
-    https://github.com/BerriAI/litellm/issues/17428
-
-    Previously, only reasoning.effort was extracted, losing the summary field.
-    Now we pass a dict with both effort and summary to LiteLLM.
+    LitellmModel should continue to pass a scalar reasoning_effort value and warn that summary
+    is ignored on this path, regardless of the provider encoded in the model string.
     """
     from openai.types.shared import Reasoning
 
@@ -184,18 +193,24 @@ async def test_reasoning_summary_is_preserved(monkeypatch):
     settings = ModelSettings(
         reasoning=Reasoning(effort="medium", summary="auto"),
     )
-    model = LitellmModel(model="test-model")
+    model = LitellmModel(model=model_name)
 
-    await model.get_response(
-        system_instructions=None,
-        input=[],
-        model_settings=settings,
-        tools=[],
-        output_schema=None,
-        handoffs=[],
-        tracing=ModelTracing.DISABLED,
-        previous_response_id=None,
-    )
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        await model.get_response(
+            system_instructions=None,
+            input=[],
+            model_settings=settings,
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+        )
 
-    # Both effort and summary should be preserved in the dict
-    assert captured["reasoning_effort"] == {"effort": "medium", "summary": "auto"}
+    assert captured["reasoning_effort"] == "medium"
+    warning_messages = [
+        record.message
+        for record in caplog.records
+        if "does not forward Reasoning.summary" in record.message
+    ]
+    assert len(warning_messages) == 1
