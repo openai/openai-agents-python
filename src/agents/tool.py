@@ -294,6 +294,9 @@ class FunctionTool:
     defer_loading: bool = False
     """Whether the Responses API should hide this tool definition until tool search loads it."""
 
+    mcp_server_name: str | None = field(default=None, kw_only=True)
+    """The MCP server name this tool originated from, if it was converted from an MCP tool."""
+
     _failure_error_function: ToolErrorFunction | None = field(
         default=None,
         kw_only=True,
@@ -428,6 +431,7 @@ def _build_wrapped_function_tool(
     defer_loading: bool = False,
     sync_invoker: bool = False,
     mcp_title: str | None = None,
+    mcp_server_name: str | None = None,
 ) -> FunctionTool:
     """Create a FunctionTool with copied-tool-aware failure handling bound in one place."""
     on_invoke_tool = with_function_tool_failure_error_handler(
@@ -452,6 +456,7 @@ def _build_wrapped_function_tool(
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
             defer_loading=defer_loading,
+            mcp_server_name=mcp_server_name,
             _mcp_title=mcp_title,
         ),
         failure_error_function,

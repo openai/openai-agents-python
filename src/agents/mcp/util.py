@@ -313,6 +313,7 @@ class MCPUtil:
             strict_json_schema=is_strict,
             needs_approval=needs_approval,
             mcp_title=resolve_mcp_tool_title(tool),
+            mcp_server_name=server.name,
         )
         return function_tool
 

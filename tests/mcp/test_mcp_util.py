@@ -81,6 +81,17 @@ async def test_get_all_function_tools():
     assert len(tools) == 5
     assert all(tool.name in names for tool in tools)
 
+    expected_server_names = [
+        server1.name,
+        server1.name,
+        server2.name,
+        server2.name,
+        server3.name,
+    ]
+    for tool, expected_server_name in zip(tools, expected_server_names):
+        assert isinstance(tool, FunctionTool)
+        assert tool.mcp_server_name == expected_server_name
+
 
 @pytest.mark.asyncio
 async def test_invoke_mcp_tool():
@@ -159,6 +170,7 @@ async def test_to_function_tool_passes_static_mcp_meta():
     )
 
     function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+    assert function_tool.mcp_server_name == server.name
     tool_context = ToolContext(
         context=None,
         tool_name="test_tool_1",

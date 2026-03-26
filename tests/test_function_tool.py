@@ -350,6 +350,7 @@ async def test_manual_function_tool_creation_works():
 
     assert tool.name == "test"
     assert tool.description == "Processes extracted user data"
+    assert tool.mcp_server_name is None
     for key, value in FunctionArgs.model_json_schema().items():
         assert tool.params_json_schema[key] == value
     assert tool.strict_json_schema
@@ -700,6 +701,25 @@ async def test_shallow_copied_function_tool_normal_failure_uses_copied_policy() 
         )
 
     assert cast(Any, copied_tool).custom_state is custom_state
+
+
+def test_function_tool_copy_preserves_mcp_server_name() -> None:
+    async def invoke(_ctx: ToolContext[Any], _args: str) -> str:
+        return "ok"
+
+    original_tool = FunctionTool(
+        name="tool_name",
+        description="tool_description",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=invoke,
+        mcp_server_name="filesystem",
+    )
+
+    shallow_copied_tool = copy.copy(original_tool)
+    replaced_tool = dataclasses.replace(original_tool, name="copied_tool")
+
+    assert shallow_copied_tool.mcp_server_name == "filesystem"
+    assert replaced_tool.mcp_server_name == "filesystem"
 
 
 @pytest.mark.asyncio
