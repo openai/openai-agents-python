@@ -160,15 +160,12 @@ async def test_extra_body_reasoning_effort_overrides_extra_args(monkeypatch):
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_reasoning_summary_is_preserved(monkeypatch):
+async def test_reasoning_summary_is_preserved_for_openai_style_models(monkeypatch):
     """
-    Ensure reasoning.summary is preserved when passing ModelSettings.reasoning.
+    Preserve structured reasoning_effort for OpenAI-style LiteLLM routes.
 
     This test verifies the fix for GitHub issue:
     https://github.com/BerriAI/litellm/issues/17428
-
-    Previously, only reasoning.effort was extracted, losing the summary field.
-    Now we pass a dict with both effort and summary to LiteLLM.
     """
     from openai.types.shared import Reasoning
 
@@ -184,7 +181,7 @@ async def test_reasoning_summary_is_preserved(monkeypatch):
     settings = ModelSettings(
         reasoning=Reasoning(effort="medium", summary="auto"),
     )
-    model = LitellmModel(model="test-model")
+    model = LitellmModel(model="openai/gpt-5.4")
 
     await model.get_response(
         system_instructions=None,
@@ -199,3 +196,40 @@ async def test_reasoning_summary_is_preserved(monkeypatch):
 
     # Both effort and summary should be preserved in the dict
     assert captured["reasoning_effort"] == {"effort": "medium", "summary": "auto"}
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_reasoning_summary_downgrades_to_string_for_anthropic_models(monkeypatch):
+    """
+    Anthropic LiteLLM routes expect string-valued reasoning_effort, so summary should not force
+    the OpenAI-style structured payload.
+    """
+    from openai.types.shared import Reasoning
+
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(model, messages=None, **kwargs):
+        captured.update(kwargs)
+        msg = Message(role="assistant", content="ok")
+        choice = Choices(index=0, message=msg)
+        return ModelResponse(choices=[choice], usage=Usage(0, 0, 0))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    settings = ModelSettings(
+        reasoning=Reasoning(effort="medium", summary="auto"),
+    )
+    model = LitellmModel(model="anthropic/claude-sonnet-4-20250514")
+
+    await model.get_response(
+        system_instructions=None,
+        input=[],
+        model_settings=settings,
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+    )
+
+    assert captured["reasoning_effort"] == "medium"

@@ -159,6 +159,13 @@ class LitellmModel(Model):
         # Reuse the same normalization to expose retry-after and explicit retry/no-retry hints.
         return get_openai_retry_advice(request)
 
+    def _should_use_structured_reasoning_effort(self) -> bool:
+        model_name = self.model.lower()
+
+        # LiteLLM's Anthropic routes currently expect a string-valued reasoning_effort, not the
+        # OpenAI-style {"effort", "summary"} object.
+        return not any(provider in model_name for provider in ("anthropic", "claude"))
+
     async def get_response(
         self,
         system_instructions: str | None,
@@ -456,16 +463,18 @@ class LitellmModel(Model):
                 f"Response format: {response_format}\n"
             )
 
-        # Build reasoning_effort - use dict only when summary is present (OpenAI feature)
-        # Otherwise pass string for backward compatibility with all providers
+        # Build reasoning_effort. Summary is an OpenAI-style extension, so keep the structured
+        # shape for OpenAI-style routes but downgrade to string effort on providers like Anthropic.
         reasoning_effort: dict[str, Any] | str | None = None
         if model_settings.reasoning:
             if model_settings.reasoning.summary is not None:
-                # Dict format when summary is needed (OpenAI only)
-                reasoning_effort = {
-                    "effort": model_settings.reasoning.effort,
-                    "summary": model_settings.reasoning.summary,
-                }
+                if self._should_use_structured_reasoning_effort():
+                    reasoning_effort = {
+                        "effort": model_settings.reasoning.effort,
+                        "summary": model_settings.reasoning.summary,
+                    }
+                elif model_settings.reasoning.effort is not None:
+                    reasoning_effort = model_settings.reasoning.effort
             elif model_settings.reasoning.effort is not None:
                 # String format for compatibility with all providers
                 reasoning_effort = model_settings.reasoning.effort
