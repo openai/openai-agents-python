@@ -7,7 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Annotated, Any, Callable, Literal, get_args, get_origin, get_type_hints
 
-from griffe import Docstring, DocstringSectionKind
+# griffelib exposes the `griffe` package at runtime but currently does not ship typing markers.
+from griffe import Docstring, DocstringSectionKind  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field, create_model
 from pydantic.fields import FieldInfo
 
