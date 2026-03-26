@@ -203,6 +203,12 @@ class BackendSpanExporter(TracingExporter):
                 did_mutate = True
             sanitized_span_data[field_name] = sanitized_field
 
+        if span_data.get("type") == "response" and "metadata" in span_data:
+            if not did_mutate:
+                sanitized_span_data = dict(span_data)
+                did_mutate = True
+            sanitized_span_data.pop("metadata", None)
+
         if span_data.get("type") != "generation":
             if not did_mutate:
                 return payload_item

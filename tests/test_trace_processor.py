@@ -488,6 +488,26 @@ def test_sanitize_for_openai_tracing_api_keeps_allowed_generation_usage():
     exporter.close()
 
 
+def test_sanitize_for_openai_tracing_api_drops_response_metadata():
+    exporter = BackendSpanExporter(api_key="test_key")
+    payload: dict[str, Any] = {
+        "object": "trace.span",
+        "span_data": {
+            "type": "response",
+            "response_id": "resp_123",
+            "metadata": {"hook": "value"},
+        },
+    }
+
+    sanitized = exporter._sanitize_for_openai_tracing_api(payload)
+    assert sanitized["span_data"] == {
+        "type": "response",
+        "response_id": "resp_123",
+    }
+    assert payload["span_data"]["metadata"] == {"hook": "value"}
+    exporter.close()
+
+
 @patch("httpx.Client")
 def test_backend_span_exporter_keeps_large_input_for_custom_endpoint(mock_client):
     class DummyItem:
