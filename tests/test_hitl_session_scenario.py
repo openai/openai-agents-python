@@ -86,7 +86,9 @@ class ScenarioModel(Model):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: Any | None,
+        response_span: Any | None = None,
     ) -> ModelResponse:
+        del response_span
         if input_has_rejection(input):
             return ModelResponse(
                 output=[get_text_message(HITL_REJECTION_MSG)],
@@ -119,7 +121,9 @@ class ScenarioModel(Model):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: Any | None,
+        response_span: Any | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
+        del response_span
         if False:
             yield cast(TResponseStreamEvent, {})
         raise RuntimeError("Streaming is not supported in this scenario.")

@@ -44,7 +44,8 @@ from agents.items import (
 from agents.model_settings import ModelSettings
 from agents.models.interface import Model, ModelTracing
 from agents.tool import Tool
-from agents.tracing import SpanError, generation_span
+from agents.tracing import Span, SpanError, generation_span
+from agents.tracing.span_data import ResponseSpanData
 from agents.usage import Usage
 
 
@@ -91,6 +92,7 @@ class FakeModel(Model):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: Any | None,
+        response_span: Span[ResponseSpanData] | None = None,
     ) -> ModelResponse:
         turn_args = {
             "system_instructions": system_instructions,
@@ -143,11 +145,19 @@ class FakeModel(Model):
                 else:
                     converted_output.append(item)
 
-            return ModelResponse(
+            model_response = ModelResponse(
                 output=converted_output,
                 usage=self.hardcoded_usage or Usage(),
                 response_id="resp-789",
             )
+            if response_span is not None:
+                response_span.span_data.response = get_response_obj(
+                    converted_output,
+                    response_id=model_response.response_id,
+                    usage=model_response.usage,
+                )
+                response_span.span_data.input = input
+            return model_response
 
     async def stream_response(
         self,
@@ -162,6 +172,7 @@ class FakeModel(Model):
         previous_response_id: str | None = None,
         conversation_id: str | None = None,
         prompt: Any | None = None,
+        response_span: Span[ResponseSpanData] | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         turn_args = {
             "system_instructions": system_instructions,
@@ -192,6 +203,9 @@ class FakeModel(Model):
                 raise output
 
             response = get_response_obj(output, usage=self.hardcoded_usage)
+            if response_span is not None:
+                response_span.span_data.response = response
+                response_span.span_data.input = input
             sequence_number = 0
 
             yield ResponseCreatedEvent(

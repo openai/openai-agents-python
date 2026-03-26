@@ -51,6 +51,7 @@ async def test_single_run_is_single_trace():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     }
                 ],
             }
@@ -88,6 +89,7 @@ async def test_multiple_runs_are_multiple_traces():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     }
                 ],
             },
@@ -102,6 +104,7 @@ async def test_multiple_runs_are_multiple_traces():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     }
                 ],
             },
@@ -278,6 +281,7 @@ async def test_wrapped_trace_is_single_trace():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     },
                     {
                         "type": "agent",
@@ -287,6 +291,7 @@ async def test_wrapped_trace_is_single_trace():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     },
                     {
                         "type": "agent",
@@ -296,6 +301,7 @@ async def test_wrapped_trace_is_single_trace():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     },
                 ],
             }
@@ -362,6 +368,7 @@ async def test_trace_config_works():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     }
                 ],
             }
@@ -399,6 +406,7 @@ async def test_not_starting_streaming_creates_trace():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     }
                 ],
             }
@@ -436,6 +444,7 @@ async def test_streaming_single_run_is_single_trace():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     }
                 ],
             }
@@ -478,6 +487,7 @@ async def test_multiple_streamed_runs_are_multiple_traces():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     }
                 ],
             },
@@ -492,6 +502,7 @@ async def test_multiple_streamed_runs_are_multiple_traces():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     }
                 ],
             },
@@ -571,6 +582,7 @@ async def test_wrapped_streaming_trace_is_single_trace():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     },
                     {
                         "type": "agent",
@@ -580,6 +592,7 @@ async def test_wrapped_streaming_trace_is_single_trace():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     },
                     {
                         "type": "agent",
@@ -589,6 +602,7 @@ async def test_wrapped_streaming_trace_is_single_trace():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     },
                 ],
             }
@@ -635,6 +649,7 @@ async def test_wrapped_mixed_trace_is_single_trace():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     },
                     {
                         "type": "agent",
@@ -644,6 +659,7 @@ async def test_wrapped_mixed_trace_is_single_trace():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     },
                     {
                         "type": "agent",
@@ -653,6 +669,7 @@ async def test_wrapped_mixed_trace_is_single_trace():
                             "tools": [],
                             "output_type": "str",
                         },
+                        "children": [{"type": "response", "data": {"response_id": "resp-789"}}],
                     },
                 ],
             }

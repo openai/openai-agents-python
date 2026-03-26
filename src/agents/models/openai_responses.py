@@ -60,7 +60,7 @@ from ..tool import (
     has_required_tool_search_surface,
     validate_responses_tool_search_configuration,
 )
-from ..tracing import SpanError, response_span
+from ..tracing import SpanError, response_span as create_response_span
 from ..usage import Usage
 from ..util._json import _to_dump_compatible
 from ..version import __version__
@@ -74,6 +74,8 @@ from .interface import Model, ModelTracing
 
 if TYPE_CHECKING:
     from ..model_settings import ModelSettings
+    from ..tracing import Span
+    from ..tracing.span_data import ResponseSpanData
 
 
 _USER_AGENT = f"Agents/Python {__version__}"
@@ -430,8 +432,13 @@ class OpenAIResponsesModel(Model):
         previous_response_id: str | None = None,
         conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
+        response_span: Span[ResponseSpanData] | None = None,
     ) -> ModelResponse:
-        with response_span(disabled=tracing.is_disabled()) as span_response:
+        span_response = response_span or create_response_span(disabled=tracing.is_disabled())
+        owns_response_span = response_span is None
+        if owns_response_span:
+            span_response.start(mark_as_current=True)
+        try:
             try:
                 response = await self._fetch_response(
                     system_instructions,
@@ -477,24 +484,27 @@ class OpenAIResponsesModel(Model):
                     span_response.span_data.response = response
                     span_response.span_data.input = input
             except Exception as e:
-                span_response.set_error(
-                    SpanError(
-                        message="Error getting response",
-                        data={
-                            "error": str(e) if tracing.include_data() else e.__class__.__name__,
-                        },
+                if owns_response_span:
+                    span_response.set_error(
+                        SpanError(
+                            message="Error getting response",
+                            data={
+                                "error": str(e) if tracing.include_data() else e.__class__.__name__,
+                            },
+                        )
                     )
-                )
                 request_id = getattr(e, "request_id", None)
                 logger.error(f"Error getting response: {e}. (request_id: {request_id})")
                 raise
-
-        return ModelResponse(
-            output=response.output,
-            usage=usage,
-            response_id=response.id,
-            request_id=getattr(response, "_request_id", None),
-        )
+            return ModelResponse(
+                output=response.output,
+                usage=usage,
+                response_id=response.id,
+                request_id=getattr(response, "_request_id", None),
+            )
+        finally:
+            if owns_response_span:
+                span_response.finish(reset_current=True)
 
     async def stream_response(
         self,
@@ -508,11 +518,16 @@ class OpenAIResponsesModel(Model):
         previous_response_id: str | None = None,
         conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
+        response_span: Span[ResponseSpanData] | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         """
         Yields a partial message as it is generated, as well as the usage information.
         """
-        with response_span(disabled=tracing.is_disabled()) as span_response:
+        span_response = response_span or create_response_span(disabled=tracing.is_disabled())
+        owns_response_span = response_span is None
+        if owns_response_span:
+            span_response.start(mark_as_current=True)
+        try:
             try:
                 stream = await self._fetch_response(
                     system_instructions,
@@ -571,16 +586,20 @@ class OpenAIResponsesModel(Model):
                     span_response.span_data.input = input
 
             except Exception as e:
-                span_response.set_error(
-                    SpanError(
-                        message="Error streaming response",
-                        data={
-                            "error": str(e) if tracing.include_data() else e.__class__.__name__,
-                        },
+                if owns_response_span:
+                    span_response.set_error(
+                        SpanError(
+                            message="Error streaming response",
+                            data={
+                                "error": str(e) if tracing.include_data() else e.__class__.__name__,
+                            },
+                        )
                     )
-                )
                 logger.error(f"Error streaming response: {e}")
                 raise
+        finally:
+            if owns_response_span:
+                span_response.finish(reset_current=True)
 
     @overload
     async def _fetch_response(

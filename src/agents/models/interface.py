@@ -15,6 +15,8 @@ from ..tool import Tool
 if TYPE_CHECKING:
     from ..model_settings import ModelSettings
     from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
+    from ..tracing import Span
+    from ..tracing.span_data import ResponseSpanData
 
 
 class ModelTracing(enum.Enum):
@@ -67,6 +69,7 @@ class Model(abc.ABC):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
+        response_span: Span[ResponseSpanData] | None = None,
     ) -> ModelResponse:
         """Get a response from the model.
 
@@ -102,6 +105,7 @@ class Model(abc.ABC):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
+        response_span: Span[ResponseSpanData] | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """Stream a response from the model.
 

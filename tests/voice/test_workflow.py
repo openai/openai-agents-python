@@ -57,7 +57,9 @@ class FakeStreamingModel(Model):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: Any | None,
+        response_span: Any | None = None,
     ) -> ModelResponse:
+        del response_span
         raise NotImplementedError("Not implemented")
 
     async def stream_response(
@@ -73,8 +75,13 @@ class FakeStreamingModel(Model):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: Any | None,
+        response_span: Any | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         output = self.get_next_output()
+        response = get_response_obj(output)
+        if response_span is not None:
+            response_span.span_data.response = response
+            response_span.span_data.input = input
         for item in output:
             if (
                 item.type == "message"
@@ -93,7 +100,7 @@ class FakeStreamingModel(Model):
 
         yield ResponseCompletedEvent(
             type="response.completed",
-            response=get_response_obj(output),
+            response=response,
             sequence_number=1,
         )
 

@@ -80,11 +80,20 @@ async def test_single_turn_model_error():
                         },
                         "children": [
                             {
-                                "type": "generation",
+                                "type": "response",
                                 "error": {
-                                    "message": "Error",
-                                    "data": {"name": "ValueError", "message": "test error"},
+                                    "message": "Error during streamed LLM execution",
+                                    "data": {"error": "test error"},
                                 },
+                                "children": [
+                                    {
+                                        "type": "generation",
+                                        "error": {
+                                            "message": "Error",
+                                            "data": {"name": "ValueError", "message": "test error"},
+                                        },
+                                    }
+                                ],
                             }
                         ],
                     }
@@ -135,7 +144,11 @@ async def test_multi_turn_no_handoffs():
                             "output_type": "str",
                         },
                         "children": [
-                            {"type": "generation"},
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                                "children": [{"type": "generation"}],
+                            },
                             {
                                 "type": "function",
                                 "data": {
@@ -145,11 +158,20 @@ async def test_multi_turn_no_handoffs():
                                 },
                             },
                             {
-                                "type": "generation",
+                                "type": "response",
                                 "error": {
-                                    "message": "Error",
-                                    "data": {"name": "ValueError", "message": "test error"},
+                                    "message": "Error during streamed LLM execution",
+                                    "data": {"error": "test error"},
                                 },
+                                "children": [
+                                    {
+                                        "type": "generation",
+                                        "error": {
+                                            "message": "Error",
+                                            "data": {"name": "ValueError", "message": "test error"},
+                                        },
+                                    }
+                                ],
                             },
                         ],
                     }
@@ -199,7 +221,11 @@ async def test_tool_call_error():
                             "output_type": "str",
                         },
                         "children": [
-                            {"type": "generation"},
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                                "children": [{"type": "generation"}],
+                            },
                             {
                                 "type": "function",
                                 "error": {
@@ -214,12 +240,16 @@ async def test_tool_call_error():
                                     "input": "bad_json",
                                     "output": (
                                         "An error occurred while parsing tool arguments. "
-                                        "Please try again with valid JSON. Error: Expecting "
-                                        "value: line 1 column 1 (char 0)"
+                                        "Please try again with valid JSON. Error: "
+                                        "Expecting value: line 1 column 1 (char 0)"
                                     ),
                                 },
                             },
-                            {"type": "generation"},
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                                "children": [{"type": "generation"}],
+                            },
                         ],
                     }
                 ],
@@ -281,7 +311,11 @@ async def test_multiple_handoff_doesnt_error():
                             "output_type": "str",
                         },
                         "children": [
-                            {"type": "generation"},
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                                "children": [{"type": "generation"}],
+                            },
                             {
                                 "type": "function",
                                 "data": {
@@ -290,21 +324,31 @@ async def test_multiple_handoff_doesnt_error():
                                     "output": "result",
                                 },
                             },
-                            {"type": "generation"},
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                                "children": [{"type": "generation"}],
+                            },
                             {
                                 "type": "handoff",
-                                "data": {"from_agent": "test", "to_agent": "test"},
                                 "error": {
-                                    "data": {"requested_agents": ["test", "test"]},
                                     "message": "Multiple handoffs requested",
+                                    "data": {"requested_agents": ["test", "test"]},
                                 },
+                                "data": {"from_agent": "test", "to_agent": "test"},
                             },
                         ],
                     },
                     {
                         "type": "agent",
                         "data": {"name": "test", "handoffs": [], "tools": [], "output_type": "str"},
-                        "children": [{"type": "generation"}],
+                        "children": [
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                                "children": [{"type": "generation"}],
+                            }
+                        ],
                     },
                 ],
             }
@@ -348,7 +392,13 @@ async def test_multiple_final_output_no_error():
                     {
                         "type": "agent",
                         "data": {"name": "test", "handoffs": [], "tools": [], "output_type": "Foo"},
-                        "children": [{"type": "generation"}],
+                        "children": [
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                                "children": [{"type": "generation"}],
+                            }
+                        ],
                     }
                 ],
             }
@@ -420,7 +470,11 @@ async def test_handoffs_lead_to_correct_agent_spans():
                             "output_type": "str",
                         },
                         "children": [
-                            {"type": "generation"},
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                                "children": [{"type": "generation"}],
+                            },
                             {
                                 "type": "function",
                                 "data": {
@@ -429,7 +483,11 @@ async def test_handoffs_lead_to_correct_agent_spans():
                                     "output": "result",
                                 },
                             },
-                            {"type": "generation"},
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                                "children": [{"type": "generation"}],
+                            },
                             {
                                 "type": "handoff",
                                 "error": {
@@ -449,7 +507,11 @@ async def test_handoffs_lead_to_correct_agent_spans():
                             "output_type": "str",
                         },
                         "children": [
-                            {"type": "generation"},
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                                "children": [{"type": "generation"}],
+                            },
                             {
                                 "type": "function",
                                 "data": {
@@ -458,7 +520,11 @@ async def test_handoffs_lead_to_correct_agent_spans():
                                     "output": "result",
                                 },
                             },
-                            {"type": "generation"},
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                                "children": [{"type": "generation"}],
+                            },
                             {
                                 "type": "handoff",
                                 "data": {"from_agent": "test_agent_1", "to_agent": "test_agent_3"},
@@ -473,7 +539,13 @@ async def test_handoffs_lead_to_correct_agent_spans():
                             "tools": ["some_function"],
                             "output_type": "str",
                         },
-                        "children": [{"type": "generation"}],
+                        "children": [
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                                "children": [{"type": "generation"}],
+                            }
+                        ],
                     },
                 ],
             }
@@ -522,12 +594,20 @@ async def test_max_turns_exceeded():
                             "output_type": "Foo",
                         },
                         "children": [
-                            {"type": "generation"},
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                                "children": [{"type": "generation"}],
+                            },
                             {
                                 "type": "function",
                                 "data": {"name": "foo", "input": "", "output": "result"},
                             },
-                            {"type": "generation"},
+                            {
+                                "type": "response",
+                                "data": {"response_id": "resp-789"},
+                                "children": [{"type": "generation"}],
+                            },
                             {
                                 "type": "function",
                                 "data": {"name": "foo", "input": "", "output": "result"},
@@ -584,7 +664,8 @@ async def test_input_guardrail_error():
                             {
                                 "type": "guardrail",
                                 "data": {"name": "input_guardrail_function", "triggered": True},
-                            }
+                            },
+                            {"type": "response", "data": {"response_id": "resp-789"}},
                         ],
                     }
                 ],
@@ -631,10 +712,11 @@ async def test_output_guardrail_error():
                         },
                         "data": {"name": "test", "handoffs": [], "tools": [], "output_type": "str"},
                         "children": [
+                            {"type": "response", "data": {"response_id": "resp-789"}},
                             {
                                 "type": "guardrail",
                                 "data": {"name": "output_guardrail_function", "triggered": True},
-                            }
+                            },
                         ],
                     }
                 ],

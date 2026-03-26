@@ -27,7 +27,7 @@ from ..logger import logger
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import Tool
 from ..tracing import generation_span
-from ..tracing.span_data import GenerationSpanData
+from ..tracing.span_data import GenerationSpanData, ResponseSpanData
 from ..tracing.spans import Span
 from ..usage import Usage
 from ..util._json import _to_dump_compatible
@@ -108,7 +108,9 @@ class OpenAIChatCompletionsModel(Model):
         previous_response_id: str | None = None,  # unused
         conversation_id: str | None = None,  # unused
         prompt: ResponsePromptParam | None = None,
+        response_span: Span[ResponseSpanData] | None = None,
     ) -> ModelResponse:
+        del response_span
         with generation_span(
             model=str(self.model),
             model_config=model_settings.to_json_dict() | {"base_url": str(self._client.base_url)},
@@ -221,10 +223,12 @@ class OpenAIChatCompletionsModel(Model):
         previous_response_id: str | None = None,  # unused
         conversation_id: str | None = None,  # unused
         prompt: ResponsePromptParam | None = None,
+        response_span: Span[ResponseSpanData] | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """
         Yields a partial message as it is generated, as well as the usage information.
         """
+        del response_span
         with generation_span(
             model=str(self.model),
             model_config=model_settings.to_json_dict() | {"base_url": str(self._client.base_url)},

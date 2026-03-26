@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses as _dc
+import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar, cast
@@ -64,7 +65,13 @@ from ..stream_events import (
     RunItemStreamEvent,
 )
 from ..tool import FunctionTool, Tool, dispose_resolved_computers
-from ..tracing import Span, SpanError, agent_span, get_current_trace
+from ..tracing import (
+    Span,
+    SpanError,
+    agent_span,
+    get_current_trace,
+    response_span as create_response_span,
+)
 from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData
 from ..usage import Usage
@@ -229,6 +236,23 @@ __all__ = [
     "get_model",
     "input_guardrail_tripwire_triggered_for_stream",
 ]
+
+
+def _maybe_attach_response_span_kwarg(
+    method: Callable[..., Any],
+    request_kwargs: dict[str, Any],
+    response_span: Span[Any],
+) -> None:
+    try:
+        parameters = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return
+
+    if any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD or parameter.name == "response_span"
+        for parameter in parameters
+    ):
+        request_kwargs["response_span"] = response_span
 
 
 def _should_attach_generic_agent_error(exc: Exception) -> bool:
@@ -1230,212 +1254,238 @@ async def run_single_turn_streamed(
     if not filtered.input and server_conversation_tracker is None:
         raise RuntimeError("Prepared model input is empty")
 
-    await asyncio.gather(
-        hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
-        (
-            agent.hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input)
-            if agent.hooks
-            else _coro.noop_coroutine()
-        ),
+    model_tracing = get_model_tracing_impl(
+        run_config.tracing_disabled, run_config.trace_include_sensitive_data
     )
+    active_response_span = create_response_span(disabled=model_tracing.is_disabled())
+    active_response_span.start(mark_as_current=True)
 
-    if (
-        not streamed_result._stream_input_persisted
-        and session is not None
-        and server_conversation_tracker is None
-        and streamed_result._original_input_for_persistence
-        and len(streamed_result._original_input_for_persistence) > 0
-    ):
-        streamed_result._stream_input_persisted = True
-        input_items_to_save = [
-            ensure_input_item_format(item)
-            for item in ItemHelpers.input_to_new_input_list(
-                streamed_result._original_input_for_persistence
-            )
-        ]
-        if input_items_to_save:
-            await save_result_to_session(session, input_items_to_save, [], streamed_result._state)
-
-    previous_response_id = (
-        server_conversation_tracker.previous_response_id
-        if server_conversation_tracker
-        and server_conversation_tracker.previous_response_id is not None
-        else None
-    )
-    conversation_id = (
-        server_conversation_tracker.conversation_id if server_conversation_tracker else None
-    )
-    if conversation_id:
-        logger.debug("Using conversation_id=%s", conversation_id)
-    else:
-        logger.debug("No conversation_id available for request")
-
-    async def rewind_model_request() -> None:
-        items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
-        await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
-        if server_conversation_tracker is not None:
-            server_conversation_tracker.rewind_input(filtered.input)
-
-    stream_failed_retry_attempts: list[int] = [0]
-    retry_stream = stream_response_with_retry(
-        get_stream=lambda: model.stream_response(
-            filtered.instructions,
-            filtered.input,
-            model_settings,
-            all_tools,
-            output_schema,
-            handoffs,
-            get_model_tracing_impl(
-                run_config.tracing_disabled, run_config.trace_include_sensitive_data
-            ),
-            previous_response_id=previous_response_id,
-            conversation_id=conversation_id,
-            prompt=prompt_config,
-        ),
-        rewind=rewind_model_request,
-        retry_settings=model_settings.retry,
-        get_retry_advice=model.get_retry_advice,
-        previous_response_id=previous_response_id,
-        conversation_id=conversation_id,
-        failed_retry_attempts_out=stream_failed_retry_attempts,
-    )
-
-    async for event in retry_stream:
-        streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
-
-        terminal_response: Response | None = None
-        if isinstance(event, ResponseCompletedEvent):
-            terminal_response = event.response
-        elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
-            maybe_response = getattr(event, "response", None)
-            if isinstance(maybe_response, Response):
-                terminal_response = maybe_response
-
-        if terminal_response is not None:
-            usage = (
-                apply_retry_attempt_usage(
-                    Usage(
-                        requests=1,
-                        input_tokens=terminal_response.usage.input_tokens,
-                        output_tokens=terminal_response.usage.output_tokens,
-                        total_tokens=terminal_response.usage.total_tokens,
-                        input_tokens_details=terminal_response.usage.input_tokens_details,
-                        output_tokens_details=terminal_response.usage.output_tokens_details,
-                    ),
-                    stream_failed_retry_attempts[0],
-                )
-                if terminal_response.usage
-                else Usage()
-            )
-            final_response = ModelResponse(
-                output=terminal_response.output,
-                usage=usage,
-                response_id=terminal_response.id,
-                request_id=getattr(terminal_response, "_request_id", None),
-            )
-
-        if isinstance(event, ResponseOutputItemDoneEvent):
-            output_item = event.item
-            output_item_type = getattr(output_item, "type", None)
-
-            if output_item_type == "tool_search_call":
-                emitted_tool_search_fingerprints.add(_tool_search_fingerprint(output_item))
-                streamed_result._event_queue.put_nowait(
-                    RunItemStreamEvent(
-                        item=ToolSearchCallItem(
-                            raw_item=coerce_tool_search_call_raw_item(output_item),
-                            agent=agent,
-                        ),
-                        name="tool_search_called",
-                    )
-                )
-
-            elif output_item_type == "tool_search_output":
-                emitted_tool_search_fingerprints.add(_tool_search_fingerprint(output_item))
-                streamed_result._event_queue.put_nowait(
-                    RunItemStreamEvent(
-                        item=ToolSearchOutputItem(
-                            raw_item=coerce_tool_search_output_raw_item(output_item),
-                            agent=agent,
-                        ),
-                        name="tool_search_output_created",
-                    )
-                )
-
-            elif isinstance(output_item, McpListTools):
-                hosted_mcp_tool_metadata.update(collect_mcp_list_tools_metadata([output_item]))
-
-            elif isinstance(output_item, TOOL_CALL_TYPES):
-                output_call_id: str | None = getattr(
-                    output_item, "call_id", getattr(output_item, "id", None)
-                )
-
-                if (
-                    output_call_id
-                    and isinstance(output_call_id, str)
-                    and output_call_id not in emitted_tool_call_ids
-                ):
-                    emitted_tool_call_ids.add(output_call_id)
-
-                    # Look up tool description from precomputed map ("last wins" matches
-                    # execution behavior in process_model_response).
-                    tool_lookup_key = get_function_tool_lookup_key_for_call(output_item)
-                    matched_tool = (
-                        tool_map.get(tool_lookup_key) if tool_lookup_key is not None else None
-                    )
-                    tool_description: str | None = None
-                    tool_title: str | None = None
-                    if isinstance(output_item, McpCall):
-                        metadata = hosted_mcp_tool_metadata.get(
-                            (output_item.server_label, output_item.name)
-                        )
-                        if metadata is not None:
-                            tool_description = metadata.description
-                            tool_title = metadata.title
-                    elif matched_tool is not None:
-                        tool_description = getattr(matched_tool, "description", None)
-                        tool_title = getattr(matched_tool, "_mcp_title", None)
-
-                    tool_item = ToolCallItem(
-                        raw_item=cast(ToolCallItemTypes, output_item),
-                        agent=agent,
-                        description=tool_description,
-                        title=tool_title,
-                    )
-                    streamed_result._event_queue.put_nowait(
-                        RunItemStreamEvent(item=tool_item, name="tool_called")
-                    )
-
-            elif isinstance(output_item, ResponseReasoningItem):
-                reasoning_id: str | None = getattr(output_item, "id", None)
-
-                if reasoning_id and reasoning_id not in emitted_reasoning_item_ids:
-                    emitted_reasoning_item_ids.add(reasoning_id)
-
-                    reasoning_item = ReasoningItem(raw_item=output_item, agent=agent)
-                    streamed_result._event_queue.put_nowait(
-                        RunItemStreamEvent(item=reasoning_item, name="reasoning_item_created")
-                    )
-
-    if final_response is not None:
-        context_wrapper.usage.add(final_response.usage)
+    try:
         await asyncio.gather(
+            hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
             (
-                agent.hooks.on_llm_end(context_wrapper, agent, final_response)
+                agent.hooks.on_llm_start(
+                    context_wrapper, agent, filtered.instructions, filtered.input
+                )
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
-            hooks.on_llm_end(context_wrapper, agent, final_response),
         )
 
-    if not final_response:
-        raise ModelBehaviorError("Model did not produce a final response!")
+        if (
+            not streamed_result._stream_input_persisted
+            and session is not None
+            and server_conversation_tracker is None
+            and streamed_result._original_input_for_persistence
+            and len(streamed_result._original_input_for_persistence) > 0
+        ):
+            streamed_result._stream_input_persisted = True
+            input_items_to_save = [
+                ensure_input_item_format(item)
+                for item in ItemHelpers.input_to_new_input_list(
+                    streamed_result._original_input_for_persistence
+                )
+            ]
+            if input_items_to_save:
+                await save_result_to_session(
+                    session, input_items_to_save, [], streamed_result._state
+                )
 
-    if server_conversation_tracker is not None:
-        # Streaming uses the same rewind helper, so a successful retry must restore delivered
-        # input tracking before the next turn computes server-managed deltas.
-        server_conversation_tracker.mark_input_as_sent(filtered.input)
-        server_conversation_tracker.track_server_items(final_response)
+        previous_response_id = (
+            server_conversation_tracker.previous_response_id
+            if server_conversation_tracker
+            and server_conversation_tracker.previous_response_id is not None
+            else None
+        )
+        conversation_id = (
+            server_conversation_tracker.conversation_id if server_conversation_tracker else None
+        )
+        if conversation_id:
+            logger.debug("Using conversation_id=%s", conversation_id)
+        else:
+            logger.debug("No conversation_id available for request")
+
+        async def rewind_model_request() -> None:
+            items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
+            await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
+            if server_conversation_tracker is not None:
+                server_conversation_tracker.rewind_input(filtered.input)
+
+        stream_request_kwargs: dict[str, Any] = {
+            "system_instructions": filtered.instructions,
+            "input": filtered.input,
+            "model_settings": model_settings,
+            "tools": all_tools,
+            "output_schema": output_schema,
+            "handoffs": handoffs,
+            "tracing": model_tracing,
+            "previous_response_id": previous_response_id,
+            "conversation_id": conversation_id,
+            "prompt": prompt_config,
+        }
+        _maybe_attach_response_span_kwarg(
+            model.stream_response, stream_request_kwargs, active_response_span
+        )
+
+        stream_failed_retry_attempts: list[int] = [0]
+        retry_stream = stream_response_with_retry(
+            get_stream=lambda: model.stream_response(**stream_request_kwargs),
+            rewind=rewind_model_request,
+            retry_settings=model_settings.retry,
+            get_retry_advice=model.get_retry_advice,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            failed_retry_attempts_out=stream_failed_retry_attempts,
+        )
+
+        async for event in retry_stream:
+            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+
+            terminal_response: Response | None = None
+            if isinstance(event, ResponseCompletedEvent):
+                terminal_response = event.response
+            elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
+                maybe_response = getattr(event, "response", None)
+                if isinstance(maybe_response, Response):
+                    terminal_response = maybe_response
+
+            if terminal_response is not None:
+                usage = (
+                    apply_retry_attempt_usage(
+                        Usage(
+                            requests=1,
+                            input_tokens=terminal_response.usage.input_tokens,
+                            output_tokens=terminal_response.usage.output_tokens,
+                            total_tokens=terminal_response.usage.total_tokens,
+                            input_tokens_details=terminal_response.usage.input_tokens_details,
+                            output_tokens_details=terminal_response.usage.output_tokens_details,
+                        ),
+                        stream_failed_retry_attempts[0],
+                    )
+                    if terminal_response.usage
+                    else Usage()
+                )
+                final_response = ModelResponse(
+                    output=terminal_response.output,
+                    usage=usage,
+                    response_id=terminal_response.id,
+                    request_id=getattr(terminal_response, "_request_id", None),
+                )
+
+            if isinstance(event, ResponseOutputItemDoneEvent):
+                output_item = event.item
+                output_item_type = getattr(output_item, "type", None)
+
+                if output_item_type == "tool_search_call":
+                    emitted_tool_search_fingerprints.add(_tool_search_fingerprint(output_item))
+                    streamed_result._event_queue.put_nowait(
+                        RunItemStreamEvent(
+                            item=ToolSearchCallItem(
+                                raw_item=coerce_tool_search_call_raw_item(output_item),
+                                agent=agent,
+                            ),
+                            name="tool_search_called",
+                        )
+                    )
+
+                elif output_item_type == "tool_search_output":
+                    emitted_tool_search_fingerprints.add(_tool_search_fingerprint(output_item))
+                    streamed_result._event_queue.put_nowait(
+                        RunItemStreamEvent(
+                            item=ToolSearchOutputItem(
+                                raw_item=coerce_tool_search_output_raw_item(output_item),
+                                agent=agent,
+                            ),
+                            name="tool_search_output_created",
+                        )
+                    )
+
+                elif isinstance(output_item, McpListTools):
+                    hosted_mcp_tool_metadata.update(collect_mcp_list_tools_metadata([output_item]))
+
+                elif isinstance(output_item, TOOL_CALL_TYPES):
+                    output_call_id: str | None = getattr(
+                        output_item, "call_id", getattr(output_item, "id", None)
+                    )
+
+                    if (
+                        output_call_id
+                        and isinstance(output_call_id, str)
+                        and output_call_id not in emitted_tool_call_ids
+                    ):
+                        emitted_tool_call_ids.add(output_call_id)
+
+                        # Look up tool description from precomputed map ("last wins" matches
+                        # execution behavior in process_model_response).
+                        tool_lookup_key = get_function_tool_lookup_key_for_call(output_item)
+                        matched_tool = (
+                            tool_map.get(tool_lookup_key) if tool_lookup_key is not None else None
+                        )
+                        tool_description: str | None = None
+                        tool_title: str | None = None
+                        if isinstance(output_item, McpCall):
+                            metadata = hosted_mcp_tool_metadata.get(
+                                (output_item.server_label, output_item.name)
+                            )
+                            if metadata is not None:
+                                tool_description = metadata.description
+                                tool_title = metadata.title
+                        elif matched_tool is not None:
+                            tool_description = getattr(matched_tool, "description", None)
+                            tool_title = getattr(matched_tool, "_mcp_title", None)
+
+                        tool_item = ToolCallItem(
+                            raw_item=cast(ToolCallItemTypes, output_item),
+                            agent=agent,
+                            description=tool_description,
+                            title=tool_title,
+                        )
+                        streamed_result._event_queue.put_nowait(
+                            RunItemStreamEvent(item=tool_item, name="tool_called")
+                        )
+
+                elif isinstance(output_item, ResponseReasoningItem):
+                    reasoning_id: str | None = getattr(output_item, "id", None)
+
+                    if reasoning_id and reasoning_id not in emitted_reasoning_item_ids:
+                        emitted_reasoning_item_ids.add(reasoning_id)
+
+                        reasoning_item = ReasoningItem(raw_item=output_item, agent=agent)
+                        streamed_result._event_queue.put_nowait(
+                            RunItemStreamEvent(item=reasoning_item, name="reasoning_item_created")
+                        )
+
+        if final_response is not None:
+            context_wrapper.usage.add(final_response.usage)
+            await asyncio.gather(
+                (
+                    agent.hooks.on_llm_end(context_wrapper, agent, final_response)
+                    if agent.hooks
+                    else _coro.noop_coroutine()
+                ),
+                hooks.on_llm_end(context_wrapper, agent, final_response),
+            )
+
+        if not final_response:
+            raise ModelBehaviorError("Model did not produce a final response!")
+
+        if server_conversation_tracker is not None:
+            # Streaming uses the same rewind helper, so a successful retry must restore delivered
+            # input tracking before the next turn computes server-managed deltas.
+            server_conversation_tracker.mark_input_as_sent(filtered.input)
+            server_conversation_tracker.track_server_items(final_response)
+    except Exception as e:
+        active_response_span.set_error(
+            SpanError(
+                message="Error during streamed LLM execution",
+                data={"error": str(e) if model_tracing.include_data() else e.__class__.__name__},
+            )
+        )
+        raise
+    finally:
+        active_response_span.finish(reset_current=True)
+
+    assert final_response is not None
 
     single_step_result = await get_single_step_result_from_response(
         agent=agent,
@@ -1612,76 +1662,96 @@ async def get_new_response(
     if server_conversation_tracker is not None:
         server_conversation_tracker.mark_input_as_sent(filtered.input)
 
-    await asyncio.gather(
-        hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
-        (
-            agent.hooks.on_llm_start(
-                context_wrapper,
-                agent,
-                filtered.instructions,
-                filtered.input,
-            )
-            if agent.hooks
-            else _coro.noop_coroutine()
-        ),
+    model_tracing = get_model_tracing_impl(
+        run_config.tracing_disabled, run_config.trace_include_sensitive_data
     )
+    active_response_span = create_response_span(disabled=model_tracing.is_disabled())
+    active_response_span.start(mark_as_current=True)
 
-    previous_response_id = (
-        server_conversation_tracker.previous_response_id
-        if server_conversation_tracker
-        and server_conversation_tracker.previous_response_id is not None
-        else None
-    )
-    conversation_id = (
-        server_conversation_tracker.conversation_id if server_conversation_tracker else None
-    )
-    if conversation_id:
-        logger.debug("Using conversation_id=%s", conversation_id)
-    else:
-        logger.debug("No conversation_id available for request")
-
-    async def rewind_model_request() -> None:
-        items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
-        await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
-        if server_conversation_tracker is not None:
-            server_conversation_tracker.rewind_input(filtered.input)
-
-    new_response = await get_response_with_retry(
-        get_response=lambda: model.get_response(
-            system_instructions=filtered.instructions,
-            input=filtered.input,
-            model_settings=model_settings,
-            tools=all_tools,
-            output_schema=output_schema,
-            handoffs=handoffs,
-            tracing=get_model_tracing_impl(
-                run_config.tracing_disabled, run_config.trace_include_sensitive_data
+    try:
+        await asyncio.gather(
+            hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
+            (
+                agent.hooks.on_llm_start(
+                    context_wrapper,
+                    agent,
+                    filtered.instructions,
+                    filtered.input,
+                )
+                if agent.hooks
+                else _coro.noop_coroutine()
             ),
+        )
+
+        previous_response_id = (
+            server_conversation_tracker.previous_response_id
+            if server_conversation_tracker
+            and server_conversation_tracker.previous_response_id is not None
+            else None
+        )
+        conversation_id = (
+            server_conversation_tracker.conversation_id if server_conversation_tracker else None
+        )
+        if conversation_id:
+            logger.debug("Using conversation_id=%s", conversation_id)
+        else:
+            logger.debug("No conversation_id available for request")
+
+        async def rewind_model_request() -> None:
+            items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
+            await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
+            if server_conversation_tracker is not None:
+                server_conversation_tracker.rewind_input(filtered.input)
+
+        response_request_kwargs: dict[str, Any] = {
+            "system_instructions": filtered.instructions,
+            "input": filtered.input,
+            "model_settings": model_settings,
+            "tools": all_tools,
+            "output_schema": output_schema,
+            "handoffs": handoffs,
+            "tracing": model_tracing,
+            "previous_response_id": previous_response_id,
+            "conversation_id": conversation_id,
+            "prompt": prompt_config,
+        }
+        _maybe_attach_response_span_kwarg(
+            model.get_response, response_request_kwargs, active_response_span
+        )
+
+        new_response = await get_response_with_retry(
+            get_response=lambda: model.get_response(**response_request_kwargs),
+            rewind=rewind_model_request,
+            retry_settings=model_settings.retry,
+            get_retry_advice=model.get_retry_advice,
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
-            prompt=prompt_config,
-        ),
-        rewind=rewind_model_request,
-        retry_settings=model_settings.retry,
-        get_retry_advice=model.get_retry_advice,
-        previous_response_id=previous_response_id,
-        conversation_id=conversation_id,
-    )
-    if server_conversation_tracker is not None:
-        # Retry helpers rewind sent-input tracking before replaying a failed request. Mark the
-        # filtered input as delivered again once a retry succeeds so subsequent turns only send
-        # new deltas.
-        server_conversation_tracker.mark_input_as_sent(filtered.input)
+        )
+        if server_conversation_tracker is not None:
+            # Retry helpers rewind sent-input tracking before replaying a failed request. Mark the
+            # filtered input as delivered again once a retry succeeds so subsequent turns only send
+            # new deltas.
+            server_conversation_tracker.mark_input_as_sent(filtered.input)
 
-    context_wrapper.usage.add(new_response.usage)
+        context_wrapper.usage.add(new_response.usage)
 
-    await asyncio.gather(
-        (
-            agent.hooks.on_llm_end(context_wrapper, agent, new_response)
-            if agent.hooks
-            else _coro.noop_coroutine()
-        ),
-        hooks.on_llm_end(context_wrapper, agent, new_response),
-    )
+        await asyncio.gather(
+            (
+                agent.hooks.on_llm_end(context_wrapper, agent, new_response)
+                if agent.hooks
+                else _coro.noop_coroutine()
+            ),
+            hooks.on_llm_end(context_wrapper, agent, new_response),
+        )
 
-    return new_response
+        return new_response
+    except Exception as e:
+        active_response_span.set_error(
+            SpanError(
+                message="Error during LLM execution",
+                data={"error": str(e) if model_tracing.include_data() else e.__class__.__name__},
+            )
+        )
+        raise
+    finally:
+        active_response_span.finish(reset_current=True)

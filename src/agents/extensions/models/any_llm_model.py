@@ -42,8 +42,8 @@ from ...models.openai_responses import (
 )
 from ...retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ...tool import Tool
-from ...tracing import generation_span, response_span
-from ...tracing.span_data import GenerationSpanData
+from ...tracing import SpanError, generation_span, response_span as create_response_span
+from ...tracing.span_data import GenerationSpanData, ResponseSpanData
 from ...tracing.spans import Span
 from ...usage import Usage
 from ...util._json import _to_dump_compatible
@@ -260,6 +260,7 @@ class AnyLLMModel(Model):
         previous_response_id: str | None = None,
         conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
+        response_span: Span[ResponseSpanData] | None = None,
     ) -> ModelResponse:
         if self._selected_api() == "responses":
             return await self._get_response_via_responses(
@@ -273,6 +274,7 @@ class AnyLLMModel(Model):
                 previous_response_id=previous_response_id,
                 conversation_id=conversation_id,
                 prompt=prompt,
+                response_span=response_span,
             )
 
         return await self._get_response_via_chat(
@@ -298,6 +300,7 @@ class AnyLLMModel(Model):
         previous_response_id: str | None = None,
         conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
+        response_span: Span[ResponseSpanData] | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         if self._selected_api() == "responses":
             async for chunk in self._stream_response_via_responses(
@@ -311,6 +314,7 @@ class AnyLLMModel(Model):
                 previous_response_id=previous_response_id,
                 conversation_id=conversation_id,
                 prompt=prompt,
+                response_span=response_span,
             ):
                 yield chunk
             return
@@ -340,56 +344,76 @@ class AnyLLMModel(Model):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
+        response_span: Span[ResponseSpanData] | None,
     ) -> ModelResponse:
-        with response_span(disabled=tracing.is_disabled()) as span_response:
-            response = await self._fetch_responses_response(
-                system_instructions=system_instructions,
-                input=input,
-                model_settings=model_settings,
-                tools=tools,
-                output_schema=output_schema,
-                handoffs=handoffs,
-                previous_response_id=previous_response_id,
-                conversation_id=conversation_id,
-                stream=False,
-                prompt=prompt,
-            )
-
-            if _debug.DONT_LOG_MODEL_DATA:
-                logger.debug("LLM responded")
-            else:
-                logger.debug(
-                    "LLM resp:\n%s\n",
-                    json.dumps(
-                        [item.model_dump() for item in response.output],
-                        indent=2,
-                        ensure_ascii=False,
-                    ),
+        span_response = response_span or create_response_span(disabled=tracing.is_disabled())
+        owns_response_span = response_span is None
+        if owns_response_span:
+            span_response.start(mark_as_current=True)
+        try:
+            try:
+                response = await self._fetch_responses_response(
+                    system_instructions=system_instructions,
+                    input=input,
+                    model_settings=model_settings,
+                    tools=tools,
+                    output_schema=output_schema,
+                    handoffs=handoffs,
+                    previous_response_id=previous_response_id,
+                    conversation_id=conversation_id,
+                    stream=False,
+                    prompt=prompt,
                 )
 
-            usage = (
-                Usage(
-                    requests=1,
-                    input_tokens=response.usage.input_tokens,
-                    output_tokens=response.usage.output_tokens,
-                    total_tokens=response.usage.total_tokens,
-                    input_tokens_details=response.usage.input_tokens_details,
-                    output_tokens_details=response.usage.output_tokens_details,
+                if _debug.DONT_LOG_MODEL_DATA:
+                    logger.debug("LLM responded")
+                else:
+                    logger.debug(
+                        "LLM resp:\n%s\n",
+                        json.dumps(
+                            [item.model_dump() for item in response.output],
+                            indent=2,
+                            ensure_ascii=False,
+                        ),
+                    )
+
+                usage = (
+                    Usage(
+                        requests=1,
+                        input_tokens=response.usage.input_tokens,
+                        output_tokens=response.usage.output_tokens,
+                        total_tokens=response.usage.total_tokens,
+                        input_tokens_details=response.usage.input_tokens_details,
+                        output_tokens_details=response.usage.output_tokens_details,
+                    )
+                    if response.usage
+                    else Usage()
                 )
-                if response.usage
-                else Usage()
-            )
 
-            if tracing.include_data():
-                span_response.span_data.response = response
-                span_response.span_data.input = input
+                if tracing.include_data():
+                    span_response.span_data.response = response
+                    span_response.span_data.input = input
 
-            return ModelResponse(
-                output=response.output,
-                usage=usage,
-                response_id=response.id,
-                request_id=getattr(response, "_request_id", None),
-            )
+                return ModelResponse(
+                    output=response.output,
+                    usage=usage,
+                    response_id=response.id,
+                    request_id=getattr(response, "_request_id", None),
+                )
+            except Exception as e:
+                if owns_response_span:
+                    span_response.set_error(
+                        SpanError(
+                            message="Error getting response",
+                            data={
+                                "error": str(e) if tracing.include_data() else e.__class__.__name__,
+                            },
+                        )
+                    )
+                raise
+        finally:
+            if owns_response_span:
+                span_response.finish(reset_current=True)
 
     async def _stream_response_via_responses(
         self,
@@ -404,37 +428,60 @@ class AnyLLMModel(Model):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
+        response_span: Span[ResponseSpanData] | None,
     ) -> AsyncIterator[ResponseStreamEvent]:
-        with response_span(disabled=tracing.is_disabled()) as span_response:
-            stream = await self._fetch_responses_response(
-                system_instructions=system_instructions,
-                input=input,
-                model_settings=model_settings,
-                tools=tools,
-                output_schema=output_schema,
-                handoffs=handoffs,
-                previous_response_id=previous_response_id,
-                conversation_id=conversation_id,
-                stream=True,
-                prompt=prompt,
-            )
-
-            final_response: Response | None = None
+        span_response = response_span or create_response_span(disabled=tracing.is_disabled())
+        owns_response_span = response_span is None
+        if owns_response_span:
+            span_response.start(mark_as_current=True)
+        try:
             try:
-                async for chunk in stream:
-                    if isinstance(chunk, ResponseCompletedEvent):
-                        final_response = chunk.response
-                    elif getattr(chunk, "type", None) in {"response.failed", "response.incomplete"}:
-                        terminal_response = getattr(chunk, "response", None)
-                        if isinstance(terminal_response, Response):
-                            final_response = terminal_response
-                    yield chunk
-            finally:
-                await self._maybe_aclose(stream)
+                stream = await self._fetch_responses_response(
+                    system_instructions=system_instructions,
+                    input=input,
+                    model_settings=model_settings,
+                    tools=tools,
+                    output_schema=output_schema,
+                    handoffs=handoffs,
+                    previous_response_id=previous_response_id,
+                    conversation_id=conversation_id,
+                    stream=True,
+                    prompt=prompt,
+                )
 
-            if tracing.include_data() and final_response:
-                span_response.span_data.response = final_response
-                span_response.span_data.input = input
+                final_response: Response | None = None
+                try:
+                    async for chunk in stream:
+                        if isinstance(chunk, ResponseCompletedEvent):
+                            final_response = chunk.response
+                        elif getattr(chunk, "type", None) in {
+                            "response.failed",
+                            "response.incomplete",
+                        }:
+                            terminal_response = getattr(chunk, "response", None)
+                            if isinstance(terminal_response, Response):
+                                final_response = terminal_response
+                        yield chunk
+                finally:
+                    await self._maybe_aclose(stream)
+
+                if tracing.include_data() and final_response:
+                    span_response.span_data.response = final_response
+                    span_response.span_data.input = input
+            except Exception as e:
+                if owns_response_span:
+                    span_response.set_error(
+                        SpanError(
+                            message="Error streaming response",
+                            data={
+                                "error": str(e) if tracing.include_data() else e.__class__.__name__,
+                            },
+                        )
+                    )
+                raise
+        finally:
+            if owns_response_span:
+                span_response.finish(reset_current=True)
 
     async def _get_response_via_chat(
         self,

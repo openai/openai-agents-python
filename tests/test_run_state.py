@@ -2046,6 +2046,7 @@ class TestDeserializeHelpers:
                 previous_response_id: str | None,
                 conversation_id: str | None,
                 prompt: Any | None,
+                response_span: Any | None = None,
             ) -> ModelResponse:
                 del (
                     system_instructions,
@@ -2057,6 +2058,7 @@ class TestDeserializeHelpers:
                     previous_response_id,
                     conversation_id,
                     prompt,
+                    response_span,
                 )
                 if _has_function_call_output(input):
                     return ModelResponse(
@@ -2092,6 +2094,7 @@ class TestDeserializeHelpers:
                 previous_response_id: str | None,
                 conversation_id: str | None,
                 prompt: Any | None,
+                response_span: Any | None = None,
             ) -> AsyncIterator[TResponseStreamEvent]:
                 del (
                     system_instructions,
@@ -2104,6 +2107,7 @@ class TestDeserializeHelpers:
                     previous_response_id,
                     conversation_id,
                     prompt,
+                    response_span,
                 )
                 if False:
                     yield cast(TResponseStreamEvent, {})

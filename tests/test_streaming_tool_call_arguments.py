@@ -59,7 +59,9 @@ class StreamingFakeModel(Model):
         previous_response_id: Optional[str],
         conversation_id: Optional[str],
         prompt: Optional[Any],
+        response_span: Optional[Any] = None,
     ):
+        del response_span
         raise NotImplementedError("Use stream_response instead")
 
     async def stream_response(
@@ -75,6 +77,7 @@ class StreamingFakeModel(Model):
         previous_response_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         prompt: Optional[Any] = None,
+        response_span: Optional[Any] = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """Stream events that simulate real OpenAI streaming behavior for tool calls."""
         self.last_turn_args = {
@@ -123,9 +126,13 @@ class StreamingFakeModel(Model):
                     sequence_number += 1
 
             # Finally: emit completion
+            response = get_response_obj(output)
+            if response_span is not None:
+                response_span.span_data.response = response
+                response_span.span_data.input = input
             yield ResponseCompletedEvent(
                 type="response.completed",
-                response=get_response_obj(output),
+                response=response,
                 sequence_number=sequence_number,
             )
 

@@ -196,6 +196,7 @@ async def test_cancel_immediate_unblocks_waiting_stream_consumer():
             previous_response_id=None,
             conversation_id=None,
             prompt=None,
+            response_span=None,
         ):
             await block_event.wait()
             async for event in super().stream_response(
@@ -209,6 +210,7 @@ async def test_cancel_immediate_unblocks_waiting_stream_consumer():
                 previous_response_id=previous_response_id,
                 conversation_id=conversation_id,
                 prompt=prompt,
+                response_span=response_span,
             ):
                 yield event
 

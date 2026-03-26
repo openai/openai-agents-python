@@ -53,7 +53,7 @@ from ...models.reasoning_content_replay import ShouldReplayReasoningContent
 from ...retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ...tool import Tool
 from ...tracing import generation_span
-from ...tracing.span_data import GenerationSpanData
+from ...tracing.span_data import GenerationSpanData, ResponseSpanData
 from ...tracing.spans import Span
 from ...usage import Usage
 from ...util._json import _to_dump_compatible
@@ -171,7 +171,9 @@ class LitellmModel(Model):
         previous_response_id: str | None = None,  # unused
         conversation_id: str | None = None,  # unused
         prompt: Any | None = None,
+        response_span: Span[ResponseSpanData] | None = None,
     ) -> ModelResponse:
+        del response_span
         with generation_span(
             model=str(self.model),
             model_config=model_settings.to_json_dict()
@@ -285,7 +287,9 @@ class LitellmModel(Model):
         previous_response_id: str | None = None,  # unused
         conversation_id: str | None = None,  # unused
         prompt: Any | None = None,
+        response_span: Span[ResponseSpanData] | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
+        del response_span
         with generation_span(
             model=str(self.model),
             model_config=model_settings.to_json_dict()

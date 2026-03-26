@@ -139,20 +139,22 @@ class GenerationSpanData(SpanData):
 class ResponseSpanData(SpanData):
     """
     Represents a Response Span in the trace.
-    Includes response and input.
+    Includes response, input, and user-defined metadata.
     """
 
-    __slots__ = ("response", "input")
+    __slots__ = ("response", "input", "metadata")
 
     def __init__(
         self,
         response: Response | None = None,
         input: str | list[ResponseInputItemParam] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         self.response = response
         # This is not used by the OpenAI trace processors, but is useful for other tracing
         # processor implementations
         self.input = input
+        self.metadata = metadata or {}
 
     @property
     def type(self) -> str:
@@ -162,6 +164,7 @@ class ResponseSpanData(SpanData):
         return {
             "type": self.type,
             "response_id": self.response.id if self.response else None,
+            "metadata": self.metadata or None,
         }
 
 

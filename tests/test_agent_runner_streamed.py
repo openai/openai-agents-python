@@ -161,6 +161,7 @@ async def test_streamed_run_accepts_terminal_response_payload_events(
             previous_response_id=None,
             conversation_id=None,
             prompt=None,
+            response_span=None,
         ):
             self.last_turn_args = {
                 "system_instructions": system_instructions,
@@ -177,6 +178,9 @@ async def test_streamed_run_accepts_terminal_response_payload_events(
             response = get_response_obj(
                 [get_text_message("partial final")], response_id="resp-partial"
             )
+            if response_span is not None:
+                response_span.span_data.response = response
+                response_span.span_data.input = input
             yield terminal_event_cls(
                 type=terminal_event_type,
                 response=response,
@@ -211,11 +215,15 @@ async def test_streamed_run_exposes_request_id_on_raw_responses() -> None:
             previous_response_id=None,
             conversation_id=None,
             prompt=None,
+            response_span=None,
         ):
             response = get_response_obj(
                 [get_text_message("partial final")], response_id="resp-partial"
             )
             response._request_id = "req_streamed_result_123"
+            if response_span is not None:
+                response_span.span_data.response = response
+                response_span.span_data.input = input
             yield ResponseCompletedEvent(
                 type="response.completed",
                 response=response,
