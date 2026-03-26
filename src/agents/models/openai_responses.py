@@ -1935,15 +1935,16 @@ class Converter:
         if isinstance(tool, FunctionTool):
             return cls._convert_function_tool(tool)
         elif isinstance(tool, WebSearchTool):
+            web_search_tool: dict[str, Any] = {
+                "type": "web_search",
+                "filters": tool.filters.model_dump() if tool.filters is not None else None,
+                "user_location": tool.user_location,
+                "search_context_size": tool.search_context_size,
+            }
+            if tool.external_web_access is not None:
+                web_search_tool["external_web_access"] = tool.external_web_access
             return (
-                _require_responses_tool_param(
-                    {
-                        "type": "web_search",
-                        "filters": tool.filters.model_dump() if tool.filters is not None else None,
-                        "user_location": tool.user_location,
-                        "search_context_size": tool.search_context_size,
-                    }
-                ),
+                _require_responses_tool_param(web_search_tool),
                 None,
             )
         elif isinstance(tool, FileSearchTool):

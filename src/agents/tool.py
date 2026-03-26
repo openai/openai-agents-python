@@ -499,6 +499,13 @@ class WebSearchTool:
     search_context_size: Literal["low", "medium", "high"] = "medium"
     """The amount of context to use for the search."""
 
+    external_web_access: bool | None = None
+    """Whether the web search tool may fetch live internet content.
+
+    When omitted, the API default is used. Set to `False` to request cached or
+    indexed-only behavior where supported.
+    """
+
     @property
     def name(self):
         return "web_search"
