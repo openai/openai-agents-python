@@ -33,6 +33,7 @@ from .items import (
     fingerprint_input_item,
     normalize_input_items_for_api,
     run_item_to_input_item,
+    strip_internal_input_item_metadata,
 )
 from .oai_conversation import OpenAIServerConversationTracker
 from .run_steps import SingleStepResult
@@ -85,7 +86,9 @@ async def prepare_input_with_session(
         history = await session.get_items(limit=resolved_settings.limit)
     else:
         history = await session.get_items()
-    converted_history = [ensure_input_item_format(item) for item in history]
+    converted_history = [
+        strip_internal_input_item_metadata(ensure_input_item_format(item)) for item in history
+    ]
 
     new_input_list = [
         ensure_input_item_format(item) for item in ItemHelpers.input_to_new_input_list(input)
@@ -562,7 +565,7 @@ def _ignore_ids_for_matching(session: Session) -> bool:
 def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInputItem:
     """Remove provider-specific fields before fingerprinting or persistence."""
     if isinstance(item, dict):
-        clean_item = dict(item)
+        clean_item = cast(dict[str, Any], strip_internal_input_item_metadata(item))
         clean_item.pop("id", None)
         clean_item.pop("provider_data", None)
         return cast(TResponseInputItem, clean_item)
@@ -585,6 +588,11 @@ def _session_item_key(item: Any) -> str:
             payload = item
         else:
             payload = ensure_input_item_format(item)
+        if isinstance(payload, dict):
+            payload = cast(
+                dict[str, Any],
+                strip_internal_input_item_metadata(cast(TResponseInputItem, payload)),
+            )
         return json.dumps(payload, sort_keys=True, default=str)
     except Exception:
         return repr(item)

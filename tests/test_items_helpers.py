@@ -3,7 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import weakref
-from typing import cast
+from typing import Any, cast
 
 from openai.types.responses.computer_action import Click as BatchedClick, Type as BatchedType
 from openai.types.responses.response_computer_tool_call import (
@@ -45,7 +45,7 @@ from agents import (
     TResponseInputItem,
     Usage,
 )
-from agents.items import ToolCallOutputItem
+from agents.items import ToolCallItem, ToolCallOutputItem
 
 
 def make_message(
@@ -568,3 +568,29 @@ def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:
 
     # This used to fail when validated payloads retained ValidatorIterator fields.
     json.dumps(new_list)
+
+
+def test_tool_call_item_to_input_item_keeps_payload_api_safe() -> None:
+    agent = Agent(name="test", instructions="test")
+    raw_item = ResponseFunctionToolCall(
+        id="fc_1",
+        call_id="call_1",
+        name="my_tool",
+        arguments="{}",
+        type="function_call",
+        status="completed",
+    )
+    item = ToolCallItem(
+        agent=agent,
+        raw_item=raw_item,
+        title="My Tool",
+        description="A helpful tool",
+    )
+
+    result = item.to_input_item()
+    result_dict = cast(dict[str, Any], result)
+
+    assert isinstance(result, dict)
+    assert result_dict["type"] == "function_call"
+    assert "title" not in result_dict
+    assert "description" not in result_dict

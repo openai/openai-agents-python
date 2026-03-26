@@ -20,6 +20,10 @@ from agents.memory.openai_responses_compaction_session import (
     is_openai_model_name,
     select_compaction_candidate_items,
 )
+from agents.run_internal.items import (
+    TOOL_CALL_SESSION_DESCRIPTION_KEY,
+    TOOL_CALL_SESSION_TITLE_KEY,
+)
 from tests.fake_model import FakeModel
 from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
 from tests.utils.simple_session import SimpleListSession
@@ -214,6 +218,104 @@ class TestOpenAIResponsesCompactionSession:
         call_kwargs = mock_client.responses.compact.call_args.kwargs
         assert "previous_response_id" not in call_kwargs
         assert call_kwargs.get("input") == items
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_input_mode_strips_internal_tool_call_metadata(self) -> None:
+        mock_session = self.create_mock_session()
+        items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "lookup_account",
+                    "arguments": "{}",
+                    TOOL_CALL_SESSION_DESCRIPTION_KEY: "Lookup customer records.",
+                    TOOL_CALL_SESSION_TITLE_KEY: "Lookup Account",
+                },
+            ),
+            cast(
+                TResponseInputItem,
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "ok",
+                },
+            ),
+        ]
+        mock_session.get_items.return_value = items
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = []
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        await session.run_compaction({"force": True})
+
+        call_kwargs = mock_client.responses.compact.call_args.kwargs
+        compact_input = cast(list[dict[str, Any]], call_kwargs["input"])
+        assert compact_input[0]["type"] == "function_call"
+        assert TOOL_CALL_SESSION_DESCRIPTION_KEY not in compact_input[0]
+        assert TOOL_CALL_SESSION_TITLE_KEY not in compact_input[0]
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_uses_sanitized_cached_items_after_add(self) -> None:
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = []
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = []
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        await session._ensure_compaction_candidates()
+        await session.add_items(
+            [
+                cast(
+                    TResponseInputItem,
+                    {
+                        "type": "function_call",
+                        "call_id": "call_cached",
+                        "name": "lookup_account",
+                        "arguments": "{}",
+                        TOOL_CALL_SESSION_DESCRIPTION_KEY: "Lookup customer records.",
+                        TOOL_CALL_SESSION_TITLE_KEY: "Lookup Account",
+                    },
+                ),
+                cast(
+                    TResponseInputItem,
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_cached",
+                        "output": "ok",
+                    },
+                ),
+            ]
+        )
+
+        await session.run_compaction({"force": True})
+
+        call_kwargs = mock_client.responses.compact.call_args.kwargs
+        compact_input = cast(list[dict[str, Any]], call_kwargs["input"])
+        assert compact_input[0]["type"] == "function_call"
+        assert TOOL_CALL_SESSION_DESCRIPTION_KEY not in compact_input[0]
+        assert TOOL_CALL_SESSION_TITLE_KEY not in compact_input[0]
 
     @pytest.mark.asyncio
     async def test_run_compaction_auto_uses_input_when_store_false(self) -> None:

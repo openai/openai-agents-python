@@ -3,13 +3,18 @@ from __future__ import annotations
 from typing import Any, cast
 
 import pytest
-from openai.types.responses import ResponseToolSearchCall, ResponseToolSearchOutputItem
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseToolSearchCall,
+    ResponseToolSearchOutputItem,
+)
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from agents import Agent
 from agents.exceptions import AgentsException
 from agents.items import (
     ReasoningItem,
+    ToolCallItem,
     ToolSearchCallItem,
     ToolSearchOutputItem,
     TResponseInputItem,
@@ -457,6 +462,75 @@ def test_run_item_to_input_item_strips_tool_search_created_by() -> None:
     assert isinstance(converted_output, dict)
     assert converted_output["type"] == "tool_search_output"
     assert "created_by" not in converted_output
+
+
+def test_run_item_to_input_item_omits_tool_call_metadata() -> None:
+    agent = Agent(name="A")
+    tool_call = ToolCallItem(
+        agent=agent,
+        raw_item=ResponseFunctionToolCall(
+            id="fc_123",
+            call_id="call_123",
+            name="lookup_account",
+            arguments="{}",
+            type="function_call",
+            status="completed",
+        ),
+        description="Lookup customer records.",
+        title="Lookup Account",
+    )
+
+    result = run_items.run_item_to_input_item(tool_call)
+    result_dict = cast(dict[str, Any], result)
+
+    assert isinstance(result, dict)
+    assert result_dict["type"] == "function_call"
+    assert "description" not in result_dict
+    assert "title" not in result_dict
+
+
+def test_normalize_input_items_for_api_strips_internal_tool_call_metadata() -> None:
+    item = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "call_123",
+            "name": "lookup_account",
+            "arguments": "{}",
+            run_items.TOOL_CALL_SESSION_DESCRIPTION_KEY: "Lookup customer records.",
+            run_items.TOOL_CALL_SESSION_TITLE_KEY: "Lookup Account",
+        },
+    )
+
+    normalized = run_items.normalize_input_items_for_api([item])
+    normalized_item = cast(dict[str, Any], normalized[0])
+
+    assert run_items.TOOL_CALL_SESSION_DESCRIPTION_KEY not in normalized_item
+    assert run_items.TOOL_CALL_SESSION_TITLE_KEY not in normalized_item
+
+
+def test_fingerprint_input_item_ignores_internal_tool_call_metadata() -> None:
+    base_item = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "call_123",
+            "name": "lookup_account",
+            "arguments": "{}",
+        },
+    )
+    with_metadata = cast(
+        TResponseInputItem,
+        {
+            **cast(dict[str, Any], base_item),
+            run_items.TOOL_CALL_SESSION_DESCRIPTION_KEY: "Lookup customer records.",
+            run_items.TOOL_CALL_SESSION_TITLE_KEY: "Lookup Account",
+        },
+    )
+
+    assert run_items.fingerprint_input_item(base_item) == run_items.fingerprint_input_item(
+        with_metadata
+    )
 
 
 def test_run_result_to_input_list_preserves_tool_search_items() -> None:

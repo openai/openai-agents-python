@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal
 from openai import AsyncOpenAI
 
 from ..models._openai_shared import get_default_openai_client
+from ..run_internal.items import normalize_input_items_for_api
 from .openai_conversations_session import OpenAIConversationsSession
 from .session import (
     OpenAIResponsesCompactionArgs,
@@ -270,11 +271,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         await self.underlying_session.add_items(items)
         if self._compaction_candidate_items is not None:
-            new_candidates = select_compaction_candidate_items(items)
+            new_items = _normalize_compaction_session_items(items)
+            new_candidates = select_compaction_candidate_items(new_items)
             if new_candidates:
                 self._compaction_candidate_items.extend(new_candidates)
         if self._session_items is not None:
-            self._session_items.extend(items)
+            self._session_items.extend(_normalize_compaction_session_items(items))
 
     async def pop_item(self) -> TResponseInputItem | None:
         popped = await self.underlying_session.pop_item()
@@ -296,7 +298,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if self._compaction_candidate_items is not None and self._session_items is not None:
             return (self._compaction_candidate_items[:], self._session_items[:])
 
-        history = await self.underlying_session.get_items()
+        history = _normalize_compaction_session_items(await self.underlying_session.get_items())
         candidates = select_compaction_candidate_items(history)
         self._compaction_candidate_items = candidates
         self._session_items = history
@@ -334,6 +336,13 @@ def _strip_orphaned_assistant_ids(
             item = {k: v for k, v in item.items() if k != "id"}  # type: ignore[assignment]
         cleaned.append(item)
     return cleaned
+
+
+def _normalize_compaction_session_items(
+    items: list[TResponseInputItem],
+) -> list[TResponseInputItem]:
+    """Normalize compaction input so SDK-only metadata never reaches responses.compact."""
+    return normalize_input_items_for_api(list(items))
 
 
 _ResolvedCompactionMode = Literal["previous_response_id", "input"]
