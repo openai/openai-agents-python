@@ -1,9 +1,11 @@
+import asyncio
 from typing import Any, cast
 
 import pytest
 from openai.types.responses.response_output_item import McpCall, McpListTools, McpListToolsTool
 
 from agents import Agent, HostedMCPTool
+from agents.handoffs import handoff
 from agents.items import MCPListToolsItem, ModelResponse, RunItem, ToolCallItem, TResponseInputItem
 from agents.lifecycle import RunHooks
 from agents.models.fake_id import FAKE_RESPONSES_ID
@@ -12,12 +14,13 @@ from agents.run_config import ModelInputData, RunConfig
 from agents.run_context import RunContextWrapper
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
 from agents.run_internal.run_loop import get_new_response, run_single_turn_streamed
+from agents.run_internal.run_steps import NextStepHandoff
 from agents.run_internal.tool_use_tracker import AgentToolUseTracker
 from agents.stream_events import RunItemStreamEvent
 from agents.usage import Usage
 
 from .fake_model import FakeModel
-from .test_responses import get_text_message
+from .test_responses import get_handoff_tool_call, get_text_message
 
 
 class DummyRunItem:
@@ -805,3 +808,102 @@ async def test_run_single_turn_streamed_seeds_hosted_mcp_metadata_from_pre_step_
     assert len(tool_call_events) == 1
     assert tool_call_events[0].description == "Search the docs."
     assert tool_call_events[0].title == "Search Docs"
+
+
+@pytest.mark.asyncio
+async def test_run_single_turn_streamed_recovers_cancelled_queue_for_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = FakeModel()
+    target = Agent(name="target", model=FakeModel())
+    model.set_next_output([get_handoff_tool_call(target)])
+    agent = Agent(name="source", model=model, handoffs=[handoff(target)])
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    tool_use_tracker = AgentToolUseTracker()
+    streamed_result = RunResultStreaming(
+        input=[cast(TResponseInputItem, {"role": "user", "content": "first"})],
+        new_items=[],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=context_wrapper,
+        current_agent=agent,
+        current_turn=1,
+        max_turns=2,
+        _current_agent_output_schema=None,
+        trace=None,
+        interruptions=[],
+    )
+
+    def _raise_cancelled(*args: Any, **kwargs: Any) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        "agents.run_internal.run_loop.stream_step_result_to_queue",
+        _raise_cancelled,
+    )
+
+    result = await run_single_turn_streamed(
+        streamed_result,
+        agent,
+        RunHooks(),
+        context_wrapper,
+        RunConfig(),
+        should_run_agent_start_hooks=False,
+        tool_use_tracker=tool_use_tracker,
+        all_tools=[],
+    )
+
+    assert isinstance(result.next_step, NextStepHandoff)
+    assert result.next_step.new_agent.name == "target"
+
+
+@pytest.mark.asyncio
+async def test_run_single_turn_streamed_propagates_cancelled_queue_without_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = FakeModel()
+    model.set_next_output([get_text_message("ok")])
+    agent = Agent(name="source", model=model)
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    tool_use_tracker = AgentToolUseTracker()
+    streamed_result = RunResultStreaming(
+        input=[cast(TResponseInputItem, {"role": "user", "content": "first"})],
+        new_items=[],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=context_wrapper,
+        current_agent=agent,
+        current_turn=1,
+        max_turns=2,
+        _current_agent_output_schema=None,
+        trace=None,
+        interruptions=[],
+    )
+
+    def _raise_cancelled(*args: Any, **kwargs: Any) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        "agents.run_internal.run_loop.stream_step_result_to_queue",
+        _raise_cancelled,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_single_turn_streamed(
+            streamed_result,
+            agent,
+            RunHooks(),
+            context_wrapper,
+            RunConfig(),
+            should_run_agent_start_hooks=False,
+            tool_use_tracker=tool_use_tracker,
+            all_tools=[],
+        )

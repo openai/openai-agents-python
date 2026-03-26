@@ -1491,7 +1491,12 @@ async def run_single_turn_streamed(
     items_to_filter = [item for item in items_to_filter if not isinstance(item, HandoffCallItem)]
 
     filtered_result = _dc.replace(single_step_result, new_step_items=items_to_filter)
-    stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
+    try:
+        stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
+    except asyncio.CancelledError:
+        if isinstance(single_step_result.next_step, NextStepHandoff):
+            return single_step_result
+        raise
     return single_step_result
 
 
