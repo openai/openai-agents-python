@@ -2433,6 +2433,39 @@ async def test_save_result_to_session_keeps_tool_call_payload_api_safe() -> None
 
 
 @pytest.mark.asyncio
+async def test_save_result_to_session_sanitizes_original_input_items() -> None:
+    session = SimpleListSession()
+
+    saved_count = await save_result_to_session(
+        session,
+        [
+            cast(
+                TResponseInputItem,
+                {
+                    "type": "function_call",
+                    "call_id": "call_input",
+                    "name": "lookup_account",
+                    "arguments": "{}",
+                    TOOL_CALL_SESSION_DESCRIPTION_KEY: "Lookup customer records.",
+                    TOOL_CALL_SESSION_TITLE_KEY: "Lookup Account",
+                },
+            )
+        ],
+        [],
+        None,
+    )
+
+    assert saved_count == 0
+    assert len(session.saved_items) == 1
+    saved_tool_call = cast(dict[str, Any], session.saved_items[0])
+    assert saved_tool_call["type"] == "function_call"
+    assert TOOL_CALL_SESSION_DESCRIPTION_KEY not in saved_tool_call
+    assert TOOL_CALL_SESSION_TITLE_KEY not in saved_tool_call
+    assert "description" not in saved_tool_call
+    assert "title" not in saved_tool_call
+
+
+@pytest.mark.asyncio
 async def test_prepare_input_with_session_strips_internal_tool_call_metadata() -> None:
     tool_call = cast(
         TResponseInputItem,
@@ -2470,6 +2503,40 @@ async def test_prepare_input_with_session_strips_internal_tool_call_metadata() -
     assert TOOL_CALL_SESSION_TITLE_KEY not in prepared_tool_calls[0]
     assert len(session_items) == 1
     assert cast(dict[str, Any], session_items[0])["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_sanitizes_new_tool_call_session_items() -> None:
+    prepared_input, session_items = await prepare_input_with_session(
+        [
+            cast(
+                TResponseInputItem,
+                {
+                    "type": "function_call",
+                    "call_id": "call_new",
+                    "name": "lookup_account",
+                    "arguments": "{}",
+                    TOOL_CALL_SESSION_DESCRIPTION_KEY: "Lookup customer records.",
+                    TOOL_CALL_SESSION_TITLE_KEY: "Lookup Account",
+                },
+            )
+        ],
+        SimpleListSession(),
+        None,
+    )
+
+    assert isinstance(prepared_input, list)
+    assert len(prepared_input) == 1
+    prepared_tool_call = cast(dict[str, Any], prepared_input[0])
+    assert prepared_tool_call["type"] == "function_call"
+    assert TOOL_CALL_SESSION_DESCRIPTION_KEY not in prepared_tool_call
+    assert TOOL_CALL_SESSION_TITLE_KEY not in prepared_tool_call
+
+    assert len(session_items) == 1
+    session_tool_call = cast(dict[str, Any], session_items[0])
+    assert session_tool_call["type"] == "function_call"
+    assert TOOL_CALL_SESSION_DESCRIPTION_KEY not in session_tool_call
+    assert TOOL_CALL_SESSION_TITLE_KEY not in session_tool_call
 
 
 @pytest.mark.asyncio

@@ -167,7 +167,8 @@ async def prepare_input_with_session(
     normalized = normalize_input_items_for_api(filtered)
     deduplicated = deduplicate_input_items_preferring_latest(normalized)
 
-    return deduplicated, [ensure_input_item_format(item) for item in appended_items]
+    appended_as_inputs = [ensure_input_item_format(item) for item in appended_items]
+    return deduplicated, normalize_input_items_for_api(appended_as_inputs)
 
 
 async def persist_session_items_for_guardrail_trip(
@@ -265,10 +266,12 @@ async def save_result_to_session(
 
     input_list: list[TResponseInputItem] = []
     if original_input:
-        input_list = [
-            ensure_input_item_format(item)
-            for item in ItemHelpers.input_to_new_input_list(original_input)
-        ]
+        input_list = normalize_input_items_for_api(
+            [
+                ensure_input_item_format(item)
+                for item in ItemHelpers.input_to_new_input_list(original_input)
+            ]
+        )
 
     resolved_reasoning_item_id_policy = (
         reasoning_item_id_policy
