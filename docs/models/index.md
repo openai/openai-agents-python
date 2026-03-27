@@ -199,6 +199,25 @@ You can integrate other LLM providers with these built-in paths:
 
 In cases where you do not have an API key from `platform.openai.com`, we recommend disabling tracing via `set_tracing_disabled()`, or setting up a [different tracing processor](../tracing.md).
 
+``` python
+from agents import Agent, AsyncOpenAI, OpenAIChatCompletionsModel, set_tracing_disabled
+
+set_tracing_disabled(disabled=True)
+
+provider = AsyncOpenAI(
+    api_key="Api_Key",
+    base_url="Base URL of Provider",
+)
+
+model = OpenAIChatCompletionsModel(
+    model="Model_Name",
+    openai_client=provider
+)
+
+
+agent= Agent(name="Helping Agent", instructions="You are a Helping Agent", model=model)
+```
+
 !!! note
 
     In these examples, we use the Chat Completions API/model, because many LLM providers still do not support the Responses API. If your LLM provider does support it, we recommend using Responses.
