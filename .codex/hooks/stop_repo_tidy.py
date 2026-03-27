@@ -188,11 +188,6 @@ def main() -> None:
             *current_paths,
         )
 
-    updated_paths = lint_fix_paths(repo_root)
-    updated_fingerprint = fingerprint_for_paths(repo_root, updated_paths)
-    state.last_tidy_fingerprint = updated_fingerprint
-    save_state(session_id, repo_root, state)
-
     if format_result.returncode != 0:
         write_stop_block(
             "`uv run ruff format -- ...` failed for the touched Python files. "
@@ -208,6 +203,11 @@ def main() -> None:
             "Repo hook: targeted Ruff lint fix failed.",
         )
         return
+
+    updated_paths = lint_fix_paths(repo_root)
+    updated_fingerprint = fingerprint_for_paths(repo_root, updated_paths)
+    state.last_tidy_fingerprint = updated_fingerprint
+    save_state(session_id, repo_root, state)
 
     if updated_fingerprint != current_fingerprint:
         write_stop_block(
