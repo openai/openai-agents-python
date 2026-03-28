@@ -943,6 +943,22 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             is_failed_connection_cleanup = self.session is None
 
             try:
+                # Signal the subprocess to shut down gracefully before the exit stack
+                # unwinds.  The exit stack tears down contexts in LIFO order: the
+                # ClientSession exits first (cancelling its internal task group), then
+                # the transport (stdio_client / sse_client) exits.  Because the
+                # ClientSession cancellation kills the reader/writer tasks inside the
+                # transport, the transport's ``finally`` block — which tries to close
+                # stdin and wait for the process — may never execute cleanly.  By
+                # closing the session's write stream ahead of time we deliver an EOF to
+                # the subprocess's stdin, giving it a chance to flush resources (e.g.
+                # multiprocessing semaphores) and exit on its own before we cancel the
+                # task groups.
+                if self.session is not None:
+                    try:
+                        await self.session._write_stream.aclose()
+                    except Exception:
+                        pass  # Best-effort; the stream may already be closed.
                 await self.exit_stack.aclose()
             except asyncio.CancelledError as e:
                 logger.debug(f"Cleanup cancelled for MCP server '{self.name}': {e}")
@@ -1010,6 +1026,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             finally:
                 self.session = None
                 self._get_session_id = None
+                self.server_initialize_result = None
+                # Reinitialize the exit stack so the same server instance can
+                # reconnect cleanly after cleanup.
+                self.exit_stack = AsyncExitStack()
 
 
 class MCPServerStdioParams(TypedDict):
