@@ -84,6 +84,41 @@ def test_prepare_input_filters_items_seen_by_server_and_tool_calls() -> None:
     assert tracker.remaining_initial_input is None
 
 
+def test_hydrate_from_state_does_not_track_string_initial_input_by_object_identity() -> None:
+    tracker = OpenAIServerConversationTracker(
+        conversation_id="conv-init-string", previous_response_id=None
+    )
+
+    tracker.hydrate_from_state(
+        original_input="hello",
+        generated_items=[],
+        model_responses=[],
+    )
+
+    assert tracker.sent_items == set()
+    assert tracker.sent_initial_input is True
+    assert tracker.remaining_initial_input is None
+    assert len(tracker.sent_item_fingerprints) == 1
+
+
+def test_hydrate_from_state_does_not_track_list_initial_input_by_object_identity() -> None:
+    tracker = OpenAIServerConversationTracker(
+        conversation_id="conv-init-list", previous_response_id=None
+    )
+    original_input = [cast(TResponseInputItem, {"role": "user", "content": "hello"})]
+
+    tracker.hydrate_from_state(
+        original_input=original_input,
+        generated_items=[],
+        model_responses=[],
+    )
+
+    assert tracker.sent_items == set()
+    assert tracker.sent_initial_input is True
+    assert tracker.remaining_initial_input is None
+    assert len(tracker.sent_item_fingerprints) == 1
+
+
 def test_mark_input_as_sent_and_rewind_input_respects_remaining_initial_input() -> None:
     tracker = OpenAIServerConversationTracker(conversation_id="conv2", previous_response_id=None)
     pending_1: TResponseInputItem = cast(TResponseInputItem, {"id": "p-1", "type": "message"})

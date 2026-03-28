@@ -156,10 +156,11 @@ class OpenAIServerConversationTracker:
         if isinstance(original_input, list):
             normalized_input = prepare_model_input_items(original_input)
 
+        # Hydrated initial input is reconstructed during resume, so object identity is not a
+        # stable dedupe key and can later collide with unrelated freshly allocated items.
         for item in ItemHelpers.input_to_new_input_list(normalized_input):
             if item is None:
                 continue
-            self.sent_items.add(id(item))
             item_id = _normalize_server_item_id(
                 item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
             )
