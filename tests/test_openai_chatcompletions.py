@@ -384,6 +384,90 @@ async def test_fetch_response_non_stream(monkeypatch) -> None:
     assert kwargs["stream_options"] is omit
 
 
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_accepts_raw_chat_completions_image_content() -> None:
+    """
+    Raw Chat Completions content parts should be accepted on the SDK input path
+    when using the Chat Completions backend.
+    """
+
+    class DummyCompletions:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] = {}
+
+        async def create(self, **kwargs: Any) -> Any:
+            self.kwargs = kwargs
+            return chat
+
+    class DummyClient:
+        def __init__(self, completions: DummyCompletions) -> None:
+            self.chat = type("_Chat", (), {"completions": completions})()
+            self.base_url = httpx.URL("https://api.openai.com/v1/")
+
+    msg = ChatCompletionMessage(role="assistant", content="ok")
+    choice = Choice(index=0, finish_reason="stop", message=msg)
+    chat = ChatCompletion(
+        id="resp-id",
+        created=0,
+        model="fake",
+        object="chat.completion",
+        choices=[choice],
+        usage=None,
+    )
+    completions = DummyCompletions()
+    dummy_client = DummyClient(completions)
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=dummy_client)  # type: ignore[arg-type]
+
+    await model.get_response(
+        system_instructions=None,
+        input=[
+            # Cast the fixture because the raw chat-style alias is intentionally outside the
+            # canonical TypedDict shape that mypy expects for ordinary SDK inputs.
+            cast(
+                Any,
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is in this image?"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,AAAA",
+                                "detail": "high",
+                            },
+                        },
+                    ],
+                },
+            )
+        ],
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert completions.kwargs["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is in this image?"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,AAAA",
+                        "detail": "high",
+                    },
+                },
+            ],
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_fetch_response_stream(monkeypatch) -> None:
     """

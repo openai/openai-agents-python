@@ -87,7 +87,11 @@ class OpenAIChatCompletionsModel(Model):
                 if not isinstance(part, dict):
                     continue
 
-                content_type = part.get("type")
+                normalized_part = Converter._normalize_input_content_part_alias(part)
+                if not isinstance(normalized_part, dict):
+                    continue
+
+                content_type = normalized_part.get("type")
                 if content_type in self._OFFICIAL_OPENAI_SUPPORTED_INPUT_CONTENT_TYPES:
                     continue
 

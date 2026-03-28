@@ -330,6 +330,41 @@ class Converter:
         return out
 
     @classmethod
+    def _normalize_input_content_part_alias(
+        cls,
+        content_part: ResponseInputContentWithAudioParam,
+    ) -> ResponseInputContentWithAudioParam:
+        """Accept raw Chat Completions parts by mapping them to SDK canonical shapes."""
+        if not isinstance(content_part, dict):
+            return content_part
+
+        content_type = content_part.get("type")
+        if content_type == "text":
+            text = content_part.get("text")
+            if not isinstance(text, str):
+                raise UserError(f"Only text content is supported here, got: {content_part}")
+            # Cast the normalized dict because we are constructing a TypedDict alias by hand.
+            return cast(ResponseInputTextParam, {"type": "input_text", "text": text})
+
+        if content_type != "image_url":
+            return content_part
+
+        image_payload = content_part.get("image_url")
+        if not isinstance(image_payload, dict):
+            raise UserError(f"Only image URLs are supported for image_url {content_part}")
+
+        image_url = image_payload.get("url")
+        if not isinstance(image_url, str) or not image_url:
+            raise UserError(f"Only image URLs are supported for image_url {content_part}")
+
+        normalized: dict[str, Any] = {"type": "input_image", "image_url": image_url}
+        detail = image_payload.get("detail")
+        if detail is not None:
+            normalized["detail"] = detail
+        # Cast the normalized dict because we are constructing a TypedDict alias by hand.
+        return cast(ResponseInputImageParam, normalized)
+
+    @classmethod
     def extract_all_content(
         cls, content: str | Iterable[ResponseInputContentWithAudioParam]
     ) -> str | list[ChatCompletionContentPartParam]:
@@ -338,6 +373,7 @@ class Converter:
         out: list[ChatCompletionContentPartParam] = []
 
         for c in content:
+            c = cls._normalize_input_content_part_alias(c)
             if isinstance(c, dict) and c.get("type") == "input_text":
                 casted_text_param = cast(ResponseInputTextParam, c)
                 out.append(
