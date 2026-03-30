@@ -277,7 +277,8 @@ class MCPUtil:
     @staticmethod
     def _server_tool_name_prefix(server_name: str) -> str:
         normalized = "".join(
-            char if char.isalnum() or char in ("_", "-") else "_" for char in server_name
+            char if (char.isascii() and char.isalnum()) or char in ("_", "-") else "_"
+            for char in server_name
         )
         normalized = normalized.strip("_-")
         if not normalized:
@@ -286,7 +287,14 @@ class MCPUtil:
 
     @staticmethod
     def _prefixed_tool_name(tool_name_prefix: str, tool_name: str) -> str:
-        return f"mcp_{len(tool_name_prefix)}_{tool_name_prefix}{tool_name}"
+        full_name = f"mcp_{len(tool_name_prefix)}_{tool_name_prefix}{tool_name}"
+        if len(full_name) <= 64:
+            return full_name
+        # Truncate to 64 chars using a deterministic hash suffix to avoid collisions
+        hash_suffix = hashlib.sha1(full_name.encode("utf-8")).hexdigest()[:8]
+        # Reserve 9 chars for "_" + 8-char hash
+        truncated = full_name[: 64 - 9]
+        return f"{truncated}_{hash_suffix}"
 
     @classmethod
     def _server_tool_name_prefixes(cls, servers: list[MCPServer]) -> dict[int, str]:
