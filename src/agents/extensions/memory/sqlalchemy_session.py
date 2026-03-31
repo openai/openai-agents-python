@@ -423,11 +423,18 @@ class SQLAlchemySession(SessionABC):
                     delete(self._sessions).where(self._sessions.c.session_id == self.session_id)
                 )
 
-    async def get_sessions_for_user(self, user_id: str) -> list[str]:
-        """Retrieve all session IDs associated with a given user.
+    async def get_sessions_for_user(
+        self,
+        user_id: str,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[str]:
+        """Retrieve session IDs associated with a given user.
 
         Args:
             user_id: The user identifier to look up sessions for.
+            limit: Maximum number of session IDs to return. If None, returns all sessions.
+            offset: Number of sessions to skip before returning results. Defaults to 0.
 
         Returns:
             List of session IDs belonging to the user, ordered by most recently updated first.
@@ -438,7 +445,10 @@ class SQLAlchemySession(SessionABC):
                 select(self._sessions.c.session_id)
                 .where(self._sessions.c.user_id == user_id)
                 .order_by(self._sessions.c.updated_at.desc())
+                .offset(offset)
             )
+            if limit is not None:
+                stmt = stmt.limit(limit)
             result = await sess.execute(stmt)
             return [row[0] for row in result.all()]
 

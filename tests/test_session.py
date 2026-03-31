@@ -711,6 +711,51 @@ async def test_sqlite_session_user_association():
 
 
 @pytest.mark.asyncio
+async def test_sqlite_session_get_sessions_for_user_pagination():
+    """Test limit and offset pagination on get_sessions_for_user."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_pagination.db"
+        items: list[TResponseInputItem] = [{"role": "user", "content": "hi"}]
+
+        # Create 5 sessions for the same user, adding items sequentially so
+        # updated_at ordering is deterministic (most recent last).
+        session_ids = [f"s{i}" for i in range(5)]
+        sessions = []
+        for sid in session_ids:
+            s = SQLiteSession(sid, db_path, user_id="paginated_user")
+            await s.add_items(items)
+            sessions.append(s)
+
+        ref = sessions[0]  # any session instance sharing the same db
+
+        # Without limit — returns all 5
+        all_ids = await ref.get_sessions_for_user("paginated_user")
+        assert len(all_ids) == 5
+
+        # limit=2 — returns the 2 most recently updated
+        page1 = await ref.get_sessions_for_user("paginated_user", limit=2)
+        assert len(page1) == 2
+
+        # limit=2, offset=2 — next page
+        page2 = await ref.get_sessions_for_user("paginated_user", limit=2, offset=2)
+        assert len(page2) == 2
+
+        # limit=2, offset=4 — last page (only 1 left)
+        page3 = await ref.get_sessions_for_user("paginated_user", limit=2, offset=4)
+        assert len(page3) == 1
+
+        # All pages together should cover all session ids
+        assert set(page1 + page2 + page3) == set(session_ids)
+
+        # offset beyond total — empty
+        empty = await ref.get_sessions_for_user("paginated_user", offset=10)
+        assert empty == []
+
+        for s in sessions:
+            s.close()
+
+
+@pytest.mark.asyncio
 async def test_sqlite_session_user_id_attribute():
     """Test that user_id is correctly stored on the session instance."""
     session_with_user = SQLiteSession("s1", user_id="alice")

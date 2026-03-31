@@ -311,11 +311,18 @@ class SQLiteSession(SessionABC):
 
         await asyncio.to_thread(_clear_session_sync)
 
-    async def get_sessions_for_user(self, user_id: str) -> list[str]:
-        """Retrieve all session IDs associated with a given user.
+    async def get_sessions_for_user(
+        self,
+        user_id: str,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[str]:
+        """Retrieve session IDs associated with a given user.
 
         Args:
             user_id: The user identifier to look up sessions for.
+            limit: Maximum number of session IDs to return. If None, returns all sessions.
+            offset: Number of sessions to skip before returning results. Defaults to 0.
 
         Returns:
             List of session IDs belonging to the user, ordered by most recently updated first.
@@ -324,14 +331,26 @@ class SQLiteSession(SessionABC):
         def _get_sessions_sync():
             conn = self._get_connection()
             with self._lock if self._is_memory_db else threading.Lock():
-                cursor = conn.execute(
-                    f"""
-                    SELECT session_id FROM {self.sessions_table}
-                    WHERE user_id = ?
-                    ORDER BY updated_at DESC
-                    """,
-                    (user_id,),
-                )
+                if limit is None:
+                    cursor = conn.execute(
+                        f"""
+                        SELECT session_id FROM {self.sessions_table}
+                        WHERE user_id = ?
+                        ORDER BY updated_at DESC
+                        LIMIT -1 OFFSET ?
+                        """,
+                        (user_id, offset),
+                    )
+                else:
+                    cursor = conn.execute(
+                        f"""
+                        SELECT session_id FROM {self.sessions_table}
+                        WHERE user_id = ?
+                        ORDER BY updated_at DESC
+                        LIMIT ? OFFSET ?
+                        """,
+                        (user_id, limit, offset),
+                    )
                 return [row[0] for row in cursor.fetchall()]
 
         return await asyncio.to_thread(_get_sessions_sync)
