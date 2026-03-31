@@ -15,7 +15,7 @@
           "dependencies",
           "feature:chat-completions",
           "feature:core",
-          "feature:lite-llm",
+          "feature:extensions",
           "feature:mcp",
           "feature:realtime",
           "feature:sessions",

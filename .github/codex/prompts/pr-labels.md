@@ -22,7 +22,7 @@ Allowed labels:
 - dependencies
 - feature:chat-completions
 - feature:core
-- feature:lite-llm
+- feature:extensions
 - feature:mcp
 - feature:realtime
 - feature:sessions
@@ -46,7 +46,7 @@ Label rules:
 - bug vs enhancement: Prefer exactly one of these. Include both only when the PR clearly contains two separate substantial changes and both are first-order outcomes.
 - feature:chat-completions: Chat Completions support or conversion is a primary deliverable of the PR. Do not add it for a small compatibility guard or parity update in `chatcmpl_converter.py`.
 - feature:core: Core agent loop, tool calls, run pipeline, or other central runtime behavior is a primary surface of the PR. For cross-cutting runtime changes, this is usually the single best feature label.
-- feature:lite-llm: LiteLLM adapter/provider behavior is a primary deliverable of the PR.
+- feature:extensions: `src/agents/extensions/` surfaces are a primary deliverable of the PR, including extension models/providers such as Any-LLM and LiteLLM.
 - feature:mcp: MCP-specific behavior or APIs are a primary deliverable of the PR. Do not add it for incidental hosted/deferred tool plumbing touched by broader runtime work.
 - feature:realtime: Realtime-specific behavior, API shape, or session semantics are a primary deliverable of the PR. Do not add it for small parity updates in realtime adapters.
 - feature:sessions: Session or memory behavior is a primary deliverable of the PR. Do not add it for persistence updates that merely support a broader feature.
