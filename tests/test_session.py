@@ -672,6 +672,58 @@ async def test_session_settings_resolve():
 
 
 @pytest.mark.asyncio
+async def test_sqlite_session_user_association():
+    """Test that sessions can be associated with users via user_id."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_users.db"
+
+        # Create sessions for user_1
+        session_a = SQLiteSession("session_a", db_path, user_id="user_1")
+        session_b = SQLiteSession("session_b", db_path, user_id="user_1")
+        # Create a session for user_2
+        session_c = SQLiteSession("session_c", db_path, user_id="user_2")
+        # Create a session without a user
+        session_d = SQLiteSession("session_d", db_path)
+
+        # Add items to trigger session/user creation
+        items: list[TResponseInputItem] = [{"role": "user", "content": "Hello"}]
+        await session_a.add_items(items)
+        await session_b.add_items(items)
+        await session_c.add_items(items)
+        await session_d.add_items(items)
+
+        # Query sessions for user_1
+        user_1_sessions = await session_a.get_sessions_for_user("user_1")
+        assert set(user_1_sessions) == {"session_a", "session_b"}
+
+        # Query sessions for user_2
+        user_2_sessions = await session_a.get_sessions_for_user("user_2")
+        assert user_2_sessions == ["session_c"]
+
+        # Query sessions for non-existent user
+        empty_sessions = await session_a.get_sessions_for_user("user_999")
+        assert empty_sessions == []
+
+        session_a.close()
+        session_b.close()
+        session_c.close()
+        session_d.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_user_id_attribute():
+    """Test that user_id is correctly stored on the session instance."""
+    session_with_user = SQLiteSession("s1", user_id="alice")
+    assert session_with_user.user_id == "alice"
+
+    session_without_user = SQLiteSession("s2")
+    assert session_without_user.user_id is None
+
+    session_with_user.close()
+    session_without_user.close()
+
+
+@pytest.mark.asyncio
 async def test_runner_with_session_settings_override():
     """Test that RunConfig can override session's default settings."""
     from agents.memory import SessionSettings

@@ -86,6 +86,8 @@ class SQLAlchemySession(SessionABC):
         create_tables: bool = False,
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
+        users_table: str = "agent_users",
+        user_id: str | None = None,
         session_settings: SessionSettings | None = None,
     ):
         """Initializes a new SQLAlchemySession.
@@ -100,9 +102,13 @@ class SQLAlchemySession(SessionABC):
                 development and testing when migrations aren't used.
             sessions_table (str, optional): Override the default table name for sessions if needed.
             messages_table (str, optional): Override the default table name for messages if needed.
+            users_table (str, optional): Override the default table name for users if needed.
+            user_id (str | None, optional): Optional user identifier to associate this session
+                with a user in the agent_users table.
             session_settings (SessionSettings | None, optional): Session configuration settings
         """
         self.session_id = session_id
+        self.user_id = user_id
         self.session_settings = session_settings or SessionSettings()
         self._engine = engine
         self._init_lock = (
@@ -112,10 +118,11 @@ class SQLAlchemySession(SessionABC):
         )
 
         self._metadata = MetaData()
-        self._sessions = Table(
-            sessions_table,
+        self._users = Table(
+            users_table,
             self._metadata,
-            Column("session_id", String, primary_key=True),
+            Column("user_id", String, primary_key=True),
+            Column("metadata", Text, nullable=True),
             Column(
                 "created_at",
                 TIMESTAMP(timezone=False),
@@ -129,6 +136,32 @@ class SQLAlchemySession(SessionABC):
                 onupdate=sql_text("CURRENT_TIMESTAMP"),
                 nullable=False,
             ),
+        )
+
+        self._sessions = Table(
+            sessions_table,
+            self._metadata,
+            Column("session_id", String, primary_key=True),
+            Column(
+                "user_id",
+                String,
+                ForeignKey(f"{users_table}.user_id", ondelete="SET NULL"),
+                nullable=True,
+            ),
+            Column(
+                "created_at",
+                TIMESTAMP(timezone=False),
+                server_default=sql_text("CURRENT_TIMESTAMP"),
+                nullable=False,
+            ),
+            Column(
+                "updated_at",
+                TIMESTAMP(timezone=False),
+                server_default=sql_text("CURRENT_TIMESTAMP"),
+                onupdate=sql_text("CURRENT_TIMESTAMP"),
+                nullable=False,
+            ),
+            Index(f"idx_{sessions_table}_user_id", "user_id"),
         )
 
         self._messages = Table(
@@ -296,6 +329,22 @@ class SQLAlchemySession(SessionABC):
 
         async with self._session_factory() as sess:
             async with sess.begin():
+                # Ensure user exists if user_id is provided
+                if self.user_id is not None:
+                    existing_user = await sess.execute(
+                        select(self._users.c.user_id).where(
+                            self._users.c.user_id == self.user_id
+                        )
+                    )
+                    if not existing_user.scalar_one_or_none():
+                        try:
+                            async with sess.begin_nested():
+                                await sess.execute(
+                                    insert(self._users).values({"user_id": self.user_id})
+                                )
+                        except IntegrityError:
+                            pass
+
                 # Avoid check-then-insert races on the first write while keeping
                 # the common path free of avoidable integrity exceptions.
                 existing = await sess.execute(
@@ -307,7 +356,9 @@ class SQLAlchemySession(SessionABC):
                     try:
                         async with sess.begin_nested():
                             await sess.execute(
-                                insert(self._sessions).values({"session_id": self.session_id})
+                                insert(self._sessions).values(
+                                    {"session_id": self.session_id, "user_id": self.user_id}
+                                )
                             )
                     except IntegrityError:
                         # Another concurrent writer created the parent row first.
@@ -371,6 +422,25 @@ class SQLAlchemySession(SessionABC):
                 await sess.execute(
                     delete(self._sessions).where(self._sessions.c.session_id == self.session_id)
                 )
+
+    async def get_sessions_for_user(self, user_id: str) -> list[str]:
+        """Retrieve all session IDs associated with a given user.
+
+        Args:
+            user_id: The user identifier to look up sessions for.
+
+        Returns:
+            List of session IDs belonging to the user, ordered by most recently updated first.
+        """
+        await self._ensure_tables()
+        async with self._session_factory() as sess:
+            stmt = (
+                select(self._sessions.c.session_id)
+                .where(self._sessions.c.user_id == user_id)
+                .order_by(self._sessions.c.updated_at.desc())
+            )
+            result = await sess.execute(stmt)
+            return [row[0] for row in result.all()]
 
     @property
     def engine(self) -> AsyncEngine:

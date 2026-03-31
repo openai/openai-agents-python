@@ -30,6 +30,8 @@ class AsyncSQLiteSession(SessionABC):
         db_path: str | Path = ":memory:",
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
+        users_table: str = "agent_users",
+        user_id: str | None = None,
     ):
         """Initialize the async SQLite session.
 
@@ -39,11 +41,15 @@ class AsyncSQLiteSession(SessionABC):
             sessions_table: Name of the table to store session metadata. Defaults to
                 'agent_sessions'
             messages_table: Name of the table to store message data. Defaults to 'agent_messages'
+            users_table: Name of the table to store user metadata. Defaults to 'agent_users'
+            user_id: Optional user identifier to associate this session with a user.
         """
         self.session_id = session_id
+        self.user_id = user_id
         self.db_path = db_path
         self.sessions_table = sessions_table
         self.messages_table = messages_table
+        self.users_table = users_table
         self._connection: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
         self._init_lock = asyncio.Lock()
@@ -52,11 +58,32 @@ class AsyncSQLiteSession(SessionABC):
         """Initialize the database schema for a specific connection."""
         await conn.execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {self.sessions_table} (
-                session_id TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS {self.users_table} (
+                user_id TEXT PRIMARY KEY,
+                metadata TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+        """
+        )
+
+        await conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.sessions_table} (
+                session_id TEXT PRIMARY KEY,
+                user_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES {self.users_table} (user_id)
+                    ON DELETE SET NULL
+            )
+        """
+        )
+
+        await conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_{self.sessions_table}_user_id
+            ON {self.sessions_table} (user_id)
         """
         )
 
@@ -160,11 +187,21 @@ class AsyncSQLiteSession(SessionABC):
             return
 
         async with self._locked_connection() as conn:
+            # Ensure user exists if user_id is provided
+            if self.user_id is not None:
+                await conn.execute(
+                    f"""
+                    INSERT OR IGNORE INTO {self.users_table} (user_id) VALUES (?)
+                """,
+                    (self.user_id,),
+                )
+
             await conn.execute(
                 f"""
-                INSERT OR IGNORE INTO {self.sessions_table} (session_id) VALUES (?)
+                INSERT OR IGNORE INTO {self.sessions_table} (session_id, user_id)
+                VALUES (?, ?)
             """,
-                (self.session_id,),
+                (self.session_id, self.user_id),
             )
 
             message_data = [(self.session_id, json.dumps(item)) for item in items]
@@ -232,6 +269,28 @@ class AsyncSQLiteSession(SessionABC):
                 (self.session_id,),
             )
             await conn.commit()
+
+    async def get_sessions_for_user(self, user_id: str) -> list[str]:
+        """Retrieve all session IDs associated with a given user.
+
+        Args:
+            user_id: The user identifier to look up sessions for.
+
+        Returns:
+            List of session IDs belonging to the user, ordered by most recently updated first.
+        """
+        async with self._locked_connection() as conn:
+            cursor = await conn.execute(
+                f"""
+                SELECT session_id FROM {self.sessions_table}
+                WHERE user_id = ?
+                ORDER BY updated_at DESC
+                """,
+                (user_id,),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [row[0] for row in rows]
 
     async def close(self) -> None:
         """Close the database connection."""

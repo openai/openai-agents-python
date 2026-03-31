@@ -27,6 +27,8 @@ class SQLiteSession(SessionABC):
         db_path: str | Path = ":memory:",
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
+        users_table: str = "agent_users",
+        user_id: str | None = None,
         session_settings: SessionSettings | None = None,
     ):
         """Initialize the SQLite session.
@@ -37,14 +39,19 @@ class SQLiteSession(SessionABC):
             sessions_table: Name of the table to store session metadata. Defaults to
                 'agent_sessions'
             messages_table: Name of the table to store message data. Defaults to 'agent_messages'
+            users_table: Name of the table to store user metadata. Defaults to 'agent_users'
+            user_id: Optional user identifier to associate this session with a user.
+                When provided, the session will be linked to the user in the agent_users table.
             session_settings: Session configuration settings including default limit for
                 retrieving items. If None, uses default SessionSettings().
         """
         self.session_id = session_id
+        self.user_id = user_id
         self.session_settings = session_settings or SessionSettings()
         self.db_path = db_path
         self.sessions_table = sessions_table
         self.messages_table = messages_table
+        self.users_table = users_table
         self._local = threading.local()
         self._lock = threading.Lock()
 
@@ -84,11 +91,32 @@ class SQLiteSession(SessionABC):
         """Initialize the database schema for a specific connection."""
         conn.execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {self.sessions_table} (
-                session_id TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS {self.users_table} (
+                user_id TEXT PRIMARY KEY,
+                metadata TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+        """
+        )
+
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.sessions_table} (
+                session_id TEXT PRIMARY KEY,
+                user_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES {self.users_table} (user_id)
+                    ON DELETE SET NULL
+            )
+        """
+        )
+
+        conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_{self.sessions_table}_user_id
+            ON {self.sessions_table} (user_id)
         """
         )
 
@@ -183,12 +211,22 @@ class SQLiteSession(SessionABC):
             conn = self._get_connection()
 
             with self._lock if self._is_memory_db else threading.Lock():
+                # Ensure user exists if user_id is provided
+                if self.user_id is not None:
+                    conn.execute(
+                        f"""
+                        INSERT OR IGNORE INTO {self.users_table} (user_id) VALUES (?)
+                    """,
+                        (self.user_id,),
+                    )
+
                 # Ensure session exists
                 conn.execute(
                     f"""
-                    INSERT OR IGNORE INTO {self.sessions_table} (session_id) VALUES (?)
+                    INSERT OR IGNORE INTO {self.sessions_table} (session_id, user_id)
+                    VALUES (?, ?)
                 """,
-                    (self.session_id,),
+                    (self.session_id, self.user_id),
                 )
 
                 # Add items
@@ -272,6 +310,31 @@ class SQLiteSession(SessionABC):
                 conn.commit()
 
         await asyncio.to_thread(_clear_session_sync)
+
+    async def get_sessions_for_user(self, user_id: str) -> list[str]:
+        """Retrieve all session IDs associated with a given user.
+
+        Args:
+            user_id: The user identifier to look up sessions for.
+
+        Returns:
+            List of session IDs belonging to the user, ordered by most recently updated first.
+        """
+
+        def _get_sessions_sync():
+            conn = self._get_connection()
+            with self._lock if self._is_memory_db else threading.Lock():
+                cursor = conn.execute(
+                    f"""
+                    SELECT session_id FROM {self.sessions_table}
+                    WHERE user_id = ?
+                    ORDER BY updated_at DESC
+                    """,
+                    (user_id,),
+                )
+                return [row[0] for row in cursor.fetchall()]
+
+        return await asyncio.to_thread(_get_sessions_sync)
 
     def close(self) -> None:
         """Close the database connection."""

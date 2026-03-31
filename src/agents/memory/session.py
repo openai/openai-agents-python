@@ -19,6 +19,7 @@ class Session(Protocol):
     """
 
     session_id: str
+    user_id: str | None = None
     session_settings: SessionSettings | None = None
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
@@ -65,6 +66,7 @@ class SessionABC(ABC):
     """
 
     session_id: str
+    user_id: str | None = None
     session_settings: SessionSettings | None = None
 
     @abstractmethod
