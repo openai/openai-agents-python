@@ -4,7 +4,7 @@ import importlib
 import sys
 import types as pytypes
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal, cast
 
 import pytest
 from openai.types.chat import (
@@ -25,9 +25,18 @@ from openai.types.responses.response_usage import (
 )
 from pydantic import BaseModel
 
-from agents import ModelSettings, ModelTracing, __version__
+from agents import (
+    Agent,
+    Handoff,
+    ModelSettings,
+    ModelTracing,
+    Tool,
+    TResponseInputItem,
+    __version__,
+)
 from agents.exceptions import UserError
 from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE
+from agents.models.fake_id import FAKE_RESPONSES_ID
 
 
 class FakeAnyLLMProvider:
@@ -581,6 +590,140 @@ async def test_any_llm_prompt_requests_fail_fast(monkeypatch) -> None:
             conversation_id=None,
             prompt={"id": "pmpt_123"},
         )
+
+
+def test_any_llm_responses_input_sanitizer_strips_none_fields_from_reasoning_items() -> None:
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+    from agents.extensions.models.any_llm_model import AnyLLMModel
+
+    model = AnyLLMModel(model="openai/gpt-5.4-mini")
+    raw_input = [
+        {
+            "id": "rid1",
+            "summary": [{"text": "why", "type": "summary_text"}],
+            "type": "reasoning",
+            "content": [{"type": "reasoning_text", "text": "thinking"}],
+            "status": None,
+            "encrypted_content": None,
+        }
+    ]
+
+    cleaned = model._sanitize_any_llm_responses_input(raw_input)
+
+    assert cleaned == [
+        {
+            "id": "rid1",
+            "summary": [{"text": "why", "type": "summary_text"}],
+            "type": "reasoning",
+            "content": [{"type": "reasoning_text", "text": "thinking"}],
+        }
+    ]
+
+    ResponsesParams = importlib.import_module("any_llm.types.responses").ResponsesParams
+    params = ResponsesParams(model="dummy", input=cleaned)
+    assert isinstance(params.input, list)
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_path_sanitizes_replayed_items_before_validation() -> None:
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+    from agents.extensions.models.any_llm_model import AnyLLMModel
+
+    class ValidatingProvider:
+        SUPPORTS_RESPONSES = True
+
+        def __init__(self) -> None:
+            self.private_responses_calls: list[dict[str, Any]] = []
+
+        async def aresponses(self, **kwargs: Any) -> Any:
+            raise AssertionError("public aresponses path should not be used in this test")
+
+        async def _aresponses(self, params: Any, **kwargs: Any) -> Response:
+            self.private_responses_calls.append({"params": params, "kwargs": kwargs})
+            return _response("Hello from sanitized replay")
+
+    class TestAnyLLMModel(AnyLLMModel):
+        def __init__(self, provider: ValidatingProvider) -> None:
+            super().__init__(model="openai/gpt-5.4-mini", api="responses")
+            self._provider = provider
+
+        def _get_provider(self) -> Any:
+            return self._provider
+
+    provider = ValidatingProvider()
+    model = TestAnyLLMModel(provider)
+    tools: list[Tool] = []
+    handoffs: list[Handoff[Any, Agent[Any]]] = []
+    stream_flag: Literal[False] = False
+
+    replay_input = cast(
+        list[TResponseInputItem],
+        [
+            {"role": "user", "content": "What's the weather in Tokyo?"},
+            {
+                "id": FAKE_RESPONSES_ID,
+                "summary": [
+                    {"text": "I should call the weather tool first.", "type": "summary_text"}
+                ],
+                "type": "reasoning",
+                "content": [{"type": "reasoning_text", "text": "thinking"}],
+                "status": None,
+                "provider_data": {"model": "anthropic/fake-responses-model"},
+            },
+            {
+                "id": FAKE_RESPONSES_ID,
+                "arguments": '{"city": "Tokyo"}',
+                "call_id": "call_weather_123",
+                "name": "get_weather",
+                "type": "function_call",
+                "status": None,
+                "provider_data": {"model": "anthropic/fake-responses-model"},
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_weather_123",
+                "output": "The weather in Tokyo is sunny and 22°C.",
+            },
+        ],
+    )
+
+    response = await model._fetch_responses_response(
+        system_instructions=None,
+        input=replay_input,
+        model_settings=ModelSettings(),
+        tools=tools,
+        output_schema=None,
+        handoffs=handoffs,
+        previous_response_id=None,
+        conversation_id=None,
+        stream=stream_flag,
+        prompt=None,
+    )
+
+    assert response.id == "resp_123"
+    assert len(provider.private_responses_calls) == 1
+    params = provider.private_responses_calls[0]["params"]
+    assert params.input == [
+        {"role": "user", "content": "What's the weather in Tokyo?"},
+        {
+            "arguments": '{"city": "Tokyo"}',
+            "call_id": "call_weather_123",
+            "name": "get_weather",
+            "type": "function_call",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_weather_123",
+            "output": "The weather in Tokyo is sunny and 22°C.",
+        },
+    ]
 
 
 def test_any_llm_provider_passes_api_override() -> None:

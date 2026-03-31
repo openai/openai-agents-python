@@ -813,7 +813,7 @@ class AnyLLMModel(Model):
 
         list_input = ItemHelpers.input_to_new_input_list(input)
         list_input = _to_dump_compatible(list_input)
-        list_input = self._remove_openai_responses_api_incompatible_fields(list_input)
+        list_input = self._sanitize_any_llm_responses_input(list_input)
 
         parallel_tool_calls = (
             True
@@ -1095,31 +1095,51 @@ class AnyLLMModel(Model):
         AnyLLMResponsesParams = any_llm_responses.ResponsesParams
         return AnyLLMResponsesParams(**payload)
 
-    def _remove_openai_responses_api_incompatible_fields(self, list_input: list[Any]) -> list[Any]:
-        has_provider_data = any(
-            isinstance(item, dict) and item.get("provider_data") for item in list_input
-        )
-        if not has_provider_data:
-            return list_input
+    def _sanitize_any_llm_responses_input(self, list_input: list[Any]) -> list[Any]:
+        """Normalize replayed Responses input into a shape accepted by any-llm.
 
+        any-llm validates replayed items against OpenAI-style input models before the request is
+        handed to the underlying provider. SDK-produced replay items can legitimately carry
+        adapter-only fields such as provider_data or explicit nulls like status=None, which those
+        models reject. Strip those fields here while preserving valid replay content.
+        """
         result: list[Any] = []
         for item in list_input:
-            cleaned = self._clean_item_for_openai(item)
+            cleaned = self._sanitize_any_llm_responses_value(item)
             if cleaned is not None:
                 result.append(cleaned)
         return result
 
-    def _clean_item_for_openai(self, item: Any) -> Any | None:
-        if not isinstance(item, dict):
-            return item
+    def _sanitize_any_llm_responses_value(self, value: Any) -> Any | None:
+        if isinstance(value, list):
+            sanitized_list = []
+            for item in value:
+                cleaned_item = self._sanitize_any_llm_responses_value(item)
+                if cleaned_item is not None:
+                    sanitized_list.append(cleaned_item)
+            return sanitized_list
 
-        if item.get("type") == "reasoning" and item.get("provider_data"):
+        if not isinstance(value, dict):
+            return value
+
+        # Provider-specific reasoning payloads are not replay-safe across adapter boundaries.
+        if value.get("type") == "reasoning" and value.get("provider_data"):
             return None
-        if item.get("id") == FAKE_RESPONSES_ID:
-            del item["id"]
-        if "provider_data" in item:
-            del item["provider_data"]
-        return item
+
+        cleaned: dict[str, Any] = {}
+        for key, item_value in value.items():
+            if key == "provider_data":
+                continue
+            if key == "id" and item_value == FAKE_RESPONSES_ID:
+                continue
+            if item_value is None:
+                continue
+
+            sanitized = self._sanitize_any_llm_responses_value(item_value)
+            if sanitized is not None:
+                cleaned[key] = sanitized
+
+        return cleaned
 
     def _attach_logprobs_to_output(self, output_items: list[Any], logprobs: list[Any]) -> None:
         from openai.types.responses import ResponseOutputMessage, ResponseOutputText
