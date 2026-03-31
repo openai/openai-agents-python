@@ -368,6 +368,54 @@ async def test_sqlite_session_get_items_with_limit():
         session.close()
 
 
+@pytest.mark.asyncio
+async def test_sqlite_session_get_items_with_offset():
+    """Test SQLiteSession get_items with offset for pagination."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_offset.db"
+        session_id = "offset_test"
+        session = SQLiteSession(session_id, db_path)
+
+        # Add 6 items: Message 1, Response 1, ... Message 3, Response 3
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"Message {i}"}
+            if i % 2 == 0
+            else {"role": "assistant", "content": f"Response {i}"}
+            for i in range(6)
+        ]
+        await session.add_items(items)
+
+        # Page 1: 2 most recent items (offset=0)
+        page1 = await session.get_items(limit=2, offset=0)
+        assert len(page1) == 2
+        assert page1[0].get("content") == "Message 4"
+        assert page1[1].get("content") == "Response 5"
+
+        # Page 2: next 2 items (offset=2)
+        page2 = await session.get_items(limit=2, offset=2)
+        assert len(page2) == 2
+        assert page2[0].get("content") == "Message 2"
+        assert page2[1].get("content") == "Response 3"
+
+        # Page 3: last 2 items (offset=4)
+        page3 = await session.get_items(limit=2, offset=4)
+        assert len(page3) == 2
+        assert page3[0].get("content") == "Message 0"
+        assert page3[1].get("content") == "Response 1"
+
+        # Offset beyond available items
+        empty = await session.get_items(limit=2, offset=10)
+        assert len(empty) == 0
+
+        # Offset without limit: skip the 2 most recent, return the rest
+        skipped = await session.get_items(offset=2)
+        assert len(skipped) == 4
+        assert skipped[0].get("content") == "Message 0"
+        assert skipped[-1].get("content") == "Response 3"
+
+        session.close()
+
+
 @pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
 @pytest.mark.asyncio
 async def test_session_memory_appends_list_input_by_default(runner_method):

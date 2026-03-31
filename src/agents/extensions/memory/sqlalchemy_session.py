@@ -224,12 +224,16 @@ class SQLAlchemySession(SessionABC):
         finally:
             self._init_lock.release()
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self, limit: int | None = None, offset: int = 0
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, uses session_settings.limit.
                    When specified, returns the latest N items in chronological order.
+            offset: Number of items to skip (from the most recent) before applying the limit.
+                    Defaults to 0. Combined with limit, enables pagination over history.
 
         Returns:
             List of input items representing the conversation history
@@ -239,7 +243,7 @@ class SQLAlchemySession(SessionABC):
         session_limit = resolve_session_limit(limit, self.session_settings)
 
         async with self._session_factory() as sess:
-            if session_limit is None:
+            if session_limit is None and offset == 0:
                 stmt = (
                     select(self._messages.c.message_data)
                     .where(self._messages.c.session_id == self.session_id)
@@ -252,19 +256,21 @@ class SQLAlchemySession(SessionABC):
                 stmt = (
                     select(self._messages.c.message_data)
                     .where(self._messages.c.session_id == self.session_id)
-                    # Use DESC + LIMIT to get the latest N
-                    # then reverse later for chronological order.
+                    # Use DESC + LIMIT/OFFSET to paginate from most recent,
+                    # then reverse for chronological order.
                     .order_by(
                         self._messages.c.created_at.desc(),
                         self._messages.c.id.desc(),
                     )
-                    .limit(session_limit)
+                    .offset(offset)
                 )
+                if session_limit is not None:
+                    stmt = stmt.limit(session_limit)
 
             result = await sess.execute(stmt)
             rows: list[str] = [row[0] for row in result.all()]
 
-            if session_limit is not None:
+            if session_limit is not None or offset > 0:
                 rows.reverse()
 
             items: list[TResponseInputItem] = []

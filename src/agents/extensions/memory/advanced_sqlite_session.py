@@ -138,12 +138,15 @@ class AdvancedSQLiteSession(SQLiteSession):
     async def get_items(
         self,
         limit: int | None = None,
+        offset: int = 0,
         branch_id: str | None = None,
     ) -> list[TResponseInputItem]:
         """Get items from current or specified branch.
 
         Args:
             limit: Maximum number of items to return. If None, uses session_settings.limit.
+            offset: Number of items to skip (from the most recent) before applying the limit.
+                    Defaults to 0. Combined with limit, enables pagination over history.
             branch_id: Branch to get items from. If None, uses current branch.
 
         Returns:
@@ -161,7 +164,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
                 with self._lock if self._is_memory_db else threading.Lock():
                     with closing(conn.cursor()) as cursor:
-                        if session_limit is None:
+                        if session_limit is None and offset == 0:
                             cursor.execute(
                                 f"""
                                 SELECT m.message_data
@@ -173,6 +176,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                                 (self.session_id, branch_id),
                             )
                         else:
+                            sql_limit = session_limit if session_limit is not None else -1
                             cursor.execute(
                                 f"""
                                 SELECT m.message_data
@@ -180,13 +184,13 @@ class AdvancedSQLiteSession(SQLiteSession):
                                 JOIN message_structure s ON m.id = s.message_id
                                 WHERE m.session_id = ? AND s.branch_id = ?
                                 ORDER BY s.sequence_number DESC
-                                LIMIT ?
+                                LIMIT ? OFFSET ?
                             """,
-                                (self.session_id, branch_id, session_limit),
+                                (self.session_id, branch_id, sql_limit, offset),
                             )
 
                         rows = cursor.fetchall()
-                        if session_limit is not None:
+                        if session_limit is not None or offset > 0:
                             rows = list(reversed(rows))
 
                     items = []
@@ -207,7 +211,7 @@ class AdvancedSQLiteSession(SQLiteSession):
             with self._lock if self._is_memory_db else threading.Lock():
                 with closing(conn.cursor()) as cursor:
                     # Get message IDs in correct order for this branch
-                    if session_limit is None:
+                    if session_limit is None and offset == 0:
                         cursor.execute(
                             f"""
                             SELECT m.message_data
@@ -219,6 +223,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                             (self.session_id, branch_id),
                         )
                     else:
+                        sql_limit = session_limit if session_limit is not None else -1
                         cursor.execute(
                             f"""
                             SELECT m.message_data
@@ -226,13 +231,13 @@ class AdvancedSQLiteSession(SQLiteSession):
                             JOIN message_structure s ON m.id = s.message_id
                             WHERE m.session_id = ? AND s.branch_id = ?
                             ORDER BY s.sequence_number DESC
-                            LIMIT ?
+                            LIMIT ? OFFSET ?
                         """,
-                            (self.session_id, branch_id, session_limit),
+                            (self.session_id, branch_id, sql_limit, offset),
                         )
 
                     rows = cursor.fetchall()
-                    if session_limit is not None:
+                    if session_limit is not None or offset > 0:
                         rows = list(reversed(rows))
 
                 items = []

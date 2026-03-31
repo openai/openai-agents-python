@@ -21,12 +21,16 @@ class Session(Protocol):
     session_id: str
     session_settings: SessionSettings | None = None
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self, limit: int | None = None, offset: int = 0
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, retrieves all items.
                    When specified, returns the latest N items in chronological order.
+            offset: Number of items to skip (from the end) before applying the limit.
+                    Defaults to 0. Combined with limit, enables pagination over history.
 
         Returns:
             List of input items representing the conversation history
@@ -68,12 +72,16 @@ class SessionABC(ABC):
     session_settings: SessionSettings | None = None
 
     @abstractmethod
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self, limit: int | None = None, offset: int = 0
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, retrieves all items.
                    When specified, returns the latest N items in chronological order.
+            offset: Number of items to skip (from the end) before applying the limit.
+                    Defaults to 0. Combined with limit, enables pagination over history.
 
         Returns:
             List of input items representing the conversation history
