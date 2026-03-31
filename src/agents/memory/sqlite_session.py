@@ -363,32 +363,36 @@ class SQLiteSession(SessionABC):
         return session
 
     @classmethod
-    async def get_session(
+    async def get_sessions(
         cls,
         user_id: str,
-        session_id: str,
         db_path: str | Path = ":memory:",
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
         users_table: str = "agent_users",
         session_settings: SessionSettings | None = None,
-    ) -> SQLiteSession | None:
-        """Retrieve an existing session for a user.
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[SQLiteSession]:
+        """Retrieve all sessions for a user.
 
         Args:
-            user_id: The user identifier who owns the session.
-            session_id: The session identifier to retrieve.
+            user_id: The user identifier to look up sessions for.
             db_path: Path to the SQLite database file. Defaults to ':memory:'.
             sessions_table: Name of the sessions table. Defaults to 'agent_sessions'.
             messages_table: Name of the messages table. Defaults to 'agent_messages'.
             users_table: Name of the users table. Defaults to 'agent_users'.
             session_settings: Session configuration settings.
+            limit: Maximum number of sessions to return. If None, returns all sessions.
+            offset: Number of sessions to skip before returning results. Defaults to 0.
 
         Returns:
-            The SQLiteSession instance if it exists and belongs to the user, None otherwise.
+            List of SQLiteSession instances belonging to the user, ordered by most
+            recently updated first.
         """
-        session = cls(
-            session_id=session_id,
+        # Use a temporary instance to access the DB and query session IDs
+        probe = cls(
+            session_id="__probe__",
             db_path=db_path,
             sessions_table=sessions_table,
             messages_table=messages_table,
@@ -397,23 +401,46 @@ class SQLiteSession(SessionABC):
             session_settings=session_settings,
         )
 
-        def _check_session():
-            conn = session._get_connection()
-            with session._lock if session._is_memory_db else threading.Lock():
-                cursor = conn.execute(
-                    f"""
-                    SELECT session_id FROM {sessions_table}
-                    WHERE session_id = ? AND user_id = ?
-                    """,
-                    (session_id, user_id),
-                )
-                return cursor.fetchone() is not None
+        def _fetch_ids():
+            conn = probe._get_connection()
+            with probe._lock if probe._is_memory_db else threading.Lock():
+                if limit is None:
+                    cursor = conn.execute(
+                        f"""
+                        SELECT session_id FROM {sessions_table}
+                        WHERE user_id = ?
+                        ORDER BY updated_at DESC
+                        LIMIT -1 OFFSET ?
+                        """,
+                        (user_id, offset),
+                    )
+                else:
+                    cursor = conn.execute(
+                        f"""
+                        SELECT session_id FROM {sessions_table}
+                        WHERE user_id = ?
+                        ORDER BY updated_at DESC
+                        LIMIT ? OFFSET ?
+                        """,
+                        (user_id, limit, offset),
+                    )
+                return [row[0] for row in cursor.fetchall()]
 
-        exists = await asyncio.to_thread(_check_session)
-        if not exists:
-            session.close()
-            return None
-        return session
+        session_ids = await asyncio.to_thread(_fetch_ids)
+        probe.close()
+
+        return [
+            cls(
+                session_id=sid,
+                db_path=db_path,
+                sessions_table=sessions_table,
+                messages_table=messages_table,
+                users_table=users_table,
+                user_id=user_id,
+                session_settings=session_settings,
+            )
+            for sid in session_ids
+        ]
 
     async def get_sessions_for_user(
         self,

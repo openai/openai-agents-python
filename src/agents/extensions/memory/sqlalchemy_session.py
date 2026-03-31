@@ -487,10 +487,9 @@ class SQLAlchemySession(SessionABC):
         return session
 
     @classmethod
-    async def get_session(
+    async def get_sessions(
         cls,
         user_id: str,
-        session_id: str,
         *,
         engine: AsyncEngine,
         create_tables: bool = False,
@@ -498,25 +497,28 @@ class SQLAlchemySession(SessionABC):
         messages_table: str = "agent_messages",
         users_table: str = "agent_users",
         session_settings: SessionSettings | None = None,
-    ) -> SQLAlchemySession | None:
-        """Retrieve an existing session for a user.
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[SQLAlchemySession]:
+        """Retrieve all sessions for a user.
 
         Args:
-            user_id: The user identifier who owns the session.
-            session_id: The session identifier to retrieve.
+            user_id: The user identifier to look up sessions for.
             engine: A pre-configured SQLAlchemy async engine.
             create_tables: Whether to auto-create tables. Defaults to False.
             sessions_table: Override the default table name for sessions.
             messages_table: Override the default table name for messages.
             users_table: Override the default table name for users.
             session_settings: Session configuration settings.
+            limit: Maximum number of sessions to return. If None, returns all sessions.
+            offset: Number of sessions to skip before returning results. Defaults to 0.
 
         Returns:
-            The SQLAlchemySession instance if it exists and belongs to the user,
-            None otherwise.
+            List of SQLAlchemySession instances belonging to the user, ordered by
+            most recently updated first.
         """
-        session = cls(
-            session_id=session_id,
+        probe = cls(
+            session_id="__probe__",
             engine=engine,
             create_tables=create_tables,
             sessions_table=sessions_table,
@@ -526,18 +528,32 @@ class SQLAlchemySession(SessionABC):
             session_settings=session_settings,
         )
 
-        await session._ensure_tables()
-        async with session._session_factory() as sess:
-            result = await sess.execute(
-                select(session._sessions.c.session_id).where(
-                    (session._sessions.c.session_id == session_id)
-                    & (session._sessions.c.user_id == user_id)
-                )
+        await probe._ensure_tables()
+        async with probe._session_factory() as sess:
+            stmt = (
+                select(probe._sessions.c.session_id)
+                .where(probe._sessions.c.user_id == user_id)
+                .order_by(probe._sessions.c.updated_at.desc())
+                .offset(offset)
             )
-            if not result.scalar_one_or_none():
-                return None
+            if limit is not None:
+                stmt = stmt.limit(limit)
+            result = await sess.execute(stmt)
+            session_ids = [row[0] for row in result.all()]
 
-        return session
+        return [
+            cls(
+                session_id=sid,
+                engine=engine,
+                create_tables=False,
+                sessions_table=sessions_table,
+                messages_table=messages_table,
+                users_table=users_table,
+                user_id=user_id,
+                session_settings=session_settings,
+            )
+            for sid in session_ids
+        ]
 
     async def get_sessions_for_user(
         self,

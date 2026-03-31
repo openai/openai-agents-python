@@ -69,37 +69,6 @@ class SessionABC(ABC):
     user_id: str | None = None
     session_settings: SessionSettings | None = None
 
-    @classmethod
-    @abstractmethod
-    async def create_session(cls, user_id: str, **kwargs: object) -> SessionABC:
-        """Create a new session for a user with an auto-generated session ID.
-
-        Args:
-            user_id: The user identifier to associate with the new session.
-            **kwargs: Backend-specific configuration (e.g., db_path, engine).
-
-        Returns:
-            A new session instance with an auto-generated session_id.
-        """
-        ...
-
-    @classmethod
-    @abstractmethod
-    async def get_session(
-        cls, user_id: str, session_id: str, **kwargs: object
-    ) -> SessionABC | None:
-        """Retrieve an existing session for a user.
-
-        Args:
-            user_id: The user identifier who owns the session.
-            session_id: The session identifier to retrieve.
-            **kwargs: Backend-specific configuration (e.g., db_path, engine).
-
-        Returns:
-            The session instance if it exists and belongs to the user, None otherwise.
-        """
-        ...
-
     @abstractmethod
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.

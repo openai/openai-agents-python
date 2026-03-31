@@ -316,31 +316,33 @@ class AsyncSQLiteSession(SessionABC):
         return session
 
     @classmethod
-    async def get_session(
+    async def get_sessions(
         cls,
         user_id: str,
-        session_id: str,
         db_path: str | Path = ":memory:",
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
         users_table: str = "agent_users",
-    ) -> AsyncSQLiteSession | None:
-        """Retrieve an existing session for a user.
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[AsyncSQLiteSession]:
+        """Retrieve all sessions for a user.
 
         Args:
-            user_id: The user identifier who owns the session.
-            session_id: The session identifier to retrieve.
+            user_id: The user identifier to look up sessions for.
             db_path: Path to the SQLite database file. Defaults to ':memory:'.
             sessions_table: Name of the sessions table. Defaults to 'agent_sessions'.
             messages_table: Name of the messages table. Defaults to 'agent_messages'.
             users_table: Name of the users table. Defaults to 'agent_users'.
+            limit: Maximum number of sessions to return. If None, returns all sessions.
+            offset: Number of sessions to skip before returning results. Defaults to 0.
 
         Returns:
-            The AsyncSQLiteSession instance if it exists and belongs to the user,
-            None otherwise.
+            List of AsyncSQLiteSession instances belonging to the user, ordered by
+            most recently updated first.
         """
-        session = cls(
-            session_id=session_id,
+        probe = cls(
+            session_id="__probe__",
             db_path=db_path,
             sessions_table=sessions_table,
             messages_table=messages_table,
@@ -348,21 +350,43 @@ class AsyncSQLiteSession(SessionABC):
             user_id=user_id,
         )
 
-        async with session._locked_connection() as conn:
-            cursor = await conn.execute(
-                f"""
-                SELECT session_id FROM {sessions_table}
-                WHERE session_id = ? AND user_id = ?
-                """,
-                (session_id, user_id),
-            )
-            row = await cursor.fetchone()
+        async with probe._locked_connection() as conn:
+            if limit is None:
+                cursor = await conn.execute(
+                    f"""
+                    SELECT session_id FROM {sessions_table}
+                    WHERE user_id = ?
+                    ORDER BY updated_at DESC
+                    LIMIT -1 OFFSET ?
+                    """,
+                    (user_id, offset),
+                )
+            else:
+                cursor = await conn.execute(
+                    f"""
+                    SELECT session_id FROM {sessions_table}
+                    WHERE user_id = ?
+                    ORDER BY updated_at DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (user_id, limit, offset),
+                )
+            rows = await cursor.fetchall()
             await cursor.close()
 
-        if row is None:
-            await session.close()
-            return None
-        return session
+        await probe.close()
+
+        return [
+            cls(
+                session_id=row[0],
+                db_path=db_path,
+                sessions_table=sessions_table,
+                messages_table=messages_table,
+                users_table=users_table,
+                user_id=user_id,
+            )
+            for row in rows
+        ]
 
     async def get_sessions_for_user(
         self,

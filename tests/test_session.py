@@ -797,39 +797,70 @@ async def test_sqlite_create_session():
 
 
 @pytest.mark.asyncio
-async def test_sqlite_get_session():
-    """Test get_session retrieves an existing session or returns None."""
+async def test_sqlite_get_sessions():
+    """Test get_sessions retrieves all sessions for a user."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_get.db"
 
-        # Create a session first
-        created = await SQLiteSession.create_session("bob", db_path=db_path)
-        session_id = created.session_id
+        # Create sessions for bob
+        s1 = await SQLiteSession.create_session("bob", db_path=db_path)
+        s2 = await SQLiteSession.create_session("bob", db_path=db_path)
+        # Create a session for eve
+        await SQLiteSession.create_session("eve", db_path=db_path)
 
-        # Add some items
+        # Add items to s1
         items: list[TResponseInputItem] = [{"role": "user", "content": "Hi Bob"}]
-        await created.add_items(items)
-        created.close()
+        await s1.add_items(items)
+        s1.close()
+        s2.close()
 
-        # Retrieve it
-        retrieved = await SQLiteSession.get_session("bob", session_id, db_path=db_path)
-        assert retrieved is not None
-        assert retrieved.session_id == session_id
-        assert retrieved.user_id == "bob"
+        # Retrieve bob's sessions
+        bob_sessions = await SQLiteSession.get_sessions("bob", db_path=db_path)
+        assert len(bob_sessions) == 2
+        session_ids = {s.session_id for s in bob_sessions}
+        assert s1.session_id in session_ids
+        assert s2.session_id in session_ids
 
-        # Verify items are preserved
-        history = await retrieved.get_items()
-        assert len(history) == 1
-        assert history[0]["content"] == "Hi Bob"
-        retrieved.close()
+        # Each returned session should be usable
+        for s in bob_sessions:
+            assert s.user_id == "bob"
+            if s.session_id == s1.session_id:
+                history = await s.get_items()
+                assert len(history) == 1
+                assert history[0]["content"] == "Hi Bob"
+            s.close()
 
-        # Wrong user_id should return None
-        wrong_user = await SQLiteSession.get_session("eve", session_id, db_path=db_path)
-        assert wrong_user is None
+        # Non-existent user returns empty list
+        empty = await SQLiteSession.get_sessions("nobody", db_path=db_path)
+        assert empty == []
 
-        # Non-existent session_id should return None
-        missing = await SQLiteSession.get_session("bob", "non-existent-id", db_path=db_path)
-        assert missing is None
+
+@pytest.mark.asyncio
+async def test_sqlite_get_sessions_pagination():
+    """Test get_sessions supports limit and offset."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_pagination_get.db"
+
+        created = []
+        for _ in range(5):
+            s = await SQLiteSession.create_session("paguser", db_path=db_path)
+            created.append(s)
+            s.close()
+
+        page1 = await SQLiteSession.get_sessions("paguser", db_path=db_path, limit=2)
+        assert len(page1) == 2
+
+        page2 = await SQLiteSession.get_sessions("paguser", db_path=db_path, limit=2, offset=2)
+        assert len(page2) == 2
+
+        page3 = await SQLiteSession.get_sessions("paguser", db_path=db_path, limit=2, offset=4)
+        assert len(page3) == 1
+
+        all_ids = {s.session_id for s in page1 + page2 + page3}
+        assert all_ids == {s.session_id for s in created}
+
+        for s in page1 + page2 + page3:
+            s.close()
 
 
 @pytest.mark.asyncio
@@ -844,11 +875,13 @@ async def test_sqlite_create_multiple_sessions_for_user():
         assert s1.session_id != s2.session_id
         assert s1.user_id == s2.user_id == "charlie"
 
-        sessions = await s1.get_sessions_for_user("charlie")
-        assert set(sessions) == {s1.session_id, s2.session_id}
+        sessions = await SQLiteSession.get_sessions("charlie", db_path=db_path)
+        assert {s.session_id for s in sessions} == {s1.session_id, s2.session_id}
 
         s1.close()
         s2.close()
+        for s in sessions:
+            s.close()
 
 
 @pytest.mark.asyncio
