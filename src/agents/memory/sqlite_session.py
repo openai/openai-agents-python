@@ -4,6 +4,7 @@ import asyncio
 import json
 import sqlite3
 import threading
+import uuid
 from pathlib import Path
 
 from ..items import TResponseInputItem
@@ -310,6 +311,109 @@ class SQLiteSession(SessionABC):
                 conn.commit()
 
         await asyncio.to_thread(_clear_session_sync)
+
+    @classmethod
+    async def create_session(
+        cls,
+        user_id: str,
+        db_path: str | Path = ":memory:",
+        sessions_table: str = "agent_sessions",
+        messages_table: str = "agent_messages",
+        users_table: str = "agent_users",
+        session_settings: SessionSettings | None = None,
+    ) -> SQLiteSession:
+        """Create a new session for a user with an auto-generated session ID.
+
+        Args:
+            user_id: The user identifier to associate with the new session.
+            db_path: Path to the SQLite database file. Defaults to ':memory:'.
+            sessions_table: Name of the sessions table. Defaults to 'agent_sessions'.
+            messages_table: Name of the messages table. Defaults to 'agent_messages'.
+            users_table: Name of the users table. Defaults to 'agent_users'.
+            session_settings: Session configuration settings.
+
+        Returns:
+            A new SQLiteSession instance with an auto-generated session_id.
+        """
+        session_id = str(uuid.uuid4())
+        session = cls(
+            session_id=session_id,
+            db_path=db_path,
+            sessions_table=sessions_table,
+            messages_table=messages_table,
+            users_table=users_table,
+            user_id=user_id,
+            session_settings=session_settings,
+        )
+
+        def _persist_session():
+            conn = session._get_connection()
+            with session._lock if session._is_memory_db else threading.Lock():
+                conn.execute(
+                    f"INSERT OR IGNORE INTO {users_table} (user_id) VALUES (?)",
+                    (user_id,),
+                )
+                conn.execute(
+                    f"INSERT INTO {sessions_table} (session_id, user_id) VALUES (?, ?)",
+                    (session_id, user_id),
+                )
+                conn.commit()
+
+        await asyncio.to_thread(_persist_session)
+        return session
+
+    @classmethod
+    async def get_session(
+        cls,
+        user_id: str,
+        session_id: str,
+        db_path: str | Path = ":memory:",
+        sessions_table: str = "agent_sessions",
+        messages_table: str = "agent_messages",
+        users_table: str = "agent_users",
+        session_settings: SessionSettings | None = None,
+    ) -> SQLiteSession | None:
+        """Retrieve an existing session for a user.
+
+        Args:
+            user_id: The user identifier who owns the session.
+            session_id: The session identifier to retrieve.
+            db_path: Path to the SQLite database file. Defaults to ':memory:'.
+            sessions_table: Name of the sessions table. Defaults to 'agent_sessions'.
+            messages_table: Name of the messages table. Defaults to 'agent_messages'.
+            users_table: Name of the users table. Defaults to 'agent_users'.
+            session_settings: Session configuration settings.
+
+        Returns:
+            The SQLiteSession instance if it exists and belongs to the user, None otherwise.
+        """
+        session = cls(
+            session_id=session_id,
+            db_path=db_path,
+            sessions_table=sessions_table,
+            messages_table=messages_table,
+            users_table=users_table,
+            user_id=user_id,
+            session_settings=session_settings,
+        )
+
+        def _check_session():
+            conn = session._get_connection()
+            with session._lock if session._is_memory_db else threading.Lock():
+                cursor = conn.execute(
+                    f"""
+                    SELECT session_id FROM {sessions_table}
+                    WHERE session_id = ? AND user_id = ?
+                    """,
+                    (session_id, user_id),
+                )
+                return cursor.fetchone() is not None
+
+        exists = await asyncio.to_thread(_check_session)
+        if not exists:
+            session.close()
+            return None
+        return session
 
     async def get_sessions_for_user(
         self,

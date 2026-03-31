@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import uuid
 from typing import Any, ClassVar
 
 from sqlalchemy import (
@@ -422,6 +423,121 @@ class SQLAlchemySession(SessionABC):
                 await sess.execute(
                     delete(self._sessions).where(self._sessions.c.session_id == self.session_id)
                 )
+
+    @classmethod
+    async def create_session(
+        cls,
+        user_id: str,
+        *,
+        engine: AsyncEngine,
+        create_tables: bool = False,
+        sessions_table: str = "agent_sessions",
+        messages_table: str = "agent_messages",
+        users_table: str = "agent_users",
+        session_settings: SessionSettings | None = None,
+    ) -> SQLAlchemySession:
+        """Create a new session for a user with an auto-generated session ID.
+
+        Args:
+            user_id: The user identifier to associate with the new session.
+            engine: A pre-configured SQLAlchemy async engine.
+            create_tables: Whether to auto-create tables. Defaults to False.
+            sessions_table: Override the default table name for sessions.
+            messages_table: Override the default table name for messages.
+            users_table: Override the default table name for users.
+            session_settings: Session configuration settings.
+
+        Returns:
+            A new SQLAlchemySession instance with an auto-generated session_id.
+        """
+        session_id = str(uuid.uuid4())
+        session = cls(
+            session_id=session_id,
+            engine=engine,
+            create_tables=create_tables,
+            sessions_table=sessions_table,
+            messages_table=messages_table,
+            users_table=users_table,
+            user_id=user_id,
+            session_settings=session_settings,
+        )
+
+        await session._ensure_tables()
+        async with session._session_factory() as sess:
+            async with sess.begin():
+                existing_user = await sess.execute(
+                    select(session._users.c.user_id).where(
+                        session._users.c.user_id == user_id
+                    )
+                )
+                if not existing_user.scalar_one_or_none():
+                    try:
+                        async with sess.begin_nested():
+                            await sess.execute(
+                                insert(session._users).values({"user_id": user_id})
+                            )
+                    except IntegrityError:
+                        pass
+                await sess.execute(
+                    insert(session._sessions).values(
+                        {"session_id": session_id, "user_id": user_id}
+                    )
+                )
+
+        return session
+
+    @classmethod
+    async def get_session(
+        cls,
+        user_id: str,
+        session_id: str,
+        *,
+        engine: AsyncEngine,
+        create_tables: bool = False,
+        sessions_table: str = "agent_sessions",
+        messages_table: str = "agent_messages",
+        users_table: str = "agent_users",
+        session_settings: SessionSettings | None = None,
+    ) -> SQLAlchemySession | None:
+        """Retrieve an existing session for a user.
+
+        Args:
+            user_id: The user identifier who owns the session.
+            session_id: The session identifier to retrieve.
+            engine: A pre-configured SQLAlchemy async engine.
+            create_tables: Whether to auto-create tables. Defaults to False.
+            sessions_table: Override the default table name for sessions.
+            messages_table: Override the default table name for messages.
+            users_table: Override the default table name for users.
+            session_settings: Session configuration settings.
+
+        Returns:
+            The SQLAlchemySession instance if it exists and belongs to the user,
+            None otherwise.
+        """
+        session = cls(
+            session_id=session_id,
+            engine=engine,
+            create_tables=create_tables,
+            sessions_table=sessions_table,
+            messages_table=messages_table,
+            users_table=users_table,
+            user_id=user_id,
+            session_settings=session_settings,
+        )
+
+        await session._ensure_tables()
+        async with session._session_factory() as sess:
+            result = await sess.execute(
+                select(session._sessions.c.session_id).where(
+                    (session._sessions.c.session_id == session_id)
+                    & (session._sessions.c.user_id == user_id)
+                )
+            )
+            if not result.scalar_one_or_none():
+                return None
+
+        return session
 
     async def get_sessions_for_user(
         self,

@@ -769,6 +769,89 @@ async def test_sqlite_session_user_id_attribute():
 
 
 @pytest.mark.asyncio
+async def test_sqlite_create_session():
+    """Test create_session generates a UUID session_id and persists user and session."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_create.db"
+
+        session = await SQLiteSession.create_session("alice", db_path=db_path)
+
+        # session_id should be a valid UUID
+        import uuid
+
+        uuid.UUID(session.session_id)  # raises if not valid
+        assert session.user_id == "alice"
+
+        # Session should be queryable via get_sessions_for_user
+        sessions = await session.get_sessions_for_user("alice")
+        assert session.session_id in sessions
+
+        # Adding items should work normally
+        items: list[TResponseInputItem] = [{"role": "user", "content": "Hello"}]
+        await session.add_items(items)
+        retrieved = await session.get_items()
+        assert len(retrieved) == 1
+        assert retrieved[0]["content"] == "Hello"
+
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_get_session():
+    """Test get_session retrieves an existing session or returns None."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_get.db"
+
+        # Create a session first
+        created = await SQLiteSession.create_session("bob", db_path=db_path)
+        session_id = created.session_id
+
+        # Add some items
+        items: list[TResponseInputItem] = [{"role": "user", "content": "Hi Bob"}]
+        await created.add_items(items)
+        created.close()
+
+        # Retrieve it
+        retrieved = await SQLiteSession.get_session("bob", session_id, db_path=db_path)
+        assert retrieved is not None
+        assert retrieved.session_id == session_id
+        assert retrieved.user_id == "bob"
+
+        # Verify items are preserved
+        history = await retrieved.get_items()
+        assert len(history) == 1
+        assert history[0]["content"] == "Hi Bob"
+        retrieved.close()
+
+        # Wrong user_id should return None
+        wrong_user = await SQLiteSession.get_session("eve", session_id, db_path=db_path)
+        assert wrong_user is None
+
+        # Non-existent session_id should return None
+        missing = await SQLiteSession.get_session("bob", "non-existent-id", db_path=db_path)
+        assert missing is None
+
+
+@pytest.mark.asyncio
+async def test_sqlite_create_multiple_sessions_for_user():
+    """Test creating multiple sessions for the same user."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_multi.db"
+
+        s1 = await SQLiteSession.create_session("charlie", db_path=db_path)
+        s2 = await SQLiteSession.create_session("charlie", db_path=db_path)
+
+        assert s1.session_id != s2.session_id
+        assert s1.user_id == s2.user_id == "charlie"
+
+        sessions = await s1.get_sessions_for_user("charlie")
+        assert set(sessions) == {s1.session_id, s2.session_id}
+
+        s1.close()
+        s2.close()
+
+
+@pytest.mark.asyncio
 async def test_runner_with_session_settings_override():
     """Test that RunConfig can override session's default settings."""
     from agents.memory import SessionSettings
