@@ -64,12 +64,30 @@ class RequireApprovalObject(TypedDict, total=False):
 RequireApprovalPolicy = Literal["always", "never"]
 RequireApprovalMapping = dict[str, RequireApprovalPolicy]
 if TYPE_CHECKING:
+    LocalMCPApprovalCallable = Callable[
+        [RunContextWrapper[Any], "AgentBase", MCPTool],
+        MaybeAwaitable[bool],
+    ]
+else:
+    LocalMCPApprovalCallable = Callable[..., Any]
+
+if TYPE_CHECKING:
     RequireApprovalSetting = (
-        RequireApprovalPolicy | RequireApprovalObject | RequireApprovalMapping | bool | None
+        RequireApprovalPolicy
+        | RequireApprovalObject
+        | RequireApprovalMapping
+        | LocalMCPApprovalCallable
+        | bool
+        | None
     )
 else:
     RequireApprovalSetting = Union[  # noqa: UP007
-        RequireApprovalPolicy, RequireApprovalObject, RequireApprovalMapping, bool, None
+        RequireApprovalPolicy,
+        RequireApprovalObject,
+        RequireApprovalMapping,
+        LocalMCPApprovalCallable,
+        bool,
+        None,
     ]
 
 
@@ -220,8 +238,10 @@ class MCPServer(abc.ABC):
                 default will cause duplicate content. You can set this to True if you know the
                 server will not duplicate the structured content in the `tool_result.content`.
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
-                a dict of tool names to those values, a boolean, or an object with always/never
-                tool lists (mirroring TS requireApproval). Normalized into a needs_approval policy.
+                a dict of tool names to those values, a boolean, an object with always/never
+                tool lists (mirroring TS requireApproval), or a sync/async callable that receives
+                `(run_context, agent, tool)` and returns whether the tool call needs approval.
+                Normalized into a needs_approval policy.
             failure_error_function: Optional function used to convert MCP tool failures into
                 a model-visible error message. If explicitly set to None, tool errors will be
                 raised instead of converted. If left unset, the agent-level configuration (or
@@ -408,6 +428,9 @@ class MCPServer(abc.ABC):
                     tool_mapping[str(name)] = _to_bool(value)
             return tool_mapping
 
+        if callable(require_approval):
+            return require_approval
+
         if isinstance(require_approval, bool):
             return require_approval
 
@@ -418,7 +441,12 @@ class MCPServer(abc.ABC):
         tool: MCPTool,
         agent: AgentBase | None,
     ) -> bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]:
-        """Return a FunctionTool.needs_approval value for a given MCP tool."""
+        """Return a FunctionTool.needs_approval value for a given MCP tool.
+
+        Legacy callers may omit ``agent`` when using ``MCPUtil.to_function_tool()`` directly.
+        When approval is configured with a callable policy and no agent is available, this method
+        returns ``True`` to preserve the historical fail-closed behavior.
+        """
 
         policy = self._needs_approval_policy
 

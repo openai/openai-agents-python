@@ -1,6 +1,7 @@
 try:
     from .manager import MCPServerManager
     from .server import (
+        LocalMCPApprovalCallable,
         MCPServer,
         MCPServerSse,
         MCPServerSseParams,
@@ -32,6 +33,7 @@ __all__ = [
     "MCPServerStreamableHttp",
     "MCPServerStreamableHttpParams",
     "MCPServerManager",
+    "LocalMCPApprovalCallable",
     "MCPUtil",
     "MCPToolMetaContext",
     "MCPToolMetaResolver",

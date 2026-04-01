@@ -677,6 +677,78 @@ async def test_to_function_tool_legacy_call_callable_policy_requires_approval():
 
 
 @pytest.mark.asyncio
+async def test_to_function_tool_callable_policy_uses_agent_and_tool():
+    """Callable require_approval policies should bridge into FunctionTool.needs_approval."""
+
+    captured: dict[str, Any] = {}
+
+    def require_approval(
+        run_context: RunContextWrapper[Any],
+        agent: Agent,
+        tool: MCPTool,
+    ) -> bool:
+        captured["run_context"] = run_context
+        captured["agent"] = agent
+        captured["tool"] = tool
+        return tool.name == "guarded_tool"
+
+    server = FakeMCPServer(require_approval=require_approval)
+    tool = MCPTool(name="guarded_tool", inputSchema={})
+    agent = Agent(name="test-agent")
+
+    function_tool = MCPUtil.to_function_tool(
+        tool,
+        server,
+        convert_schemas_to_strict=False,
+        agent=agent,
+    )
+
+    assert callable(function_tool.needs_approval)
+
+    run_context = RunContextWrapper(context={"request_id": "req_123"})
+    needs_approval = await function_tool.needs_approval(run_context, {}, "call_123")
+
+    assert needs_approval is True
+    assert captured["run_context"] is run_context
+    assert captured["agent"] is agent
+    assert captured["tool"].name == "guarded_tool"
+
+
+@pytest.mark.asyncio
+async def test_to_function_tool_async_callable_policy_is_awaited():
+    """Async require_approval policies should be awaited before tool execution."""
+
+    async def require_approval(
+        _run_context: RunContextWrapper[Any],
+        _agent: Agent,
+        tool: MCPTool,
+    ) -> bool:
+        await asyncio.sleep(0)
+        return tool.name == "async_guarded_tool"
+
+    server = FakeMCPServer(require_approval=require_approval)
+    tool = MCPTool(name="async_guarded_tool", inputSchema={})
+    agent = Agent(name="test-agent")
+
+    function_tool = MCPUtil.to_function_tool(
+        tool,
+        server,
+        convert_schemas_to_strict=False,
+        agent=agent,
+    )
+
+    assert callable(function_tool.needs_approval)
+
+    needs_approval = await function_tool.needs_approval(
+        RunContextWrapper(context=None),
+        {},
+        "call_async_123",
+    )
+
+    assert needs_approval is True
+
+
+@pytest.mark.asyncio
 async def test_mcp_tool_failure_error_function_agent_default():
     """Agent-level failure_error_function should handle MCP tool failures."""
 
