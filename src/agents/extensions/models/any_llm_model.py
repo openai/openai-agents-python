@@ -163,14 +163,15 @@ def _flatten_any_llm_reasoning_value(value: Any) -> str:
             if flattened:
                 return flattened
         return ""
-    if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-        parts = [_flatten_any_llm_reasoning_value(item) for item in value]
-        return "".join(part for part in parts if part)
 
     for attr in ("content", "text", "thinking"):
         flattened = _flatten_any_llm_reasoning_value(getattr(value, attr, None))
         if flattened:
             return flattened
+
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+        parts = [_flatten_any_llm_reasoning_value(item) for item in value]
+        return "".join(part for part in parts if part)
     return ""
 
 
@@ -829,6 +830,7 @@ class AnyLLMModel(Model):
             handoffs=handoffs,
             model=self._provider_model,
         )
+
         converted_tools = OpenAIResponsesConverter.convert_tools(
             tools,
             handoffs,

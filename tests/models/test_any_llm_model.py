@@ -739,3 +739,17 @@ def test_any_llm_provider_passes_api_override() -> None:
 
     assert isinstance(model, AnyLLMModel)
     assert model.api == "chat_completions"
+
+
+def test_any_llm_reasoning_objects_prefer_content_attributes_over_iterable_pairs() -> None:
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+    from any_llm.types.completion import Reasoning
+
+    from agents.extensions.models.any_llm_model import _extract_any_llm_reasoning_text
+
+    delta = pytypes.SimpleNamespace(reasoning=Reasoning(content="用户"))
+
+    assert _extract_any_llm_reasoning_text(delta) == "用户"
