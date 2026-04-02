@@ -1385,6 +1385,7 @@ async def run_single_turn_streamed(
                     )
                     tool_description: str | None = None
                     tool_title: str | None = None
+                    tool_mcp_server_name: str | None = None
                     if isinstance(output_item, McpCall):
                         metadata = hosted_mcp_tool_metadata.get(
                             (output_item.server_label, output_item.name)
@@ -1392,15 +1393,18 @@ async def run_single_turn_streamed(
                         if metadata is not None:
                             tool_description = metadata.description
                             tool_title = metadata.title
+                        tool_mcp_server_name = output_item.server_label
                     elif matched_tool is not None:
                         tool_description = getattr(matched_tool, "description", None)
                         tool_title = getattr(matched_tool, "_mcp_title", None)
+                        tool_mcp_server_name = getattr(matched_tool, "_mcp_server_name", None)
 
                     tool_item = ToolCallItem(
                         raw_item=cast(ToolCallItemTypes, output_item),
                         agent=agent,
                         description=tool_description,
                         title=tool_title,
+                        mcp_server_name=tool_mcp_server_name,
                     )
                     streamed_result._event_queue.put_nowait(
                         RunItemStreamEvent(item=tool_item, name="tool_called")

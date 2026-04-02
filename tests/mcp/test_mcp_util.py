@@ -1455,3 +1455,55 @@ def test_to_function_tool_description_falls_back_to_mcp_title():
 
     assert function_tool.description == "Search Docs"
     assert function_tool._mcp_title == "Search Docs"
+
+
+def test_to_function_tool_stores_mcp_server_name():
+    """Test that to_function_tool stores the MCP server name on the converted FunctionTool."""
+    server = FakeMCPServer(server_name="my_git_server")
+    tool = MCPTool(
+        name="list_commits",
+        inputSchema={},
+        description="List recent commits",
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+
+    assert function_tool._mcp_server_name == "my_git_server"
+
+
+def test_to_function_tool_default_mcp_server_name():
+    """Test that FunctionTool defaults _mcp_server_name to None for non-MCP tools."""
+    tool = FunctionTool(
+        name="plain_tool",
+        description="A plain tool",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=lambda ctx, args: None,  # type: ignore[arg-type, return-value]
+        strict_json_schema=False,
+    )
+
+    assert tool._mcp_server_name is None
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_preserve_server_name():
+    """Test that get_all_function_tools preserves server name across multiple servers."""
+    server_a = FakeMCPServer(server_name="server_a")
+    server_a.add_tool("tool_x", {"type": "object", "properties": {}})
+
+    server_b = FakeMCPServer(server_name="server_b")
+    server_b.add_tool("tool_y", {"type": "object", "properties": {}})
+
+    agent = Agent(name="test", instructions="test")
+    run_context = RunContextWrapper(context=None)
+
+    tools = await MCPUtil.get_all_function_tools(
+        [server_a, server_b],
+        convert_schemas_to_strict=False,
+        run_context=run_context,
+        agent=agent,
+    )
+
+    func_tools = [t for t in tools if isinstance(t, FunctionTool)]
+    tool_names_to_server = {t.name: t._mcp_server_name for t in func_tools}
+    assert tool_names_to_server["tool_x"] == "server_a"
+    assert tool_names_to_server["tool_y"] == "server_b"

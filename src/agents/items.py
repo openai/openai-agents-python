@@ -358,6 +358,9 @@ class ToolCallItem(RunItemBase[Any]):
     title: str | None = None
     """Optional short display label if known at item creation time."""
 
+    mcp_server_name: str | None = None
+    """Name of the MCP server that provided this tool, if applicable."""
+
 
 ToolCallOutputTypes: TypeAlias = Union[
     FunctionCallOutput,

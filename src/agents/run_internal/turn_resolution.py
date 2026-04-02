@@ -1523,6 +1523,7 @@ def process_model_response(
                     agent=agent,
                     description=metadata.description if metadata is not None else None,
                     title=metadata.title if metadata is not None else None,
+                    mcp_server_name=output.server_label,
                 )
             )
             tools_used.append("mcp")
@@ -1659,6 +1660,7 @@ def process_model_response(
                     agent=agent,
                     description=func_tool.description,
                     title=func_tool._mcp_title,
+                    mcp_server_name=func_tool._mcp_server_name,
                 )
             )
             functions.append(
