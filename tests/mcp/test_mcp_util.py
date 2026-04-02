@@ -1455,3 +1455,127 @@ def test_to_function_tool_description_falls_back_to_mcp_title():
 
     assert function_tool.description == "Search Docs"
     assert function_tool._mcp_title == "Search Docs"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_tool_names_raises_by_default():
+    """Default behavior: duplicate tool names across servers raises UserError."""
+    server_a = FakeMCPServer(server_name="server_a")
+    server_a.add_tool("run", {"type": "object", "properties": {}})
+
+    server_b = FakeMCPServer(server_name="server_b")
+    server_b.add_tool("run", {"type": "object", "properties": {}})
+
+    agent = Agent(name="test", instructions="test")
+    run_context = RunContextWrapper(context=None)
+
+    with pytest.raises(AgentsException, match="Duplicate tool names"):
+        await MCPUtil.get_all_function_tools(
+            [server_a, server_b],
+            convert_schemas_to_strict=False,
+            run_context=run_context,
+            agent=agent,
+        )
+
+
+@pytest.mark.asyncio
+async def test_include_server_in_tool_names_avoids_collision():
+    """With include_server_in_tool_names=True, duplicate names are prefixed and no error."""
+    server_a = FakeMCPServer(server_name="server_a")
+    server_a.add_tool("run", {"type": "object", "properties": {}})
+
+    server_b = FakeMCPServer(server_name="server_b")
+    server_b.add_tool("run", {"type": "object", "properties": {}})
+
+    agent = Agent(name="test", instructions="test")
+    run_context = RunContextWrapper(context=None)
+
+    tools = await MCPUtil.get_all_function_tools(
+        [server_a, server_b],
+        convert_schemas_to_strict=False,
+        run_context=run_context,
+        agent=agent,
+        include_server_in_tool_names=True,
+    )
+
+    tool_names = [t.name for t in tools]
+    assert "server_a__run" in tool_names
+    assert "server_b__run" in tool_names
+    assert len(tool_names) == 2
+
+
+@pytest.mark.asyncio
+async def test_include_server_in_tool_names_invokes_with_original_name():
+    """Prefixed tools still invoke the MCP server using the original tool name."""
+    server = FakeMCPServer(server_name="my_server")
+    server.add_tool("do_thing", {"type": "object", "properties": {}})
+
+    agent = Agent(name="test", instructions="test")
+    run_context = RunContextWrapper(context=None)
+
+    tools = await MCPUtil.get_all_function_tools(
+        [server],
+        convert_schemas_to_strict=False,
+        run_context=run_context,
+        agent=agent,
+        include_server_in_tool_names=True,
+    )
+
+    assert len(tools) == 1
+    func_tool = tools[0]
+    assert isinstance(func_tool, FunctionTool)
+    assert func_tool.name == "my_server__do_thing"
+
+    # Invoke the tool and verify the server received the original name.
+    tool_context = ToolContext(
+        context=None,
+        tool_name="my_server__do_thing",
+        tool_call_id="test_call",
+        tool_arguments="{}",
+    )
+    await func_tool.on_invoke_tool(tool_context, "{}")
+    assert server.tool_calls == ["do_thing"]
+
+
+@pytest.mark.asyncio
+async def test_include_server_in_tool_names_sanitizes_server_name():
+    """Server names with special characters are sanitized for the prefix."""
+    server = FakeMCPServer(server_name="my-cool.server/v2")
+    server.add_tool("action", {"type": "object", "properties": {}})
+
+    agent = Agent(name="test", instructions="test")
+    run_context = RunContextWrapper(context=None)
+
+    tools = await MCPUtil.get_all_function_tools(
+        [server],
+        convert_schemas_to_strict=False,
+        run_context=run_context,
+        agent=agent,
+        include_server_in_tool_names=True,
+    )
+
+    func_tool = tools[0]
+    assert isinstance(func_tool, FunctionTool)
+    assert func_tool.name == "my_cool_server_v2__action"
+
+
+@pytest.mark.asyncio
+async def test_include_server_in_tool_names_empty_server_name_fallback():
+    """Empty or all-special-character server names fall back to 'server'."""
+    server = FakeMCPServer(server_name="---")
+    server.add_tool("action", {"type": "object", "properties": {}})
+
+    agent = Agent(name="test", instructions="test")
+    run_context = RunContextWrapper(context=None)
+
+    tools = await MCPUtil.get_all_function_tools(
+        [server],
+        convert_schemas_to_strict=False,
+        run_context=run_context,
+        agent=agent,
+        include_server_in_tool_names=True,
+    )
+
+    func_tool = tools[0]
+    assert isinstance(func_tool, FunctionTool)
+    assert func_tool.name == "server__action"

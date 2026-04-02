@@ -5,6 +5,7 @@ import copy
 import functools
 import inspect
 import json
+import re
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Protocol, Union
@@ -174,6 +175,19 @@ def create_static_tool_filter(
     return filter_dict
 
 
+_SERVER_NAME_SANITIZE_RE = re.compile(r"[^a-zA-Z0-9_]")
+
+
+def _sanitize_server_name(name: str) -> str:
+    """Sanitize an MCP server name so it is safe for use as a tool name prefix.
+
+    Replaces any character that is not alphanumeric or underscore with an underscore.
+    Falls back to ``server`` if the result would be empty.
+    """
+    sanitized = _SERVER_NAME_SANITIZE_RE.sub("_", name).strip("_")
+    return sanitized or "server"
+
+
 class MCPUtil:
     """Set of utilities for interop between MCP and Agents SDK tools."""
 
@@ -207,9 +221,10 @@ class MCPUtil:
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        include_server_in_tool_names: bool = False,
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
-        tools = []
+        tools: list[Tool] = []
         tool_names: set[str] = set()
         for server in servers:
             server_tools = await cls.get_function_tools(
@@ -219,13 +234,21 @@ class MCPUtil:
                 agent,
                 failure_error_function=failure_error_function,
             )
-            server_tool_names = {tool.name for tool in server_tools}
-            if len(server_tool_names & tool_names) > 0:
-                raise UserError(
-                    f"Duplicate tool names found across MCP servers: "
-                    f"{server_tool_names & tool_names}"
-                )
-            tool_names.update(server_tool_names)
+
+            if include_server_in_tool_names:
+                prefix = _sanitize_server_name(server.name)
+                for tool in server_tools:
+                    if isinstance(tool, FunctionTool):
+                        tool.name = f"{prefix}__{tool.name}"
+            else:
+                server_tool_names = {tool.name for tool in server_tools}
+                if len(server_tool_names & tool_names) > 0:
+                    raise UserError(
+                        f"Duplicate tool names found across MCP servers: "
+                        f"{server_tool_names & tool_names}"
+                    )
+
+            tool_names.update(tool.name for tool in server_tools)
             tools.extend(server_tools)
 
         return tools
