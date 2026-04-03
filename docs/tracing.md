@@ -136,6 +136,50 @@ await Runner.run(
 )
 ```
 
+## Long-running workers
+
+In long-lived processes such as Celery workers, FastAPI background tasks, RQ, or Dramatiq, traces
+are buffered by the default `BatchTraceProcessor` and only flushed automatically on process
+shutdown. Because these processes never exit between tasks, buffered traces may never be exported
+to the Traces dashboard.
+
+To ensure traces are exported after each unit of work, call `force_flush()` on the global trace
+provider:
+
+```python
+from agents.tracing import get_trace_provider
+
+# Celery example
+@celery_app.task
+def run_agent_task(prompt: str):
+    with trace("my_task"):
+        result = Runner.run_sync(agent, prompt)
+    get_trace_provider().force_flush()  # flush after each task
+    return result
+```
+
+```python
+# FastAPI background task example
+from fastapi import BackgroundTasks
+from agents.tracing import get_trace_provider
+
+def process_in_background(prompt: str):
+    with trace("background_job"):
+        result = Runner.run_sync(agent, prompt)
+    get_trace_provider().force_flush()
+
+@app.post("/run")
+async def run(background_tasks: BackgroundTasks, prompt: str):
+    background_tasks.add_task(process_in_background, prompt)
+    return {"status": "queued"}
+```
+
+!!!note
+
+    `force_flush()` is a blocking call. It waits until all currently buffered spans have been
+    exported before returning. Call it after the `trace()` context manager exits to avoid
+    flushing a partially-built trace.
+
 ## Additional notes
 - View free traces at Openai Traces dashboard.
 
