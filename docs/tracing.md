@@ -139,6 +139,47 @@ await Runner.run(
 ## Additional notes
 - View free traces at Openai Traces dashboard.
 
+## Long-running workers
+
+In long-running worker processes (Celery, FastAPI background tasks, RQ, Dramatiq), traces created
+with `trace()` are buffered by `BatchTraceProcessor` but **may not be exported** before the next
+task begins, because the worker process never exits to trigger shutdown flushing.
+
+Use [`flush_traces()`][agents.flush_traces] after each task completes to ensure all buffered spans
+are exported:
+
+```python
+from agents import Agent, Runner, trace, flush_traces
+
+# Celery
+@celery_app.task
+def process_document(doc_id: str) -> str:
+    with trace("process_document"):
+        agent = Agent(name="Processor", instructions="Process the document.")
+        result = Runner.run_sync(agent, f"Process document {doc_id}")
+    flush_traces()  # export before the worker picks up the next task
+    return result.final_output
+```
+
+```python
+# FastAPI background task
+from fastapi import BackgroundTasks
+
+async def run_agent_task(task_id: str):
+    with trace("background_task"):
+        agent = Agent(name="Worker", instructions="Complete the task.")
+        result = await Runner.run(agent, f"Task {task_id}")
+    flush_traces()
+
+@app.post("/tasks")
+async def create_task(background_tasks: BackgroundTasks):
+    background_tasks.add_task(run_agent_task, "task-123")
+    return {"status": "queued"}
+```
+
+Without calling `flush_traces()`, traces may be dropped or merged across task boundaries in
+worker environments. See [issue #2135](https://github.com/openai/openai-agents-python/issues/2135)
+for background.
 
 ## Ecosystem integrations
 
