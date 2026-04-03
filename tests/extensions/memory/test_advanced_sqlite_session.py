@@ -1343,3 +1343,116 @@ async def test_runner_with_session_settings_override(agent: Agent):
     assert len(history_items) == 2
 
     session.close()
+
+
+async def test_concurrent_file_db_access_regression():
+    """Regression test: concurrent access to file-backed DB should be thread-safe.
+
+    This test verifies that the shared _file_db_lock prevents race conditions
+    when multiple coroutines access the same file-backed AdvancedSQLiteSession.
+    Previously, threading.Lock() was created fresh in each method call,
+    making concurrent access unsafe.
+    """
+    import tempfile
+    import asyncio
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+
+    try:
+        session = AdvancedSQLiteSession(
+            session_id="concurrent_test",
+            db_path=db_path,
+            create_tables=True,
+        )
+
+        async def add_items_task(task_id: int, count: int) -> int:
+            """Task that adds items and returns the count added."""
+            items_added = 0
+            for i in range(count):
+                item: TResponseInputItem = {
+                    "role": "user",
+                    "content": f"Task {task_id} message {i}",
+                }
+                await session.add_items([item])
+                items_added += 1
+            return items_added
+
+        tasks = [
+            add_items_task(1, 10),
+            add_items_task(2, 10),
+            add_items_task(3, 10),
+        ]
+
+        results = await asyncio.gather(*tasks)
+
+        assert sum(results) == 30, f"Expected 30 items added, got {sum(results)}"
+
+        retrieved = await session.get_items()
+        assert len(retrieved) == 30, f"Expected 30 items retrieved, got {len(retrieved)}"
+
+        contents = [item.get("content", "") for item in retrieved]
+        for task_id in range(1, 4):
+            for i in range(10):
+                expected = f"Task {task_id} message {i}"
+                assert expected in contents, f"Missing item: {expected}"
+
+        session.close()
+    finally:
+        # Clean up temp file
+        import os
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
+
+async def test_concurrent_mixed_operations_file_db():
+    """Test concurrent mixed operations (add, get, branch) on file-backed DB."""
+    import tempfile
+    import asyncio
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+
+    try:
+        session = AdvancedSQLiteSession(
+            session_id="concurrent_mixed_test",
+            db_path=db_path,
+            create_tables=True,
+        )
+
+        async def mixed_operations(task_id: int) -> tuple[int, int]:
+            """Perform mixed operations and return (added, retrieved)."""
+            added = 0
+            for i in range(5):
+                await session.add_items([{"role": "user", "content": f"T{task_id}-{i}"}])
+                added += 1
+
+            items = await session.get_items()
+            retrieved = len(items)
+
+            await session.add_items([{"role": "user", "content": f"T{task_id}-extra"}])
+            added += 1
+
+            return added, retrieved
+
+        tasks = [mixed_operations(i) for i in range(4)]
+        results = await asyncio.gather(*tasks)
+
+        final_items = await session.get_items()
+        assert len(final_items) == 24, f"Expected 24 items, got {len(final_items)}"  # 4 tasks * (5 + 1)
+
+        all_contents = [item.get("content", "") for item in final_items]
+        for task_id in range(4):
+            for i in range(5):
+                assert f"T{task_id}-{i}" in all_contents
+            assert f"T{task_id}-extra" in all_contents
+
+        session.close()
+    finally:
+        import os
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass

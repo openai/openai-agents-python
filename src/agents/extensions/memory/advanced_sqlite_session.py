@@ -49,6 +49,7 @@ class AdvancedSQLiteSession(SQLiteSession):
             self._init_structure_tables()
         self._current_branch_id = "main"
         self._logger = logger or logging.getLogger(__name__)
+        # Note: _file_db_lock is inherited from SQLiteSession base class for thread safety
 
     def _init_structure_tables(self):
         """Add structure and usage tracking tables.
@@ -158,8 +159,8 @@ class AdvancedSQLiteSession(SQLiteSession):
             def _get_all_items_sync():
                 """Synchronous helper to get all items for a branch."""
                 conn = self._get_connection()
-                # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
-                with self._lock if self._is_memory_db else threading.Lock():
+                # Use the shared instance lock inherited from base class for disk-based DBs
+                with self._lock if self._is_memory_db else self._file_db_lock:
                     with closing(conn.cursor()) as cursor:
                         if session_limit is None:
                             cursor.execute(
@@ -203,8 +204,8 @@ class AdvancedSQLiteSession(SQLiteSession):
         def _get_items_sync():
             """Synchronous helper to get items for a specific branch."""
             conn = self._get_connection()
-            # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
-            with self._lock if self._is_memory_db else threading.Lock():
+            # Use the instance lock for disk-based DBs to ensure consistent locking
+            with self._lock if self._is_memory_db else self._file_db_lock:
                 with closing(conn.cursor()) as cursor:
                     # Get message IDs in correct order for this branch
                     if session_limit is None:
@@ -345,8 +346,8 @@ class AdvancedSQLiteSession(SQLiteSession):
         def _add_structure_sync():
             """Synchronous helper to add structure metadata to database."""
             conn = self._get_connection()
-            # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
-            with self._lock if self._is_memory_db else threading.Lock():
+            # Use the instance lock for disk-based DBs to ensure consistent locking
+            with self._lock if self._is_memory_db else self._file_db_lock:
                 # Get the IDs of messages we just inserted, in order
                 with closing(conn.cursor()) as cursor:
                     cursor.execute(
@@ -451,8 +452,8 @@ class AdvancedSQLiteSession(SQLiteSession):
         def _cleanup_sync():
             """Synchronous helper to cleanup orphaned messages."""
             conn = self._get_connection()
-            # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
-            with self._lock if self._is_memory_db else threading.Lock():
+            # Use the instance lock for disk-based DBs to ensure consistent locking
+            with self._lock if self._is_memory_db else self._file_db_lock:
                 with closing(conn.cursor()) as cursor:
                     # Find messages without structure metadata
                     cursor.execute(
@@ -722,8 +723,8 @@ class AdvancedSQLiteSession(SQLiteSession):
         def _delete_sync():
             """Synchronous helper to delete branch and associated data."""
             conn = self._get_connection()
-            # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
-            with self._lock if self._is_memory_db else threading.Lock():
+            # Use the instance lock for disk-based DBs to ensure consistent locking
+            with self._lock if self._is_memory_db else self._file_db_lock:
                 with closing(conn.cursor()) as cursor:
                     # First verify the branch exists
                     cursor.execute(
@@ -829,8 +830,8 @@ class AdvancedSQLiteSession(SQLiteSession):
         def _copy_sync():
             """Synchronous helper to copy messages to new branch."""
             conn = self._get_connection()
-            # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
-            with self._lock if self._is_memory_db else threading.Lock():
+            # Use the instance lock for disk-based DBs to ensure consistent locking
+            with self._lock if self._is_memory_db else self._file_db_lock:
                 with closing(conn.cursor()) as cursor:
                     # Get all messages before the branch point
                     cursor.execute(
@@ -1124,8 +1125,8 @@ class AdvancedSQLiteSession(SQLiteSession):
         def _get_usage_sync():
             """Synchronous helper to get session usage data."""
             conn = self._get_connection()
-            # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
-            with self._lock if self._is_memory_db else threading.Lock():
+            # Use the instance lock for disk-based DBs to ensure consistent locking
+            with self._lock if self._is_memory_db else self._file_db_lock:
                 if branch_id:
                     # Branch-specific usage
                     query = """
@@ -1288,8 +1289,8 @@ class AdvancedSQLiteSession(SQLiteSession):
         def _update_sync():
             """Synchronous helper to update turn usage data."""
             conn = self._get_connection()
-            # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
-            with self._lock if self._is_memory_db else threading.Lock():
+            # Use the instance lock for disk-based DBs to ensure consistent locking
+            with self._lock if self._is_memory_db else self._file_db_lock:
                 # Serialize token details as JSON
                 input_details_json = None
                 output_details_json = None
