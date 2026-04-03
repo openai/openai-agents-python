@@ -1579,3 +1579,25 @@ async def test_include_server_in_tool_names_empty_server_name_fallback():
     func_tool = tools[0]
     assert isinstance(func_tool, FunctionTool)
     assert func_tool.name == "server__action"
+
+
+@pytest.mark.asyncio
+async def test_include_server_in_tool_names_detects_sanitized_collision():
+    """Servers whose names sanitize to the same prefix still raise on collision."""
+    server_a = FakeMCPServer(server_name="a-b")
+    server_a.add_tool("run", {"type": "object", "properties": {}})
+
+    server_b = FakeMCPServer(server_name="a_b")
+    server_b.add_tool("run", {"type": "object", "properties": {}})
+
+    agent = Agent(name="test", instructions="test")
+    run_context = RunContextWrapper(context=None)
+
+    with pytest.raises(AgentsException, match="Duplicate tool names"):
+        await MCPUtil.get_all_function_tools(
+            [server_a, server_b],
+            convert_schemas_to_strict=False,
+            run_context=run_context,
+            agent=agent,
+            include_server_in_tool_names=True,
+        )

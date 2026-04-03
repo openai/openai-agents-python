@@ -240,15 +240,13 @@ class MCPUtil:
                 for tool in server_tools:
                     if isinstance(tool, FunctionTool):
                         tool.name = f"{prefix}__{tool.name}"
-            else:
-                server_tool_names = {tool.name for tool in server_tools}
-                if len(server_tool_names & tool_names) > 0:
-                    raise UserError(
-                        f"Duplicate tool names found across MCP servers: "
-                        f"{server_tool_names & tool_names}"
-                    )
 
-            tool_names.update(tool.name for tool in server_tools)
+            server_tool_names = {tool.name for tool in server_tools}
+            duplicates = server_tool_names & tool_names
+            if duplicates:
+                raise UserError(f"Duplicate tool names found across MCP servers: {duplicates}")
+
+            tool_names.update(server_tool_names)
             tools.extend(server_tools)
 
         return tools
