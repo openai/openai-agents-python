@@ -19,7 +19,7 @@ from agents.mcp import MCPServerStreamableHttp
 
 async def register():
     async with MCPServerStreamableHttp(
-        url="https://mcp.agentbase.tools/mcp",
+        params={"url": "https://mcp.agentbase.tools/mcp"},
         name="agentbase",
     ) as server:
         agent = Agent(
@@ -45,13 +45,12 @@ AGENTBASE_TOKEN = "your-bearer-token-here"
 
 async def main():
     async with MCPServerStreamableHttp(
-        url="https://mcp.agentbase.tools/mcp",
+        params={
+            "url": "https://mcp.agentbase.tools/mcp",
+            "headers": {"Authorization": f"Bearer {AGENTBASE_TOKEN}"},
+        },
         name="agentbase",
         client_session_timeout_seconds=30,
-        # Pass auth header
-        http_client_factory=lambda: __import__('httpx').AsyncClient(
-            headers={"Authorization": f"Bearer {AGENTBASE_TOKEN}"}
-        ),
     ) as agentbase:
         agent = Agent(
             name="Research Agent",
@@ -81,17 +80,16 @@ asyncio.run(main())
 import asyncio
 from agents import Agent, Runner
 from agents.mcp import MCPServerStreamableHttp
-import httpx
 
 AGENTBASE_TOKEN = "your-bearer-token-here"
 
 def make_agentbase_server():
     return MCPServerStreamableHttp(
-        url="https://mcp.agentbase.tools/mcp",
+        params={
+            "url": "https://mcp.agentbase.tools/mcp",
+            "headers": {"Authorization": f"Bearer {AGENTBASE_TOKEN}"},
+        },
         name="agentbase",
-        http_client_factory=lambda: httpx.AsyncClient(
-            headers={"Authorization": f"Bearer {AGENTBASE_TOKEN}"}
-        ),
     )
 
 async def main():
@@ -138,5 +136,5 @@ asyncio.run(main())
 ## Links
 
 - [AgentBase](https://agentbase.tools)
-- [GitHub](https://github.com/AgentBase1/mcp-server)
+- [GitHub](https://github.com/revmischa/agentbase)
 - [OpenAI Agents SDK docs](https://openai.github.io/openai-agents-python/)
