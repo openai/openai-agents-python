@@ -42,6 +42,7 @@ __all__ = [
     "add_trace_processor",
     "agent_span",
     "custom_span",
+    "flush_traces",
     "function_span",
     "generation_span",
     "get_current_span",
@@ -108,3 +109,14 @@ def set_tracing_export_api_key(api_key: str) -> None:
     Set the OpenAI API key for the backend exporter.
     """
     default_exporter().set_api_key(api_key)
+
+
+def flush_traces() -> None:
+    """Force immediate export of buffered traces and spans.
+
+    The default ``BatchTraceProcessor`` already exports traces periodically in the
+    background. Call this when a worker, background job, or request handler needs
+    traces to be visible immediately after a unit of work finishes instead of
+    waiting for the next scheduled flush.
+    """
+    get_trace_provider().force_flush()

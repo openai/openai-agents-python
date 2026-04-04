@@ -538,6 +538,36 @@ async def test_sqlite_session_concurrent_access():
 
 
 @pytest.mark.asyncio
+async def test_sqlite_session_file_lock_is_shared_across_instances():
+    """File-backed sessions pointing at the same DB path should reuse one process-local lock."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_shared_lock.db"
+        lock_path = db_path.resolve()
+
+        session_1 = SQLiteSession("session_1", db_path)
+        session_2 = SQLiteSession("session_2", db_path)
+
+        assert session_1._lock is session_2._lock
+        assert SQLiteSession._file_lock_counts[lock_path] == 2
+
+        await asyncio.gather(
+            session_1.add_items([{"role": "user", "content": "session_1"}]),
+            session_2.add_items([{"role": "user", "content": "session_2"}]),
+        )
+
+        assert [item.get("content") for item in await session_1.get_items()] == ["session_1"]
+        assert [item.get("content") for item in await session_2.get_items()] == ["session_2"]
+
+        session_1.close()
+        assert SQLiteSession._file_lock_counts[lock_path] == 1
+        assert lock_path in SQLiteSession._file_locks
+
+        session_2.close()
+        assert lock_path not in SQLiteSession._file_lock_counts
+        assert lock_path not in SQLiteSession._file_locks
+
+
+@pytest.mark.asyncio
 async def test_session_add_items_exception_propagates_in_streamed():
     """Test that exceptions from session.add_items are properly propagated
     in run_streamed instead of causing the stream to hang forever.

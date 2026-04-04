@@ -1,5 +1,9 @@
 """Tests for AdvancedSQLiteSession functionality."""
 
+import asyncio
+import json
+import tempfile
+from pathlib import Path
 from typing import Any, Optional, cast
 
 import pytest
@@ -1343,3 +1347,52 @@ async def test_runner_with_session_settings_override(agent: Agent):
     assert len(history_items) == 2
 
     session.close()
+
+
+async def test_concurrent_add_items_preserves_message_structure_for_file_db():
+    """Concurrent add_items calls should keep agent_messages and message_structure aligned."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "advanced_concurrent.db"
+        session = AdvancedSQLiteSession(
+            session_id="advanced_concurrent",
+            db_path=db_path,
+            create_tables=True,
+        )
+
+        async def add_batch(worker_id: int) -> list[str]:
+            contents = [f"worker-{worker_id}-message-{index}" for index in range(10)]
+            await session.add_items([{"role": "user", "content": content} for content in contents])
+            return contents
+
+        expected_batches = await asyncio.gather(*(add_batch(worker_id) for worker_id in range(8)))
+        expected_contents = {content for batch in expected_batches for content in batch}
+
+        retrieved_items = await session.get_items()
+        retrieved_contents = {
+            content
+            for item in retrieved_items
+            for content in [item.get("content")]
+            if isinstance(content, str)
+        }
+
+        assert retrieved_contents == expected_contents
+        assert len(retrieved_items) == len(expected_contents)
+
+        with session._locked_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT m.message_data
+                FROM {session.messages_table} m
+                JOIN message_structure s ON s.message_id = m.id
+                WHERE m.session_id = ?
+                ORDER BY s.sequence_number ASC
+                """,
+                (session.session_id,),
+            ).fetchall()
+
+        structured_contents = {json.loads(message_data).get("content") for (message_data,) in rows}
+
+        assert structured_contents == expected_contents
+        assert len(rows) == len(expected_contents)
+
+        session.close()
