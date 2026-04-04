@@ -491,6 +491,7 @@ class BatchTraceProcessor(TracingProcessor):
         # We lazily start the background worker thread the first time a span/trace is queued.
         self._worker_thread: threading.Thread | None = None
         self._thread_start_lock = threading.Lock()
+        self._export_lock = threading.Lock()
 
     def _ensure_thread_started(self) -> None:
         # Fast path without holding the lock
@@ -571,25 +572,26 @@ class BatchTraceProcessor(TracingProcessor):
         """Drains the queue and exports in batches. If force=True, export everything.
         Otherwise, export up to `max_batch_size` repeatedly until the queue is completely empty.
         """
-        while True:
-            items_to_export: list[Span[Any] | Trace] = []
+        with self._export_lock:
+            while True:
+                items_to_export: list[Span[Any] | Trace] = []
 
-            # Gather a batch of spans up to max_batch_size
-            while not self._queue.empty() and (
-                force or len(items_to_export) < self._max_batch_size
-            ):
-                try:
-                    items_to_export.append(self._queue.get_nowait())
-                except queue.Empty:
-                    # Another thread might have emptied the queue between checks
+                # Gather a batch of spans up to max_batch_size
+                while not self._queue.empty() and (
+                    force or len(items_to_export) < self._max_batch_size
+                ):
+                    try:
+                        items_to_export.append(self._queue.get_nowait())
+                    except queue.Empty:
+                        # Another thread might have emptied the queue between checks
+                        break
+
+                # If we collected nothing, we're done
+                if not items_to_export:
                     break
 
-            # If we collected nothing, we're done
-            if not items_to_export:
-                break
-
-            # Export the batch
-            self._exporter.export(items_to_export)
+                # Export the batch
+                self._exporter.export(items_to_export)
 
 
 # Lazily initialized defaults to avoid creating network clients or threading

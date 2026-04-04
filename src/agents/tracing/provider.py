@@ -188,9 +188,21 @@ class TraceProvider(ABC):
     ) -> Span[TSpanData]:
         """Create a new span."""
 
-    @abstractmethod
+    def force_flush(self) -> None:
+        """Force all registered processors to flush buffered traces/spans immediately.
+
+        The default implementation is a no-op so existing custom ``TraceProvider``
+        implementations continue to work without adding this method.
+        """
+        return None
+
     def shutdown(self) -> None:
-        """Clean up any resources used by the provider."""
+        """Clean up any resources used by the provider.
+
+        The default implementation is a no-op so existing custom ``TraceProvider``
+        implementations continue to work without adding this method.
+        """
+        return None
 
 
 class DefaultTraceProvider(TraceProvider):
@@ -365,7 +377,19 @@ class DefaultTraceProvider(TraceProvider):
             trace_metadata=trace_metadata,
         )
 
+    def force_flush(self) -> None:
+        """Force all processors to flush their buffers immediately."""
+        self._refresh_disabled_flag()
+        if self._disabled:
+            return
+
+        try:
+            self._multi_processor.force_flush()
+        except Exception as e:
+            logger.error(f"Error flushing trace provider: {e}")
+
     def shutdown(self) -> None:
+        self._refresh_disabled_flag()
         if self._disabled:
             return
 
