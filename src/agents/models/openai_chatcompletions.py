@@ -20,7 +20,7 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from .. import _debug
 from ..agent_output import AgentOutputSchemaBase
-from ..exceptions import UserError
+from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..logger import logger
@@ -130,6 +130,16 @@ class OpenAIChatCompletionsModel(Model):
                 stream=False,
                 prompt=prompt,
             )
+
+            if not response.choices:
+                provider_error = getattr(response, "error", None)
+                error_details = (
+                    f": {provider_error}" if provider_error is not None else ""
+                )
+                raise ModelBehaviorError(
+                    f"ChatCompletion response has no choices (possible provider error payload)"
+                    f"{error_details}"
+                )
 
             message: ChatCompletionMessage | None = None
             first_choice: Choice | None = None
