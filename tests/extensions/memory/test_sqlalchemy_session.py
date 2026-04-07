@@ -272,6 +272,31 @@ async def test_add_items_concurrent_first_write_after_tables_exist(tmp_path):
     assert sorted(stored_contents) == sorted(submitted)
 
 
+async def test_add_items_waits_for_transient_sqlite_write_lock(tmp_path):
+    """SQLite writes should wait briefly for a transient lock instead of failing."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'sqlite_write_lock_retry.db'}"
+    session = SQLAlchemySession.from_url(
+        "sqlite_write_lock_retry",
+        url=db_url,
+        create_tables=True,
+    )
+    await session.get_items()
+
+    async with session.engine.connect() as conn:
+        await conn.execute(text("BEGIN IMMEDIATE"))
+        blocked_write = asyncio.create_task(
+            session.add_items([{"role": "user", "content": "after-lock"}])
+        )
+        await asyncio.sleep(0.1)
+        await conn.rollback()
+
+    await asyncio.wait_for(blocked_write, timeout=5)
+
+    stored = await session.get_items()
+    assert len(stored) == 1
+    assert stored[0].get("content") == "after-lock"
+
+
 async def test_add_items_concurrent_first_access_across_sessions_with_shared_engine(tmp_path):
     """Concurrent first writes should not race table creation across session instances."""
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'concurrent_shared_engine.db'}"
