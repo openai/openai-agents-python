@@ -232,6 +232,72 @@ async def test_resumed_run_again_resets_persisted_count(monkeypatch) -> None:
     assert "function_call" in saved_types
 
 
+@pytest.mark.parametrize(
+    ("conversation_id", "previous_response_id", "auto_previous_response_id"),
+    [
+        ("conv_1", None, False),
+        (None, "resp_prev", False),
+        (None, None, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_resumed_interruption_passes_server_managed_conversation_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    conversation_id: str | None,
+    previous_response_id: str | None,
+    auto_previous_response_id: bool,
+) -> None:
+    agent = Agent(name="resume-agent")
+    context_wrapper: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+    state = RunState(
+        context=context_wrapper,
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+        conversation_id=conversation_id,
+        previous_response_id=previous_response_id,
+        auto_previous_response_id=auto_previous_response_id,
+    )
+
+    state._current_step = NextStepInterruption(interruptions=[])
+    state._model_responses = [
+        ModelResponse(output=[], usage=Usage(), response_id="resp_1"),
+    ]
+    state._last_processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+    server_managed_values: list[bool] = []
+
+    async def fake_resolve_interrupted_turn(**kwargs: object) -> SingleStepResult:
+        server_managed_values.append(cast(bool, kwargs["server_manages_conversation"]))
+        return SingleStepResult(
+            original_input="input",
+            model_response=ModelResponse(output=[], usage=Usage(), response_id="resp_resume"),
+            pre_step_items=[],
+            new_step_items=[],
+            next_step=NextStepFinalOutput("done"),
+            tool_input_guardrail_results=[],
+            tool_output_guardrail_results=[],
+        )
+
+    monkeypatch.setattr(run_module, "resolve_interrupted_turn", fake_resolve_interrupted_turn)
+
+    runner = run_module.AgentRunner()
+    result = await runner.run(agent, state, run_config=RunConfig())
+
+    assert result.final_output == "done"
+    assert server_managed_values == [True]
+
+
 @pytest.mark.asyncio
 async def test_resumed_approval_does_not_duplicate_session_items() -> None:
     async def test_tool() -> str:
