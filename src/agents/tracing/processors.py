@@ -291,6 +291,11 @@ class BackendSpanExporter(TracingExporter):
             return self._truncate_string_for_json_limit(value, max_bytes)
 
         if isinstance(value, dict):
+            # Avoid re-truncating our own truncated preview dicts, which
+            # would cause infinite recursion (the preview dict contains bool
+            # values that get wrapped into new preview dicts, and so on).
+            if value.get("truncated") is True and "original_type" in value and "preview" in value:
+                return value
             return self._truncate_mapping_for_json_limit(value, max_bytes)
 
         if isinstance(value, list):
