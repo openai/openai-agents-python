@@ -133,9 +133,7 @@ class OpenAIChatCompletionsModel(Model):
 
             if not response.choices:
                 provider_error = getattr(response, "error", None)
-                error_details = (
-                    f": {provider_error}" if provider_error is not None else ""
-                )
+                error_details = f": {provider_error}" if provider_error is not None else ""
                 raise ModelBehaviorError(
                     f"ChatCompletion response has no choices (possible provider error payload)"
                     f"{error_details}"
