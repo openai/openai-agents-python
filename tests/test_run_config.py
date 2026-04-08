@@ -153,3 +153,16 @@ def test_trace_include_sensitive_data_tracks_explicit_overrides(monkeypatch):
     assert unrelated_config._trace_include_sensitive_data_was_explicit is False
     assert explicit_true_config._trace_include_sensitive_data_was_explicit is True
     assert explicit_false_config._trace_include_sensitive_data_was_explicit is True
+
+
+def test_trace_include_sensitive_data_tracks_post_init_assignment(monkeypatch):
+    """RunConfig should treat post-init trace flag assignments as explicit."""
+    monkeypatch.setenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "false")
+
+    config = RunConfig()
+    assert config.trace_include_sensitive_data is False
+    assert config._trace_include_sensitive_data_was_explicit is False
+
+    config.trace_include_sensitive_data = False
+    assert config.trace_include_sensitive_data is False
+    assert config._trace_include_sensitive_data_was_explicit is True

@@ -411,6 +411,48 @@ async def test_resumed_run_honors_explicit_trace_include_sensitive_data() -> Non
 
 
 @pytest.mark.asyncio
+async def test_resumed_run_honors_mutated_trace_include_sensitive_data() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="send_email", needs_approval=True)
+    def send_email(recipient: str) -> str:
+        return recipient
+
+    agent = Agent(name="trace_agent", model=model, tools=[send_email])
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "send_email", '{"recipient":"alice@example.com"}', call_id="call-1"
+                )
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = await Runner.run(
+        agent,
+        input="first_test",
+        run_config=RunConfig(trace_include_sensitive_data=True),
+    )
+    assert first.interruptions
+
+    state = first.to_state()
+    assert state._trace_include_sensitive_data is True
+    state.approve(first.interruptions[0], override_arguments={"recipient": "bob@example.com"})
+
+    run_config = RunConfig()
+    run_config.trace_include_sensitive_data = False
+    resumed = await Runner.run(agent, state, run_config=run_config)
+
+    assert resumed.final_output == "done"
+    assert state._trace_include_sensitive_data is False
+    function_span = _get_last_function_span_export("send_email")
+    assert function_span["span_data"]["input"] is None
+    assert function_span["span_data"]["output"] is None
+
+
+@pytest.mark.asyncio
 async def test_resumed_run_preserves_sensitive_trace_flag_for_unrelated_run_config() -> None:
     model = FakeModel()
 

@@ -203,14 +203,33 @@ class RunConfig:
         compare=False,
         default=False,
     )
+    _trace_include_sensitive_data_initialized: bool = field(
+        init=False,
+        repr=False,
+        compare=False,
+        default=False,
+    )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        if name == "trace_include_sensitive_data" and getattr(
+            self, "_trace_include_sensitive_data_initialized", False
+        ):
+            object.__setattr__(self, "_trace_include_sensitive_data_was_explicit", True)
 
     def __post_init__(self) -> None:
         if self.trace_include_sensitive_data is _TRACE_INCLUDE_SENSITIVE_DATA_UNSET:
-            self.trace_include_sensitive_data = _default_trace_include_sensitive_data()
-            self._trace_include_sensitive_data_was_explicit = False
+            object.__setattr__(
+                self,
+                "trace_include_sensitive_data",
+                _default_trace_include_sensitive_data(),
+            )
+            object.__setattr__(self, "_trace_include_sensitive_data_was_explicit", False)
+            object.__setattr__(self, "_trace_include_sensitive_data_initialized", True)
             return
 
-        self._trace_include_sensitive_data_was_explicit = True
+        object.__setattr__(self, "_trace_include_sensitive_data_was_explicit", True)
+        object.__setattr__(self, "_trace_include_sensitive_data_initialized", True)
 
 
 class RunOptions(TypedDict, Generic[TContext]):
