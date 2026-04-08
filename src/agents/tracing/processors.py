@@ -283,6 +283,8 @@ class BackendSpanExporter(TracingExporter):
 
         return self._truncate_json_value_for_limit(sanitized_value, max_bytes)
 
+    _TRUNCATED_PREVIEW_KEY = "__truncated_preview__"
+
     def _truncate_json_value_for_limit(self, value: Any, max_bytes: int) -> Any:
         if self._value_json_size_bytes(value) <= max_bytes:
             return value
@@ -294,7 +296,10 @@ class BackendSpanExporter(TracingExporter):
             # Avoid re-truncating our own truncated preview dicts, which
             # would cause infinite recursion (the preview dict contains bool
             # values that get wrapped into new preview dicts, and so on).
-            if value.get("truncated") is True and "original_type" in value and "preview" in value:
+            # Use a sentinel key to reliably identify SDK-generated previews
+            # without matching arbitrary user data that happens to use the
+            # same key names.
+            if self._TRUNCATED_PREVIEW_KEY in value:
                 return value
             return self._truncate_mapping_for_json_limit(value, max_bytes)
 
@@ -361,6 +366,7 @@ class BackendSpanExporter(TracingExporter):
             preview = f"<{type_name} bytes={len(value)} truncated>"
 
         return {
+            self._TRUNCATED_PREVIEW_KEY: True,
             "truncated": True,
             "original_type": type_name,
             "preview": preview,
