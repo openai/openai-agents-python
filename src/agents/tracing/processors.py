@@ -299,7 +299,7 @@ class BackendSpanExporter(TracingExporter):
             # Use a sentinel key to reliably identify SDK-generated previews
             # without matching arbitrary user data that happens to use the
             # same key names.
-            if self._TRUNCATED_PREVIEW_KEY in value:
+            if value.get(self._TRUNCATED_PREVIEW_KEY) is True and "original_type" in value and "preview" in value:
                 return value
             return self._truncate_mapping_for_json_limit(value, max_bytes)
 
