@@ -12,6 +12,19 @@ from .fake_model import FakeModel
 from .test_responses import get_text_message
 
 
+class _RecordingLock:
+    def __init__(self, lock):
+        self._lock = lock
+        self.enter_count = 0
+
+    def __enter__(self):
+        self.enter_count += 1
+        return self._lock.__enter__()
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._lock.__exit__(exc_type, exc, tb)
+
+
 # Helper functions for parametrized testing of different Runner methods
 def _run_sync_wrapper(agent, input_data, **kwargs):
     """Wrapper for run_sync that properly sets up an event loop."""
@@ -565,6 +578,49 @@ async def test_sqlite_session_file_lock_is_shared_across_instances():
         session_2.close()
         assert lock_path not in SQLiteSession._file_lock_counts
         assert lock_path not in SQLiteSession._file_locks
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_apply_history_mutations_uses_file_lock():
+    """File-backed history rewrites should reuse the session lock."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_rewrite_lock.db"
+        session = SQLiteSession("rewrite_lock_test", db_path)
+        function_call: TResponseInputItem = {
+            "type": "function_call",
+            "call_id": "call-1",
+            "id": "fc_1",
+            "name": "test_tool",
+            "arguments": '{"value":"before"}',
+        }
+        replacement: TResponseInputItem = {
+            "type": "function_call",
+            "call_id": "call-1",
+            "id": "fc_1",
+            "name": "test_tool",
+            "arguments": '{"value":"after"}',
+        }
+
+        await session.add_items([function_call])
+        recording_lock = _RecordingLock(session._lock)
+        session.__dict__["_lock"] = recording_lock
+
+        await session.apply_history_mutations(
+            {
+                "mutations": [
+                    {
+                        "type": "replace_function_call",
+                        "call_id": "call-1",
+                        "replacement": replacement,
+                    }
+                ]
+            }
+        )
+        assert recording_lock.enter_count == 1
+
+        retrieved = await session.get_items()
+        assert retrieved == [replacement]
+        session.close()
 
 
 @pytest.mark.asyncio

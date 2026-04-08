@@ -326,8 +326,7 @@ class SQLiteSession(SessionABC):
             return
 
         def _apply_history_mutations_sync() -> None:
-            conn = self._get_connection()
-            with self._lock if self._is_memory_db else threading.Lock():
+            with self._locked_connection() as conn:
                 cursor = conn.execute(
                     f"""
                     SELECT message_data FROM {self.messages_table}
