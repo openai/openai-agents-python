@@ -920,6 +920,48 @@ def test_sanitize_for_openai_tracing_api_replaces_unserializable_output():
     exporter.close()
 
 
+def test_truncate_json_value_for_limit_terminates_preview_dict_under_zero_budget():
+    exporter = BackendSpanExporter(api_key="test_key")
+    preview = exporter._truncated_preview(None)
+
+    truncated = exporter._truncate_json_value_for_limit(preview, 0)
+
+    assert truncated == {}
+    exporter.close()
+
+
+def test_sanitize_for_openai_tracing_api_handles_none_content_under_tight_budget():
+    exporter = BackendSpanExporter(api_key="test_key")
+    payload: dict[str, Any] = {
+        "object": "trace.span",
+        "span_data": {
+            "type": "generation",
+            "output": [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "name": "a" * 25_000,
+                    "tool_calls": [],
+                }
+                for _ in range(8)
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    }
+
+    sanitized = exporter._sanitize_for_openai_tracing_api(payload)
+    sanitized_output = cast(list[Any], sanitized["span_data"]["output"])
+
+    assert isinstance(sanitized_output, list)
+    assert sanitized_output != payload["span_data"]["output"]
+    assert (
+        exporter._value_json_size_bytes(sanitized_output)
+        <= exporter._OPENAI_TRACING_MAX_FIELD_BYTES
+    )
+    assert any(item == {} for item in sanitized_output)
+    exporter.close()
+
+
 def test_truncate_string_for_json_limit_returns_original_when_within_limit():
     exporter = BackendSpanExporter(api_key="test_key")
     value = "hello"
