@@ -778,10 +778,15 @@ async def test_parallel_guardrail_trip_with_slow_cancel_sibling_stops_streaming_
     with patch.object(model, "stream_response", side_effect=delayed_stream_response):
         result = Runner.run_streamed(agent, "trigger guardrail")
 
-        with pytest.raises(InputGuardrailTripwireTriggered):
+        with pytest.raises(InputGuardrailTripwireTriggered) as excinfo:
             async for _event in result.stream_events():
                 pass
 
+    exc = excinfo.value
+    assert exc.run_data is not None
+    assert [res.output.output_info for res in exc.run_data.input_guardrail_results] == [
+        "parallel_trip_before_tool_execution_with_slow_cancel"
+    ]
     assert model_started.is_set() is True
     assert guardrail_tripped.is_set() is True
     assert slow_cancel_started.is_set() is True
