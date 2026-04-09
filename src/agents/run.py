@@ -1206,9 +1206,7 @@ class AgentRunner:
                             )
                             result._current_turn = current_turn
                             result._model_input_items = generated_items[:]
-                            result._replay_from_model_input_items = (
-                                generated_items != session_items
-                            )
+                            result._replay_from_model_input_items = generated_items != session_items
                             if run_state is not None:
                                 result._current_turn_persisted_item_count = (
                                     run_state._current_turn_persisted_item_count
