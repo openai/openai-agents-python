@@ -135,7 +135,7 @@ _LOCAL_SHELL_CALL_ADAPTER: TypeAdapter[LocalShellCall] = TypeAdapter(LocalShellC
 _MISSING_CONTEXT_SENTINEL = object()
 
 
-@dataclass(slots=True)
+@dataclass
 class RunState(Generic[TContext, TAgent]):
     """Serializable snapshot of an agent run, including context, usage, and interruptions.
 
