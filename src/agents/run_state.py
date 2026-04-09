@@ -1,2621 +1,1640 @@
-"""RunState class for serializing and resuming agent runs with human-in-the-loop support."""
-
 from __future__ import annotations
 
-import copy
-import dataclasses
-import json
-from collections import deque
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, Union, cast
-from uuid import uuid4
+import asyncio
+import contextlib
+import warnings
+from typing import Union, cast
 
-from openai.types.responses import (
-    ResponseComputerToolCall,
-    ResponseFunctionToolCall,
-    ResponseOutputMessage,
-    ResponseReasoningItem,
-)
-from openai.types.responses.response_input_param import (
-    ComputerCallOutput,
-    FunctionCallOutput,
-    LocalShellCallOutput,
-    McpApprovalResponse,
-)
-from openai.types.responses.response_output_item import (
-    LocalShellCall,
-    McpApprovalRequest,
-    McpListTools,
-)
-from pydantic import TypeAdapter, ValidationError
-from typing_extensions import TypeVar
+from typing_extensions import Unpack
 
-from ._tool_identity import (
-    FunctionToolLookupKey,
-    NamedToolLookupKey,
-    build_function_tool_lookup_map,
-    deserialize_function_tool_lookup_key,
-    get_function_tool_lookup_key,
-    get_function_tool_lookup_key_for_tool,
-    get_function_tool_namespace,
-    get_function_tool_qualified_name,
-    serialize_function_tool_lookup_key,
+from . import _debug
+from ._tool_identity import get_tool_trace_name_for_tool
+from .agent import Agent
+from .agent_tool_state import set_agent_tool_state_scope
+from .exceptions import (
+    AgentsException,
+    InputGuardrailTripwireTriggered,
+    MaxTurnsExceeded,
+    RunErrorDetails,
+    UserError,
 )
-from .exceptions import UserError
 from .guardrail import (
-    GuardrailFunctionOutput,
-    InputGuardrail,
     InputGuardrailResult,
-    OutputGuardrail,
-    OutputGuardrailResult,
 )
-from .handoffs import Handoff
 from .items import (
-    CompactionItem,
-    HandoffCallItem,
-    HandoffOutputItem,
-    MCPApprovalRequestItem,
-    MCPApprovalResponseItem,
-    MCPListToolsItem,
-    MessageOutputItem,
-    ModelResponse,
-    ReasoningItem,
+    ItemHelpers,
     RunItem,
-    ToolApprovalItem,
-    ToolCallItem,
-    ToolCallOutputItem,
-    ToolSearchCallItem,
-    ToolSearchOutputItem,
     TResponseInputItem,
-    coerce_tool_search_call_raw_item,
-    coerce_tool_search_output_raw_item,
 )
+from .lifecycle import RunHooks
 from .logger import logger
-from .run_context import RunContextWrapper
-from .tool import (
-    ApplyPatchTool,
-    ComputerTool,
-    FunctionTool,
-    HostedMCPTool,
-    LocalShellTool,
-    ShellTool,
+from .memory import Session
+from .result import RunResult, RunResultStreaming
+from .run_config import (
+    DEFAULT_MAX_TURNS,
+    CallModelData,
+    CallModelInputFilter,
+    ModelInputData,
+    ReasoningItemIdPolicy,
+    RunConfig,
+    RunOptions,
+    ToolErrorFormatter,
+    ToolErrorFormatterArgs,
 )
-from .tool_guardrails import (
-    AllowBehavior,
-    RaiseExceptionBehavior,
-    RejectContentBehavior,
-    ToolGuardrailFunctionOutput,
-    ToolInputGuardrail,
-    ToolInputGuardrailResult,
-    ToolOutputGuardrail,
-    ToolOutputGuardrailResult,
+from .run_context import RunContextWrapper, TContext
+from .run_error_handlers import RunErrorHandlers
+from .run_internal.agent_runner_helpers import (
+    append_model_response_if_new,
+    apply_resumed_conversation_settings,
+    build_interruption_result,
+    build_resumed_stream_debug_extra,
+    ensure_context_wrapper,
+    finalize_conversation_tracking,
+    input_guardrails_triggered,
+    resolve_processed_response,
+    resolve_resumed_context,
+    resolve_trace_settings,
+    save_turn_items_if_needed,
+    should_cancel_parallel_model_task_on_input_guardrail_trip,
+    update_run_state_for_interruption,
+    validate_session_conversation_settings,
 )
-from .tracing.traces import Trace, TraceState
-from .usage import deserialize_usage, serialize_usage
-from .util._json import _to_dump_compatible
-
-if TYPE_CHECKING:
-    from .agent import Agent
-    from .guardrail import InputGuardrailResult, OutputGuardrailResult
-    from .items import ModelResponse, RunItem
-    from .run_internal.run_steps import (
-        NextStepInterruption,
-        ProcessedResponse,
-    )
-
-TContext = TypeVar("TContext", default=Any)
-TAgent = TypeVar("TAgent", bound="Agent[Any]", default="Agent[Any]")
-ContextOverride = Union[Mapping[str, Any], RunContextWrapper[Any]]
-ContextSerializer = Callable[[Any], Mapping[str, Any]]
-ContextDeserializer = Callable[[Mapping[str, Any]], Any]
-
-
-# RunState schema policy.
-# 1. Keep schema versions shipped in releases readable.
-# 2. Unreleased schema versions may be renumbered or squashed before release when their
-#    intermediate snapshots are intentionally unsupported.
-# 3. to_json() always emits CURRENT_SCHEMA_VERSION.
-# 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
-#    versions).
-CURRENT_SCHEMA_VERSION = "1.6"
-SUPPORTED_SCHEMA_VERSIONS = frozenset(
-    {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", CURRENT_SCHEMA_VERSION}
+from .run_internal.approvals import approvals_from_step
+from .run_internal.error_handlers import (
+    build_run_error_data,
+    create_message_output_item,
+    format_final_output_text,
+    resolve_run_error_handler_result,
+    validate_handler_final_output,
 )
+from .run_internal.items import (
+    copy_input_items,
+    normalize_resumed_input,
+)
+from .run_internal.oai_conversation import OpenAIServerConversationTracker
+from .run_internal.run_loop import (
+    get_all_tools,
+    get_handoffs,
+    get_output_schema,
+    initialize_computer_tools,
+    resolve_interrupted_turn,
+    run_final_output_hooks,
+    run_input_guardrails,
+    run_output_guardrails,
+    run_single_turn,
+    start_streaming,
+    validate_run_hooks,
+)
+from .run_internal.run_steps import (
+    NextStepFinalOutput,
+    NextStepHandoff,
+    NextStepInterruption,
+    NextStepRunAgain,
+)
+from .run_internal.session_persistence import (
+    persist_session_items_for_guardrail_trip,
+    prepare_input_with_session,
+    resumed_turn_items,
+    save_result_to_session,
+    save_resumed_turn_items,
+    session_items_for_turn,
+    update_run_state_after_resume,
+)
+from .run_internal.tool_use_tracker import (
+    AgentToolUseTracker,
+    hydrate_tool_use_tracker,
+    serialize_tool_use_tracker,
+)
+from .run_state import RunState
+from .tool import dispose_resolved_computers
+from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
+from .tracing import Span, SpanError, agent_span, get_current_trace
+from .tracing.context import TraceCtxManager, create_trace_for_run
+from .tracing.span_data import AgentSpanData
+from .util import _error_tracing
 
-_FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
-_COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(ComputerCallOutput)
-_LOCAL_SHELL_OUTPUT_ADAPTER: TypeAdapter[LocalShellCallOutput] = TypeAdapter(LocalShellCallOutput)
-_TOOL_CALL_OUTPUT_UNION_ADAPTER: TypeAdapter[
-    FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput
-] = TypeAdapter(Union[FunctionCallOutput, ComputerCallOutput, LocalShellCallOutput])
-_MCP_APPROVAL_RESPONSE_ADAPTER: TypeAdapter[McpApprovalResponse] = TypeAdapter(McpApprovalResponse)
-_HANDOFF_OUTPUT_ADAPTER: TypeAdapter[TResponseInputItem] = TypeAdapter(TResponseInputItem)
-_LOCAL_SHELL_CALL_ADAPTER: TypeAdapter[LocalShellCall] = TypeAdapter(LocalShellCall)
-_MISSING_CONTEXT_SENTINEL = object()
+DEFAULT_AGENT_RUNNER: AgentRunner = None  # type: ignore
+# the value is set at the end of the module
+
+__all__ = [
+    "AgentRunner",
+    "Runner",
+    "RunConfig",
+    "RunOptions",
+    "RunState",
+    "RunContextWrapper",
+    "ModelInputData",
+    "CallModelData",
+    "CallModelInputFilter",
+    "ReasoningItemIdPolicy",
+    "ToolErrorFormatter",
+    "ToolErrorFormatterArgs",
+    "DEFAULT_MAX_TURNS",
+    "set_default_agent_runner",
+    "get_default_agent_runner",
+]
 
 
-@dataclass
-class RunState(Generic[TContext, TAgent]):
-    """Serializable snapshot of an agent run, including context, usage, and interruptions.
-
-    ``RunState`` is the durable pause/resume boundary for human-in-the-loop flows. It stores
-    enough information to continue an interrupted run, including model responses, generated
-    items, approval state, and optional server-managed conversation identifiers.
-
-    Context serialization is intentionally conservative:
-
-    - Mapping contexts round-trip directly.
-    - Custom contexts may require a serializer and deserializer.
-    - When no safe serializer is available, the snapshot is still written but emits warnings and
-      records metadata describing what is required to rebuild the original context type.
+def set_default_agent_runner(runner: AgentRunner | None) -> None:
     """
+    WARNING: this class is experimental and not part of the public API
+    It should not be used directly.
+    """
+    global DEFAULT_AGENT_RUNNER
+    DEFAULT_AGENT_RUNNER = runner or AgentRunner()
 
-    _current_turn: int = 0
-    """Current turn number in the conversation."""
 
-    _current_agent: TAgent | None = None
-    """The agent currently handling the conversation."""
+def get_default_agent_runner() -> AgentRunner:
+    """
+    WARNING: this class is experimental and not part of the public API
+    It should not be used directly.
+    """
+    global DEFAULT_AGENT_RUNNER
+    return DEFAULT_AGENT_RUNNER
 
-    _original_input: str | list[Any] = field(default_factory=list)
-    """Original user input prior to any processing."""
 
-    _model_responses: list[ModelResponse] = field(default_factory=list)
-    """Responses from the model so far."""
-
-    _context: RunContextWrapper[TContext] | None = None
-    """Run context tracking approvals, usage, and other metadata."""
-
-    _generated_items: list[RunItem] = field(default_factory=list)
-    """Items used to build model input when resuming; may be filtered by handoffs."""
-
-    _session_items: list[RunItem] = field(default_factory=list)
-    """Full, unfiltered run items for session history."""
-
-    _max_turns: int = 10
-    """Maximum allowed turns before forcing termination."""
-
-    _conversation_id: str | None = None
-    """Conversation identifier for server-managed conversation tracking."""
-
-    _previous_response_id: str | None = None
-    """Response identifier of the last server-managed response."""
-
-    _auto_previous_response_id: bool = False
-    """Whether the previous response id should be automatically tracked."""
-
-    _reasoning_item_id_policy: Literal["preserve", "omit"] | None = None
-    """How reasoning item IDs are represented in next-turn model input."""
-
-    _input_guardrail_results: list[InputGuardrailResult] = field(default_factory=list)
-    """Results from input guardrails applied to the run."""
-
-    _output_guardrail_results: list[OutputGuardrailResult] = field(default_factory=list)
-    """Results from output guardrails applied to the run."""
-
-    _tool_input_guardrail_results: list[ToolInputGuardrailResult] = field(default_factory=list)
-    """Results from tool input guardrails applied during the run."""
-
-    _tool_output_guardrail_results: list[ToolOutputGuardrailResult] = field(default_factory=list)
-    """Results from tool output guardrails applied during the run."""
-
-    _current_step: NextStepInterruption | None = None
-    """Current step if the run is interrupted (e.g., for tool approval)."""
-
-    _last_processed_response: ProcessedResponse | None = None
-    """The last processed model response. This is needed for resuming from interruptions."""
-
-    _generated_items_last_processed_marker: str | None = field(default=None, repr=False)
-    """Tracks whether _generated_items already include the current last_processed_response."""
-
-    _current_turn_persisted_item_count: int = 0
-    """Tracks how many items from this turn were already written to the session."""
-
-    _tool_use_tracker_snapshot: dict[str, list[str]] = field(default_factory=dict)
-    """Serialized snapshot of the AgentToolUseTracker (agent name -> tools used)."""
-
-    _trace_state: TraceState | None = field(default=None, repr=False)
-    """Serialized trace metadata for resuming tracing context."""
-
-    _agent_tool_state_scope_id: str | None = field(default=None, repr=False)
-    """Private scope id used to isolate agent-tool pending state per RunState instance."""
-
-    def __init__(
-        self,
-        context: RunContextWrapper[TContext],
-        original_input: str | list[Any],
-        starting_agent: TAgent,
-        max_turns: int = 10,
+class Runner:
+    @classmethod
+    async def run(
+        cls,
+        starting_agent: Agent[TContext],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         *,
-        conversation_id: str | None = None,
+        context: TContext | None = None,
+        max_turns: int = DEFAULT_MAX_TURNS,
+        hooks: RunHooks[TContext] | None = None,
+        run_config: RunConfig | None = None,
+        error_handlers: RunErrorHandlers[TContext] | None = None,
         previous_response_id: str | None = None,
         auto_previous_response_id: bool = False,
-    ):
-        """Initialize a new RunState."""
-        self._context = context
-        self._original_input = _clone_original_input(original_input)
-        self._current_agent = starting_agent
-        self._max_turns = max_turns
-        self._conversation_id = conversation_id
-        self._previous_response_id = previous_response_id
-        self._auto_previous_response_id = auto_previous_response_id
-        self._reasoning_item_id_policy = None
-        self._model_responses = []
-        self._generated_items = []
-        self._session_items = []
-        self._input_guardrail_results = []
-        self._output_guardrail_results = []
-        self._tool_input_guardrail_results = []
-        self._tool_output_guardrail_results = []
-        self._current_step = None
-        self._current_turn = 0
-        self._last_processed_response = None
-        self._generated_items_last_processed_marker = None
-        self._current_turn_persisted_item_count = 0
-        self._tool_use_tracker_snapshot = {}
-        self._trace_state = None
-        from .agent_tool_state import get_agent_tool_state_scope
-
-        self._agent_tool_state_scope_id = get_agent_tool_state_scope(context)
-
-    def get_interruptions(self) -> list[ToolApprovalItem]:
-        """Return pending interruptions if the current step is an interruption."""
-        # Import at runtime to avoid circular import
-        from .run_internal.run_steps import NextStepInterruption
-
-        if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
-            return []
-        return self._current_step.interruptions
-
-    def approve(self, approval_item: ToolApprovalItem, always_approve: bool = False) -> None:
-        """Approve a tool call and rerun with this state to continue."""
-        if self._context is None:
-            raise UserError("Cannot approve tool: RunState has no context")
-        self._context.approve_tool(approval_item, always_approve=always_approve)
-
-    def reject(
-        self,
-        approval_item: ToolApprovalItem,
-        always_reject: bool = False,
-        *,
-        rejection_message: str | None = None,
-    ) -> None:
-        """Reject a tool call and rerun with this state to continue.
-
-        When ``rejection_message`` is provided, that exact text is sent back to the model when the
-        run resumes. Otherwise the run-level tool error formatter or the SDK default message is
-        used.
+        conversation_id: str | None = None,
+        session: Session | None = None,
+    ) -> RunResult:
         """
-        if self._context is None:
-            raise UserError("Cannot reject tool: RunState has no context")
-        self._context.reject_tool(
-            approval_item,
-            always_reject=always_reject,
-            rejection_message=rejection_message,
-        )
+        Run a workflow starting at the given agent.
 
-    def _serialize_approvals(self) -> dict[str, dict[str, Any]]:
-        """Serialize approval records into a JSON-friendly mapping."""
-        if self._context is None:
-            return {}
-        approvals_dict: dict[str, dict[str, Any]] = {}
-        for tool_name, record in self._context._approvals.items():
-            approvals_dict[tool_name] = {
-                "approved": record.approved
-                if isinstance(record.approved, bool)
-                else list(record.approved),
-                "rejected": record.rejected
-                if isinstance(record.rejected, bool)
-                else list(record.rejected),
-            }
-            if record.rejection_messages:
-                approvals_dict[tool_name]["rejection_messages"] = dict(record.rejection_messages)
-            if record.sticky_rejection_message is not None:
-                approvals_dict[tool_name]["sticky_rejection_message"] = (
-                    record.sticky_rejection_message
-                )
-        return approvals_dict
+        The agent will run in a loop until a final output is generated. The loop runs like so:
 
-    def _serialize_model_responses(self) -> list[dict[str, Any]]:
-        """Serialize model responses."""
-        return [
-            {
-                "usage": serialize_usage(resp.usage),
-                "output": [_serialize_raw_item_value(item) for item in resp.output],
-                "response_id": resp.response_id,
-                "request_id": resp.request_id,
-            }
-            for resp in self._model_responses
-        ]
+          1. The agent is invoked with the given input.
+          2. If there is a final output (i.e. the agent produces something of type
+             `agent.output_type`), the loop terminates.
+          3. If there's a handoff, we run the loop again, with the new agent.
+          4. Else, we run tool calls (if any), and re-run the loop.
 
-    def _serialize_original_input(self) -> str | list[Any]:
-        """Normalize original input into the shape expected by Responses API."""
-        if not isinstance(self._original_input, list):
-            return self._original_input
+        In two cases, the agent may raise an exception:
 
-        normalized_items = []
-        for item in self._original_input:
-            normalized_item = _serialize_raw_item_value(item)
-            if isinstance(normalized_item, dict):
-                normalized_item = dict(normalized_item)
-                role = normalized_item.get("role")
-                if role == "assistant":
-                    content = normalized_item.get("content")
-                    if isinstance(content, str):
-                        normalized_item["content"] = [{"type": "output_text", "text": content}]
-                    if "status" not in normalized_item:
-                        normalized_item["status"] = "completed"
-            normalized_items.append(normalized_item)
-        return normalized_items
+          1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised unless handled.
+          2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered
+             exception is raised.
 
-    def _serialize_context_payload(
-        self,
-        *,
-        context_serializer: ContextSerializer | None = None,
-        strict_context: bool = False,
-    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-        """Validate and serialize the stored run context.
-
-        The returned metadata captures how the context was serialized so restore-time code can
-        decide whether a deserializer or override is required. This lets RunState remain durable
-        for simple mapping contexts without silently pretending that richer custom objects can be
-        reconstructed automatically.
-        """
-        if self._context is None:
-            return None, _build_context_meta(
-                None,
-                serialized_via="none",
-                requires_deserializer=False,
-                omitted=False,
-            )
-
-        raw_context_payload = self._context.context
-        if raw_context_payload is None:
-            return None, _build_context_meta(
-                raw_context_payload,
-                serialized_via="none",
-                requires_deserializer=False,
-                omitted=False,
-            )
-
-        if isinstance(raw_context_payload, Mapping):
-            return (
-                dict(raw_context_payload),
-                _build_context_meta(
-                    raw_context_payload,
-                    serialized_via="mapping",
-                    requires_deserializer=False,
-                    omitted=False,
-                ),
-            )
-
-        if strict_context and context_serializer is None:
-            # Avoid silently dropping non-mapping context data when strict mode is requested.
-            raise UserError(
-                "RunState serialization requires context to be a mapping when strict_context "
-                "is True. Provide context_serializer to serialize custom contexts."
-            )
-
-        if context_serializer is not None:
-            try:
-                serialized = context_serializer(raw_context_payload)
-            except Exception as exc:
-                raise UserError(
-                    "Context serializer failed while serializing RunState context."
-                ) from exc
-            if not isinstance(serialized, Mapping):
-                raise UserError("Context serializer must return a mapping.")
-            return (
-                dict(serialized),
-                _build_context_meta(
-                    raw_context_payload,
-                    serialized_via="context_serializer",
-                    requires_deserializer=True,
-                    omitted=False,
-                ),
-            )
-
-        if hasattr(raw_context_payload, "model_dump"):
-            try:
-                serialized = raw_context_payload.model_dump(exclude_unset=True)
-            except TypeError:
-                serialized = raw_context_payload.model_dump()
-            if not isinstance(serialized, Mapping):
-                raise UserError("RunState context model_dump must return a mapping.")
-            # We can persist the data, but the original type is lost unless the caller rebuilds it.
-            logger.warning(
-                "RunState context was serialized from a Pydantic model. "
-                "Provide context_deserializer or context_override to restore the original type."
-            )
-            return (
-                dict(serialized),
-                _build_context_meta(
-                    raw_context_payload,
-                    serialized_via="model_dump",
-                    requires_deserializer=True,
-                    omitted=False,
-                ),
-            )
-
-        if dataclasses.is_dataclass(raw_context_payload):
-            serialized = dataclasses.asdict(cast(Any, raw_context_payload))
-            if not isinstance(serialized, Mapping):
-                raise UserError("RunState dataclass context must serialize to a mapping.")
-            # Dataclass instances serialize to dicts, so reconstruction requires a deserializer.
-            logger.warning(
-                "RunState context was serialized from a dataclass. "
-                "Provide context_deserializer or context_override to restore the original type."
-            )
-            return (
-                dict(serialized),
-                _build_context_meta(
-                    raw_context_payload,
-                    serialized_via="asdict",
-                    requires_deserializer=True,
-                    omitted=False,
-                ),
-            )
-
-        # Fall back to an empty dict so the run state remains serializable, but
-        # explicitly warn because the original context will be unavailable on restore.
-        logger.warning(
-            "RunState context of type %s is not serializable; storing empty context. "
-            "Provide context_serializer to preserve it.",
-            type(raw_context_payload).__name__,
-        )
-        return (
-            {},
-            _build_context_meta(
-                raw_context_payload,
-                serialized_via="omitted",
-                requires_deserializer=True,
-                omitted=True,
-            ),
-        )
-
-    def _serialize_tool_input(self, tool_input: Any) -> Any:
-        """Normalize tool input for JSON serialization."""
-        if tool_input is None:
-            return None
-
-        if dataclasses.is_dataclass(tool_input):
-            return dataclasses.asdict(cast(Any, tool_input))
-
-        if hasattr(tool_input, "model_dump"):
-            try:
-                serialized = tool_input.model_dump(exclude_unset=True)
-            except TypeError:
-                serialized = tool_input.model_dump()
-            return _to_dump_compatible(serialized)
-
-        return _to_dump_compatible(tool_input)
-
-    def _current_generated_items_merge_marker(self) -> str | None:
-        """Return a marker for the processed response already reflected in _generated_items."""
-        if not (self._last_processed_response and self._last_processed_response.new_items):
-            return None
-
-        latest_response_id = (
-            self._model_responses[-1].response_id if self._model_responses else None
-        )
-        serialized_items = [
-            self._serialize_item(item) for item in self._last_processed_response.new_items
-        ]
-        return json.dumps(
-            {
-                "current_turn": self._current_turn,
-                "last_response_id": latest_response_id,
-                "new_items": serialized_items,
-            },
-            sort_keys=True,
-            default=str,
-        )
-
-    def _mark_generated_items_merged_with_last_processed(self) -> None:
-        """Remember that _generated_items already include the current processed response."""
-        self._generated_items_last_processed_marker = self._current_generated_items_merge_marker()
-
-    def _clear_generated_items_last_processed_marker(self) -> None:
-        """Forget any prior merge marker after _generated_items is replaced."""
-        self._generated_items_last_processed_marker = None
-
-    def _merge_generated_items_with_processed(self) -> list[RunItem]:
-        """Merge persisted and newly processed items without duplication."""
-        generated_items = list(self._generated_items)
-        if not (self._last_processed_response and self._last_processed_response.new_items):
-            return generated_items
-
-        current_merge_marker = self._current_generated_items_merge_marker()
-        if (
-            current_merge_marker is not None
-            and self._generated_items_last_processed_marker == current_merge_marker
-        ):
-            return generated_items
-
-        seen_id_types: set[tuple[str, str]] = set()
-        seen_call_ids: set[str] = set()
-        seen_call_id_types: set[tuple[str, str]] = set()
-
-        def _id_type_call(item: Any) -> tuple[str | None, str | None, str | None]:
-            item_id = None
-            item_type = None
-            call_id = None
-            if hasattr(item, "raw_item"):
-                raw = item.raw_item
-                if isinstance(raw, dict):
-                    item_id = raw.get("id")
-                    item_type = raw.get("type")
-                    call_id = raw.get("call_id")
-                else:
-                    item_id = _get_attr(raw, "id")
-                    item_type = _get_attr(raw, "type")
-                    call_id = _get_attr(raw, "call_id")
-            if item_id is None and hasattr(item, "id"):
-                item_id = _get_attr(item, "id")
-            if item_type is None and hasattr(item, "type"):
-                item_type = _get_attr(item, "type")
-            return item_id, item_type, call_id
-
-        for existing in generated_items:
-            item_id, item_type, call_id = _id_type_call(existing)
-            if item_id and item_type:
-                seen_id_types.add((item_id, item_type))
-            if call_id and item_type:
-                seen_call_id_types.add((call_id, item_type))
-            elif call_id:
-                seen_call_ids.add(call_id)
-
-        for new_item in self._last_processed_response.new_items:
-            item_id, item_type, call_id = _id_type_call(new_item)
-            if call_id and item_type:
-                if (call_id, item_type) in seen_call_id_types:
-                    continue
-            elif call_id and call_id in seen_call_ids:
-                continue
-            if item_id and item_type and (item_id, item_type) in seen_id_types:
-                continue
-            if item_id and item_type:
-                seen_id_types.add((item_id, item_type))
-            if call_id and item_type:
-                seen_call_id_types.add((call_id, item_type))
-            elif call_id:
-                seen_call_ids.add(call_id)
-            generated_items.append(new_item)
-
-        if current_merge_marker is not None:
-            self._generated_items_last_processed_marker = current_merge_marker
-        return generated_items
-
-    def to_json(
-        self,
-        *,
-        context_serializer: ContextSerializer | None = None,
-        strict_context: bool = False,
-        include_tracing_api_key: bool = False,
-    ) -> dict[str, Any]:
-        """Serializes the run state to a JSON-compatible dictionary.
-
-        This method is used to serialize the run state to a dictionary that can be used to
-        resume the run later.
+        Note:
+            Only the first agent's input guardrails are run.
 
         Args:
-            context_serializer: Optional function to serialize non-mapping context values.
-            strict_context: When True, require mapping contexts or a context_serializer.
-            include_tracing_api_key: When True, include the tracing API key in the trace payload.
+            starting_agent: The starting agent to run.
+            input: The initial input to the agent. You can pass a single string for a
+                user message, or a list of input items.
+            context: The context to run the agent with.
+            max_turns: The maximum number of turns to run the agent for. A turn is
+                defined as one AI invocation (including any tool calls that might occur).
+            hooks: An object that receives callbacks on various lifecycle events.
+            run_config: Global settings for the entire agent run.
+            error_handlers: Error handlers keyed by error kind. Currently supports max_turns.
+            previous_response_id: The ID of the previous response. If using OpenAI
+                models via the Responses API, this allows you to skip passing in input
+                from the previous turn.
+            conversation_id: The conversation ID
+                (https://platform.openai.com/docs/guides/conversation-state?api-mode=responses).
+                If provided, the conversation will be used to read and write items.
+                Every agent will have access to the conversation history so far,
+                and its output items will be written to the conversation.
+                We recommend only using this if you are exclusively using OpenAI models;
+                other model providers don't write to the Conversation object,
+                so you'll end up having partial conversations stored.
+            session: A session for automatic conversation history management.
 
         Returns:
-            A dictionary representation of the run state.
-
-        Raises:
-            UserError: If required state (agent, context) is missing.
+            A run result containing all the inputs, guardrail results and the output of
+            the last agent. Agents may perform handoffs, so we don't know the specific
+            type of the output.
         """
-        if self._current_agent is None:
-            raise UserError("Cannot serialize RunState: No current agent")
-        if self._context is None:
-            raise UserError("Cannot serialize RunState: No context")
 
-        approvals_dict = self._serialize_approvals()
-        model_responses = self._serialize_model_responses()
-        original_input_serialized = self._serialize_original_input()
-        context_payload, context_meta = self._serialize_context_payload(
-            context_serializer=context_serializer,
-            strict_context=strict_context,
+        runner = DEFAULT_AGENT_RUNNER
+        return await runner.run(
+            starting_agent,
+            input,
+            context=context,
+            max_turns=max_turns,
+            hooks=hooks,
+            run_config=run_config,
+            error_handlers=error_handlers,
+            previous_response_id=previous_response_id,
+            auto_previous_response_id=auto_previous_response_id,
+            conversation_id=conversation_id,
+            session=session,
         )
 
-        context_entry: dict[str, Any] = {
-            "usage": serialize_usage(self._context.usage),
-            "approvals": approvals_dict,
-            "context": context_payload,
-            # Preserve metadata so deserialization can warn when context types were erased.
-            "context_meta": context_meta,
-        }
-        tool_input = self._serialize_tool_input(self._context.tool_input)
-        if tool_input is not None:
-            context_entry["tool_input"] = tool_input
-
-        result = {
-            "$schemaVersion": CURRENT_SCHEMA_VERSION,
-            "current_turn": self._current_turn,
-            "current_agent": {"name": self._current_agent.name},
-            "original_input": original_input_serialized,
-            "model_responses": model_responses,
-            "context": context_entry,
-            "tool_use_tracker": copy.deepcopy(self._tool_use_tracker_snapshot),
-            "max_turns": self._max_turns,
-            "no_active_agent_run": True,
-            "input_guardrail_results": _serialize_guardrail_results(self._input_guardrail_results),
-            "output_guardrail_results": _serialize_guardrail_results(
-                self._output_guardrail_results
-            ),
-            "tool_input_guardrail_results": _serialize_tool_guardrail_results(
-                self._tool_input_guardrail_results, type_label="tool_input"
-            ),
-            "tool_output_guardrail_results": _serialize_tool_guardrail_results(
-                self._tool_output_guardrail_results, type_label="tool_output"
-            ),
-            "conversation_id": self._conversation_id,
-            "previous_response_id": self._previous_response_id,
-            "auto_previous_response_id": self._auto_previous_response_id,
-            "reasoning_item_id_policy": self._reasoning_item_id_policy,
-        }
-
-        generated_items = self._merge_generated_items_with_processed()
-        result["generated_items"] = [self._serialize_item(item) for item in generated_items]
-        result["session_items"] = [self._serialize_item(item) for item in list(self._session_items)]
-        result["current_step"] = self._serialize_current_step()
-        result["last_model_response"] = _serialize_last_model_response(model_responses)
-        result["last_processed_response"] = (
-            self._serialize_processed_response(
-                self._last_processed_response,
-                context_serializer=context_serializer,
-                strict_context=strict_context,
-                include_tracing_api_key=include_tracing_api_key,
-            )
-            if self._last_processed_response
-            else None
-        )
-        result["current_turn_persisted_item_count"] = self._current_turn_persisted_item_count
-        result["trace"] = self._serialize_trace_data(
-            include_tracing_api_key=include_tracing_api_key
-        )
-
-        return result
-
-    def _serialize_processed_response(
-        self,
-        processed_response: ProcessedResponse,
+    @classmethod
+    def run_sync(
+        cls,
+        starting_agent: Agent[TContext],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         *,
-        context_serializer: ContextSerializer | None = None,
-        strict_context: bool = False,
-        include_tracing_api_key: bool = False,
-    ) -> dict[str, Any]:
-        """Serialize a ProcessedResponse to JSON format.
+        context: TContext | None = None,
+        max_turns: int = DEFAULT_MAX_TURNS,
+        hooks: RunHooks[TContext] | None = None,
+        run_config: RunConfig | None = None,
+        error_handlers: RunErrorHandlers[TContext] | None = None,
+        previous_response_id: str | None = None,
+        auto_previous_response_id: bool = False,
+        conversation_id: str | None = None,
+        session: Session | None = None,
+    ) -> RunResult:
+        """
+        Run a workflow synchronously, starting at the given agent.
+
+        Note:
+            This just wraps the `run` method, so it will not work if there's already an
+            event loop (e.g. inside an async function, or in a Jupyter notebook or async
+            context like FastAPI). For those cases, use the `run` method instead.
+
+        The agent will run in a loop until a final output is generated. The loop runs:
+
+          1. The agent is invoked with the given input.
+          2. If there is a final output (i.e. the agent produces something of type
+             `agent.output_type`), the loop terminates.
+          3. If there's a handoff, we run the loop again, with the new agent.
+          4. Else, we run tool calls (if any), and re-run the loop.
+
+        In two cases, the agent may raise an exception:
+
+          1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised unless handled.
+          2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered
+             exception is raised.
+
+        Note:
+            Only the first agent's input guardrails are run.
 
         Args:
-            processed_response: The ProcessedResponse to serialize.
+            starting_agent: The starting agent to run.
+            input: The initial input to the agent. You can pass a single string for a
+                user message, or a list of input items.
+            context: The context to run the agent with.
+            max_turns: The maximum number of turns to run the agent for. A turn is
+                defined as one AI invocation (including any tool calls that might occur).
+            hooks: An object that receives callbacks on various lifecycle events.
+            run_config: Global settings for the entire agent run.
+            error_handlers: Error handlers keyed by error kind. Currently supports max_turns.
+            previous_response_id: The ID of the previous response, if using OpenAI
+                models via the Responses API, this allows you to skip passing in input
+                from the previous turn.
+            conversation_id: The ID of the stored conversation, if any.
+            session: A session for automatic conversation history management.
 
         Returns:
-            A dictionary representation of the ProcessedResponse.
+            A run result containing all the inputs, guardrail results and the output of
+            the last agent. Agents may perform handoffs, so we don't know the specific
+            type of the output.
         """
 
-        action_groups = _serialize_tool_action_groups(processed_response)
-        _serialize_pending_nested_agent_tool_runs(
-            parent_state=self,
-            function_entries=action_groups.get("functions", []),
-            function_runs=processed_response.functions,
-            scope_id=self._agent_tool_state_scope_id,
-            context_serializer=context_serializer,
-            strict_context=strict_context,
-            include_tracing_api_key=include_tracing_api_key,
+        runner = DEFAULT_AGENT_RUNNER
+        return runner.run_sync(
+            starting_agent,
+            input,
+            context=context,
+            max_turns=max_turns,
+            hooks=hooks,
+            run_config=run_config,
+            error_handlers=error_handlers,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            session=session,
+            auto_previous_response_id=auto_previous_response_id,
         )
 
-        interruptions_data = [
-            _serialize_tool_approval_interruption(interruption, include_tool_name=True)
-            for interruption in processed_response.interruptions
-            if isinstance(interruption, ToolApprovalItem)
-        ]
-
-        return {
-            "new_items": [self._serialize_item(item) for item in processed_response.new_items],
-            "tools_used": processed_response.tools_used,
-            **action_groups,
-            "interruptions": interruptions_data,
-        }
-
-    def _serialize_current_step(self) -> dict[str, Any] | None:
-        """Serialize the current step if it's an interruption."""
-        # Import at runtime to avoid circular import
-        from .run_internal.run_steps import NextStepInterruption
-
-        if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
-            return None
-
-        interruptions_data = [
-            _serialize_tool_approval_interruption(
-                item, include_tool_name=item.tool_name is not None
-            )
-            for item in self._current_step.interruptions
-            if isinstance(item, ToolApprovalItem)
-        ]
-
-        return {
-            "type": "next_step_interruption",
-            "data": {
-                "interruptions": interruptions_data,
-            },
-        }
-
-    def _serialize_item(self, item: RunItem) -> dict[str, Any]:
-        """Serialize a run item to JSON-compatible dict."""
-        raw_item_dict: Any = _serialize_raw_item_value(item.raw_item)
-
-        result: dict[str, Any] = {
-            "type": item.type,
-            "raw_item": raw_item_dict,
-            "agent": {"name": item.agent.name},
-        }
-
-        # Add additional fields based on item type
-        if hasattr(item, "output"):
-            serialized_output = item.output
-            try:
-                if hasattr(serialized_output, "model_dump"):
-                    serialized_output = serialized_output.model_dump(exclude_unset=True)
-                elif dataclasses.is_dataclass(serialized_output):
-                    serialized_output = dataclasses.asdict(serialized_output)  # type: ignore[arg-type]
-                serialized_output = _ensure_json_compatible(serialized_output)
-            except Exception:
-                serialized_output = str(item.output)
-            result["output"] = serialized_output
-        if hasattr(item, "source_agent"):
-            result["source_agent"] = {"name": item.source_agent.name}
-        if hasattr(item, "target_agent"):
-            result["target_agent"] = {"name": item.target_agent.name}
-        if hasattr(item, "tool_name") and item.tool_name is not None:
-            result["tool_name"] = item.tool_name
-        if hasattr(item, "tool_namespace") and item.tool_namespace is not None:
-            result["tool_namespace"] = item.tool_namespace
-        tool_lookup_key = serialize_function_tool_lookup_key(getattr(item, "tool_lookup_key", None))
-        if tool_lookup_key is not None:
-            result["tool_lookup_key"] = tool_lookup_key
-        if getattr(item, "_allow_bare_name_alias", False):
-            result["allow_bare_name_alias"] = True
-        if hasattr(item, "description") and item.description is not None:
-            result["description"] = item.description
-        if hasattr(item, "title") and item.title is not None:
-            result["title"] = item.title
-
-        return result
-
-    def _lookup_function_name(self, call_id: str) -> str:
-        """Attempt to find the function name for the provided call_id."""
-        if not call_id:
-            return ""
-
-        def _extract_name(raw: Any) -> str | None:
-            if isinstance(raw, dict):
-                candidate_call_id = cast(Optional[str], raw.get("call_id"))
-                if candidate_call_id == call_id:
-                    name_value = raw.get("name", "")
-                    return str(name_value) if name_value else ""
-            else:
-                candidate_call_id = cast(Optional[str], _get_attr(raw, "call_id"))
-                if candidate_call_id == call_id:
-                    name_value = _get_attr(raw, "name", "")
-                    return str(name_value) if name_value else ""
-            return None
-
-        # Search generated items first
-        for run_item in self._generated_items:
-            if run_item.type != "tool_call_item":
-                continue
-            name = _extract_name(run_item.raw_item)
-            if name is not None:
-                return name
-
-        # Inspect last processed response
-        if self._last_processed_response is not None:
-            for run_item in self._last_processed_response.new_items:
-                if run_item.type != "tool_call_item":
-                    continue
-                name = _extract_name(run_item.raw_item)
-                if name is not None:
-                    return name
-
-        # Finally, inspect the original input list where the function call originated
-        if isinstance(self._original_input, list):
-            for input_item in self._original_input:
-                if not isinstance(input_item, dict):
-                    continue
-                if input_item.get("type") != "function_call":
-                    continue
-                item_call_id = cast(Optional[str], input_item.get("call_id"))
-                if item_call_id == call_id:
-                    name_value = input_item.get("name", "")
-                    return str(name_value) if name_value else ""
-
-        return ""
-
-    def to_string(
-        self,
+    @classmethod
+    def run_streamed(
+        cls,
+        starting_agent: Agent[TContext],
+        input: str | list[TResponseInputItem] | RunState[TContext],
+        context: TContext | None = None,
+        max_turns: int = DEFAULT_MAX_TURNS,
+        hooks: RunHooks[TContext] | None = None,
+        run_config: RunConfig | None = None,
+        previous_response_id: str | None = None,
+        auto_previous_response_id: bool = False,
+        conversation_id: str | None = None,
+        session: Session | None = None,
         *,
-        context_serializer: ContextSerializer | None = None,
-        strict_context: bool = False,
-        include_tracing_api_key: bool = False,
-    ) -> str:
-        """Serializes the run state to a JSON string.
+        error_handlers: RunErrorHandlers[TContext] | None = None,
+    ) -> RunResultStreaming:
+        """
+        Run a workflow starting at the given agent in streaming mode.
+
+        The returned result object contains a method you can use to stream semantic
+        events as they are generated.
+
+        The agent will run in a loop until a final output is generated. The loop runs like so:
+
+          1. The agent is invoked with the given input.
+          2. If there is a final output (i.e. the agent produces something of type
+             `agent.output_type`), the loop terminates.
+          3. If there's a handoff, we run the loop again, with the new agent.
+          4. Else, we run tool calls (if any), and re-run the loop.
+
+        In two cases, the agent may raise an exception:
+
+          1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised unless handled.
+          2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered
+             exception is raised.
+
+        Note:
+            Only the first agent's input guardrails are run.
 
         Args:
-            include_tracing_api_key: When True, include the tracing API key in the trace payload.
+            starting_agent: The starting agent to run.
+            input: The initial input to the agent. You can pass a single string for a
+                user message, or a list of input items.
+            context: The context to run the agent with.
+            max_turns: The maximum number of turns to run the agent for. A turn is
+                defined as one AI invocation (including any tool calls that might occur).
+            hooks: An object that receives callbacks on various lifecycle events.
+            run_config: Global settings for the entire agent run.
+            error_handlers: Error handlers keyed by error kind. Currently supports max_turns.
+            previous_response_id: The ID of the previous response, if using OpenAI
+                models via the Responses API, this allows you to skip passing in input
+                from the previous turn.
+            conversation_id: The ID of the stored conversation, if any.
+            session: A session for automatic conversation history management.
 
         Returns:
-            JSON string representation of the run state.
+            A result object that contains data about the run, as well as a method to
+            stream events.
         """
-        return json.dumps(
-            self.to_json(
-                context_serializer=context_serializer,
-                strict_context=strict_context,
-                include_tracing_api_key=include_tracing_api_key,
-            ),
-            indent=2,
-        )
 
-    def set_trace(self, trace: Trace | None) -> None:
-        """Capture trace metadata for serialization/resumption."""
-        self._trace_state = TraceState.from_trace(trace)
-
-    def _serialize_trace_data(self, *, include_tracing_api_key: bool) -> dict[str, Any] | None:
-        if not self._trace_state:
-            return None
-        return self._trace_state.to_json(include_tracing_api_key=include_tracing_api_key)
-
-    def set_tool_use_tracker_snapshot(self, snapshot: Mapping[str, Sequence[str]] | None) -> None:
-        """Store a copy of the serialized tool-use tracker data."""
-        if not snapshot:
-            self._tool_use_tracker_snapshot = {}
-            return
-
-        normalized: dict[str, list[str]] = {}
-        for agent_name, tools in snapshot.items():
-            if not isinstance(agent_name, str):
-                continue
-            normalized[agent_name] = [tool for tool in tools if isinstance(tool, str)]
-        self._tool_use_tracker_snapshot = normalized
-
-    def set_reasoning_item_id_policy(self, policy: Literal["preserve", "omit"] | None) -> None:
-        """Store how reasoning item IDs should appear in next-turn model input."""
-        self._reasoning_item_id_policy = policy
-
-    def get_tool_use_tracker_snapshot(self) -> dict[str, list[str]]:
-        """Return a defensive copy of the tool-use tracker snapshot."""
-        return {
-            agent_name: list(tool_names)
-            for agent_name, tool_names in self._tool_use_tracker_snapshot.items()
-        }
-
-    @staticmethod
-    async def from_string(
-        initial_agent: Agent[Any],
-        state_string: str,
-        *,
-        context_override: ContextOverride | None = None,
-        context_deserializer: ContextDeserializer | None = None,
-        strict_context: bool = False,
-    ) -> RunState[Any, Agent[Any]]:
-        """Deserializes a run state from a JSON string.
-
-        This method is used to deserialize a run state from a string that was serialized using
-        the `to_string()` method.
-
-        Args:
-            initial_agent: The initial agent (used to build agent map for resolution).
-            state_string: The JSON string to deserialize.
-            context_override: Optional context mapping or RunContextWrapper to use instead of the
-                serialized context.
-            context_deserializer: Optional function to rebuild non-mapping context values.
-            strict_context: When True, require a deserializer or override for non-mapping contexts.
-
-        Returns:
-            A reconstructed RunState instance.
-
-        Raises:
-            UserError: If the string is invalid JSON or has incompatible schema version.
-        """
-        try:
-            state_json = json.loads(state_string)
-        except json.JSONDecodeError as e:
-            raise UserError(f"Failed to parse run state JSON: {e}") from e
-
-        return await RunState.from_json(
-            initial_agent=initial_agent,
-            state_json=state_json,
-            context_override=context_override,
-            context_deserializer=context_deserializer,
-            strict_context=strict_context,
-        )
-
-    @staticmethod
-    async def from_json(
-        initial_agent: Agent[Any],
-        state_json: dict[str, Any],
-        *,
-        context_override: ContextOverride | None = None,
-        context_deserializer: ContextDeserializer | None = None,
-        strict_context: bool = False,
-    ) -> RunState[Any, Agent[Any]]:
-        """Deserializes a run state from a JSON dictionary.
-
-        This method is used to deserialize a run state from a dict that was created using
-        the `to_json()` method.
-
-        Args:
-            initial_agent: The initial agent (used to build agent map for resolution).
-            state_json: The JSON dictionary to deserialize.
-            context_override: Optional context mapping or RunContextWrapper to use instead of the
-                serialized context.
-            context_deserializer: Optional function to rebuild non-mapping context values.
-            strict_context: When True, require a deserializer or override for non-mapping contexts.
-
-        Returns:
-            A reconstructed RunState instance.
-
-        Raises:
-            UserError: If the dict has incompatible schema version.
-        """
-        return await _build_run_state_from_json(
-            initial_agent=initial_agent,
-            state_json=state_json,
-            context_override=context_override,
-            context_deserializer=context_deserializer,
-            strict_context=strict_context,
+        runner = DEFAULT_AGENT_RUNNER
+        return runner.run_streamed(
+            starting_agent,
+            input,
+            context=context,
+            max_turns=max_turns,
+            hooks=hooks,
+            run_config=run_config,
+            error_handlers=error_handlers,
+            previous_response_id=previous_response_id,
+            auto_previous_response_id=auto_previous_response_id,
+            conversation_id=conversation_id,
+            session=session,
         )
 
 
-# --------------------------
-# Private helpers
-# --------------------------
-
-
-def _get_attr(obj: Any, attr: str, default: Any = None) -> Any:
-    """Return attribute value if present, otherwise the provided default."""
-    return getattr(obj, attr, default)
-
-
-def _describe_context_type(value: Any) -> str:
-    """Summarize a context object for serialization metadata."""
-    if value is None:
-        return "none"
-    if isinstance(value, Mapping):
-        return "mapping"
-    if hasattr(value, "model_dump"):
-        return "pydantic"
-    if dataclasses.is_dataclass(value):
-        return "dataclass"
-    return "custom"
-
-
-def _context_class_path(value: Any) -> str | None:
-    """Return module and qualname for debugging purposes."""
-    if value is None:
-        return None
-    cls = value.__class__
-    module = getattr(cls, "__module__", "")
-    qualname = getattr(cls, "__qualname__", "")
-    if not module or not qualname:
-        return None
-    return f"{module}:{qualname}"
-
-
-def _build_context_meta(
-    original_context: Any,
-    *,
-    serialized_via: str,
-    requires_deserializer: bool,
-    omitted: bool,
-) -> dict[str, Any]:
-    """Capture context serialization metadata for debugging and recovery hints."""
-    original_type = _describe_context_type(original_context)
-    meta: dict[str, Any] = {
-        "original_type": original_type,
-        "serialized_via": serialized_via,
-        "requires_deserializer": requires_deserializer,
-        "omitted": omitted,
-    }
-    class_path = _context_class_path(original_context)
-    if class_path and original_type not in {"mapping", "none"}:
-        # Store the class path for reference only; never auto-import it for safety.
-        meta["class_path"] = class_path
-    return meta
-
-
-def _context_meta_requires_deserializer(context_meta: Mapping[str, Any] | None) -> bool:
-    """Return True when metadata indicates a non-mapping context needs help to restore."""
-    if not isinstance(context_meta, Mapping):
-        return False
-    if context_meta.get("omitted"):
-        return True
-    return bool(context_meta.get("requires_deserializer"))
-
-
-def _context_meta_warning_message(context_meta: Mapping[str, Any] | None) -> str:
-    """Build a warning message describing context deserialization requirements."""
-    if not isinstance(context_meta, Mapping):
-        return (
-            "RunState context was serialized from a custom type; provide context_deserializer "
-            "or context_override to restore it."
-        )
-    original_type = context_meta.get("original_type") or "custom"
-    class_path = context_meta.get("class_path")
-    type_label = f"{original_type} ({class_path})" if class_path else str(original_type)
-    if context_meta.get("omitted"):
-        return (
-            "RunState context was omitted during serialization for "
-            f"{type_label}; provide context_override to supply it."
-        )
-    return (
-        "RunState context was serialized from "
-        f"{type_label}; provide context_deserializer or context_override to restore it."
-    )
-
-
-def _transform_field_names(
-    data: dict[str, Any] | list[Any] | Any, field_map: Mapping[str, str]
-) -> Any:
-    """Recursively remap field names using the provided mapping."""
-    if isinstance(data, dict):
-        transformed: dict[str, Any] = {}
-        for key, value in data.items():
-            mapped_key = field_map.get(key, key)
-            if isinstance(value, (dict, list)):
-                transformed[mapped_key] = _transform_field_names(value, field_map)
-            else:
-                transformed[mapped_key] = value
-        return transformed
-
-    if isinstance(data, list):
-        return [
-            _transform_field_names(item, field_map) if isinstance(item, (dict, list)) else item
-            for item in data
-        ]
-
-    return data
-
-
-def _serialize_raw_item_value(raw_item: Any) -> Any:
-    """Return a serializable representation of a raw item."""
-    if hasattr(raw_item, "model_dump"):
-        return raw_item.model_dump(exclude_unset=True)
-    if isinstance(raw_item, dict):
-        return dict(raw_item)
-    return raw_item
-
-
-def _ensure_json_compatible(value: Any) -> Any:
-    try:
-        return json.loads(json.dumps(value, default=str))
-    except Exception:
-        return str(value)
-
-
-def _serialize_tool_call_data(tool_call: Any) -> Any:
-    """Convert a tool call to a serializable dictionary."""
-    return _serialize_raw_item_value(tool_call)
-
-
-def _serialize_tool_metadata(
-    tool: Any,
-    *,
-    include_description: bool = False,
-    include_params_schema: bool = False,
-) -> dict[str, Any]:
-    """Build a dictionary of tool metadata for serialization."""
-    metadata: dict[str, Any] = {"name": tool.name if hasattr(tool, "name") else None}
-    namespace = get_function_tool_namespace(tool)
-    if namespace is not None:
-        metadata["namespace"] = namespace
-    qualified_name = get_function_tool_qualified_name(tool)
-    if qualified_name is not None and qualified_name != metadata["name"]:
-        metadata["qualifiedName"] = qualified_name
-    lookup_key = serialize_function_tool_lookup_key(get_function_tool_lookup_key_for_tool(tool))
-    if lookup_key is not None:
-        metadata["lookupKey"] = lookup_key
-    if include_description and hasattr(tool, "description"):
-        metadata["description"] = tool.description
-    if include_params_schema and hasattr(tool, "params_json_schema"):
-        metadata["paramsJsonSchema"] = tool.params_json_schema
-    return metadata
-
-
-def _serialize_tool_actions(
-    actions: Sequence[Any],
-    *,
-    tool_attr: str,
-    wrapper_key: str,
-    include_description: bool = False,
-    include_params_schema: bool = False,
-) -> list[dict[str, Any]]:
-    """Serialize tool action runs that share the same structure."""
-    serialized_actions = []
-    for action in actions:
-        tool = getattr(action, tool_attr)
-        tool_dict = _serialize_tool_metadata(
-            tool,
-            include_description=include_description,
-            include_params_schema=include_params_schema,
-        )
-        serialized_actions.append(
-            {
-                "tool_call": _serialize_tool_call_data(action.tool_call),
-                wrapper_key: tool_dict,
-            }
-        )
-    return serialized_actions
-
-
-def _serialize_handoffs(handoffs: Sequence[Any]) -> list[dict[str, Any]]:
-    """Serialize handoff tool calls."""
-    serialized_handoffs = []
-    for handoff in handoffs:
-        handoff_target = handoff.handoff
-        handoff_name = _get_attr(handoff_target, "tool_name") or _get_attr(handoff_target, "name")
-        serialized_handoffs.append(
-            {
-                "tool_call": _serialize_tool_call_data(handoff.tool_call),
-                "handoff": {"tool_name": handoff_name},
-            }
-        )
-    return serialized_handoffs
-
-
-def _serialize_mcp_approval_requests(requests: Sequence[Any]) -> list[dict[str, Any]]:
-    """Serialize MCP approval requests in a consistent format."""
-    serialized_requests = []
-    for request in requests:
-        request_item_dict = _serialize_raw_item_value(request.request_item)
-        serialized_requests.append(
-            {
-                "request_item": {"raw_item": request_item_dict},
-                "mcp_tool": _serialize_mcp_tool(request.mcp_tool),
-            }
-        )
-    return serialized_requests
-
-
-def _serialize_mcp_tool(mcp_tool: Any) -> dict[str, Any]:
-    """Serialize an MCP tool into a JSON-friendly mapping."""
-    if mcp_tool is None:
-        return {}
-
-    tool_dict: dict[str, Any] | None = None
-    if hasattr(mcp_tool, "to_json"):
-        try:
-            tool_json = mcp_tool.to_json()
-        except Exception:
-            tool_json = None
-        if isinstance(tool_json, Mapping):
-            tool_dict = dict(tool_json)
-        elif tool_json is not None:
-            tool_dict = {"value": tool_json}
-
-    if tool_dict is None:
-        tool_dict = _serialize_tool_metadata(mcp_tool)
-
-    if tool_dict.get("name") is None:
-        tool_dict["name"] = _get_attr(mcp_tool, "name")
-
-    tool_config = _get_attr(mcp_tool, "tool_config")
-    if tool_config is not None and "tool_config" not in tool_dict:
-        tool_dict["tool_config"] = _serialize_raw_item_value(tool_config)
-
-    normalized = _ensure_json_compatible(tool_dict)
-    if isinstance(normalized, Mapping):
-        return dict(normalized)
-    return {"value": normalized}
-
-
-def _serialize_tool_approval_interruption(
-    interruption: ToolApprovalItem, *, include_tool_name: bool
-) -> dict[str, Any]:
-    """Serialize a ToolApprovalItem interruption."""
-    interruption_dict: dict[str, Any] = {
-        "type": "tool_approval_item",
-        "raw_item": _serialize_raw_item_value(interruption.raw_item),
-        "agent": {"name": interruption.agent.name},
-    }
-    if include_tool_name and interruption.tool_name is not None:
-        interruption_dict["tool_name"] = interruption.tool_name
-    if interruption.tool_namespace is not None:
-        interruption_dict["tool_namespace"] = interruption.tool_namespace
-    tool_lookup_key = serialize_function_tool_lookup_key(
-        getattr(interruption, "tool_lookup_key", None)
-    )
-    if tool_lookup_key is not None:
-        interruption_dict["tool_lookup_key"] = tool_lookup_key
-    if interruption._allow_bare_name_alias:
-        interruption_dict["allow_bare_name_alias"] = True
-    return interruption_dict
-
-
-def _serialize_tool_action_groups(
-    processed_response: ProcessedResponse,
-) -> dict[str, list[dict[str, Any]]]:
-    """Serialize tool-related action groups using a shared spec."""
-    action_specs: list[
-        tuple[str, list[Any], str, str, bool, bool]
-    ] = [  # Key, actions, tool_attr, wrapper_key, include_description, include_params_schema.
-        (
-            "functions",
-            processed_response.functions,
-            "function_tool",
-            "tool",
-            True,
-            True,
-        ),
-        (
-            "computer_actions",
-            processed_response.computer_actions,
-            "computer_tool",
-            "computer",
-            True,
-            False,
-        ),
-        (
-            "local_shell_actions",
-            processed_response.local_shell_calls,
-            "local_shell_tool",
-            "local_shell",
-            True,
-            False,
-        ),
-        (
-            "shell_actions",
-            processed_response.shell_calls,
-            "shell_tool",
-            "shell",
-            True,
-            False,
-        ),
-        (
-            "apply_patch_actions",
-            processed_response.apply_patch_calls,
-            "apply_patch_tool",
-            "apply_patch",
-            True,
-            False,
-        ),
-    ]
-
-    serialized: dict[str, list[dict[str, Any]]] = {
-        key: _serialize_tool_actions(
-            actions,
-            tool_attr=tool_attr,
-            wrapper_key=wrapper_key,
-            include_description=include_description,
-            include_params_schema=include_params_schema,
-        )
-        for (
-            key,
-            actions,
-            tool_attr,
-            wrapper_key,
-            include_description,
-            include_params_schema,
-        ) in action_specs
-    }
-    serialized["handoffs"] = _serialize_handoffs(processed_response.handoffs)
-    serialized["mcp_approval_requests"] = _serialize_mcp_approval_requests(
-        processed_response.mcp_approval_requests
-    )
-    return serialized
-
-
-def _serialize_pending_nested_agent_tool_runs(
-    *,
-    parent_state: RunState[Any, Any],
-    function_entries: Sequence[dict[str, Any]],
-    function_runs: Sequence[Any],
-    scope_id: str | None = None,
-    context_serializer: ContextSerializer | None = None,
-    strict_context: bool = False,
-    include_tracing_api_key: bool = False,
-) -> None:
-    """Attach serialized nested run state for pending agent-as-tool interruptions."""
-    if not function_entries or not function_runs:
-        return
-
-    from .agent_tool_state import peek_agent_tool_run_result
-
-    for entry, function_run in zip(function_entries, function_runs):
-        tool_call = getattr(function_run, "tool_call", None)
-        if not isinstance(tool_call, ResponseFunctionToolCall):
-            continue
-
-        pending_run_result = peek_agent_tool_run_result(tool_call, scope_id=scope_id)
-        if pending_run_result is None:
-            continue
-
-        interruptions = getattr(pending_run_result, "interruptions", None)
-        if not isinstance(interruptions, list) or not interruptions:
-            continue
-
-        to_state = getattr(pending_run_result, "to_state", None)
-        if not callable(to_state):
-            continue
-
-        try:
-            nested_state = to_state()
-        except Exception:
-            if strict_context:
-                raise
-            logger.warning(
-                "Failed to capture nested agent run state for tool call %s.",
-                tool_call.call_id,
-            )
-            continue
-
-        if not isinstance(nested_state, RunState):
-            continue
-        if nested_state is parent_state:
-            # Defensive guard against accidental self-referential serialization loops.
-            continue
-
-        try:
-            entry["agent_run_state"] = nested_state.to_json(
-                context_serializer=context_serializer,
-                strict_context=strict_context,
-                include_tracing_api_key=include_tracing_api_key,
-            )
-        except Exception:
-            if strict_context:
-                raise
-            logger.warning(
-                "Failed to serialize nested agent run state for tool call %s.",
-                tool_call.call_id,
-            )
-
-
-class _SerializedAgentToolRunResult:
-    """Minimal run-result wrapper used to restore nested agent-as-tool resumptions."""
-
-    def __init__(self, state: RunState[Any, Agent[Any]]) -> None:
-        self._state = state
-        self.interruptions = list(state.get_interruptions())
-        self.final_output = None
-
-    def to_state(self) -> RunState[Any, Agent[Any]]:
-        return self._state
-
-
-def _serialize_guardrail_results(
-    results: Sequence[InputGuardrailResult | OutputGuardrailResult],
-) -> list[dict[str, Any]]:
-    """Serialize guardrail results for persistence."""
-    serialized: list[dict[str, Any]] = []
-    for result in results:
-        entry = {
-            "guardrail": {
-                "type": "output" if isinstance(result, OutputGuardrailResult) else "input",
-                "name": result.guardrail.name,
-            },
-            "output": {
-                "tripwireTriggered": result.output.tripwire_triggered,
-                "outputInfo": result.output.output_info,
-            },
-        }
-        if isinstance(result, OutputGuardrailResult):
-            entry["agentOutput"] = result.agent_output
-            entry["agent"] = {"name": result.agent.name}
-        serialized.append(entry)
-    return serialized
-
-
-def _serialize_tool_guardrail_results(
-    results: Sequence[ToolInputGuardrailResult | ToolOutputGuardrailResult],
-    *,
-    type_label: Literal["tool_input", "tool_output"],
-) -> list[dict[str, Any]]:
-    """Serialize tool guardrail results for persistence."""
-    serialized: list[dict[str, Any]] = []
-    for result in results:
-        guardrail_name = (
-            result.guardrail.get_name()
-            if hasattr(result.guardrail, "get_name")
-            else getattr(result.guardrail, "name", None)
-        )
-        serialized.append(
-            {
-                "guardrail": {"type": type_label, "name": guardrail_name},
-                "output": {
-                    "outputInfo": result.output.output_info,
-                    "behavior": result.output.behavior,
-                },
-            }
-        )
-    return serialized
-
-
-def _serialize_last_model_response(model_responses: list[dict[str, Any]]) -> Any:
-    """Return the last serialized model response, if any."""
-    if not model_responses:
-        return None
-    return model_responses[-1]
-
-
-def _build_named_tool_map(
-    tools: Sequence[Any], tool_type: type[Any]
-) -> dict[NamedToolLookupKey, Any]:
-    """Build a name-indexed map for tools of a given type."""
-    if tool_type is FunctionTool:
-        return cast(
-            dict[NamedToolLookupKey, Any],
-            build_function_tool_lookup_map(
-                [tool for tool in tools if isinstance(tool, FunctionTool)]
-            ),
-        )
-
-    tool_map: dict[NamedToolLookupKey, Any] = {}
-    for tool in tools:
-        if not isinstance(tool, tool_type) or not hasattr(tool, "name"):
-            continue
-        tool_name = getattr(tool, "name", None)
-        if not isinstance(tool_name, str) or not tool_name:
-            continue
-        tool_map[tool_name] = tool
-        if tool_type is ComputerTool:
-            # Persisted runs may contain either the released preview name or the GA alias from
-            # newer branches. Mirror both so either payload restores against the local tool.
-            if tool_name == "computer":
-                tool_map["computer_use_preview"] = tool
-            elif tool_name == "computer_use_preview":
-                tool_map["computer"] = tool
-    return tool_map
-
-
-def _build_handoffs_map(current_agent: Agent[Any]) -> dict[str, Handoff[Any, Agent[Any]]]:
-    """Map handoff tool names to their definitions for quick lookup."""
-    handoffs_map: dict[str, Handoff[Any, Agent[Any]]] = {}
-    if not hasattr(current_agent, "handoffs"):
-        return handoffs_map
-
-    for handoff in current_agent.handoffs:
-        if not isinstance(handoff, Handoff):
-            continue
-        handoff_name = getattr(handoff, "tool_name", None) or getattr(handoff, "name", None)
-        if handoff_name:
-            handoffs_map[handoff_name] = handoff
-    return handoffs_map
-
-
-async def _restore_pending_nested_agent_tool_runs(
-    *,
-    current_agent: Agent[Any],
-    function_entries: Sequence[Any],
-    function_runs: Sequence[Any],
-    scope_id: str | None = None,
-    context_deserializer: ContextDeserializer | None = None,
-    strict_context: bool = False,
-) -> None:
-    """Rehydrate nested agent-as-tool run state into the ephemeral tool-call cache."""
-    if not function_entries or not function_runs:
-        return
-
-    from .agent_tool_state import drop_agent_tool_run_result, record_agent_tool_run_result
-
-    for entry, function_run in zip(function_entries, function_runs):
-        if not isinstance(entry, Mapping):
-            continue
-        nested_state_data = entry.get("agent_run_state")
-        if not isinstance(nested_state_data, Mapping):
-            continue
-
-        tool_call = getattr(function_run, "tool_call", None)
-        if not isinstance(tool_call, ResponseFunctionToolCall):
-            continue
-
-        try:
-            nested_state = await _build_run_state_from_json(
-                initial_agent=current_agent,
-                state_json=dict(nested_state_data),
-                context_deserializer=context_deserializer,
-                strict_context=strict_context,
-            )
-        except Exception:
-            if strict_context:
-                raise
-            logger.warning(
-                "Failed to deserialize nested agent run state for tool call %s.",
-                tool_call.call_id,
-            )
-            continue
-
-        pending_result = _SerializedAgentToolRunResult(nested_state)
-        if not pending_result.interruptions:
-            continue
-
-        # Replace any stale cache entry with the same signature so resumed runs do not read
-        # older pending interruptions after consuming this restored entry.
-        drop_agent_tool_run_result(tool_call, scope_id=scope_id)
-        record_agent_tool_run_result(tool_call, cast(Any, pending_result), scope_id=scope_id)
-
-
-async def _deserialize_processed_response(
-    processed_response_data: dict[str, Any],
-    current_agent: Agent[Any],
-    context: RunContextWrapper[Any],
-    agent_map: dict[str, Agent[Any]],
-    *,
-    scope_id: str | None = None,
-    context_deserializer: ContextDeserializer | None = None,
-    strict_context: bool = False,
-) -> ProcessedResponse:
-    """Deserialize a ProcessedResponse from JSON data.
-
-    Args:
-        processed_response_data: Serialized ProcessedResponse dictionary.
-        current_agent: The current agent (used to get tools and handoffs).
-        context: The run context wrapper.
-        agent_map: Map of agent names to agents.
-
-    Returns:
-        A reconstructed ProcessedResponse instance.
+class AgentRunner:
     """
-    new_items = _deserialize_items(processed_response_data.get("new_items", []), agent_map)
-
-    if hasattr(current_agent, "get_all_tools"):
-        all_tools = await current_agent.get_all_tools(context)
-    else:
-        all_tools = []
-
-    tools_map = _build_named_tool_map(all_tools, FunctionTool)
-    computer_tools_map = _build_named_tool_map(all_tools, ComputerTool)
-    local_shell_tools_map = _build_named_tool_map(all_tools, LocalShellTool)
-    shell_tools_map = _build_named_tool_map(all_tools, ShellTool)
-    apply_patch_tools_map = _build_named_tool_map(all_tools, ApplyPatchTool)
-    mcp_tools_map = _build_named_tool_map(all_tools, HostedMCPTool)
-    handoffs_map = _build_handoffs_map(current_agent)
-
-    from .run_internal.run_steps import (
-        ProcessedResponse,
-        ToolRunApplyPatchCall,
-        ToolRunComputerAction,
-        ToolRunFunction,
-        ToolRunHandoff,
-        ToolRunLocalShellCall,
-        ToolRunMCPApprovalRequest,
-        ToolRunShellCall,
-    )
-
-    def _deserialize_actions(
-        entries: list[dict[str, Any]],
-        *,
-        tool_key: str,
-        tool_map: Mapping[NamedToolLookupKey, Any],
-        call_parser: Callable[[dict[str, Any]], Any],
-        action_factory: Callable[[Any, Any], Any],
-        name_resolver: Callable[[Mapping[str, Any]], NamedToolLookupKey | None] | None = None,
-    ) -> list[Any]:
-        """Deserialize tool actions with shared structure."""
-        deserialized: list[Any] = []
-        for entry in entries or []:
-            tool_container = entry.get(tool_key, {}) if isinstance(entry, Mapping) else {}
-            if name_resolver:
-                tool_name = name_resolver(entry)
-            else:
-                if isinstance(tool_container, Mapping):
-                    tool_name = tool_container.get("name")
-                else:
-                    tool_name = None
-            tool = tool_map.get(tool_name) if tool_name else None
-            if (
-                tool is None
-                and name_resolver is None
-                and isinstance(tool_container, Mapping)
-                and not isinstance(tool_container.get("namespace"), str)
-            ):
-                bare_name = tool_container.get("name")
-                if isinstance(bare_name, str):
-                    bare_lookup_key = get_function_tool_lookup_key(bare_name)
-                    if bare_lookup_key is not None:
-                        tool = tool_map.get(bare_lookup_key)
-            if not tool:
-                continue
-
-            tool_call_data_raw = entry.get("tool_call", {}) if isinstance(entry, Mapping) else {}
-            tool_call_data = (
-                dict(tool_call_data_raw) if isinstance(tool_call_data_raw, Mapping) else {}
-            )
-            try:
-                tool_call = call_parser(tool_call_data)
-            except Exception:
-                continue
-            deserialized.append(action_factory(tool_call, tool))
-        return deserialized
-
-    def _parse_with_adapter(adapter: TypeAdapter[Any], data: dict[str, Any]) -> Any:
-        try:
-            return adapter.validate_python(data)
-        except ValidationError:
-            return data
-
-    def _parse_apply_patch_call(data: dict[str, Any]) -> Any:
-        try:
-            return ResponseFunctionToolCall(**data)
-        except Exception:
-            return data
-
-    def _deserialize_action_groups() -> dict[str, list[Any]]:
-        def _resolve_handoff_tool_name(data: Mapping[str, Any]) -> NamedToolLookupKey | None:
-            handoff_data = data.get("handoff", {})
-            if not isinstance(handoff_data, Mapping):
-                return None
-            tool_name = handoff_data.get("tool_name")
-            return cast(
-                NamedToolLookupKey | None, tool_name if isinstance(tool_name, str) else None
-            )
-
-        def _resolve_function_tool_name(data: Mapping[str, Any]) -> FunctionToolLookupKey | None:
-            tool_data = data.get("tool", {})
-            if isinstance(tool_data, Mapping):
-                lookup_key = deserialize_function_tool_lookup_key(tool_data.get("lookupKey"))
-                if lookup_key is not None:
-                    return lookup_key
-
-            tool_call_data = data.get("tool_call", {})
-            if isinstance(tool_call_data, Mapping):
-                lookup_key = get_function_tool_lookup_key(
-                    cast(str | None, tool_call_data.get("name")),
-                    cast(str | None, tool_call_data.get("namespace")),
-                )
-                if lookup_key is not None:
-                    return lookup_key
-
-            if not isinstance(tool_data, Mapping):
-                return None
-            return get_function_tool_lookup_key(
-                cast(str | None, tool_data.get("name")),
-                cast(str | None, tool_data.get("namespace")),
-            )
-
-        action_specs: list[
-            tuple[
-                str,
-                str,
-                Mapping[Any, Any],
-                Callable[[dict[str, Any]], Any],
-                Callable[[Any, Any], Any],
-                Callable[[Mapping[str, Any]], NamedToolLookupKey | None] | None,
-            ]
-        ] = [
-            (
-                "handoffs",
-                "handoff",
-                handoffs_map,
-                lambda data: ResponseFunctionToolCall(**data),
-                lambda tool_call, handoff: ToolRunHandoff(tool_call=tool_call, handoff=handoff),
-                _resolve_handoff_tool_name,
-            ),
-            (
-                "functions",
-                "tool",
-                tools_map,
-                lambda data: ResponseFunctionToolCall(**data),
-                lambda tool_call, function_tool: ToolRunFunction(
-                    tool_call=tool_call, function_tool=function_tool
-                ),
-                _resolve_function_tool_name,
-            ),
-            (
-                "computer_actions",
-                "computer",
-                computer_tools_map,
-                lambda data: ResponseComputerToolCall(**data),
-                lambda tool_call, computer_tool: ToolRunComputerAction(
-                    tool_call=tool_call, computer_tool=computer_tool
-                ),
-                None,
-            ),
-            (
-                "local_shell_actions",
-                "local_shell",
-                local_shell_tools_map,
-                lambda data: _parse_with_adapter(_LOCAL_SHELL_CALL_ADAPTER, data),
-                lambda tool_call, local_shell_tool: ToolRunLocalShellCall(
-                    tool_call=tool_call, local_shell_tool=local_shell_tool
-                ),
-                None,
-            ),
-            (
-                "shell_actions",
-                "shell",
-                shell_tools_map,
-                lambda data: _parse_with_adapter(_LOCAL_SHELL_CALL_ADAPTER, data),
-                lambda tool_call, shell_tool: ToolRunShellCall(
-                    tool_call=tool_call, shell_tool=shell_tool
-                ),
-                None,
-            ),
-            (
-                "apply_patch_actions",
-                "apply_patch",
-                apply_patch_tools_map,
-                _parse_apply_patch_call,
-                lambda tool_call, apply_patch_tool: ToolRunApplyPatchCall(
-                    tool_call=tool_call, apply_patch_tool=apply_patch_tool
-                ),
-                None,
-            ),
-        ]
-
-        action_groups: dict[str, list[Any]] = {}
-        for (
-            key,
-            tool_key,
-            tool_map,
-            call_parser,
-            action_factory,
-            name_resolver,
-        ) in action_specs:
-            action_groups[key] = _deserialize_actions(
-                processed_response_data.get(key, []),
-                tool_key=tool_key,
-                tool_map=tool_map,
-                call_parser=call_parser,
-                action_factory=action_factory,
-                name_resolver=name_resolver,
-            )
-        return action_groups
-
-    action_groups = _deserialize_action_groups()
-    handoffs = action_groups["handoffs"]
-    functions = action_groups["functions"]
-    computer_actions = action_groups["computer_actions"]
-    local_shell_actions = action_groups["local_shell_actions"]
-    shell_actions = action_groups["shell_actions"]
-    apply_patch_actions = action_groups["apply_patch_actions"]
-
-    await _restore_pending_nested_agent_tool_runs(
-        current_agent=current_agent,
-        function_entries=processed_response_data.get("functions", []),
-        function_runs=functions,
-        scope_id=scope_id,
-        context_deserializer=context_deserializer,
-        strict_context=strict_context,
-    )
-
-    mcp_approval_requests: list[ToolRunMCPApprovalRequest] = []
-    for request_data in processed_response_data.get("mcp_approval_requests", []):
-        request_item_data = request_data.get("request_item", {})
-        raw_item_data = (
-            request_item_data.get("raw_item", {}) if isinstance(request_item_data, Mapping) else {}
-        )
-        request_item_adapter: TypeAdapter[McpApprovalRequest] = TypeAdapter(McpApprovalRequest)
-        request_item = request_item_adapter.validate_python(raw_item_data)
-
-        mcp_tool_data = request_data.get("mcp_tool", {})
-        if not mcp_tool_data:
-            continue
-
-        mcp_tool_name = mcp_tool_data.get("name")
-        mcp_tool = mcp_tools_map.get(mcp_tool_name) if mcp_tool_name else None
-
-        if mcp_tool:
-            mcp_approval_requests.append(
-                ToolRunMCPApprovalRequest(
-                    request_item=request_item,
-                    mcp_tool=mcp_tool,
-                )
-            )
-
-    interruptions: list[ToolApprovalItem] = []
-    for interruption_data in processed_response_data.get("interruptions", []):
-        approval_item = _deserialize_tool_approval_item(
-            interruption_data,
-            agent_map=agent_map,
-            fallback_agent=current_agent,
-        )
-        if approval_item is not None:
-            interruptions.append(approval_item)
-
-    return ProcessedResponse(
-        new_items=new_items,
-        handoffs=handoffs,
-        functions=functions,
-        computer_actions=computer_actions,
-        local_shell_calls=local_shell_actions,
-        shell_calls=shell_actions,
-        apply_patch_calls=apply_patch_actions,
-        tools_used=processed_response_data.get("tools_used", []),
-        mcp_approval_requests=mcp_approval_requests,
-        interruptions=interruptions,
-    )
-
-
-def _deserialize_tool_call_raw_item(normalized_raw_item: Mapping[str, Any]) -> Any:
-    """Deserialize a tool call raw item when possible, falling back to the original mapping."""
-    if not isinstance(normalized_raw_item, Mapping):
-        return normalized_raw_item
-
-    tool_type = normalized_raw_item.get("type")
-
-    if tool_type == "function_call":
-        try:
-            return ResponseFunctionToolCall(**normalized_raw_item)
-        except Exception:
-            return normalized_raw_item
-
-    if tool_type in {"shell_call", "apply_patch_call", "hosted_tool_call", "local_shell_call"}:
-        return normalized_raw_item
-
-    try:
-        return ResponseFunctionToolCall(**normalized_raw_item)
-    except Exception:
-        return normalized_raw_item
-
-
-def _resolve_agent_from_data(
-    agent_data: Any,
-    agent_map: Mapping[str, Agent[Any]],
-    fallback_agent: Agent[Any] | None = None,
-) -> Agent[Any] | None:
-    """Resolve an agent from serialized data with an optional fallback."""
-    agent_name = None
-    if isinstance(agent_data, Mapping):
-        agent_name = agent_data.get("name")
-    elif isinstance(agent_data, str):
-        agent_name = agent_data
-
-    if agent_name:
-        return agent_map.get(agent_name) or fallback_agent
-    return fallback_agent
-
-
-def _deserialize_tool_approval_raw_item(normalized_raw_item: Any) -> Any:
-    """Deserialize a tool approval raw item, preferring function calls when possible."""
-    if not isinstance(normalized_raw_item, Mapping):
-        return normalized_raw_item
-
-    return _deserialize_tool_call_raw_item(dict(normalized_raw_item))
-
-
-def _deserialize_tool_approval_item(
-    item_data: Mapping[str, Any],
-    *,
-    agent_map: Mapping[str, Agent[Any]],
-    fallback_agent: Agent[Any] | None = None,
-    pre_normalized_raw_item: Any | None = None,
-) -> ToolApprovalItem | None:
-    """Deserialize a ToolApprovalItem from serialized data."""
-    agent = _resolve_agent_from_data(item_data.get("agent"), agent_map, fallback_agent)
-    if agent is None:
-        return None
-
-    raw_item_data: Any = pre_normalized_raw_item
-    if raw_item_data is None:
-        raw_item_data = item_data.get("raw_item") or item_data.get("rawItem") or {}
-        if isinstance(raw_item_data, Mapping):
-            raw_item_data = dict(raw_item_data)
-
-    tool_name = item_data.get("tool_name")
-    tool_namespace = item_data.get("tool_namespace")
-    tool_lookup_key = deserialize_function_tool_lookup_key(item_data.get("tool_lookup_key"))
-    allow_bare_name_alias = item_data.get("allow_bare_name_alias") is True
-    raw_item = _deserialize_tool_approval_raw_item(raw_item_data)
-    return ToolApprovalItem(
-        agent=agent,
-        raw_item=raw_item,
-        tool_name=tool_name,
-        tool_namespace=tool_namespace,
-        tool_lookup_key=tool_lookup_key,
-        _allow_bare_name_alias=allow_bare_name_alias,
-    )
-
-
-def _deserialize_tool_call_output_raw_item(
-    raw_item: Mapping[str, Any],
-) -> FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput | dict[str, Any] | None:
-    """Deserialize a tool call output raw item; return None when validation fails."""
-    if not isinstance(raw_item, Mapping):
-        return cast(
-            FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput | dict[str, Any],
-            raw_item,
-        )
-
-    normalized_raw_item = dict(raw_item)
-    output_type = normalized_raw_item.get("type")
-
-    if output_type == "function_call_output":
-        return _FUNCTION_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
-    if output_type == "computer_call_output":
-        return _COMPUTER_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
-    if output_type == "local_shell_call_output":
-        return _LOCAL_SHELL_OUTPUT_ADAPTER.validate_python(normalized_raw_item)
-    if output_type in {"shell_call_output", "apply_patch_call_output"}:
-        return normalized_raw_item
-
-    try:
-        return cast(
-            FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput | dict[str, Any],
-            _TOOL_CALL_OUTPUT_UNION_ADAPTER.validate_python(normalized_raw_item),
-        )
-    except ValidationError:
-        return None
-
-
-def _parse_guardrail_entry(
-    entry: Any, *, expected_type: Literal["input", "output"]
-) -> tuple[str, GuardrailFunctionOutput, dict[str, Any]] | None:
-    entry_dict = entry if isinstance(entry, dict) else {}
-    guardrail_info_raw = entry_dict.get("guardrail", {})
-    guardrail_info = guardrail_info_raw if isinstance(guardrail_info_raw, dict) else {}
-    guardrail_type = guardrail_info.get("type")
-    if guardrail_type and guardrail_type != expected_type:
-        return None
-    name = guardrail_info.get("name") or f"deserialized_{expected_type}_guardrail"
-    output_data_raw = entry_dict.get("output", {})
-    output_data = output_data_raw if isinstance(output_data_raw, dict) else {}
-    guardrail_output = GuardrailFunctionOutput(
-        output_info=output_data.get("outputInfo"),
-        tripwire_triggered=bool(output_data.get("tripwireTriggered")),
-    )
-    return name, guardrail_output, entry_dict
-
-
-def _parse_tool_guardrail_entry(
-    entry: Any, *, expected_type: Literal["tool_input", "tool_output"]
-) -> tuple[str, ToolGuardrailFunctionOutput] | None:
-    entry_dict = entry if isinstance(entry, dict) else {}
-    guardrail_info_raw = entry_dict.get("guardrail", {})
-    guardrail_info = guardrail_info_raw if isinstance(guardrail_info_raw, dict) else {}
-    guardrail_type = guardrail_info.get("type")
-    if guardrail_type and guardrail_type != expected_type:
-        return None
-    name = guardrail_info.get("name") or f"deserialized_{expected_type}_guardrail"
-    output_data_raw = entry_dict.get("output", {})
-    output_data = output_data_raw if isinstance(output_data_raw, dict) else {}
-    behavior_data = output_data.get("behavior")
-    behavior: RejectContentBehavior | RaiseExceptionBehavior | AllowBehavior
-    if isinstance(behavior_data, dict) and "type" in behavior_data:
-        behavior = cast(
-            Union[RejectContentBehavior, RaiseExceptionBehavior, AllowBehavior],
-            behavior_data,
-        )
-    else:
-        behavior = AllowBehavior(type="allow")
-    output_info = output_data.get("outputInfo")
-    guardrail_output = ToolGuardrailFunctionOutput(
-        output_info=output_info,
-        behavior=behavior,
-    )
-    return name, guardrail_output
-
-
-def _deserialize_input_guardrail_results(
-    results_data: list[dict[str, Any]],
-) -> list[InputGuardrailResult]:
-    """Rehydrate input guardrail results from serialized data."""
-    deserialized: list[InputGuardrailResult] = []
-    for entry in results_data or []:
-        parsed = _parse_guardrail_entry(entry, expected_type="input")
-        if not parsed:
-            continue
-        name, guardrail_output, _ = parsed
-
-        def _input_guardrail_fn(
-            context: RunContextWrapper[Any],
-            agent: Agent[Any],
-            input: Any,
-            *,
-            _output: GuardrailFunctionOutput = guardrail_output,
-        ) -> GuardrailFunctionOutput:
-            return _output
-
-        guardrail = InputGuardrail(guardrail_function=_input_guardrail_fn, name=name)
-        deserialized.append(InputGuardrailResult(guardrail=guardrail, output=guardrail_output))
-    return deserialized
-
-
-def _deserialize_output_guardrail_results(
-    results_data: list[dict[str, Any]],
-    *,
-    agent_map: dict[str, Agent[Any]],
-    fallback_agent: Agent[Any],
-) -> list[OutputGuardrailResult]:
-    """Rehydrate output guardrail results from serialized data."""
-    deserialized: list[OutputGuardrailResult] = []
-    for entry in results_data or []:
-        parsed = _parse_guardrail_entry(entry, expected_type="output")
-        if not parsed:
-            continue
-        name, guardrail_output, entry_dict = parsed
-        agent_output = entry_dict.get("agentOutput")
-        agent_data = entry_dict.get("agent")
-        agent_name = agent_data.get("name") if isinstance(agent_data, dict) else None
-        resolved_agent = agent_map.get(agent_name) if isinstance(agent_name, str) else None
-        resolved_agent = resolved_agent or fallback_agent
-
-        def _output_guardrail_fn(
-            context: RunContextWrapper[Any],
-            agent_param: Agent[Any],
-            agent_output_param: Any,
-            *,
-            _output: GuardrailFunctionOutput = guardrail_output,
-        ) -> GuardrailFunctionOutput:
-            return _output
-
-        guardrail = OutputGuardrail(guardrail_function=_output_guardrail_fn, name=name)
-        deserialized.append(
-            OutputGuardrailResult(
-                guardrail=guardrail,
-                agent_output=agent_output,
-                agent=resolved_agent,
-                output=guardrail_output,
-            )
-        )
-    return deserialized
-
-
-def _deserialize_tool_input_guardrail_results(
-    results_data: list[dict[str, Any]],
-) -> list[ToolInputGuardrailResult]:
-    """Rehydrate tool input guardrail results from serialized data."""
-    deserialized: list[ToolInputGuardrailResult] = []
-    for entry in results_data or []:
-        parsed = _parse_tool_guardrail_entry(entry, expected_type="tool_input")
-        if not parsed:
-            continue
-        name, guardrail_output = parsed
-
-        def _tool_input_guardrail_fn(
-            data: Any,
-            *,
-            _output: ToolGuardrailFunctionOutput = guardrail_output,
-        ) -> ToolGuardrailFunctionOutput:
-            return _output
-
-        guardrail: ToolInputGuardrail[Any] = ToolInputGuardrail(
-            guardrail_function=_tool_input_guardrail_fn, name=name
-        )
-        deserialized.append(ToolInputGuardrailResult(guardrail=guardrail, output=guardrail_output))
-    return deserialized
-
-
-def _deserialize_tool_output_guardrail_results(
-    results_data: list[dict[str, Any]],
-) -> list[ToolOutputGuardrailResult]:
-    """Rehydrate tool output guardrail results from serialized data."""
-    deserialized: list[ToolOutputGuardrailResult] = []
-    for entry in results_data or []:
-        parsed = _parse_tool_guardrail_entry(entry, expected_type="tool_output")
-        if not parsed:
-            continue
-        name, guardrail_output = parsed
-
-        def _tool_output_guardrail_fn(
-            data: Any,
-            *,
-            _output: ToolGuardrailFunctionOutput = guardrail_output,
-        ) -> ToolGuardrailFunctionOutput:
-            return _output
-
-        guardrail: ToolOutputGuardrail[Any] = ToolOutputGuardrail(
-            guardrail_function=_tool_output_guardrail_fn, name=name
-        )
-        deserialized.append(ToolOutputGuardrailResult(guardrail=guardrail, output=guardrail_output))
-    return deserialized
-
-
-async def _build_run_state_from_json(
-    initial_agent: Agent[Any],
-    state_json: dict[str, Any],
-    context_override: ContextOverride | None = None,
-    context_deserializer: ContextDeserializer | None = None,
-    strict_context: bool = False,
-) -> RunState[Any, Agent[Any]]:
-    """Shared helper to rebuild RunState from JSON payload.
-
-    Context restoration follows this precedence order:
-
-    1. ``context_override`` when supplied.
-    2. ``context_deserializer`` applied to serialized mapping data.
-    3. Direct mapping restore for contexts that were serialized as plain mappings.
-
-    When the snapshot metadata indicates that the original context type could not round-trip
-    safely, this function warns or raises (in ``strict_context`` mode) rather than silently
-    claiming that the rebuilt mapping is equivalent to the original object.
+    WARNING: this class is experimental and not part of the public API
+    It should not be used directly or subclassed.
     """
-    schema_version = state_json.get("$schemaVersion")
-    if not schema_version:
-        raise UserError("Run state is missing schema version")
-    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
-        supported_versions = ", ".join(sorted(SUPPORTED_SCHEMA_VERSIONS))
-        raise UserError(
-            f"Run state schema version {schema_version} is not supported. "
-            f"Supported versions are: {supported_versions}. "
-            f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
+
+    async def run(
+        self,
+        starting_agent: Agent[TContext],
+        input: str | list[TResponseInputItem] | RunState[TContext],
+        **kwargs: Unpack[RunOptions[TContext]],
+    ) -> RunResult:
+        context = kwargs.get("context")
+        max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
+        hooks = cast(RunHooks[TContext], validate_run_hooks(kwargs.get("hooks")))
+        run_config = kwargs.get("run_config")
+        error_handlers = kwargs.get("error_handlers")
+        previous_response_id = kwargs.get("previous_response_id")
+        auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
+        conversation_id = kwargs.get("conversation_id")
+        session = kwargs.get("session")
+
+        if run_config is None:
+            run_config = RunConfig()
+
+        is_resumed_state = isinstance(input, RunState)
+        run_state: RunState[TContext] | None = None
+        starting_input = input if not is_resumed_state else None
+        original_user_input: str | list[TResponseInputItem] | None = None
+        session_input_items_for_persistence: list[TResponseInputItem] | None = (
+            [] if (session is not None and is_resumed_state) else None
         )
+        # Track the most recent input batch we persisted so conversation-lock retries can rewind
+        # exactly those items (and not the full history).
+        last_saved_input_snapshot_for_rewind: list[TResponseInputItem] | None = None
 
-    agent_map = _build_agent_map(initial_agent)
-
-    current_agent_name = state_json["current_agent"]["name"]
-    current_agent = agent_map.get(current_agent_name)
-    if not current_agent:
-        raise UserError(f"Agent {current_agent_name} not found in agent map")
-
-    context_data = state_json["context"]
-    usage = deserialize_usage(context_data.get("usage", {}))
-
-    serialized_context: Any = context_data.get("context", _MISSING_CONTEXT_SENTINEL)
-    if serialized_context is _MISSING_CONTEXT_SENTINEL:
-        serialized_context = {}
-    context_meta_raw = context_data.get("context_meta")
-    context_meta = context_meta_raw if isinstance(context_meta_raw, Mapping) else None
-
-    # If context was originally a custom type and no override/deserializer is supplied,
-    # surface the risk of losing behavior/state during restore.
-    if (
-        context_override is None
-        and context_deserializer is None
-        and _context_meta_requires_deserializer(context_meta)
-    ):
-        warning_message = _context_meta_warning_message(context_meta)
-        if strict_context:
-            raise UserError(warning_message)
-        logger.warning(warning_message)
-
-    if isinstance(context_override, RunContextWrapper):
-        context = context_override
-    elif context_override is not None:
-        context = RunContextWrapper(context=context_override)
-    elif serialized_context is None:
-        context = RunContextWrapper(context=None)
-    elif context_deserializer is not None:
-        if not isinstance(serialized_context, Mapping):
-            raise UserError(
-                "Serialized run state context must be a mapping to use context_deserializer."
+        if is_resumed_state:
+            run_state = cast(RunState[TContext], input)
+            (
+                conversation_id,
+                previous_response_id,
+                auto_previous_response_id,
+            ) = apply_resumed_conversation_settings(
+                run_state=run_state,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
             )
-        try:
-            rebuilt_context = context_deserializer(dict(serialized_context))
-        except Exception as exc:
-            raise UserError(
-                "Context deserializer failed while rebuilding RunState context."
-            ) from exc
-        if isinstance(rebuilt_context, RunContextWrapper):
-            context = rebuilt_context
+            validate_session_conversation_settings(
+                session,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
+            starting_input = run_state._original_input
+            original_user_input = copy_input_items(run_state._original_input)
+            prepared_input = normalize_resumed_input(original_user_input)
+
+            context_wrapper = resolve_resumed_context(
+                run_state=run_state,
+                context=context,
+            )
+            context = context_wrapper.context
+
+            max_turns = run_state._max_turns
         else:
-            context = RunContextWrapper(context=rebuilt_context)
-    elif isinstance(serialized_context, Mapping):
-        context = RunContextWrapper(context=serialized_context)
-    else:
-        raise UserError("Serialized run state context must be a mapping. Please provide one.")
-    context.usage = usage
-    context._rebuild_approvals(context_data.get("approvals", {}))
-    serialized_tool_input = context_data.get("tool_input")
-    if (
-        context_override is None
-        and serialized_tool_input is not None
-        and getattr(context, "tool_input", None) is None
-    ):
-        context.tool_input = serialized_tool_input
+            raw_input = cast(Union[str, list[TResponseInputItem]], input)
+            original_user_input = raw_input
 
-    original_input_raw = state_json["original_input"]
-    if isinstance(original_input_raw, list):
-        normalized_original_input = []
-        for item in original_input_raw:
-            if not isinstance(item, Mapping):
-                normalized_original_input.append(item)
-                continue
-            item_dict = dict(item)
-            normalized_original_input.append(item_dict)
-    else:
-        normalized_original_input = original_input_raw
+            validate_session_conversation_settings(
+                session,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
 
-    state = RunState(
-        context=context,
-        original_input=normalized_original_input,
-        starting_agent=current_agent,
-        max_turns=state_json["max_turns"],
-        conversation_id=state_json.get("conversation_id"),
-        previous_response_id=state_json.get("previous_response_id"),
-        auto_previous_response_id=bool(state_json.get("auto_previous_response_id", False)),
-    )
-    from .agent_tool_state import set_agent_tool_state_scope
+            server_manages_conversation = (
+                conversation_id is not None
+                or previous_response_id is not None
+                or auto_previous_response_id
+            )
 
-    state._agent_tool_state_scope_id = uuid4().hex
-    set_agent_tool_state_scope(context, state._agent_tool_state_scope_id)
-
-    state._current_turn = state_json["current_turn"]
-    state._model_responses = _deserialize_model_responses(state_json.get("model_responses", []))
-    state._generated_items = _deserialize_items(state_json.get("generated_items", []), agent_map)
-
-    last_processed_response_data = state_json.get("last_processed_response")
-    if last_processed_response_data and state._context is not None:
-        state._last_processed_response = await _deserialize_processed_response(
-            last_processed_response_data,
-            current_agent,
-            state._context,
-            agent_map,
-            scope_id=state._agent_tool_state_scope_id,
-            context_deserializer=context_deserializer,
-            strict_context=strict_context,
-        )
-    else:
-        state._last_processed_response = None
-
-    if "session_items" in state_json:
-        state._session_items = _deserialize_items(state_json.get("session_items", []), agent_map)
-    else:
-        state._session_items = state._merge_generated_items_with_processed()
-
-    state._mark_generated_items_merged_with_last_processed()
-
-    state._input_guardrail_results = _deserialize_input_guardrail_results(
-        state_json.get("input_guardrail_results", [])
-    )
-    state._output_guardrail_results = _deserialize_output_guardrail_results(
-        state_json.get("output_guardrail_results", []),
-        agent_map=agent_map,
-        fallback_agent=current_agent,
-    )
-    state._tool_input_guardrail_results = _deserialize_tool_input_guardrail_results(
-        state_json.get("tool_input_guardrail_results", [])
-    )
-    state._tool_output_guardrail_results = _deserialize_tool_output_guardrail_results(
-        state_json.get("tool_output_guardrail_results", [])
-    )
-
-    current_step_data = state_json.get("current_step")
-    if current_step_data and current_step_data.get("type") == "next_step_interruption":
-        interruptions: list[ToolApprovalItem] = []
-        interruptions_data = current_step_data.get("data", {}).get(
-            "interruptions", current_step_data.get("interruptions", [])
-        )
-        for item_data in interruptions_data:
-            approval_item = _deserialize_tool_approval_item(item_data, agent_map=agent_map)
-            if approval_item is not None:
-                interruptions.append(approval_item)
-
-        from .run_internal.run_steps import NextStepInterruption
-
-        state._current_step = NextStepInterruption(
-            interruptions=[item for item in interruptions if isinstance(item, ToolApprovalItem)]
-        )
-
-    state._current_turn_persisted_item_count = state_json.get(
-        "current_turn_persisted_item_count", 0
-    )
-    serialized_policy = state_json.get("reasoning_item_id_policy")
-    if serialized_policy in {"preserve", "omit"}:
-        state._reasoning_item_id_policy = cast(Literal["preserve", "omit"], serialized_policy)
-    else:
-        state._reasoning_item_id_policy = None
-    state.set_tool_use_tracker_snapshot(state_json.get("tool_use_tracker", {}))
-    trace_data = state_json.get("trace")
-    if isinstance(trace_data, Mapping):
-        state._trace_state = TraceState.from_json(trace_data)
-    else:
-        state._trace_state = None
-
-    return state
-
-
-def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
-    """Build a map of agent names to agents by traversing handoffs.
-
-    Args:
-        initial_agent: The starting agent.
-
-    Returns:
-        Dictionary mapping agent names to agent instances.
-    """
-    agent_map: dict[str, Agent[Any]] = {}
-    queue: deque[Agent[Any]] = deque([initial_agent])
-
-    while queue:
-        current = queue.popleft()
-        if current.name in agent_map:
-            continue
-        agent_map[current.name] = current
-
-        # Add handoff agents to the queue
-        for handoff_item in current.handoffs:
-            handoff_agent: Any | None = None
-            handoff_agent_name: str | None = None
-
-            if isinstance(handoff_item, Handoff):
-                # Some custom/mocked Handoff subclasses bypass dataclass initialization.
-                # Prefer agent_name, then legacy name fallback used in tests.
-                candidate_name = getattr(handoff_item, "agent_name", None) or getattr(
-                    handoff_item, "name", None
+            if server_manages_conversation:
+                prepared_input, _ = await prepare_input_with_session(
+                    raw_input,
+                    session,
+                    run_config.session_input_callback,
+                    run_config.session_settings,
+                    include_history_in_prepared_input=False,
+                    preserve_dropped_new_items=True,
                 )
-                if isinstance(candidate_name, str):
-                    handoff_agent_name = candidate_name
-                    if handoff_agent_name in agent_map:
-                        continue
-
-                handoff_ref = getattr(handoff_item, "_agent_ref", None)
-                handoff_agent = handoff_ref() if callable(handoff_ref) else None
-                if handoff_agent is None:
-                    # Backward-compatibility fallback for custom legacy handoff objects that store
-                    # the target directly on `.agent`. New code should prefer `handoff()` objects.
-                    legacy_agent = getattr(handoff_item, "agent", None)
-                    if legacy_agent is not None:
-                        handoff_agent = legacy_agent
-                        logger.debug(
-                            "Using legacy handoff `.agent` fallback while building agent map. "
-                            "This compatibility path is not recommended for new code."
-                        )
-                if handoff_agent_name is None:
-                    candidate_name = getattr(handoff_agent, "name", None)
-                    handoff_agent_name = candidate_name if isinstance(candidate_name, str) else None
-                if handoff_agent is None or not hasattr(handoff_agent, "handoffs"):
-                    if handoff_agent_name:
-                        logger.debug(
-                            "Skipping unresolved handoff target while building agent map: %s",
-                            handoff_agent_name,
-                        )
-                    continue
+                original_input_for_state = raw_input
+                session_input_items_for_persistence = []
             else:
-                # Backward-compatibility fallback for custom legacy handoff wrappers that expose
-                # the target directly on `.agent` without inheriting from `Handoff`.
-                legacy_agent = getattr(handoff_item, "agent", None)
-                if legacy_agent is not None:
-                    handoff_agent = legacy_agent
-                    logger.debug(
-                        "Using legacy non-`Handoff` `.agent` fallback while building agent map."
-                    )
-                else:
-                    handoff_agent = handoff_item
-                candidate_name = getattr(handoff_agent, "name", None)
-                handoff_agent_name = candidate_name if isinstance(candidate_name, str) else None
+                (
+                    prepared_input,
+                    session_input_items_for_persistence,
+                ) = await prepare_input_with_session(
+                    raw_input,
+                    session,
+                    run_config.session_input_callback,
+                    run_config.session_settings,
+                )
+                original_input_for_state = prepared_input
+
+        resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
+            run_config.reasoning_item_id_policy
+            if run_config.reasoning_item_id_policy is not None
+            else (run_state._reasoning_item_id_policy if run_state is not None else None)
+        )
+        if run_state is not None:
+            run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+
+        # Check whether to enable OpenAI server-managed conversation
+        if (
+            conversation_id is not None
+            or previous_response_id is not None
+            or auto_previous_response_id
+        ):
+            server_conversation_tracker = OpenAIServerConversationTracker(
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+                reasoning_item_id_policy=resolved_reasoning_item_id_policy,
+            )
+        else:
+            server_conversation_tracker = None
+        session_persistence_enabled = session is not None and server_conversation_tracker is None
+
+        if server_conversation_tracker is not None and is_resumed_state and run_state is not None:
+            session_input_items: list[TResponseInputItem] | None = None
+            if session is not None:
+                try:
+                    session_input_items = await session.get_items()
+                except Exception:
+                    session_input_items = None
+            server_conversation_tracker.hydrate_from_state(
+                original_input=run_state._original_input,
+                generated_items=run_state._generated_items,
+                model_responses=run_state._model_responses,
+                session_items=session_input_items,
+            )
+
+        tool_use_tracker = AgentToolUseTracker()
+        if is_resumed_state and run_state is not None:
+            hydrate_tool_use_tracker(tool_use_tracker, run_state, starting_agent)
+
+        (
+            trace_workflow_name,
+            trace_id,
+            trace_group_id,
+            trace_metadata,
+            trace_config,
+        ) = resolve_trace_settings(run_state=run_state, run_config=run_config)
+
+        with TraceCtxManager(
+            workflow_name=trace_workflow_name,
+            trace_id=trace_id,
+            group_id=trace_group_id,
+            metadata=trace_metadata,
+            tracing=trace_config,
+            disabled=run_config.tracing_disabled,
+            trace_state=run_state._trace_state if run_state is not None else None,
+            reattach_resumed_trace=is_resumed_state,
+        ):
+            if is_resumed_state and run_state is not None:
+                run_state.set_trace(get_current_trace())
+                current_turn = run_state._current_turn
+                raw_original_input = run_state._original_input
+                original_input = normalize_resumed_input(raw_original_input)
+                generated_items = run_state._generated_items
+                session_items = list(run_state._session_items)
+                model_responses = run_state._model_responses
+                # Cast to the correct type since we know this is TContext
+                context_wrapper = cast(RunContextWrapper[TContext], run_state._context)
+            else:
+                current_turn = 0
+                original_input = copy_input_items(original_input_for_state)
+                generated_items = []
+                session_items = []
+                model_responses = []
+                context_wrapper = ensure_context_wrapper(context)
+                set_agent_tool_state_scope(context_wrapper, None)
+                run_state = RunState(
+                    context=context_wrapper,
+                    original_input=original_input,
+                    starting_agent=starting_agent,
+                    max_turns=max_turns,
+                    conversation_id=conversation_id,
+                    previous_response_id=previous_response_id,
+                    auto_previous_response_id=auto_previous_response_id,
+                )
+                run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+                run_state.set_trace(get_current_trace())
+
+            def _with_reasoning_item_id_policy(result: RunResult) -> RunResult:
+                result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+                if run_state is not None:
+                    run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+                return result
+
+            pending_server_items: list[RunItem] | None = None
+            input_guardrail_results: list[InputGuardrailResult] = (
+                list(run_state._input_guardrail_results) if run_state is not None else []
+            )
+            tool_input_guardrail_results: list[ToolInputGuardrailResult] = (
+                list(getattr(run_state, "_tool_input_guardrail_results", []))
+                if run_state is not None
+                else []
+            )
+            tool_output_guardrail_results: list[ToolOutputGuardrailResult] = (
+                list(getattr(run_state, "_tool_output_guardrail_results", []))
+                if run_state is not None
+                else []
+            )
+
+            current_span: Span[AgentSpanData] | None = None
+            if is_resumed_state and run_state is not None and run_state._current_agent is not None:
+                current_agent = run_state._current_agent
+            else:
+                current_agent = starting_agent
+            should_run_agent_start_hooks = True
+            store_setting = current_agent.model_settings.resolve(run_config.model_settings).store
 
             if (
-                handoff_agent is not None
-                and handoff_agent_name
-                and handoff_agent_name not in agent_map
+                not is_resumed_state
+                and session_persistence_enabled
+                and original_user_input is not None
+                and session_input_items_for_persistence is None
             ):
-                queue.append(cast(Any, handoff_agent))
+                session_input_items_for_persistence = ItemHelpers.input_to_new_input_list(
+                    original_user_input
+                )
 
-        # Include agent-as-tool instances so nested approvals can be restored.
-        tools = getattr(current, "tools", None)
-        if tools:
-            for tool in tools:
-                if not getattr(tool, "_is_agent_tool", False):
-                    continue
-                tool_agent = getattr(tool, "_agent_instance", None)
-                tool_agent_name = getattr(tool_agent, "name", None)
-                if tool_agent and tool_agent_name and tool_agent_name not in agent_map:
-                    queue.append(tool_agent)
+            if session_persistence_enabled and session_input_items_for_persistence:
+                # Capture the exact input saved so it can be rewound on conversation lock retries.
+                last_saved_input_snapshot_for_rewind = list(session_input_items_for_persistence)
+                await save_result_to_session(
+                    session,
+                    session_input_items_for_persistence,
+                    [],
+                    run_state,
+                    store=store_setting,
+                )
+                session_input_items_for_persistence = []
 
-    return agent_map
+            try:
+                while True:
+                    resuming_turn = is_resumed_state
+                    normalized_starting_input: str | list[TResponseInputItem] = (
+                        starting_input
+                        if starting_input is not None and not isinstance(starting_input, RunState)
+                        else ""
+                    )
+                    store_setting = current_agent.model_settings.resolve(
+                        run_config.model_settings
+                    ).store
+                    if run_state is not None and run_state._current_step is not None:
+                        if isinstance(run_state._current_step, NextStepInterruption):
+                            logger.debug("Continuing from interruption")
+                            if (
+                                not run_state._model_responses
+                                or not run_state._last_processed_response
+                            ):
+                                raise UserError("No model response found in previous state")
 
+                            turn_result = await resolve_interrupted_turn(
+                                agent=current_agent,
+                                original_input=original_input,
+                                original_pre_step_items=generated_items,
+                                new_response=run_state._model_responses[-1],
+                                processed_response=run_state._last_processed_response,
+                                hooks=hooks,
+                                context_wrapper=context_wrapper,
+                                run_config=run_config,
+                                run_state=run_state,
+                            )
 
-def _deserialize_model_responses(responses_data: list[dict[str, Any]]) -> list[ModelResponse]:
-    """Deserialize model responses from JSON data.
+                            if run_state._last_processed_response is not None:
+                                tool_use_tracker.record_processed_response(
+                                    current_agent,
+                                    run_state._last_processed_response,
+                                )
 
-    Args:
-        responses_data: List of serialized model response dictionaries.
+                            original_input = turn_result.original_input
+                            generated_items, turn_session_items = resumed_turn_items(turn_result)
+                            session_items.extend(turn_session_items)
+                            if run_state is not None:
+                                update_run_state_after_resume(
+                                    run_state,
+                                    turn_result=turn_result,
+                                    generated_items=generated_items,
+                                    session_items=session_items,
+                                )
 
-    Returns:
-        List of ModelResponse instances.
-    """
+                            if (
+                                session_persistence_enabled
+                                and turn_result.new_step_items
+                                and run_state is not None
+                            ):
+                                run_state._current_turn_persisted_item_count = (
+                                    await save_resumed_turn_items(
+                                        session=session,
+                                        items=turn_session_items,
+                                        persisted_count=(
+                                            run_state._current_turn_persisted_item_count
+                                        ),
+                                        response_id=turn_result.model_response.response_id,
+                                        reasoning_item_id_policy=(
+                                            run_state._reasoning_item_id_policy
+                                        ),
+                                        store=store_setting,
+                                    )
+                                )
 
-    result = []
-    for resp_data in responses_data:
-        usage = deserialize_usage(resp_data.get("usage", {}))
+                            # After the resumed turn, treat subsequent turns as fresh so
+                            # counters and input saving behave normally.
+                            is_resumed_state = False
 
-        normalized_output = [
-            dict(item) if isinstance(item, Mapping) else item for item in resp_data["output"]
-        ]
+                            if isinstance(turn_result.next_step, NextStepInterruption):
+                                interruption_result_input: str | list[TResponseInputItem] = (
+                                    original_input
+                                )
+                                append_model_response_if_new(
+                                    model_responses, turn_result.model_response
+                                )
+                                processed_response_for_state = resolve_processed_response(
+                                    run_state=run_state,
+                                    processed_response=turn_result.processed_response,
+                                )
+                                if run_state is not None:
+                                    update_run_state_for_interruption(
+                                        run_state=run_state,
+                                        model_responses=model_responses,
+                                        processed_response=processed_response_for_state,
+                                        generated_items=generated_items,
+                                        session_items=session_items,
+                                        current_turn=current_turn,
+                                        next_step=turn_result.next_step,
+                                    )
+                                result = build_interruption_result(
+                                    result_input=interruption_result_input,
+                                    session_items=session_items,
+                                    model_responses=model_responses,
+                                    current_agent=current_agent,
+                                    input_guardrail_results=input_guardrail_results,
+                                    tool_input_guardrail_results=(
+                                        turn_result.tool_input_guardrail_results
+                                    ),
+                                    tool_output_guardrail_results=(
+                                        turn_result.tool_output_guardrail_results
+                                    ),
+                                    context_wrapper=context_wrapper,
+                                    interruptions=approvals_from_step(turn_result.next_step),
+                                    processed_response=processed_response_for_state,
+                                    tool_use_tracker=tool_use_tracker,
+                                    max_turns=max_turns,
+                                    current_turn=current_turn,
+                                    generated_items=generated_items,
+                                    run_state=run_state,
+                                    original_input=original_input,
+                                )
+                                return finalize_conversation_tracking(
+                                    _with_reasoning_item_id_policy(result),
+                                    server_conversation_tracker=server_conversation_tracker,
+                                    run_state=run_state,
+                                )
 
-        output_adapter: TypeAdapter[Any] = TypeAdapter(list[Any])
-        output = output_adapter.validate_python(normalized_output)
+                            if isinstance(turn_result.next_step, NextStepRunAgain):
+                                continue
 
-        response_id = resp_data.get("response_id")
-        request_id = resp_data.get("request_id")
+                            append_model_response_if_new(
+                                model_responses, turn_result.model_response
+                            )
+                            tool_input_guardrail_results.extend(
+                                turn_result.tool_input_guardrail_results
+                            )
+                            tool_output_guardrail_results.extend(
+                                turn_result.tool_output_guardrail_results
+                            )
 
-        result.append(
-            ModelResponse(
-                usage=usage,
-                output=output,
-                response_id=response_id,
-                request_id=request_id,
+                            if isinstance(turn_result.next_step, NextStepFinalOutput):
+                                output_guardrail_results = await run_output_guardrails(
+                                    current_agent.output_guardrails
+                                    + (run_config.output_guardrails or []),
+                                    current_agent,
+                                    turn_result.next_step.output,
+                                    context_wrapper,
+                                )
+                                current_step = getattr(run_state, "_current_step", None)
+                                approvals_from_state = approvals_from_step(current_step)
+                                result = RunResult(
+                                    input=turn_result.original_input,
+                                    new_items=session_items,
+                                    raw_responses=model_responses,
+                                    final_output=turn_result.next_step.output,
+                                    _last_agent=current_agent,
+                                    input_guardrail_results=input_guardrail_results,
+                                    output_guardrail_results=output_guardrail_results,
+                                    tool_input_guardrail_results=tool_input_guardrail_results,
+                                    tool_output_guardrail_results=tool_output_guardrail_results,
+                                    context_wrapper=context_wrapper,
+                                    interruptions=approvals_from_state,
+                                    _tool_use_tracker_snapshot=serialize_tool_use_tracker(
+                                        tool_use_tracker
+                                    ),
+                                    max_turns=max_turns,
+                                )
+                                result._current_turn = current_turn
+                                result._model_input_items = generated_items[:]
+                                # Keep normalized replay aligned with the model-facing
+                                # continuation whenever session history preserved extra items.
+                                result._replay_from_model_input_items = (
+                                    generated_items != session_items
+                                )
+                                if run_state is not None:
+                                    result._trace_state = run_state._trace_state
+                                if session_persistence_enabled:
+                                    input_items_for_save_1: list[TResponseInputItem] = (
+                                        session_input_items_for_persistence
+                                        if session_input_items_for_persistence is not None
+                                        else []
+                                    )
+                                    await save_result_to_session(
+                                        session,
+                                        input_items_for_save_1,
+                                        session_items_for_turn(turn_result),
+                                        run_state,
+                                        response_id=turn_result.model_response.response_id,
+                                        store=store_setting,
+                                    )
+                                result._original_input = copy_input_items(original_input)
+                                return finalize_conversation_tracking(
+                                    _with_reasoning_item_id_policy(result),
+                                    server_conversation_tracker=server_conversation_tracker,
+                                    run_state=run_state,
+                                )
+                            elif isinstance(turn_result.next_step, NextStepHandoff):
+                                current_agent = cast(
+                                    Agent[TContext], turn_result.next_step.new_agent
+                                )
+                                if run_state is not None:
+                                    run_state._current_agent = current_agent
+                                starting_input = turn_result.original_input
+                                original_input = turn_result.original_input
+                                if current_span is not None:
+                                    current_span.finish(reset_current=True)
+                                current_span = None
+                                should_run_agent_start_hooks = True
+                                continue
+
+                            continue
+
+                    if run_state is not None:
+                        if run_state._current_step is None:
+                            run_state._current_step = NextStepRunAgain()  # type: ignore[assignment]
+                    all_tools = await get_all_tools(current_agent, context_wrapper)
+                    await initialize_computer_tools(
+                        tools=all_tools, context_wrapper=context_wrapper
+                    )
+
+                    if current_span is None:
+                        handoff_names = [
+                            h.agent_name for h in await get_handoffs(current_agent, context_wrapper)
+                        ]
+                        if output_schema := get_output_schema(current_agent):
+                            output_type_name = output_schema.name()
+                        else:
+                            output_type_name = "str"
+
+                        current_span = agent_span(
+                            name=current_agent.name,
+                            handoffs=handoff_names,
+                            output_type=output_type_name,
+                        )
+                        current_span.start(mark_as_current=True)
+                        current_span.span_data.tools = [
+                            tool_name
+                            for tool in all_tools
+                            if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
+                        ]
+
+                    current_turn += 1
+                    if current_turn > max_turns:
+                        _error_tracing.attach_error_to_span(
+                            current_span,
+                            SpanError(
+                                message="Max turns exceeded",
+                                data={"max_turns": max_turns},
+                            ),
+                        )
+                        max_turns_error = MaxTurnsExceeded(f"Max turns ({max_turns}) exceeded")
+                        run_error_data = build_run_error_data(
+                            input=original_input,
+                            new_items=session_items,
+                            raw_responses=model_responses,
+                            last_agent=current_agent,
+                            reasoning_item_id_policy=resolved_reasoning_item_id_policy,
+                        )
+                        handler_result = await resolve_run_error_handler_result(
+                            error_handlers=error_handlers,
+                            error=max_turns_error,
+                            context_wrapper=context_wrapper,
+                            run_data=run_error_data,
+                        )
+                        if handler_result is None:
+                            raise max_turns_error
+
+                        validated_output = validate_handler_final_output(
+                            current_agent, handler_result.final_output
+                        )
+                        output_text = format_final_output_text(current_agent, validated_output)
+                        synthesized_item = create_message_output_item(current_agent, output_text)
+                        include_in_history = handler_result.include_in_history
+                        if include_in_history:
+                            generated_items.append(synthesized_item)
+                            session_items.append(synthesized_item)
+
+                        await run_final_output_hooks(
+                            current_agent,
+                            hooks,
+                            context_wrapper,
+                            validated_output,
+                        )
+                        output_guardrail_results = await run_output_guardrails(
+                            current_agent.output_guardrails + (run_config.output_guardrails or []),
+                            current_agent,
+                            validated_output,
+                            context_wrapper,
+                        )
+                        current_step = getattr(run_state, "_current_step", None)
+                        approvals_from_state = approvals_from_step(current_step)
+                        result = RunResult(
+                            input=original_input,
+                            new_items=session_items,
+                            raw_responses=model_responses,
+                            final_output=validated_output,
+                            _last_agent=current_agent,
+                            input_guardrail_results=input_guardrail_results,
+                            output_guardrail_results=output_guardrail_results,
+                            tool_input_guardrail_results=tool_input_guardrail_results,
+                            tool_output_guardrail_results=tool_output_guardrail_results,
+                            context_wrapper=context_wrapper,
+                            interruptions=approvals_from_state,
+                            _tool_use_tracker_snapshot=serialize_tool_use_tracker(tool_use_tracker),
+                            max_turns=max_turns,
+                        )
+                        result._current_turn = max_turns
+                        result._model_input_items = generated_items[:]
+                        result._replay_from_model_input_items = generated_items != session_items
+                        if run_state is not None:
+                            result._trace_state = run_state._trace_state
+                        if session_persistence_enabled and include_in_history:
+                            handler_input_items_for_save: list[TResponseInputItem] = (
+                                session_input_items_for_persistence
+                                if session_input_items_for_persistence is not None
+                                else []
+                            )
+                            await save_result_to_session(
+                                session,
+                                handler_input_items_for_save,
+                                [synthesized_item],
+                                run_state,
+                                response_id=None,
+                                store=store_setting,
+                            )
+                        result._original_input = copy_input_items(original_input)
+                        return finalize_conversation_tracking(
+                            _with_reasoning_item_id_policy(result),
+                            server_conversation_tracker=server_conversation_tracker,
+                            run_state=run_state,
+                        )
+
+                    if run_state is not None and not resuming_turn:
+                        run_state._current_turn_persisted_item_count = 0
+
+                    logger.debug("Running agent %s (turn %s)", current_agent.name, current_turn)
+
+                    if session_persistence_enabled:
+                        try:
+                            last_saved_input_snapshot_for_rewind = (
+                                ItemHelpers.input_to_new_input_list(original_input)
+                            )
+                        except Exception:
+                            last_saved_input_snapshot_for_rewind = None
+
+                    items_for_model = (
+                        pending_server_items
+                        if server_conversation_tracker is not None and pending_server_items
+                        else generated_items
+                    )
+
+                    if current_turn <= 1:
+                        all_input_guardrails = starting_agent.input_guardrails + (
+                            run_config.input_guardrails or []
+                        )
+                        sequential_guardrails = [
+                            g for g in all_input_guardrails if not g.run_in_parallel
+                        ]
+                        parallel_guardrails = [g for g in all_input_guardrails if g.run_in_parallel]
+
+                        try:
+                            sequential_results = []
+                            if sequential_guardrails:
+                                sequential_results = await run_input_guardrails(
+                                    starting_agent,
+                                    sequential_guardrails,
+                                    copy_input_items(prepared_input),
+                                    context_wrapper,
+                                )
+                        except InputGuardrailTripwireTriggered:
+                            session_input_items_for_persistence = (
+                                await persist_session_items_for_guardrail_trip(
+                                    session,
+                                    server_conversation_tracker,
+                                    session_input_items_for_persistence,
+                                    original_user_input,
+                                    run_state,
+                                    store=store_setting,
+                                )
+                            )
+                            raise
+
+                        parallel_results: list[InputGuardrailResult] = []
+                        model_task = asyncio.create_task(
+                            run_single_turn(
+                                agent=current_agent,
+                                all_tools=all_tools,
+                                original_input=original_input,
+                                generated_items=items_for_model,
+                                hooks=hooks,
+                                context_wrapper=context_wrapper,
+                                run_config=run_config,
+                                should_run_agent_start_hooks=should_run_agent_start_hooks,
+                                tool_use_tracker=tool_use_tracker,
+                                server_conversation_tracker=server_conversation_tracker,
+                                session=session,
+                                session_items_to_rewind=(
+                                    last_saved_input_snapshot_for_rewind
+                                    if not is_resumed_state and session_persistence_enabled
+                                    else None
+                                ),
+                                reasoning_item_id_policy=resolved_reasoning_item_id_policy,
+                            )
+                        )
+
+                        if parallel_guardrails:
+                            try:
+                                parallel_results, turn_result = await asyncio.gather(
+                                    run_input_guardrails(
+                                        starting_agent,
+                                        parallel_guardrails,
+                                        copy_input_items(prepared_input),
+                                        context_wrapper,
+                                    ),
+                                    model_task,
+                                )
+                            except InputGuardrailTripwireTriggered:
+                                if should_cancel_parallel_model_task_on_input_guardrail_trip():
+                                    if not model_task.done():
+                                        model_task.cancel()
+                                    await asyncio.gather(model_task, return_exceptions=True)
+                                session_input_items_for_persistence = (
+                                    await persist_session_items_for_guardrail_trip(
+                                        session,
+                                        server_conversation_tracker,
+                                        session_input_items_for_persistence,
+                                        original_user_input,
+                                        run_state,
+                                        store=store_setting,
+                                    )
+                                )
+                                raise
+                        else:
+                            turn_result = await model_task
+
+                        input_guardrail_results.extend(sequential_results)
+                        input_guardrail_results.extend(parallel_results)
+                    else:
+                        turn_result = await run_single_turn(
+                            agent=current_agent,
+                            all_tools=all_tools,
+                            original_input=original_input,
+                            generated_items=items_for_model,
+                            hooks=hooks,
+                            context_wrapper=context_wrapper,
+                            run_config=run_config,
+                            should_run_agent_start_hooks=should_run_agent_start_hooks,
+                            tool_use_tracker=tool_use_tracker,
+                            server_conversation_tracker=server_conversation_tracker,
+                            session=session,
+                            session_items_to_rewind=(
+                                last_saved_input_snapshot_for_rewind
+                                if not is_resumed_state and session_persistence_enabled
+                                else None
+                            ),
+                            reasoning_item_id_policy=resolved_reasoning_item_id_policy,
+                        )
+
+                    # Start hooks should only run on the first turn unless reset by a handoff.
+                    last_saved_input_snapshot_for_rewind = None
+                    should_run_agent_start_hooks = False
+
+                    model_responses.append(turn_result.model_response)
+                    original_input = turn_result.original_input
+                    # For model input, use new_step_items (filtered on handoffs).
+                    generated_items = turn_result.pre_step_items + turn_result.new_step_items
+                    # Accumulate unfiltered items for observability.
+                    turn_session_items = session_items_for_turn(turn_result)
+                    session_items.extend(turn_session_items)
+                    if server_conversation_tracker is not None:
+                        pending_server_items = list(turn_result.new_step_items)
+                        server_conversation_tracker.track_server_items(turn_result.model_response)
+
+                    tool_input_guardrail_results.extend(turn_result.tool_input_guardrail_results)
+                    tool_output_guardrail_results.extend(turn_result.tool_output_guardrail_results)
+
+                    items_to_save_turn = list(turn_session_items)
+                    if not isinstance(turn_result.next_step, NextStepInterruption):
+                        # When resuming a turn we have already persisted the tool_call items;
+                        if (
+                            is_resumed_state
+                            and run_state
+                            and run_state._current_turn_persisted_item_count > 0
+                        ):
+                            items_to_save_turn = [
+                                item for item in items_to_save_turn if item.type != "tool_call_item"
+                            ]
+                        if session_persistence_enabled:
+                            output_call_ids = {
+                                item.raw_item.get("call_id")
+                                if isinstance(item.raw_item, dict)
+                                else getattr(item.raw_item, "call_id", None)
+                                for item in turn_result.new_step_items
+                                if item.type == "tool_call_output_item"
+                            }
+                            for item in generated_items:
+                                if item.type != "tool_call_item":
+                                    continue
+                                call_id = (
+                                    item.raw_item.get("call_id")
+                                    if isinstance(item.raw_item, dict)
+                                    else getattr(item.raw_item, "call_id", None)
+                                )
+                                if (
+                                    call_id in output_call_ids
+                                    and item not in items_to_save_turn
+                                    and not (
+                                        run_state
+                                        and run_state._current_turn_persisted_item_count > 0
+                                    )
+                                ):
+                                    items_to_save_turn.append(item)
+                            if items_to_save_turn:
+                                logger.debug(
+                                    "Persisting turn items (types=%s)",
+                                    [item.type for item in items_to_save_turn],
+                                )
+                                if is_resumed_state and run_state is not None:
+                                    saved_count = await save_result_to_session(
+                                        session,
+                                        [],
+                                        items_to_save_turn,
+                                        None,
+                                        response_id=turn_result.model_response.response_id,
+                                        reasoning_item_id_policy=(
+                                            run_state._reasoning_item_id_policy
+                                        ),
+                                        store=store_setting,
+                                    )
+                                    run_state._current_turn_persisted_item_count += saved_count
+                                else:
+                                    await save_result_to_session(
+                                        session,
+                                        [],
+                                        items_to_save_turn,
+                                        run_state,
+                                        response_id=turn_result.model_response.response_id,
+                                        store=store_setting,
+                                    )
+
+                    # After the first resumed turn, treat subsequent turns as fresh
+                    # so counters and input saving behave normally.
+                    is_resumed_state = False
+
+                    try:
+                        if isinstance(turn_result.next_step, NextStepFinalOutput):
+                            output_guardrail_results = await run_output_guardrails(
+                                current_agent.output_guardrails
+                                + (run_config.output_guardrails or []),
+                                current_agent,
+                                turn_result.next_step.output,
+                                context_wrapper,
+                            )
+
+                            # Ensure starting_input is not None and not RunState
+                            final_output_result_input: str | list[TResponseInputItem] = (
+                                normalized_starting_input
+                            )
+                            result = RunResult(
+                                input=final_output_result_input,
+                                new_items=session_items,
+                                raw_responses=model_responses,
+                                final_output=turn_result.next_step.output,
+                                _last_agent=current_agent,
+                                input_guardrail_results=input_guardrail_results,
+                                output_guardrail_results=output_guardrail_results,
+                                tool_input_guardrail_results=tool_input_guardrail_results,
+                                tool_output_guardrail_results=tool_output_guardrail_results,
+                                context_wrapper=context_wrapper,
+                                interruptions=[],
+                                _tool_use_tracker_snapshot=serialize_tool_use_tracker(
+                                    tool_use_tracker
+                                ),
+                                max_turns=max_turns,
+                            )
+                            result._current_turn = current_turn
+                            result._model_input_items = generated_items[:]
+                            result._replay_from_model_input_items = generated_items != session_items
+                            if run_state is not None:
+                                result._current_turn_persisted_item_count = (
+                                    run_state._current_turn_persisted_item_count
+                                )
+                            await save_turn_items_if_needed(
+                                session=session,
+                                run_state=run_state,
+                                session_persistence_enabled=session_persistence_enabled,
+                                input_guardrail_results=input_guardrail_results,
+                                items=session_items_for_turn(turn_result),
+                                response_id=turn_result.model_response.response_id,
+                                store=store_setting,
+                            )
+                            result._original_input = copy_input_items(original_input)
+                            return finalize_conversation_tracking(
+                                _with_reasoning_item_id_policy(result),
+                                server_conversation_tracker=server_conversation_tracker,
+                                run_state=run_state,
+                            )
+                        elif isinstance(turn_result.next_step, NextStepInterruption):
+                            if session_persistence_enabled:
+                                if not input_guardrails_triggered(input_guardrail_results):
+                                    # Persist session items but skip approval placeholders.
+                                    input_items_for_save_interruption: list[TResponseInputItem] = (
+                                        session_input_items_for_persistence
+                                        if session_input_items_for_persistence is not None
+                                        else []
+                                    )
+                                    await save_result_to_session(
+                                        session,
+                                        input_items_for_save_interruption,
+                                        session_items_for_turn(turn_result),
+                                        run_state,
+                                        response_id=turn_result.model_response.response_id,
+                                        store=store_setting,
+                                    )
+                            append_model_response_if_new(
+                                model_responses, turn_result.model_response
+                            )
+                            processed_response_for_state = resolve_processed_response(
+                                run_state=run_state,
+                                processed_response=turn_result.processed_response,
+                            )
+                            if run_state is not None:
+                                update_run_state_for_interruption(
+                                    run_state=run_state,
+                                    model_responses=model_responses,
+                                    processed_response=processed_response_for_state,
+                                    generated_items=generated_items,
+                                    session_items=session_items,
+                                    current_turn=current_turn,
+                                    next_step=turn_result.next_step,
+                                )
+                            # Ensure starting_input is not None and not RunState
+                            interruption_result_input2: str | list[TResponseInputItem] = (
+                                normalized_starting_input
+                            )
+                            result = build_interruption_result(
+                                result_input=interruption_result_input2,
+                                session_items=session_items,
+                                model_responses=model_responses,
+                                current_agent=current_agent,
+                                input_guardrail_results=input_guardrail_results,
+                                tool_input_guardrail_results=tool_input_guardrail_results,
+                                tool_output_guardrail_results=tool_output_guardrail_results,
+                                context_wrapper=context_wrapper,
+                                interruptions=approvals_from_step(turn_result.next_step),
+                                processed_response=processed_response_for_state,
+                                tool_use_tracker=tool_use_tracker,
+                                max_turns=max_turns,
+                                current_turn=current_turn,
+                                generated_items=generated_items,
+                                run_state=run_state,
+                                original_input=original_input,
+                            )
+                            return finalize_conversation_tracking(
+                                _with_reasoning_item_id_policy(result),
+                                server_conversation_tracker=server_conversation_tracker,
+                                run_state=run_state,
+                            )
+                        elif isinstance(turn_result.next_step, NextStepHandoff):
+                            current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
+                            if run_state is not None:
+                                run_state._current_agent = current_agent
+                            # Next agent starts with the nested/filtered input.
+                            # Assign without type annotation to avoid redefinition error
+                            starting_input = turn_result.original_input
+                            original_input = turn_result.original_input
+                            current_span.finish(reset_current=True)
+                            current_span = None
+                            should_run_agent_start_hooks = True
+                        elif isinstance(turn_result.next_step, NextStepRunAgain):
+                            await save_turn_items_if_needed(
+                                session=session,
+                                run_state=run_state,
+                                session_persistence_enabled=session_persistence_enabled,
+                                input_guardrail_results=input_guardrail_results,
+                                items=session_items_for_turn(turn_result),
+                                response_id=turn_result.model_response.response_id,
+                                store=store_setting,
+                            )
+                            continue
+                        else:
+                            raise AgentsException(
+                                f"Unknown next step type: {type(turn_result.next_step)}"
+                            )
+                    finally:
+                        # execute_tools_and_side_effects returns a SingleStepResult that
+                        # stores direct references to the `pre_step_items` and `new_step_items`
+                        # lists it manages internally. Clear them here so the next turn does not
+                        # hold on to items from previous turns and to avoid leaking agent refs.
+                        turn_result.pre_step_items.clear()
+                        turn_result.new_step_items.clear()
+            except AgentsException as exc:
+                exc.run_data = RunErrorDetails(
+                    input=original_input,
+                    new_items=session_items,
+                    raw_responses=model_responses,
+                    last_agent=current_agent,
+                    context_wrapper=context_wrapper,
+                    input_guardrail_results=input_guardrail_results,
+                    output_guardrail_results=[],
+                )
+                raise
+            finally:
+                try:
+                    await dispose_resolved_computers(run_context=context_wrapper)
+                except Exception as error:
+                    logger.warning("Failed to dispose computers after run: %s", error)
+                if current_span:
+                    current_span.finish(reset_current=True)
+
+    def run_sync(
+        self,
+        starting_agent: Agent[TContext],
+        input: str | list[TResponseInputItem] | RunState[TContext],
+        **kwargs: Unpack[RunOptions[TContext]],
+    ) -> RunResult:
+        context = kwargs.get("context")
+        max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
+        hooks = kwargs.get("hooks")
+        run_config = kwargs.get("run_config")
+        error_handlers = kwargs.get("error_handlers")
+        previous_response_id = kwargs.get("previous_response_id")
+        auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
+        conversation_id = kwargs.get("conversation_id")
+        session = kwargs.get("session")
+
+        # Python 3.14 stopped implicitly wiring up a default event loop
+        # when synchronous code touches asyncio APIs for the first time.
+        # Several of our synchronous entry points (for example the Redis/SQLAlchemy session helpers)
+        # construct asyncio primitives like asyncio.Lock during __init__,
+        # which binds them to whatever loop happens to be the thread's default at that moment.
+        # To keep those locks usable we must ensure that run_sync reuses that same default loop
+        # instead of hopping over to a brand-new asyncio.run() loop.
+        try:
+            already_running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            already_running_loop = None
+
+        if already_running_loop is not None:
+            # This method is only expected to run when no loop is already active.
+            # (Each thread has its own default loop; concurrent sync runs should happen on
+            # different threads. In a single thread use the async API to interleave work.)
+            raise RuntimeError(
+                "AgentRunner.run_sync() cannot be called when an event loop is already running."
+            )
+
+        policy = asyncio.get_event_loop_policy()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            try:
+                default_loop = policy.get_event_loop()
+            except RuntimeError:
+                default_loop = policy.new_event_loop()
+                policy.set_event_loop(default_loop)
+
+        # We intentionally leave the default loop open even if we had to create one above. Session
+        # instances and other helpers stash loop-bound primitives between calls and expect to find
+        # the same default loop every time run_sync is invoked on this thread.
+        # Schedule the async run on the default loop so that we can manage cancellation explicitly.
+        task = default_loop.create_task(
+            self.run(
+                starting_agent,
+                input,
+                session=session,
+                context=context,
+                max_turns=max_turns,
+                hooks=hooks,
+                run_config=run_config,
+                error_handlers=error_handlers,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+                conversation_id=conversation_id,
             )
         )
 
-    return result
-
-
-def _deserialize_items(
-    items_data: list[dict[str, Any]], agent_map: dict[str, Agent[Any]]
-) -> list[RunItem]:
-    """Deserialize run items from JSON data.
-
-    Args:
-        items_data: List of serialized run item dictionaries.
-        agent_map: Map of agent names to agent instances.
-
-    Returns:
-        List of RunItem instances.
-    """
-
-    result: list[RunItem] = []
-
-    def _resolve_agent_info(
-        item_data: Mapping[str, Any], item_type: str
-    ) -> tuple[Agent[Any] | None, str | None]:
-        """Resolve agent from serialized data."""
-        candidate_name: str | None = None
-        fields = ["agent"]
-        if item_type == "handoff_output_item":
-            fields.extend(["source_agent", "target_agent"])
-
-        for agent_field in fields:
-            raw_agent = item_data.get(agent_field)
-            if isinstance(raw_agent, Mapping):
-                candidate_name = raw_agent.get("name") or candidate_name
-            elif isinstance(raw_agent, str):
-                candidate_name = raw_agent
-
-            agent_candidate = _resolve_agent_from_data(raw_agent, agent_map)
-            if agent_candidate:
-                return agent_candidate, agent_candidate.name
-
-        return None, candidate_name
-
-    for item_data in items_data:
-        item_type = item_data.get("type")
-        if not item_type:
-            logger.warning("Item missing type field, skipping")
-            continue
-
-        agent, agent_name = _resolve_agent_info(item_data, item_type)
-        if not agent:
-            if agent_name:
-                logger.warning(f"Agent {agent_name} not found, skipping item")
-            else:
-                logger.warning(f"Item missing agent field, skipping: {item_type}")
-            continue
-
-        raw_item_data = item_data["raw_item"]
-        normalized_raw_item = (
-            dict(raw_item_data) if isinstance(raw_item_data, Mapping) else raw_item_data
-        )
-
         try:
-            if item_type == "message_output_item":
-                raw_item_msg = ResponseOutputMessage(**normalized_raw_item)
-                result.append(MessageOutputItem(agent=agent, raw_item=raw_item_msg))
+            # Drive the coroutine to completion, harvesting the final RunResult.
+            return default_loop.run_until_complete(task)
+        except BaseException:
+            # If the sync caller aborts (KeyboardInterrupt, etc.), make sure the scheduled task
+            # does not linger on the shared loop by cancelling it and waiting for completion.
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    default_loop.run_until_complete(task)
+            raise
+        finally:
+            if not default_loop.is_closed():
+                # The loop stays open for subsequent runs, but we still need to flush any pending
+                # async generators so their cleanup code executes promptly.
+                with contextlib.suppress(RuntimeError):
+                    default_loop.run_until_complete(default_loop.shutdown_asyncgens())
 
-            elif item_type == "tool_search_call_item":
-                raw_item_tool_search_call = coerce_tool_search_call_raw_item(normalized_raw_item)
-                result.append(ToolSearchCallItem(agent=agent, raw_item=raw_item_tool_search_call))
+    def run_streamed(
+        self,
+        starting_agent: Agent[TContext],
+        input: str | list[TResponseInputItem] | RunState[TContext],
+        **kwargs: Unpack[RunOptions[TContext]],
+    ) -> RunResultStreaming:
+        context = kwargs.get("context")
+        max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
+        hooks = cast(RunHooks[TContext], validate_run_hooks(kwargs.get("hooks")))
+        run_config = kwargs.get("run_config")
+        error_handlers = kwargs.get("error_handlers")
+        previous_response_id = kwargs.get("previous_response_id")
+        auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
+        conversation_id = kwargs.get("conversation_id")
+        session = kwargs.get("session")
 
-            elif item_type == "tool_search_output_item":
-                raw_item_tool_search_output = coerce_tool_search_output_raw_item(
-                    normalized_raw_item
-                )
-                result.append(
-                    ToolSearchOutputItem(agent=agent, raw_item=raw_item_tool_search_output)
-                )
+        if run_config is None:
+            run_config = RunConfig()
 
-            elif item_type == "tool_call_item":
-                # Tool call items can be function calls, shell calls, apply_patch calls,
-                # MCP calls, etc. Check the type field to determine which type to deserialize as
-                raw_item_tool = _deserialize_tool_call_raw_item(normalized_raw_item)
-                # Preserve display metadata if it was stored with the item.
-                description = item_data.get("description")
-                title = item_data.get("title")
-                result.append(
-                    ToolCallItem(
-                        agent=agent,
-                        raw_item=raw_item_tool,
-                        description=description,
-                        title=title,
-                    )
-                )
+        # Handle RunState input
+        is_resumed_state = isinstance(input, RunState)
+        run_state: RunState[TContext] | None = None
+        input_for_result: str | list[TResponseInputItem]
+        starting_input = input if not is_resumed_state else None
 
-            elif item_type == "tool_call_output_item":
-                # For tool call outputs, validate and convert the raw dict
-                # Try to determine the type based on the dict structure
-                raw_item_output = _deserialize_tool_call_output_raw_item(normalized_raw_item)
-                if raw_item_output is None:
-                    continue
-                result.append(
-                    ToolCallOutputItem(
-                        agent=agent,
-                        raw_item=raw_item_output,
-                        output=item_data.get("output", ""),
-                    )
-                )
+        if is_resumed_state:
+            run_state = cast(RunState[TContext], input)
+            (
+                conversation_id,
+                previous_response_id,
+                auto_previous_response_id,
+            ) = apply_resumed_conversation_settings(
+                run_state=run_state,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
+            validate_session_conversation_settings(
+                session,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
+            # When resuming, use the original_input from state.
+            # primeFromState will mark items as sent so prepareInput skips them
+            starting_input = run_state._original_input
 
-            elif item_type == "reasoning_item":
-                raw_item_reason = ResponseReasoningItem(**normalized_raw_item)
-                result.append(ReasoningItem(agent=agent, raw_item=raw_item_reason))
+            logger.debug(
+                "Resuming from RunState in run_streaming()",
+                extra=build_resumed_stream_debug_extra(
+                    run_state,
+                    include_tool_output=not _debug.DONT_LOG_TOOL_DATA,
+                ),
+            )
+            # When resuming, use the original_input from state.
+            # primeFromState will mark items as sent so prepareInput skips them
+            raw_input_for_result = run_state._original_input
+            input_for_result = normalize_resumed_input(raw_input_for_result)
+            # Use context from RunState if not provided, otherwise override it.
+            context_wrapper = resolve_resumed_context(
+                run_state=run_state,
+                context=context,
+            )
+            context = context_wrapper.context
 
-            elif item_type == "handoff_call_item":
-                raw_item_handoff = ResponseFunctionToolCall(**normalized_raw_item)
-                result.append(HandoffCallItem(agent=agent, raw_item=raw_item_handoff))
+            # Override max_turns with the state's max_turns to preserve it across resumption
+            max_turns = run_state._max_turns
 
-            elif item_type == "handoff_output_item":
-                source_agent = _resolve_agent_from_data(item_data.get("source_agent"), agent_map)
-                target_agent = _resolve_agent_from_data(item_data.get("target_agent"), agent_map)
+        else:
+            # input is already str | list[TResponseInputItem] when not RunState
+            # Reuse input_for_result variable from outer scope
+            input_for_result = cast(Union[str, list[TResponseInputItem]], input)
+            validate_session_conversation_settings(
+                session,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
+            context_wrapper = ensure_context_wrapper(context)
+            set_agent_tool_state_scope(context_wrapper, None)
+            # input_for_state is the same as input_for_result here
+            input_for_state = input_for_result
+            run_state = RunState(
+                context=context_wrapper,
+                original_input=copy_input_items(input_for_state),
+                starting_agent=starting_agent,
+                max_turns=max_turns,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
 
-                # If we cannot resolve both agents, skip this item gracefully
-                if not source_agent or not target_agent:
-                    source_name = item_data.get("source_agent")
-                    target_name = item_data.get("target_agent")
-                    logger.warning(
-                        "Skipping handoff_output_item: could not resolve agents "
-                        "(source=%s, target=%s).",
-                        source_name,
-                        target_name,
-                    )
-                    continue
+        resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
+            run_config.reasoning_item_id_policy
+            if run_config.reasoning_item_id_policy is not None
+            else (run_state._reasoning_item_id_policy if run_state is not None else None)
+        )
+        if run_state is not None:
+            run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
 
-                # For handoff output items, we need to validate the raw_item
-                # as a TResponseInputItem (which is a union type)
-                # If validation fails, use the raw dict as-is (for test compatibility)
-                try:
-                    raw_item_handoff_output = _HANDOFF_OUTPUT_ADAPTER.validate_python(
-                        normalized_raw_item
-                    )
-                except ValidationError:
-                    # If validation fails, use the raw dict as-is
-                    # This allows tests to use mock data that doesn't match
-                    # the exact TResponseInputItem union types
-                    raw_item_handoff_output = normalized_raw_item  # type: ignore[assignment]
-                result.append(
-                    HandoffOutputItem(
-                        agent=agent,
-                        raw_item=raw_item_handoff_output,
-                        source_agent=source_agent,
-                        target_agent=target_agent,
-                    )
-                )
+        (
+            trace_workflow_name,
+            trace_id,
+            trace_group_id,
+            trace_metadata,
+            trace_config,
+        ) = resolve_trace_settings(run_state=run_state, run_config=run_config)
 
-            elif item_type == "compaction_item":
-                try:
-                    raw_item_compaction = _HANDOFF_OUTPUT_ADAPTER.validate_python(
-                        normalized_raw_item
-                    )
-                except ValidationError:
-                    raw_item_compaction = normalized_raw_item  # type: ignore[assignment]
-                result.append(CompactionItem(agent=agent, raw_item=raw_item_compaction))
+        # If there's already a trace, we don't create a new one. In addition, we can't end the
+        # trace here, because the actual work is done in `stream_events` and this method ends
+        # before that.
+        new_trace = create_trace_for_run(
+            workflow_name=trace_workflow_name,
+            trace_id=trace_id,
+            group_id=trace_group_id,
+            metadata=trace_metadata,
+            tracing=trace_config,
+            disabled=run_config.tracing_disabled,
+            trace_state=run_state._trace_state if run_state is not None else None,
+            reattach_resumed_trace=is_resumed_state,
+        )
+        if run_state is not None:
+            run_state.set_trace(new_trace or get_current_trace())
 
-            elif item_type == "mcp_list_tools_item":
-                raw_item_mcp_list = McpListTools(**normalized_raw_item)
-                result.append(MCPListToolsItem(agent=agent, raw_item=raw_item_mcp_list))
+        schema_agent = (
+            run_state._current_agent if run_state and run_state._current_agent else starting_agent
+        )
+        output_schema = get_output_schema(schema_agent)
 
-            elif item_type == "mcp_approval_request_item":
-                raw_item_mcp_req = McpApprovalRequest(**normalized_raw_item)
-                result.append(MCPApprovalRequestItem(agent=agent, raw_item=raw_item_mcp_req))
+        streamed_input: str | list[TResponseInputItem] = (
+            starting_input
+            if starting_input is not None and not isinstance(starting_input, RunState)
+            else ""
+        )
+        streamed_result = RunResultStreaming(
+            input=copy_input_items(streamed_input),
+            # When resuming from RunState, use session_items from state.
+            # primeFromState will mark items as sent so prepareInput skips them
+            new_items=run_state._session_items if run_state else [],
+            current_agent=schema_agent,
+            raw_responses=run_state._model_responses if run_state else [],
+            final_output=None,
+            is_complete=False,
+            current_turn=run_state._current_turn if run_state else 0,
+            max_turns=max_turns,
+            input_guardrail_results=(list(run_state._input_guardrail_results) if run_state else []),
+            output_guardrail_results=(
+                list(run_state._output_guardrail_results) if run_state else []
+            ),
+            tool_input_guardrail_results=(
+                list(getattr(run_state, "_tool_input_guardrail_results", [])) if run_state else []
+            ),
+            tool_output_guardrail_results=(
+                list(getattr(run_state, "_tool_output_guardrail_results", [])) if run_state else []
+            ),
+            _current_agent_output_schema=output_schema,
+            trace=new_trace,
+            context_wrapper=context_wrapper,
+            interruptions=[],
+            # Preserve persisted-count from state to avoid re-saving items when resuming.
+            # If a cross-SDK state omits the counter, fall back to len(generated_items)
+            # to avoid duplication.
+            _current_turn_persisted_item_count=(
+                run_state._current_turn_persisted_item_count if run_state else 0
+            ),
+            # When resuming from RunState, preserve the original input from the state
+            # This ensures originalInput in serialized state reflects the first turn's input
+            _original_input=(
+                copy_input_items(run_state._original_input)
+                if run_state and run_state._original_input is not None
+                else copy_input_items(streamed_input)
+            ),
+        )
+        streamed_result._model_input_items = (
+            list(run_state._generated_items) if run_state is not None else []
+        )
+        streamed_result._replay_from_model_input_items = (
+            list(run_state._generated_items) != list(run_state._session_items)
+            if run_state is not None
+            else False
+        )
+        streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+        if run_state is not None:
+            streamed_result._trace_state = run_state._trace_state
+        # Store run_state in streamed_result._state so it's accessible throughout streaming
+        # Now that we create run_state for both fresh and resumed runs, always set it
+        streamed_result._conversation_id = conversation_id
+        streamed_result._previous_response_id = previous_response_id
+        streamed_result._auto_previous_response_id = auto_previous_response_id
+        streamed_result._state = run_state
+        if run_state is not None:
+            streamed_result._tool_use_tracker_snapshot = run_state.get_tool_use_tracker_snapshot()
 
-            elif item_type == "mcp_approval_response_item":
-                # Validate and convert the raw dict to McpApprovalResponse
-                raw_item_mcp_response = _MCP_APPROVAL_RESPONSE_ADAPTER.validate_python(
-                    normalized_raw_item
-                )
-                result.append(MCPApprovalResponseItem(agent=agent, raw_item=raw_item_mcp_response))
-
-            elif item_type == "tool_approval_item":
-                approval_item = _deserialize_tool_approval_item(
-                    item_data,
-                    agent_map=agent_map,
-                    fallback_agent=agent,
-                    pre_normalized_raw_item=normalized_raw_item,
-                )
-                if approval_item is not None:
-                    result.append(approval_item)
-
-        except Exception as e:
-            logger.warning(f"Failed to deserialize item of type {item_type}: {e}")
-            continue
-
-    return result
+        # Kick off the actual agent loop in the background and return the streamed result object.
+        streamed_result.run_loop_task = asyncio.create_task(
+            start_streaming(
+                starting_input=input_for_result,
+                streamed_result=streamed_result,
+                starting_agent=starting_agent,
+                max_turns=max_turns,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                run_config=run_config,
+                error_handlers=error_handlers,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+                conversation_id=conversation_id,
+                session=session,
+                run_state=run_state,
+                is_resumed_state=is_resumed_state,
+            )
+        )
+        return streamed_result
 
 
-def _clone_original_input(original_input: str | list[Any]) -> str | list[Any]:
-    """Return a deep copy of the original input so later mutations don't leak into saved state."""
-    if isinstance(original_input, str):
-        return original_input
-    return copy.deepcopy(original_input)
+DEFAULT_AGENT_RUNNER = AgentRunner()
