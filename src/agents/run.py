@@ -559,7 +559,7 @@ class AgentRunner:
                 raw_original_input = run_state._original_input
                 original_input = normalize_resumed_input(raw_original_input)
                 generated_items = run_state._generated_items
-                session_items = run_state._session_items[:]
+                session_items = list(run_state._session_items)
                 model_responses = run_state._model_responses
                 # Cast to the correct type since we know this is TContext
                 context_wrapper = cast(RunContextWrapper[TContext], run_state._context)
@@ -591,7 +591,7 @@ class AgentRunner:
 
             pending_server_items: list[RunItem] | None = None
             input_guardrail_results: list[InputGuardrailResult] = (
-                run_state._input_guardrail_results[:] if run_state is not None else []
+                list(run_state._input_guardrail_results) if run_state is not None else []
             )
             tool_input_guardrail_results: list[ToolInputGuardrailResult] = (
                 list(getattr(run_state, "_tool_input_guardrail_results", []))
@@ -624,7 +624,7 @@ class AgentRunner:
 
             if session_persistence_enabled and session_input_items_for_persistence:
                 # Capture the exact input saved so it can be rewound on conversation lock retries.
-                last_saved_input_snapshot_for_rewind = session_input_items_for_persistence[:]
+                last_saved_input_snapshot_for_rewind = list(session_input_items_for_persistence)
                 await save_result_to_session(
                     session,
                     session_input_items_for_persistence,
@@ -1099,13 +1099,13 @@ class AgentRunner:
                     turn_session_items = session_items_for_turn(turn_result)
                     session_items.extend(turn_session_items)
                     if server_conversation_tracker is not None:
-                        pending_server_items = turn_result.new_step_items[:]
+                        pending_server_items = list(turn_result.new_step_items)
                         server_conversation_tracker.track_server_items(turn_result.model_response)
 
                     tool_input_guardrail_results.extend(turn_result.tool_input_guardrail_results)
                     tool_output_guardrail_results.extend(turn_result.tool_output_guardrail_results)
 
-                    items_to_save_turn = turn_session_items[:]
+                    items_to_save_turn = list(turn_session_items)
                     if not isinstance(turn_result.next_step, NextStepInterruption):
                         # When resuming a turn we have already persisted the tool_call items;
                         if (
