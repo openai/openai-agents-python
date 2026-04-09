@@ -1,6 +1,6 @@
 import logging
 import sys
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from openai import AsyncOpenAI
 
@@ -74,7 +74,6 @@ from .memory import (
     Session,
     SessionABC,
     SessionSettings,
-    SQLiteSession,
     is_openai_responses_compaction_aware_session,
 )
 from .model_settings import ModelSettings
@@ -224,6 +223,19 @@ from .tracing import (
 )
 from .usage import Usage
 from .version import __version__
+
+if TYPE_CHECKING:
+    from .memory.sqlite_session import SQLiteSession
+
+
+def __getattr__(name: str) -> Any:
+    if name == "SQLiteSession":
+        from .memory.sqlite_session import SQLiteSession
+
+        globals()[name] = SQLiteSession
+        return SQLiteSession
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def set_default_openai_key(key: str, use_for_tracing: bool = True) -> None:
