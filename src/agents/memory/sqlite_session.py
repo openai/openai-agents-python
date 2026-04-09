@@ -2,16 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
+import sys
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from ..items import TResponseInputItem
 from .session import SessionABC
 from .session_settings import SessionSettings, resolve_session_limit
+
+if TYPE_CHECKING:
+    import sqlite3
+else:
+    sqlite3 = sys.modules.get("sqlite3")
+    if sqlite3 is None:
+        try:
+            import sqlite3 as _sqlite3
+
+            sqlite3 = _sqlite3
+        except ImportError:
+            sqlite3 = None  # type: ignore[misc,assignment]
 
 
 class SQLiteSession(SessionABC):
@@ -46,6 +58,12 @@ class SQLiteSession(SessionABC):
             session_settings: Session configuration settings including default limit for
                 retrieving items. If None, uses default SessionSettings().
         """
+        if sqlite3 is None:
+            raise RuntimeError(
+                "SQLiteSession requires the sqlite3 module, which is not available "
+                "in this Python runtime. Please install a Python build with sqlite3 support "
+                "or use an alternative session implementation."
+            )
         self.session_id = session_id
         self.session_settings = session_settings or SessionSettings()
         self.db_path = db_path
