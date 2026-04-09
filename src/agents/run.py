@@ -797,12 +797,12 @@ class AgentRunner:
                                     max_turns=max_turns,
                                 )
                                 result._current_turn = current_turn
-                                result._model_input_items = list(generated_items)
+                                result._model_input_items = generated_items[:]
                                 # Keep normalized replay aligned with the model-facing
                                 # continuation whenever session history preserved extra items.
-                                result._replay_from_model_input_items = list(
-                                    generated_items
-                                ) != list(session_items)
+                                result._replay_from_model_input_items = (
+                                    generated_items != session_items
+                                )
                                 if run_state is not None:
                                     result._trace_state = run_state._trace_state
                                 if session_persistence_enabled:
@@ -936,10 +936,8 @@ class AgentRunner:
                             max_turns=max_turns,
                         )
                         result._current_turn = max_turns
-                        result._model_input_items = list(generated_items)
-                        result._replay_from_model_input_items = list(generated_items) != list(
-                            session_items
-                        )
+                        result._model_input_items = generated_items[:]
+                        result._replay_from_model_input_items = generated_items != session_items
                         if run_state is not None:
                             result._trace_state = run_state._trace_state
                         if session_persistence_enabled and include_in_history:
@@ -1207,10 +1205,8 @@ class AgentRunner:
                                 max_turns=max_turns,
                             )
                             result._current_turn = current_turn
-                            result._model_input_items = list(generated_items)
-                            result._replay_from_model_input_items = list(generated_items) != list(
-                                session_items
-                            )
+                            result._model_input_items = generated_items[:]
+                            result._replay_from_model_input_items = generated_items != session_items
                             if run_state is not None:
                                 result._current_turn_persisted_item_count = (
                                     run_state._current_turn_persisted_item_count
