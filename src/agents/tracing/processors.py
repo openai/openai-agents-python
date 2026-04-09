@@ -296,7 +296,11 @@ class BackendSpanExporter(TracingExporter):
         if isinstance(value, list):
             return self._truncate_list_for_json_limit(value, max_bytes)
 
-        return self._truncated_preview(value)
+        preview = self._truncated_preview(value)
+        if self._value_json_size_bytes(preview) <= max_bytes:
+            return preview
+
+        return value
 
     def _truncate_mapping_for_json_limit(
         self, value: dict[str, Any], max_bytes: int
