@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -25,6 +26,18 @@ def _make_approval_agent(model: FakeModel) -> Agent[None]:
         return "ok"
 
     return Agent(name="test_agent", model=model, tools=[approval_tool])
+
+
+def _get_last_function_span_export(name: str) -> dict[str, Any]:
+    matching_spans = [
+        exported
+        for span in fetch_ordered_spans()
+        if (exported := span.export()) is not None
+        and exported["span_data"]["type"] == "function"
+        and exported["span_data"]["name"] == name
+    ]
+    assert matching_spans
+    return matching_spans[-1]
 
 
 @pytest.mark.asyncio
@@ -243,6 +256,239 @@ async def test_resumed_run_with_workflow_override_starts_new_trace() -> None:
     assert fetch_events().count("trace_end") == 2
     assert [trace.trace_id for trace in traces] == [trace_id, trace_id]
     assert [trace.name for trace in traces] == ["original_workflow", "override_workflow"]
+
+
+@pytest.mark.asyncio
+async def test_approval_override_records_custom_trace_span() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="send_email", needs_approval=True)
+    def send_email(recipient: str) -> str:
+        return recipient
+
+    agent = Agent(name="trace_agent", model=model, tools=[send_email])
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "send_email", '{"recipient":"alice@example.com"}', call_id="call-1"
+                )
+            ]
+        ]
+    )
+
+    first = await Runner.run(agent, input="first_test")
+    assert first.interruptions
+
+    state = first.to_state()
+    before_custom_spans = [
+        span
+        for span in fetch_ordered_spans()
+        if getattr(getattr(span, "span_data", None), "type", None) == "custom"
+    ]
+
+    state.approve(first.interruptions[0], override_arguments={"recipient": "bob@example.com"})
+
+    after_custom_spans = [
+        span
+        for span in fetch_ordered_spans()
+        if getattr(getattr(span, "span_data", None), "type", None) == "custom"
+    ]
+
+    assert len(after_custom_spans) == len(before_custom_spans) + 1
+    override_span = after_custom_spans[-1].export()
+    assert override_span is not None
+    assert override_span["span_data"]["name"] == "approval override: send_email"
+    assert override_span["span_data"]["data"] == {
+        "tool_name": "send_email",
+        "call_id": "call-1",
+        "original_arguments": {"recipient": "alice@example.com"},
+        "override_arguments": {"recipient": "bob@example.com"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_approval_override_respects_restored_sensitive_trace_flag() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="send_email", needs_approval=True)
+    def send_email(recipient: str) -> str:
+        return recipient
+
+    agent = Agent(name="trace_agent", model=model, tools=[send_email])
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "send_email", '{"recipient":"alice@example.com"}', call_id="call-1"
+                )
+            ]
+        ]
+    )
+
+    first = await Runner.run(agent, input="first_test")
+    assert first.interruptions
+
+    state = first.to_state()
+    state.set_trace_include_sensitive_data(False)
+    restored_state = await RunState.from_string(agent, state.to_string())
+    restored_interruptions = restored_state.get_interruptions()
+    assert restored_interruptions
+
+    before_custom_spans = [
+        span
+        for span in fetch_ordered_spans()
+        if getattr(getattr(span, "span_data", None), "type", None) == "custom"
+    ]
+
+    restored_state.approve(
+        restored_interruptions[0],
+        override_arguments={"recipient": "bob@example.com"},
+    )
+
+    after_custom_spans = [
+        span
+        for span in fetch_ordered_spans()
+        if getattr(getattr(span, "span_data", None), "type", None) == "custom"
+    ]
+    assert len(after_custom_spans) == len(before_custom_spans)
+
+
+@pytest.mark.asyncio
+async def test_completed_result_to_state_preserves_sensitive_trace_flag() -> None:
+    model = FakeModel()
+    model.add_multiple_turn_outputs([[get_text_message("done")]])
+    agent = Agent(name="trace_agent", model=model)
+
+    result = await Runner.run(
+        agent,
+        input="first_test",
+        run_config=RunConfig(trace_include_sensitive_data=False),
+    )
+
+    state = result.to_state()
+
+    assert state._trace_include_sensitive_data is False
+
+
+@pytest.mark.asyncio
+async def test_resumed_run_honors_explicit_trace_include_sensitive_data() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="send_email", needs_approval=True)
+    def send_email(recipient: str) -> str:
+        return recipient
+
+    agent = Agent(name="trace_agent", model=model, tools=[send_email])
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "send_email", '{"recipient":"alice@example.com"}', call_id="call-1"
+                )
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = await Runner.run(agent, input="first_test")
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"recipient": "bob@example.com"})
+
+    resumed = await Runner.run(
+        agent,
+        state,
+        run_config=RunConfig(trace_include_sensitive_data=False),
+    )
+
+    assert resumed.final_output == "done"
+    assert state._trace_include_sensitive_data is False
+    function_span = _get_last_function_span_export("send_email")
+    assert function_span["span_data"]["input"] is None
+    assert function_span["span_data"]["output"] is None
+
+
+@pytest.mark.asyncio
+async def test_resumed_run_honors_mutated_trace_include_sensitive_data() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="send_email", needs_approval=True)
+    def send_email(recipient: str) -> str:
+        return recipient
+
+    agent = Agent(name="trace_agent", model=model, tools=[send_email])
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "send_email", '{"recipient":"alice@example.com"}', call_id="call-1"
+                )
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = await Runner.run(
+        agent,
+        input="first_test",
+        run_config=RunConfig(trace_include_sensitive_data=True),
+    )
+    assert first.interruptions
+
+    state = first.to_state()
+    assert state._trace_include_sensitive_data is True
+    state.approve(first.interruptions[0], override_arguments={"recipient": "bob@example.com"})
+
+    run_config = RunConfig()
+    run_config.trace_include_sensitive_data = False
+    resumed = await Runner.run(agent, state, run_config=run_config)
+
+    assert resumed.final_output == "done"
+    assert state._trace_include_sensitive_data is False
+    function_span = _get_last_function_span_export("send_email")
+    assert function_span["span_data"]["input"] is None
+    assert function_span["span_data"]["output"] is None
+
+
+@pytest.mark.asyncio
+async def test_resumed_run_preserves_sensitive_trace_flag_for_unrelated_run_config() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="send_email", needs_approval=True)
+    def send_email(recipient: str) -> str:
+        return recipient
+
+    agent = Agent(name="trace_agent", model=model, tools=[send_email])
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "send_email", '{"recipient":"alice@example.com"}', call_id="call-1"
+                )
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = await Runner.run(agent, input="first_test")
+    assert first.interruptions
+
+    state = first.to_state()
+    state.set_trace_include_sensitive_data(False)
+    state.approve(first.interruptions[0], override_arguments={"recipient": "bob@example.com"})
+
+    resumed = await Runner.run(
+        agent,
+        state,
+        run_config=RunConfig(workflow_name="override_workflow"),
+    )
+
+    assert resumed.final_output == "done"
+    function_span = _get_last_function_span_export("send_email")
+    assert function_span["span_data"]["input"] is None
+    assert function_span["span_data"]["output"] is None
 
 
 @pytest.mark.asyncio
@@ -528,6 +774,94 @@ async def test_resumed_streaming_run_reuses_original_trace_without_duplicate_tra
     assert fetch_events().count("trace_start") == 1
     assert fetch_events().count("trace_end") == 1
     assert all(span.trace_id == traces[0].trace_id for span in fetch_ordered_spans())
+
+
+@pytest.mark.asyncio
+async def test_resumed_streaming_run_honors_explicit_trace_include_sensitive_data() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="send_email", needs_approval=True)
+    def send_email(recipient: str) -> str:
+        return recipient
+
+    agent = Agent(name="trace_agent", model=model, tools=[send_email])
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "send_email", '{"recipient":"alice@example.com"}', call_id="call-1"
+                )
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = Runner.run_streamed(agent, input="first_test")
+    async for _ in first.stream_events():
+        pass
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"recipient": "bob@example.com"})
+
+    resumed = Runner.run_streamed(
+        agent,
+        state,
+        run_config=RunConfig(trace_include_sensitive_data=False),
+    )
+    async for _ in resumed.stream_events():
+        pass
+
+    assert resumed.final_output == "done"
+    assert state._trace_include_sensitive_data is False
+    function_span = _get_last_function_span_export("send_email")
+    assert function_span["span_data"]["input"] is None
+    assert function_span["span_data"]["output"] is None
+
+
+@pytest.mark.asyncio
+async def test_resumed_streaming_run_preserves_sensitive_trace_flag_for_unrelated_run_config() -> (
+    None
+):
+    model = FakeModel()
+
+    @function_tool(name_override="send_email", needs_approval=True)
+    def send_email(recipient: str) -> str:
+        return recipient
+
+    agent = Agent(name="trace_agent", model=model, tools=[send_email])
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "send_email", '{"recipient":"alice@example.com"}', call_id="call-1"
+                )
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = Runner.run_streamed(agent, input="first_test")
+    async for _ in first.stream_events():
+        pass
+    assert first.interruptions
+
+    state = first.to_state()
+    state.set_trace_include_sensitive_data(False)
+    state.approve(first.interruptions[0], override_arguments={"recipient": "bob@example.com"})
+
+    resumed = Runner.run_streamed(
+        agent,
+        state,
+        run_config=RunConfig(workflow_name="override_workflow"),
+    )
+    async for _ in resumed.stream_events():
+        pass
+
+    assert resumed.final_output == "done"
+    function_span = _get_last_function_span_export("send_email")
+    assert function_span["span_data"]["input"] is None
+    assert function_span["span_data"]["output"] is None
 
 
 @pytest.mark.asyncio

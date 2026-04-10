@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import sqlite3
 import threading
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from ..items import TResponseInputItem
-from .session import SessionABC
+from .session import SessionABC, SessionHistoryRewriteArgs, apply_session_history_mutations
 from .session_settings import SessionSettings, resolve_session_limit
 
 
@@ -317,6 +318,69 @@ class SQLiteSession(SessionABC):
                 conn.commit()
 
         await asyncio.to_thread(_clear_session_sync)
+
+    async def apply_history_mutations(self, args: SessionHistoryRewriteArgs) -> None:
+        """Rewrite persisted session history using structured mutations."""
+        mutations = list(args.get("mutations", []))
+        if not mutations:
+            return
+
+        def _apply_history_mutations_sync() -> None:
+            with self._locked_connection() as conn:
+                cursor = conn.execute(
+                    f"""
+                    SELECT message_data FROM {self.messages_table}
+                    WHERE session_id = ?
+                    ORDER BY id ASC
+                """,
+                    (self.session_id,),
+                )
+                rows = cursor.fetchall()
+
+                existing_items: list[TResponseInputItem] = []
+                for (message_data,) in rows:
+                    try:
+                        item = json.loads(message_data)
+                    except json.JSONDecodeError:
+                        continue
+                    existing_items.append(copy.deepcopy(item))
+
+                rewritten_items = apply_session_history_mutations(existing_items, mutations)
+
+                conn.execute(
+                    f"""
+                    DELETE FROM {self.messages_table}
+                    WHERE session_id = ?
+                """,
+                    (self.session_id,),
+                )
+
+                if rewritten_items:
+                    conn.execute(
+                        f"""
+                        INSERT OR IGNORE INTO {self.sessions_table} (session_id) VALUES (?)
+                    """,
+                        (self.session_id,),
+                    )
+                    message_data = [(self.session_id, json.dumps(item)) for item in rewritten_items]
+                    conn.executemany(
+                        f"""
+                        INSERT INTO {self.messages_table} (session_id, message_data) VALUES (?, ?)
+                    """,
+                        message_data,
+                    )
+
+                conn.execute(
+                    f"""
+                    UPDATE {self.sessions_table}
+                    SET updated_at = CURRENT_TIMESTAMP
+                    WHERE session_id = ?
+                """,
+                    (self.session_id,),
+                )
+                conn.commit()
+
+        await asyncio.to_thread(_apply_history_mutations_sync)
 
     def close(self) -> None:
         """Close the database connection."""

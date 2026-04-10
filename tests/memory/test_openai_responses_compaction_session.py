@@ -26,7 +26,7 @@ from agents.run_internal.items import (
 )
 from tests.fake_model import FakeModel
 from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
-from tests.utils.simple_session import SimpleListSession
+from tests.utils.simple_session import RewriteAwareSimpleSession, SimpleListSession
 
 
 class TestIsOpenAIModelName:
@@ -140,6 +140,107 @@ class TestOpenAIResponsesCompactionSession:
         result = await session.get_items()
         assert len(result) == 1
         mock_session.get_items.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_apply_history_mutations_rewrites_underlying_history(self) -> None:
+        underlying = SimpleListSession(
+            history=[
+                cast(TResponseInputItem, {"type": "message", "role": "user", "content": "hello"}),
+                cast(
+                    TResponseInputItem,
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "id": "fc_1",
+                        "name": "test_tool",
+                        "arguments": '{"value":"foo"}',
+                    },
+                ),
+                cast(
+                    TResponseInputItem,
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-1",
+                        "output": "ok",
+                    },
+                ),
+            ]
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+        )
+
+        await session.apply_history_mutations(
+            {
+                "mutations": [
+                    {
+                        "type": "replace_function_call",
+                        "call_id": "call-1",
+                        "replacement": cast(
+                            TResponseInputItem,
+                            {
+                                "type": "function_call",
+                                "call_id": "call-1",
+                                "id": "fc_1",
+                                "name": "test_tool",
+                                "arguments": '{"value":"bar"}',
+                            },
+                        ),
+                    }
+                ]
+            }
+        )
+
+        saved_items = await underlying.get_items()
+        assert cast(dict[str, Any], saved_items[1])["arguments"] == '{"value":"bar"}'
+
+    @pytest.mark.asyncio
+    async def test_apply_history_mutations_delegates_to_rewrite_aware_underlying_session(
+        self,
+    ) -> None:
+        underlying = RewriteAwareSimpleSession(
+            history=[
+                cast(
+                    TResponseInputItem,
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "id": "fc_1",
+                        "name": "test_tool",
+                        "arguments": '{"value":"foo"}',
+                    },
+                )
+            ]
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+        )
+
+        await session.apply_history_mutations(
+            {
+                "mutations": [
+                    {
+                        "type": "replace_function_call",
+                        "call_id": "call-1",
+                        "replacement": cast(
+                            TResponseInputItem,
+                            {
+                                "type": "function_call",
+                                "call_id": "call-1",
+                                "id": "fc_1",
+                                "name": "test_tool",
+                                "arguments": '{"value":"bar"}',
+                            },
+                        ),
+                    }
+                ]
+            }
+        )
+
+        saved_items = await underlying.get_items()
+        assert cast(dict[str, Any], saved_items[0])["arguments"] == '{"value":"bar"}'
 
     @pytest.mark.asyncio
     async def test_run_compaction_requires_response_id(self) -> None:
@@ -351,6 +452,143 @@ class TestOpenAIResponsesCompactionSession:
         assert call_kwargs.get("input") == items
 
     @pytest.mark.asyncio
+    async def test_run_compaction_forces_input_mode_after_local_history_rewrite(self) -> None:
+        underlying = RewriteAwareSimpleSession(
+            history=[
+                cast(TResponseInputItem, {"type": "message", "role": "user", "content": "hello"}),
+                cast(
+                    TResponseInputItem,
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "id": "fc_1",
+                        "name": "test_tool",
+                        "arguments": '{"value":"foo"}',
+                    },
+                ),
+                cast(
+                    TResponseInputItem,
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-1",
+                        "output": "ok",
+                    },
+                ),
+            ]
+        )
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = []
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="auto",
+        )
+
+        await session.apply_history_mutations(
+            {
+                "mutations": [
+                    {
+                        "type": "replace_function_call",
+                        "call_id": "call-1",
+                        "replacement": cast(
+                            TResponseInputItem,
+                            {
+                                "type": "function_call",
+                                "call_id": "call-1",
+                                "id": "fc_1",
+                                "name": "test_tool",
+                                "arguments": '{"value":"bar"}',
+                            },
+                        ),
+                    }
+                ]
+            }
+        )
+        await session.run_compaction({"response_id": "resp-1", "force": True})
+
+        first_call_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in first_call_kwargs
+        assert isinstance(first_call_kwargs.get("input"), list)
+
+        mock_client.responses.compact.reset_mock()
+        await session.run_compaction({"response_id": "resp-2", "force": True})
+
+        second_call_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert second_call_kwargs.get("previous_response_id") == "resp-2"
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_keeps_local_rewrite_pending_until_input_compaction_succeeds(
+        self,
+    ) -> None:
+        underlying = RewriteAwareSimpleSession(
+            history=[
+                cast(TResponseInputItem, {"type": "message", "role": "user", "content": "hello"}),
+                cast(
+                    TResponseInputItem,
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "id": "fc_1",
+                        "name": "test_tool",
+                        "arguments": '{"value":"foo"}',
+                    },
+                ),
+                cast(
+                    TResponseInputItem,
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-1",
+                        "output": "ok",
+                    },
+                ),
+            ]
+        )
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = []
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="auto",
+        )
+
+        await session.apply_history_mutations(
+            {
+                "mutations": [
+                    {
+                        "type": "replace_function_call",
+                        "call_id": "call-1",
+                        "replacement": cast(
+                            TResponseInputItem,
+                            {
+                                "type": "function_call",
+                                "call_id": "call-1",
+                                "id": "fc_1",
+                                "name": "test_tool",
+                                "arguments": '{"value":"bar"}',
+                            },
+                        ),
+                    }
+                ]
+            }
+        )
+
+        await session.run_compaction({"response_id": "resp-1"})
+        mock_client.responses.compact.assert_not_called()
+
+        await session.run_compaction({"response_id": "resp-2", "force": True})
+
+        call_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in call_kwargs
+        assert isinstance(call_kwargs.get("input"), list)
+        assert cast(dict[str, Any], call_kwargs["input"][1])["arguments"] == '{"value":"bar"}'
+
+    @pytest.mark.asyncio
     async def test_run_compaction_auto_uses_default_store_when_unset(self) -> None:
         mock_session = self.create_mock_session()
         items: list[TResponseInputItem] = [
@@ -384,6 +622,81 @@ class TestOpenAIResponsesCompactionSession:
         assert "previous_response_id" not in first_kwargs
         assert second_kwargs.get("previous_response_id") == "resp-stored"
         assert "input" not in second_kwargs
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_ignores_abandoned_unresolved_function_calls(self) -> None:
+        mock_session = self.create_mock_session()
+        items: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "first"}),
+            cast(
+                TResponseInputItem,
+                {
+                    "type": "function_call",
+                    "call_id": "call-abandoned",
+                    "id": "fc_1",
+                    "name": "test_tool",
+                    "arguments": "{}",
+                },
+            ),
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "followup"}),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "latest response"},
+            ),
+        ]
+        mock_session.get_items.return_value = items
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = []
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            compaction_mode="auto",
+        )
+
+        await session.run_compaction({"response_id": "resp-latest", "force": True})
+
+        mock_client.responses.compact.assert_called_once_with(
+            previous_response_id="resp-latest",
+            model="gpt-4.1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_still_blocks_active_unresolved_function_calls(self) -> None:
+        mock_session = self.create_mock_session()
+        items: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "hello"}),
+            cast(
+                TResponseInputItem,
+                {
+                    "type": "function_call",
+                    "call_id": "call-pending",
+                    "id": "fc_1",
+                    "name": "test_tool",
+                    "arguments": "{}",
+                },
+            ),
+        ]
+        mock_session.get_items.return_value = items
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            compaction_mode="auto",
+        )
+
+        await session.run_compaction({"response_id": "resp-pending", "force": True})
+
+        mock_client.responses.compact.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_run_compaction_auto_uses_input_when_last_response_unstored(self) -> None:

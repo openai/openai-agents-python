@@ -15,11 +15,15 @@ from agents import (
     MessageOutputItem,
     RunContextWrapper,
     RunItem,
+    Runner,
     RunResult,
     RunResultStreaming,
 )
 from agents.exceptions import AgentsException
 from agents.tool_context import ToolContext
+
+from .fake_model import FakeModel
+from .test_responses import get_text_message
 
 
 def create_run_result(
@@ -259,6 +263,25 @@ def test_run_result_streaming_release_agents_releases_current_agent() -> None:
     assert agent_ref() is None
     with pytest.raises(AgentsException):
         _ = streaming_result.last_agent
+
+
+@pytest.mark.asyncio
+async def test_runner_result_does_not_retain_live_run_state() -> None:
+    agent = Agent(
+        name="runner-result-agent",
+        model=FakeModel(initial_output=[get_text_message("done")]),
+    )
+
+    result = await Runner.run(agent, "hello")
+
+    assert result._state is None
+
+    agent_ref = weakref.ref(agent)
+    result.release_agents()
+    del agent
+    gc.collect()
+
+    assert agent_ref() is None
 
 
 def test_run_result_agent_tool_invocation_returns_none_for_plain_context() -> None:

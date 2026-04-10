@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
@@ -8,6 +9,8 @@ from typing_extensions import TypedDict, TypeGuard
 if TYPE_CHECKING:
     from ..items import TResponseInputItem
     from .session_settings import SessionSettings
+
+SERVER_MANAGED_CONVERSATION_SESSION_ATTR = "_server_managed_conversation_session"
 
 
 @runtime_checkable
@@ -102,6 +105,105 @@ class SessionABC(ABC):
     async def clear_session(self) -> None:
         """Clear all items for this session."""
         ...
+
+
+@runtime_checkable
+class ServerManagedConversationSession(Session, Protocol):
+    """Protocol for sessions whose canonical history is managed by a remote service."""
+
+    _server_managed_conversation_session: Literal[True]
+
+
+def is_server_managed_conversation_session(
+    session: Session | None,
+) -> TypeGuard[ServerManagedConversationSession]:
+    """Check whether the session advertises server-managed history semantics."""
+    if session is None:
+        return False
+    try:
+        marker = getattr(session, SERVER_MANAGED_CONVERSATION_SESSION_ATTR, False)
+    except Exception:
+        return False
+    return marker is True
+
+
+class ReplaceFunctionCallSessionHistoryMutation(TypedDict):
+    """Replace the canonical persisted function call for a tool call."""
+
+    type: Literal["replace_function_call"]
+    call_id: str
+    replacement: TResponseInputItem
+
+
+SessionHistoryMutation = ReplaceFunctionCallSessionHistoryMutation
+
+
+class SessionHistoryRewriteArgs(TypedDict):
+    """Arguments for persisted-history rewrites."""
+
+    mutations: list[SessionHistoryMutation]
+
+
+@runtime_checkable
+class SessionHistoryRewriteAwareSession(Session, Protocol):
+    """Protocol for sessions that can rewrite previously persisted history."""
+
+    async def apply_history_mutations(self, args: SessionHistoryRewriteArgs) -> None:
+        """Apply structured history mutations to the persisted session history."""
+        ...
+
+
+def is_session_history_rewrite_aware_session(
+    session: Session | None,
+) -> TypeGuard[SessionHistoryRewriteAwareSession]:
+    """Check whether a session supports persisted-history rewrites."""
+    if session is None:
+        return False
+    try:
+        apply_history_mutations = getattr(session, "apply_history_mutations", None)
+    except Exception:
+        return False
+    return callable(apply_history_mutations)
+
+
+def apply_session_history_mutations(
+    items: list[TResponseInputItem],
+    mutations: list[SessionHistoryMutation],
+) -> list[TResponseInputItem]:
+    """Apply structured history mutations to a list of persisted session items."""
+    next_items = [copy.deepcopy(item) for item in items]
+    for mutation in mutations:
+        if mutation["type"] == "replace_function_call":
+            next_items = _apply_replace_function_call_mutation(next_items, mutation)
+    return next_items
+
+
+def _apply_replace_function_call_mutation(
+    items: list[TResponseInputItem],
+    mutation: ReplaceFunctionCallSessionHistoryMutation,
+) -> list[TResponseInputItem]:
+    """Replace the first matching function call and drop later duplicates for the same call id."""
+    replacement = copy.deepcopy(mutation["replacement"])
+    next_items: list[TResponseInputItem] = []
+    kept_replacement = False
+
+    for item in items:
+        if _is_matching_function_call(item, mutation["call_id"]):
+            if not kept_replacement:
+                next_items.append(replacement)
+                kept_replacement = True
+            continue
+        next_items.append(item)
+
+    return next_items
+
+
+def _is_matching_function_call(item: TResponseInputItem, call_id: str) -> bool:
+    if isinstance(item, dict):
+        return item.get("type") == "function_call" and item.get("call_id") == call_id
+    item_type = getattr(item, "type", None)
+    item_call_id = getattr(item, "call_id", None)
+    return item_type == "function_call" and item_call_id == call_id
 
 
 class OpenAIResponsesCompactionArgs(TypedDict, total=False):

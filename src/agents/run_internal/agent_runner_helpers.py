@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any, cast
 
 from ..agent import Agent
@@ -9,7 +10,10 @@ from ..agent_tool_state import set_agent_tool_state_scope
 from ..exceptions import UserError
 from ..guardrail import InputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
-from ..memory import Session
+from ..memory import (
+    Session,
+    is_session_history_rewrite_aware_session,
+)
 from ..result import RunResult
 from ..run_config import RunConfig
 from ..run_context import RunContextWrapper, TContext
@@ -30,6 +34,7 @@ from .session_persistence import save_result_to_session
 from .tool_use_tracker import AgentToolUseTracker, serialize_tool_use_tracker
 
 __all__ = [
+    "attach_run_state_metadata",
     "apply_resumed_conversation_settings",
     "append_model_response_if_new",
     "build_generated_items_details",
@@ -39,6 +44,7 @@ __all__ = [
     "ensure_context_wrapper",
     "finalize_conversation_tracking",
     "input_guardrails_triggered",
+    "resolve_trace_include_sensitive_data",
     "validate_session_conversation_settings",
     "resolve_trace_settings",
     "resolve_processed_response",
@@ -46,6 +52,7 @@ __all__ = [
     "save_turn_items_if_needed",
     "should_cancel_parallel_model_task_on_input_guardrail_trip",
     "update_run_state_for_interruption",
+    "validate_override_history_persistence_support",
 ]
 
 _PARALLEL_INPUT_GUARDRAIL_CANCEL_PATCH_ID = (
@@ -104,6 +111,48 @@ def validate_session_conversation_settings(
     )
 
 
+def validate_override_history_persistence_support(
+    *,
+    input: str | list[TResponseInputItem] | RunState[Any],
+    session: Session | None,
+    response_history_is_server_managed: bool,
+) -> None:
+    """Fail fast when approval override persistence requirements are not satisfied."""
+    if not isinstance(input, RunState):
+        return
+
+    if (
+        input.has_pending_execution_only_approval_overrides()
+        and not response_history_is_server_managed
+    ):
+        raise UserError(
+            "save_override_arguments=False is only supported when using conversation_id, "
+            "previous_response_id, or auto_previous_response_id."
+        )
+
+    mutations = input.get_session_history_mutations()
+    if not mutations:
+        return
+
+    if response_history_is_server_managed:
+        raise UserError(
+            "save_override_arguments requires local canonical history. "
+            "Server-managed conversations cannot persist corrected function_call arguments. "
+            "Pass save_override_arguments=False to apply the override only to the current "
+            "execution."
+        )
+
+    if session is None or is_session_history_rewrite_aware_session(session):
+        return
+
+    raise UserError(
+        "save_override_arguments requires a session that supports persisted-history rewrites. "
+        "Use SQLiteSession, OpenAIResponsesCompactionSession, or another "
+        "SessionHistoryRewriteAwareSession, or pass save_override_arguments=False to apply "
+        "the override only to the current execution."
+    )
+
+
 def resolve_trace_settings(
     *,
     run_state: RunState[TContext] | None,
@@ -132,6 +181,21 @@ def resolve_trace_settings(
             tracing = {"api_key": trace_state.tracing_api_key}
 
     return workflow_name, trace_id, group_id, metadata, tracing
+
+
+def resolve_trace_include_sensitive_data(
+    *,
+    run_state: RunState[TContext] | None,
+    run_config: RunConfig,
+) -> bool:
+    """Resolve whether traces may include sensitive data for this run."""
+    if run_state is None:
+        return run_config.trace_include_sensitive_data
+
+    if getattr(run_config, "_trace_include_sensitive_data_was_explicit", True):
+        return run_config.trace_include_sensitive_data
+
+    return run_state._trace_include_sensitive_data
 
 
 def resolve_resumed_context(
@@ -233,6 +297,23 @@ def finalize_conversation_tracking(
     return result
 
 
+def attach_run_state_metadata(result: RunResult, *, run_state: RunState | None) -> RunResult:
+    """Copy resumable state metadata from the current RunState onto a RunResult."""
+    if run_state is None:
+        return result
+
+    result._current_turn_persisted_item_count = run_state._current_turn_persisted_item_count
+    result._trace_state = run_state._trace_state
+    result._trace_include_sensitive_data_snapshot = run_state._trace_include_sensitive_data
+    result._session_history_mutations_snapshot = copy.deepcopy(
+        run_state.get_session_history_mutations()
+    )
+    result._execution_only_approval_override_call_ids_snapshot = list(
+        run_state._execution_only_approval_override_call_ids
+    )
+    return result
+
+
 def build_interruption_result(
     *,
     result_input: str | list[TResponseInputItem],
@@ -272,9 +353,7 @@ def build_interruption_result(
     result._current_turn = current_turn
     result._model_input_items = list(generated_items)
     result._replay_from_model_input_items = list(generated_items) != list(session_items)
-    if run_state is not None:
-        result._current_turn_persisted_item_count = run_state._current_turn_persisted_item_count
-        result._trace_state = run_state._trace_state
+    attach_run_state_metadata(result, run_state=run_state)
     result._original_input = copy_input_items(original_input)
     return result
 

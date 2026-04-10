@@ -92,7 +92,13 @@ from .test_responses import (
 )
 from .utils.factories import make_run_state
 from .utils.hitl import make_context_wrapper, make_model_and_agent, make_shell_call
-from .utils.simple_session import CountingSession, IdStrippingSession, SimpleListSession
+from .utils.simple_session import (
+    CountingSession,
+    IdStrippingSession,
+    RewriteAwareSimpleSession,
+    ServerManagedSimpleSession,
+    SimpleListSession,
+)
 
 
 class _DummyRunItem:
@@ -1134,6 +1140,187 @@ async def test_resumed_state_updates_agent_after_handoff() -> None:
         "handoff should switch approvals to the delegate agent"
     )
     assert state._current_agent is delegate
+
+
+@pytest.mark.asyncio
+async def test_resume_with_durable_override_rewrites_local_session_history() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        return f"result:{test}"
+
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = RewriteAwareSimpleSession()
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "approval_tool", json.dumps({"test": "foo"}), call_id="call-1"
+                )
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = await Runner.run(agent, input="user_message", session=session)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+
+    resumed = await Runner.run(agent, state, session=session)
+
+    assert resumed.final_output == "done"
+    saved_items = await session.get_items()
+    assert saved_items[1]["type"] == "function_call"
+    assert cast(dict[str, Any], saved_items[1])["arguments"] == json.dumps({"test": "bar"})
+    assert saved_items[2]["type"] == "function_call_output"
+    assert saved_items[2]["call_id"] == "call-1"
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_execution_only_override_without_server_managed_history() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        return f"result:{test}"
+
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "approval_tool", json.dumps({"test": "foo"}), call_id="call-1"
+                )
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = await Runner.run(agent, input="user_message")
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(
+        first.interruptions[0],
+        override_arguments={"test": "bar"},
+        save_override_arguments=False,
+    )
+
+    with pytest.raises(UserError, match="save_override_arguments=False is only supported"):
+        await Runner.run(agent, state)
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_execution_only_override_with_marker_session() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        return f"result:{test}"
+
+    agent = Agent(
+        name="approval_agent",
+        model=model,
+        tools=[approval_tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    session = ServerManagedSimpleSession()
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "approval_tool", json.dumps({"test": "foo"}), call_id="call-1"
+                )
+            ],
+        ]
+    )
+
+    first = await Runner.run(agent, input="user_message", session=session)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(
+        first.interruptions[0],
+        override_arguments={"test": "bar"},
+        save_override_arguments=False,
+    )
+
+    with pytest.raises(UserError, match="save_override_arguments=False is only supported"):
+        await Runner.run(agent, state, session=session)
+
+
+@pytest.mark.asyncio
+async def test_resume_supports_execution_only_override_with_previous_response_id() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        return f"result:{test}"
+
+    agent = Agent(
+        name="approval_agent",
+        model=model,
+        tools=[approval_tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "approval_tool", json.dumps({"test": "foo"}), call_id="call-1"
+                )
+            ],
+        ]
+    )
+
+    first = await Runner.run(agent, input="user_message", previous_response_id="resp-root")
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(
+        first.interruptions[0],
+        override_arguments={"test": "bar"},
+        save_override_arguments=False,
+    )
+
+    resumed = await Runner.run(agent, state)
+
+    assert resumed.final_output == "result:bar"
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_durable_override_for_non_rewrite_aware_session() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool(test: str) -> str:
+        return f"result:{test}"
+
+    agent = Agent(name="approval_agent", model=model, tools=[approval_tool])
+    session = SimpleListSession()
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "approval_tool", json.dumps({"test": "foo"}), call_id="call-1"
+                )
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    first = await Runner.run(agent, input="user_message", session=session)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0], override_arguments={"test": "bar"})
+
+    with pytest.raises(UserError, match="supports persisted-history rewrites"):
+        await Runner.run(agent, state, session=session)
 
 
 class Foo(TypedDict):

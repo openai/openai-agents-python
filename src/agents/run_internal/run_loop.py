@@ -494,6 +494,7 @@ async def start_streaming(
             previous_response_id=previous_response_id,
             auto_previous_response_id=auto_previous_response_id,
         )
+        run_state.set_trace_include_sensitive_data(run_config.trace_include_sensitive_data)
         run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
         streamed_result._state = run_state
     elif streamed_result._state is None:
