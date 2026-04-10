@@ -221,3 +221,4 @@ The following community and vendor integrations support the OpenAI Agents SDK tr
 -   [Traccia](https://traccia.ai/docs/integrations/openai-agents)
 -   [PromptLayer](https://docs.promptlayer.com/languages/integrations#openai-agents-sdk)
 -   [HoneyHive](https://docs.honeyhive.ai/v2/integrations/openai-agents)
+-   [Asqav](https://www.asqav.com/docs/integrations#openai-agents)
