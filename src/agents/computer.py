@@ -24,15 +24,23 @@ class Computer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def click(self, x: int, y: int, button: Button) -> None:
+    def click(self, x: int, y: int, button: Button, *, keys: list[str] | None = None) -> None:
         pass
 
     @abc.abstractmethod
-    def double_click(self, x: int, y: int) -> None:
+    def double_click(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
         pass
 
     @abc.abstractmethod
-    def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+    def scroll(
+        self,
+        x: int,
+        y: int,
+        scroll_x: int,
+        scroll_y: int,
+        *,
+        keys: list[str] | None = None,
+    ) -> None:
         pass
 
     @abc.abstractmethod
@@ -44,7 +52,7 @@ class Computer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def move(self, x: int, y: int) -> None:
+    def move(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
         pass
 
     @abc.abstractmethod
@@ -52,7 +60,7 @@ class Computer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def drag(self, path: list[tuple[int, int]]) -> None:
+    def drag(self, path: list[tuple[int, int]], *, keys: list[str] | None = None) -> None:
         pass
 
 
@@ -75,15 +83,23 @@ class AsyncComputer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def click(self, x: int, y: int, button: Button) -> None:
+    async def click(self, x: int, y: int, button: Button, *, keys: list[str] | None = None) -> None:
         pass
 
     @abc.abstractmethod
-    async def double_click(self, x: int, y: int) -> None:
+    async def double_click(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
         pass
 
     @abc.abstractmethod
-    async def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+    async def scroll(
+        self,
+        x: int,
+        y: int,
+        scroll_x: int,
+        scroll_y: int,
+        *,
+        keys: list[str] | None = None,
+    ) -> None:
         pass
 
     @abc.abstractmethod
@@ -95,7 +111,7 @@ class AsyncComputer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def move(self, x: int, y: int) -> None:
+    async def move(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
         pass
 
     @abc.abstractmethod
@@ -103,5 +119,5 @@ class AsyncComputer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def drag(self, path: list[tuple[int, int]]) -> None:
+    async def drag(self, path: list[tuple[int, int]], *, keys: list[str] | None = None) -> None:
         pass

@@ -445,13 +445,21 @@ class DummyComputer(Computer):
     def screenshot(self) -> str:
         return ""  # pragma: no cover
 
-    def click(self, x: int, y: int, button: str) -> None:
+    def click(self, x: int, y: int, button: str, *, keys: list[str] | None = None) -> None:
         return None  # pragma: no cover
 
-    def double_click(self, x: int, y: int) -> None:
+    def double_click(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
         return None  # pragma: no cover
 
-    def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+    def scroll(
+        self,
+        x: int,
+        y: int,
+        scroll_x: int,
+        scroll_y: int,
+        *,
+        keys: list[str] | None = None,
+    ) -> None:
         return None  # pragma: no cover
 
     def type(self, text: str) -> None:
@@ -460,13 +468,13 @@ class DummyComputer(Computer):
     def wait(self) -> None:
         return None  # pragma: no cover
 
-    def move(self, x: int, y: int) -> None:
+    def move(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
         return None  # pragma: no cover
 
     def keypress(self, keys: list[str]) -> None:
         return None  # pragma: no cover
 
-    def drag(self, path: list[tuple[int, int]]) -> None:
+    def drag(self, path: list[tuple[int, int]], *, keys: list[str] | None = None) -> None:
         return None  # pragma: no cover
 
 

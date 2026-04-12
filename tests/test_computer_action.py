@@ -5,7 +5,8 @@ that screenshots are taken and wrapped appropriately, and that the execute funct
 hooks and returns the expected ToolCallOutputItem."""
 
 import json
-from typing import Any, cast
+from collections.abc import Callable
+from typing import Any, TypeVar, cast
 
 import pytest
 from openai.types.responses.computer_action import (
@@ -41,6 +42,7 @@ from agents import (
     set_tracing_disabled,
     trace,
 )
+from agents.exceptions import ModelBehaviorError
 from agents.items import ToolCallOutputItem
 from agents.run_internal import run_loop
 from agents.run_internal.run_loop import ComputerAction, ToolRunComputerAction
@@ -49,6 +51,8 @@ from agents.tool import ComputerToolSafetyCheckData
 from .fake_model import FakeModel
 from .test_responses import get_text_message
 from .testing_processor import SPAN_PROCESSOR_TESTING
+
+T = TypeVar("T")
 
 
 def _get_function_span(tool_name: str) -> dict[str, Any]:
@@ -77,6 +81,10 @@ def _get_agent_span(agent_name: str) -> dict[str, Any]:
     raise AssertionError(f"Agent span for '{agent_name}' not found")
 
 
+def _action_with_keys(factory: Callable[..., T], **kwargs: Any) -> T:
+    return cast(T, cast(Any, factory)(**kwargs))
+
+
 class LoggingComputer(Computer):
     """A `Computer` implementation that logs calls to its methods for verification in tests."""
 
@@ -96,14 +104,20 @@ class LoggingComputer(Computer):
         self.calls.append(("screenshot", ()))
         return self._screenshot_return
 
-    def click(self, x: int, y: int, button: str) -> None:
-        self.calls.append(("click", (x, y, button)))
+    def _log_mouse_action(self, name: str, *args: Any, keys: list[str] | None = None) -> None:
+        payload = args if keys is None else (*args, keys)
+        self.calls.append((name, payload))
 
-    def double_click(self, x: int, y: int) -> None:
-        self.calls.append(("double_click", (x, y)))
+    def click(self, x: int, y: int, button: str, *, keys: list[str] | None = None) -> None:
+        self._log_mouse_action("click", x, y, button, keys=keys)
 
-    def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
-        self.calls.append(("scroll", (x, y, scroll_x, scroll_y)))
+    def double_click(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
+        self._log_mouse_action("double_click", x, y, keys=keys)
+
+    def scroll(
+        self, x: int, y: int, scroll_x: int, scroll_y: int, *, keys: list[str] | None = None
+    ) -> None:
+        self._log_mouse_action("scroll", x, y, scroll_x, scroll_y, keys=keys)
 
     def type(self, text: str) -> None:
         self.calls.append(("type", (text,)))
@@ -111,14 +125,14 @@ class LoggingComputer(Computer):
     def wait(self) -> None:
         self.calls.append(("wait", ()))
 
-    def move(self, x: int, y: int) -> None:
-        self.calls.append(("move", (x, y)))
+    def move(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
+        self._log_mouse_action("move", x, y, keys=keys)
 
     def keypress(self, keys: list[str]) -> None:
         self.calls.append(("keypress", (keys,)))
 
-    def drag(self, path: list[tuple[int, int]]) -> None:
-        self.calls.append(("drag", (tuple(path),)))
+    def drag(self, path: list[tuple[int, int]], *, keys: list[str] | None = None) -> None:
+        self._log_mouse_action("drag", tuple(path), keys=keys)
 
 
 class LoggingAsyncComputer(AsyncComputer):
@@ -140,14 +154,20 @@ class LoggingAsyncComputer(AsyncComputer):
         self.calls.append(("screenshot", ()))
         return self._screenshot_return
 
-    async def click(self, x: int, y: int, button: str) -> None:
-        self.calls.append(("click", (x, y, button)))
+    def _log_mouse_action(self, name: str, *args: Any, keys: list[str] | None = None) -> None:
+        payload = args if keys is None else (*args, keys)
+        self.calls.append((name, payload))
 
-    async def double_click(self, x: int, y: int) -> None:
-        self.calls.append(("double_click", (x, y)))
+    async def click(self, x: int, y: int, button: str, *, keys: list[str] | None = None) -> None:
+        self._log_mouse_action("click", x, y, button, keys=keys)
 
-    async def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
-        self.calls.append(("scroll", (x, y, scroll_x, scroll_y)))
+    async def double_click(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
+        self._log_mouse_action("double_click", x, y, keys=keys)
+
+    async def scroll(
+        self, x: int, y: int, scroll_x: int, scroll_y: int, *, keys: list[str] | None = None
+    ) -> None:
+        self._log_mouse_action("scroll", x, y, scroll_x, scroll_y, keys=keys)
 
     async def type(self, text: str) -> None:
         self.calls.append(("type", (text,)))
@@ -155,14 +175,14 @@ class LoggingAsyncComputer(AsyncComputer):
     async def wait(self) -> None:
         self.calls.append(("wait", ()))
 
-    async def move(self, x: int, y: int) -> None:
-        self.calls.append(("move", (x, y)))
+    async def move(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
+        self._log_mouse_action("move", x, y, keys=keys)
 
     async def keypress(self, keys: list[str]) -> None:
         self.calls.append(("keypress", (keys,)))
 
-    async def drag(self, path: list[tuple[int, int]]) -> None:
-        self.calls.append(("drag", (tuple(path),)))
+    async def drag(self, path: list[tuple[int, int]], *, keys: list[str] | None = None) -> None:
+        self._log_mouse_action("drag", tuple(path), keys=keys)
 
 
 @pytest.mark.asyncio
@@ -294,6 +314,76 @@ async def test_get_screenshot_reuses_terminal_batched_screenshot() -> None:
 
     assert computer.calls == [("screenshot", ())]
     assert screenshot_output == "captured"
+
+
+@pytest.mark.asyncio
+async def test_get_screenshot_preserves_modifier_keys_for_sync_driver() -> None:
+    computer = LoggingComputer(screenshot_return="with_keys")
+    tool_call = ResponseComputerToolCall(
+        id="c5",
+        type="computer_call",
+        action=_action_with_keys(
+            ActionClick, type="click", x=4, y=8, button="left", keys=["shift", "ctrl"]
+        ),
+        call_id="c5",
+        pending_safety_checks=[],
+        status="completed",
+    )
+
+    screenshot_output = await ComputerAction._execute_action_and_capture(computer, tool_call)
+
+    assert computer.calls == [
+        ("click", (4, 8, "left", ["shift", "ctrl"])),
+        ("screenshot", ()),
+    ]
+    assert screenshot_output == "with_keys"
+
+
+@pytest.mark.asyncio
+async def test_get_screenshot_preserves_modifier_keys_for_async_driver() -> None:
+    computer = LoggingAsyncComputer(screenshot_return="async_keys")
+    tool_call = ResponseComputerToolCall(
+        id="c6",
+        type="computer_call",
+        action=_action_with_keys(
+            ActionScroll, type="scroll", x=7, y=9, scroll_x=3, scroll_y=-2, keys=["alt"]
+        ),
+        call_id="c6",
+        pending_safety_checks=[],
+        status="completed",
+    )
+
+    screenshot_output = await ComputerAction._execute_action_and_capture(computer, tool_call)
+
+    assert computer.calls == [
+        ("scroll", (7, 9, 3, -2, ["alt"])),
+        ("screenshot", ()),
+    ]
+    assert screenshot_output == "async_keys"
+
+
+@pytest.mark.asyncio
+async def test_get_screenshot_raises_for_legacy_driver_missing_modifier_support() -> None:
+    class LegacyDriver:
+        def screenshot(self) -> str:
+            return "legacy"
+
+        def click(self, x: int, y: int, button: str) -> None:
+            return None
+
+    tool_call = ResponseComputerToolCall(
+        id="c7",
+        type="computer_call",
+        action=_action_with_keys(
+            ActionClick, type="click", x=1, y=1, button="left", keys=["shift"]
+        ),
+        call_id="c7",
+        pending_safety_checks=[],
+        status="completed",
+    )
+
+    with pytest.raises(ModelBehaviorError, match="does not accept keyword argument\\(s\\) keys"):
+        await ComputerAction._execute_action_and_capture(LegacyDriver(), tool_call)
 
 
 class LoggingRunHooks(RunHooks[Any]):

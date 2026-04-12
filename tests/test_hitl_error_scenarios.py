@@ -102,13 +102,21 @@ class TrackingComputer(Computer):
         self.calls.append("screenshot")
         return "img"
 
-    def click(self, _x: int, _y: int, _button: str) -> None:
+    def click(self, _x: int, _y: int, _button: str, *, keys: list[str] | None = None) -> None:
         self.calls.append("click")
 
-    def double_click(self, _x: int, _y: int) -> None:
+    def double_click(self, _x: int, _y: int, *, keys: list[str] | None = None) -> None:
         self.calls.append("double_click")
 
-    def scroll(self, _x: int, _y: int, _scroll_x: int, _scroll_y: int) -> None:
+    def scroll(
+        self,
+        _x: int,
+        _y: int,
+        _scroll_x: int,
+        _scroll_y: int,
+        *,
+        keys: list[str] | None = None,
+    ) -> None:
         self.calls.append("scroll")
 
     def type(self, _text: str) -> None:
@@ -117,13 +125,13 @@ class TrackingComputer(Computer):
     def wait(self) -> None:
         self.calls.append("wait")
 
-    def move(self, _x: int, _y: int) -> None:
+    def move(self, _x: int, _y: int, *, keys: list[str] | None = None) -> None:
         self.calls.append("move")
 
     def keypress(self, _keys: list[str]) -> None:
         self.calls.append("keypress")
 
-    def drag(self, _path: list[tuple[int, int]]) -> None:
+    def drag(self, _path: list[tuple[int, int]], *, keys: list[str] | None = None) -> None:
         self.calls.append("drag")
 
 

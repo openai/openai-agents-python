@@ -983,22 +983,32 @@ async def test_ga_computer_tool_does_not_require_preview_metadata() -> None:
         async def screenshot(self) -> str:
             return "screenshot"
 
-        async def click(self, x: int, y: int, button: str) -> None:
+        async def click(
+            self, x: int, y: int, button: str, *, keys: list[str] | None = None
+        ) -> None:
             pass
 
-        async def double_click(self, x: int, y: int) -> None:
+        async def double_click(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
             pass
 
-        async def drag(self, path: list[tuple[int, int]]) -> None:
+        async def drag(self, path: list[tuple[int, int]], *, keys: list[str] | None = None) -> None:
             pass
 
         async def keypress(self, keys: list[str]) -> None:
             pass
 
-        async def move(self, x: int, y: int) -> None:
+        async def move(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
             pass
 
-        async def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+        async def scroll(
+            self,
+            x: int,
+            y: int,
+            scroll_x: int,
+            scroll_y: int,
+            *,
+            keys: list[str] | None = None,
+        ) -> None:
             pass
 
         async def type(self, text: str) -> None:
@@ -1054,22 +1064,30 @@ async def test_prompt_id_uses_preview_computer_payload_when_prompt_owns_model() 
         def screenshot(self) -> str:
             return "screenshot"
 
-        def click(self, x: int, y: int, button: str) -> None:
+        def click(self, x: int, y: int, button: str, *, keys: list[str] | None = None) -> None:
             pass
 
-        def double_click(self, x: int, y: int) -> None:
+        def double_click(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
             pass
 
-        def drag(self, path: list[tuple[int, int]]) -> None:
+        def drag(self, path: list[tuple[int, int]], *, keys: list[str] | None = None) -> None:
             pass
 
         def keypress(self, keys: list[str]) -> None:
             pass
 
-        def move(self, x: int, y: int) -> None:
+        def move(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
             pass
 
-        def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+        def scroll(
+            self,
+            x: int,
+            y: int,
+            scroll_x: int,
+            scroll_y: int,
+            *,
+            keys: list[str] | None = None,
+        ) -> None:
             pass
 
         def type(self, text: str) -> None:
@@ -1126,22 +1144,30 @@ async def test_prompt_id_computer_without_preview_metadata_raises_clear_error() 
         def screenshot(self) -> str:
             return "screenshot"
 
-        def click(self, x: int, y: int, button: str) -> None:
+        def click(self, x: int, y: int, button: str, *, keys: list[str] | None = None) -> None:
             pass
 
-        def double_click(self, x: int, y: int) -> None:
+        def double_click(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
             pass
 
-        def drag(self, path: list[tuple[int, int]]) -> None:
+        def drag(self, path: list[tuple[int, int]], *, keys: list[str] | None = None) -> None:
             pass
 
         def keypress(self, keys: list[str]) -> None:
             pass
 
-        def move(self, x: int, y: int) -> None:
+        def move(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
             pass
 
-        def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+        def scroll(
+            self,
+            x: int,
+            y: int,
+            scroll_x: int,
+            scroll_y: int,
+            *,
+            keys: list[str] | None = None,
+        ) -> None:
             pass
 
         def type(self, text: str) -> None:
@@ -1201,22 +1227,30 @@ async def test_prompt_id_unresolved_computer_uses_preview_payload_shape() -> Non
         def screenshot(self) -> str:
             return "screenshot"
 
-        def click(self, x: int, y: int, button: str) -> None:
+        def click(self, x: int, y: int, button: str, *, keys: list[str] | None = None) -> None:
             pass
 
-        def double_click(self, x: int, y: int) -> None:
+        def double_click(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
             pass
 
-        def drag(self, path: list[tuple[int, int]]) -> None:
+        def drag(self, path: list[tuple[int, int]], *, keys: list[str] | None = None) -> None:
             pass
 
         def keypress(self, keys: list[str]) -> None:
             pass
 
-        def move(self, x: int, y: int) -> None:
+        def move(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
             pass
 
-        def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+        def scroll(
+            self,
+            x: int,
+            y: int,
+            scroll_x: int,
+            scroll_y: int,
+            *,
+            keys: list[str] | None = None,
+        ) -> None:
             pass
 
         def type(self, text: str) -> None:
@@ -1276,22 +1310,30 @@ async def test_prompt_id_explicit_ga_computer_tool_choice_uses_ga_selector_and_t
         def screenshot(self) -> str:
             return "screenshot"
 
-        def click(self, x: int, y: int, button: str) -> None:
+        def click(self, x: int, y: int, button: str, *, keys: list[str] | None = None) -> None:
             pass
 
-        def double_click(self, x: int, y: int) -> None:
+        def double_click(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
             pass
 
-        def drag(self, path: list[tuple[int, int]]) -> None:
+        def drag(self, path: list[tuple[int, int]], *, keys: list[str] | None = None) -> None:
             pass
 
         def keypress(self, keys: list[str]) -> None:
             pass
 
-        def move(self, x: int, y: int) -> None:
+        def move(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
             pass
 
-        def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+        def scroll(
+            self,
+            x: int,
+            y: int,
+            scroll_x: int,
+            scroll_y: int,
+            *,
+            keys: list[str] | None = None,
+        ) -> None:
             pass
 
         def type(self, text: str) -> None:
@@ -1352,22 +1394,30 @@ async def test_preview_model_forced_computer_tool_choice_uses_preview_selector(
         def screenshot(self) -> str:
             return "screenshot"
 
-        def click(self, x: int, y: int, button: str) -> None:
+        def click(self, x: int, y: int, button: str, *, keys: list[str] | None = None) -> None:
             pass
 
-        def double_click(self, x: int, y: int) -> None:
+        def double_click(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
             pass
 
-        def drag(self, path: list[tuple[int, int]]) -> None:
+        def drag(self, path: list[tuple[int, int]], *, keys: list[str] | None = None) -> None:
             pass
 
         def keypress(self, keys: list[str]) -> None:
             pass
 
-        def move(self, x: int, y: int) -> None:
+        def move(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
             pass
 
-        def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+        def scroll(
+            self,
+            x: int,
+            y: int,
+            scroll_x: int,
+            scroll_y: int,
+            *,
+            keys: list[str] | None = None,
+        ) -> None:
             pass
 
         def type(self, text: str) -> None:

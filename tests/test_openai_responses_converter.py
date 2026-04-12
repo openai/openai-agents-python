@@ -62,13 +62,21 @@ class DummyComputer(Computer):
     def screenshot(self) -> str:
         raise NotImplementedError
 
-    def click(self, x: int, y: int, button: str) -> None:
+    def click(self, x: int, y: int, button: str, *, keys: list[str] | None = None) -> None:
         raise NotImplementedError
 
-    def double_click(self, x: int, y: int) -> None:
+    def double_click(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
         raise NotImplementedError
 
-    def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+    def scroll(
+        self,
+        x: int,
+        y: int,
+        scroll_x: int,
+        scroll_y: int,
+        *,
+        keys: list[str] | None = None,
+    ) -> None:
         raise NotImplementedError
 
     def type(self, text: str) -> None:
@@ -77,13 +85,13 @@ class DummyComputer(Computer):
     def wait(self) -> None:
         raise NotImplementedError
 
-    def move(self, x: int, y: int) -> None:
+    def move(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
         raise NotImplementedError
 
     def keypress(self, keys: list[str]) -> None:
         raise NotImplementedError
 
-    def drag(self, path: list[tuple[int, int]]) -> None:
+    def drag(self, path: list[tuple[int, int]], *, keys: list[str] | None = None) -> None:
         raise NotImplementedError
 
 

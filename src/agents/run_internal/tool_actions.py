@@ -185,17 +185,32 @@ class ComputerAction:
     ) -> str:
         """Execute computer actions (sync or async drivers) and return the final screenshot."""
 
-        async def maybe_call(method_name: str, *args: Any) -> Any:
+        async def maybe_call(method_name: str, *args: Any, **kwargs: Any) -> Any:
             method = getattr(computer, method_name, None)
             if method is None or not callable(method):
                 raise ModelBehaviorError(f"Computer driver missing method {method_name}")
-            result = method(*args)
+            supported_kwargs = cls._supported_keyword_arguments(method)
+            filtered_kwargs = {key: value for key, value in kwargs.items() if value is not None}
+            unsupported_kwargs = [
+                key
+                for key in filtered_kwargs
+                if key not in supported_kwargs and None not in supported_kwargs
+            ]
+            if unsupported_kwargs:
+                unsupported = ", ".join(sorted(unsupported_kwargs))
+                raise ModelBehaviorError(
+                    "Computer driver method "
+                    f"{method_name!r} does not accept keyword argument(s) {unsupported}. "
+                    "Update the driver to support modifier keys for computer actions."
+                )
+            result = method(*args, **filtered_kwargs)
             return await result if inspect.isawaitable(result) else result
 
         last_action_was_screenshot = False
         last_screenshot_result: Any = None
         for action in cls._iter_actions(tool_call):
             action_type = get_mapping_or_attr(action, "type")
+            action_keys = cls._normalize_modifier_keys(get_mapping_or_attr(action, "keys"))
             last_action_was_screenshot = False
             if action_type == "click":
                 await maybe_call(
@@ -203,12 +218,14 @@ class ComputerAction:
                     get_mapping_or_attr(action, "x"),
                     get_mapping_or_attr(action, "y"),
                     get_mapping_or_attr(action, "button"),
+                    keys=action_keys,
                 )
             elif action_type == "double_click":
                 await maybe_call(
                     "double_click",
                     get_mapping_or_attr(action, "x"),
                     get_mapping_or_attr(action, "y"),
+                    keys=action_keys,
                 )
             elif action_type == "drag":
                 path = get_mapping_or_attr(action, "path") or []
@@ -221,6 +238,7 @@ class ComputerAction:
                         )
                         for point in path
                     ],
+                    keys=action_keys,
                 )
             elif action_type == "keypress":
                 await maybe_call("keypress", get_mapping_or_attr(action, "keys"))
@@ -229,6 +247,7 @@ class ComputerAction:
                     "move",
                     get_mapping_or_attr(action, "x"),
                     get_mapping_or_attr(action, "y"),
+                    keys=action_keys,
                 )
             elif action_type == "screenshot":
                 last_screenshot_result = await maybe_call("screenshot")
@@ -240,6 +259,7 @@ class ComputerAction:
                     get_mapping_or_attr(action, "y"),
                     get_mapping_or_attr(action, "scroll_x"),
                     get_mapping_or_attr(action, "scroll_y"),
+                    keys=action_keys,
                 )
             elif action_type == "type":
                 await maybe_call("type", get_mapping_or_attr(action, "text"))
@@ -284,6 +304,31 @@ class ComputerAction:
         if dataclasses.is_dataclass(action) and not isinstance(action, type):
             return dataclasses.asdict(action)
         return action
+
+    @staticmethod
+    def _normalize_modifier_keys(keys: Any) -> list[str] | None:
+        if not keys:
+            return None
+        return cast(list[str], keys)
+
+    @staticmethod
+    def _supported_keyword_arguments(method: Any) -> set[str | None]:
+        signature = inspect.signature(method)
+        supported: set[str | None] = {
+            parameter.name
+            for parameter in signature.parameters.values()
+            if parameter.kind
+            in {
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            }
+        }
+        if any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        ):
+            supported.add(None)
+        return supported
 
 
 class LocalShellAction:
