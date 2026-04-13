@@ -190,12 +190,16 @@ class SQLiteSession(SessionABC):
             (self.session_id,),
         )
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self, limit: int | None = None, offset: int = 0
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, uses session_settings.limit.
                    When specified, returns the latest N items in chronological order.
+            offset: Number of most-recent items to skip before applying the limit.
+                    Defaults to 0. Use with limit to paginate backwards through history.
 
         Returns:
             List of input items representing the conversation history
@@ -204,7 +208,7 @@ class SQLiteSession(SessionABC):
 
         def _get_items_sync():
             with self._locked_connection() as conn:
-                if session_limit is None:
+                if session_limit is None and offset == 0:
                     # Fetch all items in chronological order
                     cursor = conn.execute(
                         f"""
@@ -215,21 +219,23 @@ class SQLiteSession(SessionABC):
                         (self.session_id,),
                     )
                 else:
-                    # Fetch the latest N items in chronological order
+                    # Fetch latest N items with optional offset, in chronological order.
+                    # LIMIT -1 means no limit in SQLite.
+                    sql_limit = session_limit if session_limit is not None else -1
                     cursor = conn.execute(
                         f"""
                         SELECT message_data FROM {self.messages_table}
                         WHERE session_id = ?
                         ORDER BY id DESC
-                        LIMIT ?
+                        LIMIT ? OFFSET ?
                         """,
-                        (self.session_id, session_limit),
+                        (self.session_id, sql_limit, offset),
                     )
 
                 rows = cursor.fetchall()
 
                 # Reverse to get chronological order when using DESC
-                if session_limit is not None:
+                if session_limit is not None or offset > 0:
                     rows = list(reversed(rows))
 
                 items = []

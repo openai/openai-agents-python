@@ -140,12 +140,16 @@ class RedisSession(SessionABC):
     # Session protocol implementation
     # ------------------------------------------------------------------
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self, limit: int | None = None, offset: int = 0
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, uses session_settings.limit.
                    When specified, returns the latest N items in chronological order.
+            offset: Number of most-recent items to skip before applying the limit.
+                    Defaults to 0. Use with limit to paginate backwards through history.
 
         Returns:
             List of input items representing the conversation history
@@ -153,15 +157,21 @@ class RedisSession(SessionABC):
         session_limit = resolve_session_limit(limit, self.session_settings)
 
         async with self._lock:
-            if session_limit is None:
+            if session_limit is None and offset == 0:
                 # Get all messages in chronological order
                 raw_messages = await self._redis.lrange(self._messages_key, 0, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
             else:
-                if session_limit <= 0:
+                if session_limit is not None and session_limit <= 0:
                     return []
-                # Get the latest N messages (Redis list is ordered chronologically)
-                # Use negative indices to get from the end - Redis uses -N to -1 for last N items
-                raw_messages = await self._redis.lrange(self._messages_key, -session_limit, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+                # Redis list is ordered chronologically (index 0 = oldest).
+                # Use negative indices to address from the newest end.
+                # -1 = newest, -(offset+1) = newest after skipping offset items.
+                end = -(offset + 1) if offset > 0 else -1
+                if session_limit is None:
+                    start = 0
+                else:
+                    start = -(session_limit + offset)
+                raw_messages = await self._redis.lrange(self._messages_key, start, end)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
 
             items: list[TResponseInputItem] = []
             for raw_msg in raw_messages:

@@ -24,12 +24,21 @@ class SimpleListSession(Session):
         # Mirror saved_items used by some tests for inspection.
         self.saved_items: list[TResponseInputItem] = self._items
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self, limit: int | None = None, offset: int = 0
+    ) -> list[TResponseInputItem]:
+        items = self._items
+        total = len(items)
+        # Work from the newest end: exclude the `offset` most-recent items first.
+        end = total - offset
+        if end <= 0:
+            return []
         if limit is None:
-            return list(self._items)
+            return list(items[:end])
         if limit <= 0:
             return []
-        return self._items[-limit:]
+        start = max(0, end - limit)
+        return list(items[start:end])
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         self._items.extend(items)

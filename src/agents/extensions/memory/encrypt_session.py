@@ -170,8 +170,10 @@ class EncryptedSession(SessionABC):
         except (InvalidToken, KeyError):
             return None
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
-        encrypted_items = await self.underlying_session.get_items(limit)
+    async def get_items(
+        self, limit: int | None = None, offset: int = 0
+    ) -> list[TResponseInputItem]:
+        encrypted_items = await self.underlying_session.get_items(limit, offset)
         valid_items: list[TResponseInputItem] = []
         for enc in encrypted_items:
             item = self._unwrap(enc)

@@ -702,6 +702,49 @@ async def test_session_settings_resolve():
 
 
 @pytest.mark.asyncio
+async def test_sqlite_session_get_items_with_offset():
+    """Test SQLiteSession get_items with offset parameter for pagination."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_offset.db"
+        session = SQLiteSession("offset_test", db_path)
+
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"Message {i}"} for i in range(6)
+        ]
+        await session.add_items(items)
+
+        # offset=0 is the default — same as no offset
+        page0 = await session.get_items(limit=2, offset=0)
+        assert len(page0) == 2
+        assert page0[0].get("content") == "Message 4"
+        assert page0[1].get("content") == "Message 5"
+
+        # offset=2 skips the 2 most-recent items then returns the next 2
+        page1 = await session.get_items(limit=2, offset=2)
+        assert len(page1) == 2
+        assert page1[0].get("content") == "Message 2"
+        assert page1[1].get("content") == "Message 3"
+
+        # offset=4 skips 4 most-recent, returns the 2 oldest
+        page2 = await session.get_items(limit=2, offset=4)
+        assert len(page2) == 2
+        assert page2[0].get("content") == "Message 0"
+        assert page2[1].get("content") == "Message 1"
+
+        # offset without limit returns everything except the N most-recent
+        without_limit = await session.get_items(offset=2)
+        assert len(without_limit) == 4
+        assert without_limit[0].get("content") == "Message 0"
+        assert without_limit[-1].get("content") == "Message 3"
+
+        # offset >= total items returns empty list
+        empty = await session.get_items(limit=2, offset=10)
+        assert len(empty) == 0
+
+        session.close()
+
+
+@pytest.mark.asyncio
 async def test_runner_with_session_settings_override():
     """Test that RunConfig can override session's default settings."""
     from agents.memory import SessionSettings

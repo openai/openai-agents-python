@@ -232,12 +232,16 @@ class DaprSession(SessionABC):
     # Session protocol implementation
     # ------------------------------------------------------------------
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self, limit: int | None = None, offset: int = 0
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, uses session_settings.limit.
                    When specified, returns the latest N items in chronological order.
+            offset: Number of most-recent items to skip before applying the limit.
+                    Defaults to 0. Use with limit to paginate backwards through history.
 
         Returns:
             List of input items representing the conversation history
@@ -255,6 +259,11 @@ class DaprSession(SessionABC):
             messages = self._decode_messages(response.data)
             if not messages:
                 return []
+            # Apply offset from the newest end, then limit.
+            end = len(messages) - offset if offset > 0 else len(messages)
+            if end <= 0:
+                return []
+            messages = messages[:end]
             if session_limit is not None:
                 if session_limit <= 0:
                     return []

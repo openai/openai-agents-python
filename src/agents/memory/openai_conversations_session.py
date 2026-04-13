@@ -70,13 +70,15 @@ class OpenAIConversationsSession(SessionABC):
     async def _clear_session_id(self) -> None:
         self._session_id = None
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self, limit: int | None = None, offset: int = 0
+    ) -> list[TResponseInputItem]:
         session_id = await self._get_session_id()
 
         session_limit = resolve_session_limit(limit, self.session_settings)
 
         all_items = []
-        if session_limit is None:
+        if session_limit is None and offset == 0:
             async for item in self._openai_client.conversations.items.list(
                 conversation_id=session_id,
                 order="asc",
@@ -84,15 +86,20 @@ class OpenAIConversationsSession(SessionABC):
                 # calling model_dump() to make this serializable
                 all_items.append(item.model_dump(exclude_unset=True))
         else:
+            # Fetch limit+offset items in DESC order (newest first), skip the first
+            # `offset` (most-recent) items, then reverse for chronological order.
+            fetch_limit = (session_limit + offset) if session_limit is not None else None
             async for item in self._openai_client.conversations.items.list(
                 conversation_id=session_id,
-                limit=session_limit,
+                **({"limit": fetch_limit} if fetch_limit is not None else {}),
                 order="desc",
             ):
                 # calling model_dump() to make this serializable
                 all_items.append(item.model_dump(exclude_unset=True))
-                if session_limit is not None and len(all_items) >= session_limit:
+                if fetch_limit is not None and len(all_items) >= fetch_limit:
                     break
+            # Drop the `offset` newest items (head of the DESC list) then restore order.
+            all_items = all_items[offset:]
             all_items.reverse()
 
         return all_items  # type: ignore

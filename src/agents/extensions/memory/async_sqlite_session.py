@@ -102,19 +102,23 @@ class AsyncSQLiteSession(SessionABC):
             conn = await self._get_connection()
             yield conn
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self, limit: int | None = None, offset: int = 0
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, retrieves all items.
                    When specified, returns the latest N items in chronological order.
+            offset: Number of most-recent items to skip before applying the limit.
+                    Defaults to 0. Use with limit to paginate backwards through history.
 
         Returns:
             List of input items representing the conversation history
         """
 
         async with self._locked_connection() as conn:
-            if limit is None:
+            if limit is None and offset == 0:
                 cursor = await conn.execute(
                     f"""
                     SELECT message_data FROM {self.messages_table}
@@ -124,20 +128,22 @@ class AsyncSQLiteSession(SessionABC):
                     (self.session_id,),
                 )
             else:
+                # LIMIT -1 means no limit in SQLite.
+                sql_limit = limit if limit is not None else -1
                 cursor = await conn.execute(
                     f"""
                     SELECT message_data FROM {self.messages_table}
                     WHERE session_id = ?
                     ORDER BY id DESC
-                    LIMIT ?
+                    LIMIT ? OFFSET ?
                     """,
-                    (self.session_id, limit),
+                    (self.session_id, sql_limit, offset),
                 )
 
             rows = list(await cursor.fetchall())
             await cursor.close()
 
-        if limit is not None:
+        if limit is not None or offset > 0:
             rows = rows[::-1]
 
         items: list[TResponseInputItem] = []
