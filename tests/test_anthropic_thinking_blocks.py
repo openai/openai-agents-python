@@ -10,6 +10,7 @@ This test validates the fix for issue #1704:
 
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 from openai.types.chat import ChatCompletionMessageToolCall
@@ -160,12 +161,17 @@ def test_anthropic_thinking_blocks_with_tool_calls():
         "Content should be reasoning_text type"
     )
 
-    # Verify signature is stored in encrypted_content
+    # Verify full blocks are stored as JSON in encrypted_content so that both
+    # thinking and redacted_thinking blocks survive the round-trip verbatim.
     assert hasattr(reasoning_item, "encrypted_content"), (
         "Reasoning item should have encrypted_content"
     )
-    assert reasoning_item.encrypted_content == "TestSignature123\nTestSignature456", (
-        "Signature should be preserved"
+    stored_blocks = json.loads(reasoning_item.encrypted_content)
+    assert stored_blocks[0]["signature"] == "TestSignature123", (
+        "Signature of first block should be preserved"
+    )
+    assert stored_blocks[1]["signature"] == "TestSignature456", (
+        "Signature of second block should be preserved"
     )
 
     # Verify tool calls are present
@@ -349,11 +355,12 @@ def test_anthropic_thinking_blocks_without_tool_calls():
         "Thinking text should be preserved"
     )
 
-    # Verify signature is stored in encrypted_content
+    # Verify full blocks are stored as JSON in encrypted_content.
     assert hasattr(reasoning_item, "encrypted_content"), (
         "Reasoning item should have encrypted_content"
     )
-    assert reasoning_item.encrypted_content == "TestSignatureNoTools123", (
+    stored_blocks = json.loads(reasoning_item.encrypted_content)
+    assert stored_blocks[0]["signature"] == "TestSignatureNoTools123", (
         "Signature should be preserved"
     )
 
@@ -416,3 +423,143 @@ def test_anthropic_thinking_blocks_without_tool_calls():
     assert (
         second_content.get("text") == "The weather in Paris is sunny with a temperature of 22°C."
     ), "Text content should be preserved"
+
+
+def test_redacted_thinking_blocks_preserved_across_turns():
+    """
+    Regression test for Bedrock redacted_thinking blocks being dropped.
+
+    When Claude (via Bedrock) returns redacted_thinking blocks the previous
+    serialisation only stored thinking/signature pairs and silently discarded
+    any block whose type is "redacted_thinking" (they carry a "data" field
+    instead of "thinking"/"signature").  Bedrock then rejected the next turn
+    with: "thinking or redacted_thinking blocks in the latest assistant message
+    cannot be modified".
+
+    The fix serialises the complete block list as JSON so every block type
+    survives the round-trip verbatim.
+    """
+    redacted_data = "SGVsbG8gV29ybGQ="  # base64 stand-in for encrypted content
+    message = InternalChatCompletionMessage(
+        role="assistant",
+        content="I've investigated the cluster.",
+        reasoning_content="Thinking was redacted by the provider.",
+        thinking_blocks=[
+            {
+                "type": "redacted_thinking",
+                "data": redacted_data,
+            }
+        ],
+        tool_calls=None,
+    )
+
+    # Step 1: model response → output items
+    output_items = Converter.message_to_output_items(message)
+
+    reasoning_items = [i for i in output_items if getattr(i, "type", None) == "reasoning"]
+    assert len(reasoning_items) == 1
+
+    reasoning_item = reasoning_items[0]
+
+    # encrypted_content must be present (the block has no "thinking" text, so
+    # content will be empty — encrypted_content is the only carrier).
+    assert reasoning_item.encrypted_content, (
+        "encrypted_content must be set even for redacted_thinking blocks"
+    )
+    stored_blocks = json.loads(reasoning_item.encrypted_content)
+    assert len(stored_blocks) == 1
+    assert stored_blocks[0]["type"] == "redacted_thinking", (
+        "Block type must be preserved verbatim"
+    )
+    assert stored_blocks[0]["data"] == redacted_data, (
+        "Encrypted data must be preserved verbatim"
+    )
+
+    # Step 2: output items → next-turn messages
+    items_as_dicts: list[dict[str, Any]] = [
+        i.model_dump() if hasattr(i, "model_dump") else cast(dict[str, Any], i)
+        for i in output_items
+    ]
+    messages = Converter.items_to_messages(
+        items_as_dicts,  # type: ignore[arg-type]
+        model="anthropic/claude-sonnet-4-5",
+        preserve_thinking_blocks=True,
+    )
+
+    assistant_messages = [m for m in messages if m.get("role") == "assistant"]
+    assert len(assistant_messages) == 1
+
+    content = assistant_messages[0].get("content")
+    assert isinstance(content, list) and len(content) >= 1, (
+        "Assistant message must contain the redacted_thinking block"
+    )
+
+    redacted_block = content[0]
+    assert redacted_block.get("type") == "redacted_thinking", (
+        f"Expected redacted_thinking block, got {redacted_block.get('type')}"
+    )
+    assert redacted_block.get("data") == redacted_data, (
+        "data field of redacted_thinking block must be preserved verbatim"
+    )
+
+
+def test_mixed_thinking_and_redacted_thinking_blocks_preserved():
+    """
+    When a response contains both thinking and redacted_thinking blocks,
+    all blocks must survive the round-trip in their original order and with
+    their original fields intact.
+    """
+    message = InternalChatCompletionMessage(
+        role="assistant",
+        content="Done.",
+        reasoning_content="Mixed thinking blocks.",
+        thinking_blocks=[
+            {
+                "type": "thinking",
+                "thinking": "First, let me check the pods.",
+                "signature": "SigAAA",
+            },
+            {
+                "type": "redacted_thinking",
+                "data": "cmVkYWN0ZWQ=",
+            },
+            {
+                "type": "thinking",
+                "thinking": "Now summarising findings.",
+                "signature": "SigBBB",
+            },
+        ],
+        tool_calls=None,
+    )
+
+    output_items = Converter.message_to_output_items(message)
+
+    reasoning_items = [i for i in output_items if getattr(i, "type", None) == "reasoning"]
+    assert len(reasoning_items) == 1
+
+    stored_blocks = json.loads(reasoning_items[0].encrypted_content)
+    assert len(stored_blocks) == 3
+    assert stored_blocks[0] == {"type": "thinking", "thinking": "First, let me check the pods.", "signature": "SigAAA"}
+    assert stored_blocks[1] == {"type": "redacted_thinking", "data": "cmVkYWN0ZWQ="}
+    assert stored_blocks[2] == {"type": "thinking", "thinking": "Now summarising findings.", "signature": "SigBBB"}
+
+    items_as_dicts: list[dict[str, Any]] = [
+        i.model_dump() if hasattr(i, "model_dump") else cast(dict[str, Any], i)
+        for i in output_items
+    ]
+    messages = Converter.items_to_messages(
+        items_as_dicts,  # type: ignore[arg-type]
+        model="bedrock/anthropic.claude-sonnet-4-5",
+        preserve_thinking_blocks=True,
+    )
+
+    assistant_messages = [m for m in messages if m.get("role") == "assistant"]
+    assert len(assistant_messages) == 1
+
+    content = assistant_messages[0].get("content")
+    assert isinstance(content, list)
+
+    # First three entries are the thinking blocks (in original order)
+    assert content[0] == {"type": "thinking", "thinking": "First, let me check the pods.", "signature": "SigAAA"}
+    assert content[1] == {"type": "redacted_thinking", "data": "cmVkYWN0ZWQ="}
+    assert content[2] == {"type": "thinking", "thinking": "Now summarising findings.", "signature": "SigBBB"}

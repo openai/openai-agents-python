@@ -147,23 +147,25 @@ class Converter:
 
             # Store thinking blocks for Anthropic compatibility
             if hasattr(message, "thinking_blocks") and message.thinking_blocks:
-                # Store thinking text in content and signature in encrypted_content
-                reasoning_item.content = []
-                signatures: list[str] = []
-                for block in message.thinking_blocks:
-                    if isinstance(block, dict):
-                        thinking_text = block.get("thinking", "")
-                        if thinking_text:
-                            reasoning_item.content.append(
-                                Content(text=thinking_text, type="reasoning_text")
-                            )
-                        # Store the signature if present
-                        if signature := block.get("signature"):
-                            signatures.append(signature)
+                blocks_as_dicts = [b for b in message.thinking_blocks if isinstance(b, dict)]
 
-                # Store the signatures in encrypted_content with newline delimiter
-                if signatures:
-                    reasoning_item.encrypted_content = "\n".join(signatures)
+                # Serialise the full blocks as JSON so that both thinking and
+                # redacted_thinking blocks can be reconstructed verbatim on the
+                # next turn.  Providers like Bedrock reject requests where
+                # thinking/redacted_thinking blocks are modified or dropped
+                # between turns; redacted_thinking blocks carry a "data" field
+                # instead of "thinking"/"signature" and were silently lost with
+                # the previous signature-only serialisation.
+                if blocks_as_dicts:
+                    reasoning_item.encrypted_content = json.dumps(blocks_as_dicts)
+
+                # Populate content with the visible thinking text so it can be
+                # used for display and summary purposes.
+                reasoning_item.content = [
+                    Content(text=block.get("thinking", ""), type="reasoning_text")
+                    for block in blocks_as_dicts
+                    if block.get("thinking")
+                ]
 
             items.append(reasoning_item)
 
@@ -772,33 +774,36 @@ class Converter:
                 if (
                     model
                     and ("claude" in model.lower() or "anthropic" in model.lower())
-                    and content_items
                     and preserve_thinking_blocks
+                    and encrypted_content
                     # Items may not all originate from Claude, so we need to check for model match.
                     # For backward compatibility, if provider_data is missing, we ignore the check.
                     and (model == item_model or item_provider_data == {})
                 ):
-                    signatures = encrypted_content.split("\n") if encrypted_content else []
+                    # Try the JSON format first (current serialisation, preserves
+                    # redacted_thinking verbatim).  Fall back to the legacy
+                    # "\n"-joined signatures format so existing in-flight sessions
+                    # with the old encoding are not broken.
+                    try:
+                        pending_thinking_blocks = json.loads(encrypted_content)
+                    except (json.JSONDecodeError, TypeError):
+                        signatures = encrypted_content.split("\n") if encrypted_content else []
 
-                    # Reconstruct thinking blocks from content and signature
-                    reconstructed_thinking_blocks = []
-                    for content_item in content_items:
-                        if (
-                            isinstance(content_item, dict)
-                            and content_item.get("type") == "reasoning_text"
-                        ):
-                            thinking_block = {
-                                "type": "thinking",
-                                "thinking": content_item.get("text", ""),
-                            }
-                            # Add signatures if available
-                            if signatures:
-                                thinking_block["signature"] = signatures.pop(0)
-                            reconstructed_thinking_blocks.append(thinking_block)
+                        reconstructed_thinking_blocks = []
+                        for content_item in content_items:
+                            if (
+                                isinstance(content_item, dict)
+                                and content_item.get("type") == "reasoning_text"
+                            ):
+                                thinking_block: dict[str, str] = {
+                                    "type": "thinking",
+                                    "thinking": content_item.get("text", ""),
+                                }
+                                if signatures:
+                                    thinking_block["signature"] = signatures.pop(0)
+                                reconstructed_thinking_blocks.append(thinking_block)
 
-                    # Store thinking blocks as pending for the next assistant message
-                    # This preserves the original behavior
-                    pending_thinking_blocks = reconstructed_thinking_blocks
+                        pending_thinking_blocks = reconstructed_thinking_blocks
 
                 if model is not None:
                     replay_context = ReasoningContentReplayContext(
