@@ -786,8 +786,11 @@ class Converter:
                         # "\n"-joined signatures format so existing in-flight sessions
                         # with the old encoding are not broken.
                         try:
-                            pending_thinking_blocks = json.loads(encrypted_content)
-                        except (json.JSONDecodeError, TypeError):
+                            decoded = json.loads(encrypted_content)
+                            if not isinstance(decoded, list):
+                                raise ValueError("expected a list of block dicts")
+                            pending_thinking_blocks = decoded
+                        except (json.JSONDecodeError, TypeError, ValueError):
                             signatures = encrypted_content.split("\n")
 
                             reconstructed_thinking_blocks = []
