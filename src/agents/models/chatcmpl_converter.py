@@ -775,35 +775,45 @@ class Converter:
                     model
                     and ("claude" in model.lower() or "anthropic" in model.lower())
                     and preserve_thinking_blocks
-                    and encrypted_content
+                    and (content_items or encrypted_content)
                     # Items may not all originate from Claude, so we need to check for model match.
                     # For backward compatibility, if provider_data is missing, we ignore the check.
                     and (model == item_model or item_provider_data == {})
                 ):
-                    # Try the JSON format first (current serialisation, preserves
-                    # redacted_thinking verbatim).  Fall back to the legacy
-                    # "\n"-joined signatures format so existing in-flight sessions
-                    # with the old encoding are not broken.
-                    try:
-                        pending_thinking_blocks = json.loads(encrypted_content)
-                    except (json.JSONDecodeError, TypeError):
-                        signatures = encrypted_content.split("\n") if encrypted_content else []
+                    if encrypted_content:
+                        # Try the JSON format first (current serialisation, preserves
+                        # redacted_thinking verbatim).  Fall back to the legacy
+                        # "\n"-joined signatures format so existing in-flight sessions
+                        # with the old encoding are not broken.
+                        try:
+                            pending_thinking_blocks = json.loads(encrypted_content)
+                        except (json.JSONDecodeError, TypeError):
+                            signatures = encrypted_content.split("\n")
 
-                        reconstructed_thinking_blocks = []
-                        for content_item in content_items:
-                            if (
-                                isinstance(content_item, dict)
-                                and content_item.get("type") == "reasoning_text"
-                            ):
-                                thinking_block: dict[str, str] = {
-                                    "type": "thinking",
-                                    "thinking": content_item.get("text", ""),
-                                }
-                                if signatures:
-                                    thinking_block["signature"] = signatures.pop(0)
-                                reconstructed_thinking_blocks.append(thinking_block)
+                            reconstructed_thinking_blocks = []
+                            for content_item in content_items:
+                                if (
+                                    isinstance(content_item, dict)
+                                    and content_item.get("type") == "reasoning_text"
+                                ):
+                                    thinking_block: dict[str, str] = {
+                                        "type": "thinking",
+                                        "thinking": content_item.get("text", ""),
+                                    }
+                                    if signatures:
+                                        thinking_block["signature"] = signatures.pop(0)
+                                    reconstructed_thinking_blocks.append(thinking_block)
 
-                        pending_thinking_blocks = reconstructed_thinking_blocks
+                            pending_thinking_blocks = reconstructed_thinking_blocks
+                    else:
+                        # No encrypted_content: older persisted turns where signatures
+                        # were absent.  Reconstruct thinking blocks from content text
+                        # only so multi-turn history is not silently dropped.
+                        pending_thinking_blocks = [
+                            {"type": "thinking", "thinking": item.get("text", "")}
+                            for item in content_items
+                            if isinstance(item, dict) and item.get("type") == "reasoning_text"
+                        ]
 
                 if model is not None:
                     replay_context = ReasoningContentReplayContext(
