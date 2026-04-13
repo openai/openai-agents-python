@@ -189,17 +189,23 @@ class ComputerAction:
     ) -> str:
         """Execute computer actions (sync or async drivers) and return the final screenshot."""
 
-        async def maybe_call(method_name: str, *args: Any) -> Any:
+        async def maybe_call(method_name: str, *args: Any, **kwargs: Any) -> Any:
             method = getattr(computer, method_name, None)
             if method is None or not callable(method):
                 raise ModelBehaviorError(f"Computer driver missing method {method_name}")
-            result = method(*args)
+            filtered_kwargs = cls._filter_supported_kwargs(
+                method_name=method_name,
+                method=method,
+                kwargs=kwargs,
+            )
+            result = method(*args, **filtered_kwargs)
             return await result if inspect.isawaitable(result) else result
 
         last_action_was_screenshot = False
         last_screenshot_result: Any = None
         for action in cls._iter_actions(tool_call):
             action_type = get_mapping_or_attr(action, "type")
+            action_keys = cls._normalize_modifier_keys(get_mapping_or_attr(action, "keys"))
             last_action_was_screenshot = False
             if action_type == "click":
                 await maybe_call(
@@ -207,12 +213,14 @@ class ComputerAction:
                     get_mapping_or_attr(action, "x"),
                     get_mapping_or_attr(action, "y"),
                     get_mapping_or_attr(action, "button"),
+                    keys=action_keys,
                 )
             elif action_type == "double_click":
                 await maybe_call(
                     "double_click",
                     get_mapping_or_attr(action, "x"),
                     get_mapping_or_attr(action, "y"),
+                    keys=action_keys,
                 )
             elif action_type == "drag":
                 path = get_mapping_or_attr(action, "path") or []
@@ -225,6 +233,7 @@ class ComputerAction:
                         )
                         for point in path
                     ],
+                    keys=action_keys,
                 )
             elif action_type == "keypress":
                 await maybe_call("keypress", get_mapping_or_attr(action, "keys"))
@@ -233,6 +242,7 @@ class ComputerAction:
                     "move",
                     get_mapping_or_attr(action, "x"),
                     get_mapping_or_attr(action, "y"),
+                    keys=action_keys,
                 )
             elif action_type == "screenshot":
                 last_screenshot_result = await maybe_call("screenshot")
@@ -244,6 +254,7 @@ class ComputerAction:
                     get_mapping_or_attr(action, "y"),
                     get_mapping_or_attr(action, "scroll_x"),
                     get_mapping_or_attr(action, "scroll_y"),
+                    keys=action_keys,
                 )
             elif action_type == "type":
                 await maybe_call("type", get_mapping_or_attr(action, "text"))
@@ -288,6 +299,61 @@ class ComputerAction:
         if dataclasses.is_dataclass(action) and not isinstance(action, type):
             return dataclasses.asdict(action)
         return action
+
+    @staticmethod
+    def _normalize_modifier_keys(keys: Any) -> list[str] | None:
+        if not keys:
+            return None
+        return cast(list[str], keys)
+
+    @classmethod
+    def _filter_supported_kwargs(
+        cls,
+        *,
+        method_name: str,
+        method: Any,
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        filtered_kwargs = {key: value for key, value in kwargs.items() if value is not None}
+        if not filtered_kwargs:
+            return {}
+
+        supported_kwargs = cls._supported_keyword_arguments(method)
+        unsupported_kwargs = [
+            key
+            for key in filtered_kwargs
+            if key not in supported_kwargs and None not in supported_kwargs
+        ]
+        if unsupported_kwargs:
+            logger.warning(
+                "Computer driver method %r does not accept keyword argument(s) %s; "
+                "dropping them and continuing.",
+                method_name,
+                ", ".join(sorted(unsupported_kwargs)),
+            )
+            for key in unsupported_kwargs:
+                filtered_kwargs.pop(key, None)
+
+        return filtered_kwargs
+
+    @staticmethod
+    def _supported_keyword_arguments(method: Any) -> set[str | None]:
+        signature = inspect.signature(method)
+        supported: set[str | None] = {
+            parameter.name
+            for parameter in signature.parameters.values()
+            if parameter.kind
+            in {
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            }
+        }
+        if any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        ):
+            supported.add(None)
+        return supported
 
 
 class LocalShellAction:
