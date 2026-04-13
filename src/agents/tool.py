@@ -353,6 +353,31 @@ class FunctionTool:
                 setattr(copied_tool, attr_name, attr_value)
         return copied_tool
 
+    def __get__(self, obj: Any, objtype: Any = None) -> FunctionTool:
+        """Descriptor protocol: bind this method tool to a class instance.
+
+        When a :func:`function_tool`-decorated method is accessed on an instance
+        (e.g. ``my_instance.my_tool``), this returns a new :class:`FunctionTool`
+        whose invocation automatically prepends ``my_instance`` as the receiver,
+        so the underlying method receives the correct ``self``/``cls`` argument.
+
+        Accessing the tool on the *class* (``MyClass.my_tool``) returns the
+        unbound :class:`FunctionTool` unchanged.
+        """
+        if obj is None:
+            # Class-level access — return the unbound tool descriptor.
+            return self
+        make_impl = getattr(self, "_make_impl", None)
+        if make_impl is None:
+            # Not a method tool; behave as a plain attribute (no binding needed).
+            return self
+        # Build a copy and rewire its invoker to use the bound receiver.
+        bound_tool = copy.copy(self)
+        handler = bound_tool.on_invoke_tool
+        if isinstance(handler, _FailureHandlingFunctionToolInvoker):
+            handler._invoke_tool_impl = make_impl(obj)
+        return bound_tool
+
 
 class _FailureHandlingFunctionToolInvoker:
     """Internal callable that rebinds wrapper error handling for copied FunctionTools."""
@@ -1669,6 +1694,97 @@ def function_tool(
             strict_json_schema=strict_mode,
         )
 
+        _on_handled_error = _build_handled_function_tool_error_handler(
+            span_message="Error running tool (non-fatal)",
+            span_message_for_json_decode_error="Error running tool",
+            log_label="Tool",
+        )
+
+        if schema.skips_receiver:
+            # The decorated function is an unbound instance/class method.  We
+            # store a factory (_make_impl) on the returned FunctionTool so that
+            # the __get__ descriptor can produce a correctly-bound invoker when
+            # the tool is accessed via a class instance.
+            def _make_impl(
+                receiver: Any,
+            ) -> Callable[[ToolContext[Any], str], Awaitable[Any]]:
+                async def _method_invoke_impl(ctx: ToolContext[Any], input: str) -> Any:
+                    tool_name = ctx.tool_name
+                    json_data = _parse_function_tool_json_input(
+                        tool_name=tool_name, input_json=input
+                    )
+                    _log_function_tool_invocation(tool_name=tool_name, input_json=input)
+
+                    try:
+                        parsed = (
+                            schema.params_pydantic_model(**json_data)
+                            if json_data
+                            else schema.params_pydantic_model()
+                        )
+                    except ValidationError as e:
+                        raise ModelBehaviorError(
+                            f"Invalid JSON input for tool {tool_name}: {e}"
+                        ) from e
+
+                    args, kwargs_dict = schema.to_call_args(parsed)
+
+                    if not _debug.DONT_LOG_TOOL_DATA:
+                        logger.debug(f"Tool call args: {args}, kwargs: {kwargs_dict}")
+
+                    if receiver is None:
+                        raise UserError(
+                            f"Tool '{schema.name}' was decorated on a class method and must be "
+                            f"accessed via a class instance before being invoked. "
+                            f"Use 'instance.{schema.name}' or bind the tool with "
+                            f"'tool.__get__(instance)' before adding it to an agent."
+                        )
+
+                    if not is_sync_function_tool:
+                        if schema.takes_context:
+                            result = await the_func(receiver, ctx, *args, **kwargs_dict)
+                        else:
+                            result = await the_func(receiver, *args, **kwargs_dict)
+                    else:
+                        if schema.takes_context:
+                            result = await asyncio.to_thread(
+                                the_func, receiver, ctx, *args, **kwargs_dict
+                            )
+                        else:
+                            result = await asyncio.to_thread(
+                                the_func, receiver, *args, **kwargs_dict
+                            )
+
+                    if _debug.DONT_LOG_TOOL_DATA:
+                        logger.debug(f"Tool {tool_name} completed.")
+                    else:
+                        logger.debug(f"Tool {tool_name} returned {result}")
+
+                    return result
+
+                return _method_invoke_impl
+
+            function_tool = _build_wrapped_function_tool(
+                name=schema.name,
+                description=schema.description or "",
+                params_json_schema=schema.params_json_schema,
+                invoke_tool_impl=_make_impl(None),  # unbound placeholder
+                on_handled_error=_on_handled_error,
+                failure_error_function=failure_error_function,
+                strict_json_schema=strict_mode,
+                is_enabled=is_enabled,
+                needs_approval=needs_approval,
+                tool_input_guardrails=tool_input_guardrails,
+                tool_output_guardrails=tool_output_guardrails,
+                timeout_seconds=timeout,
+                timeout_behavior=timeout_behavior,
+                timeout_error_function=timeout_error_function,
+                defer_loading=defer_loading,
+                sync_invoker=is_sync_function_tool,
+            )
+            # Store the factory so __get__ can bind a receiver on instance access.
+            function_tool._make_impl = _make_impl  # type: ignore[attr-defined]
+            return function_tool
+
         async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
             tool_name = ctx.tool_name
             json_data = _parse_function_tool_json_input(tool_name=tool_name, input_json=input)
@@ -1711,11 +1827,7 @@ def function_tool(
             description=schema.description or "",
             params_json_schema=schema.params_json_schema,
             invoke_tool_impl=_on_invoke_tool_impl,
-            on_handled_error=_build_handled_function_tool_error_handler(
-                span_message="Error running tool (non-fatal)",
-                span_message_for_json_decode_error="Error running tool",
-                log_label="Tool",
-            ),
+            on_handled_error=_on_handled_error,
             failure_error_function=failure_error_function,
             strict_json_schema=strict_mode,
             is_enabled=is_enabled,

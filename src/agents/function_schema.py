@@ -36,6 +36,10 @@ class FuncSchema:
     """The signature of the function."""
     takes_context: bool = False
     """Whether the function takes a RunContextWrapper argument (must be the first argument)."""
+    skips_receiver: bool = False
+    """Whether the function's leading ``self`` or ``cls`` parameter was stripped from the schema.
+    When True, the tool is a *method tool* and must be called with a receiver prepended to the
+    argument list (see :meth:`FunctionTool.__get__`)."""
     strict_json_schema: bool = True
     """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
     as it increases the likelihood of correct JSON input."""
@@ -286,23 +290,46 @@ def function_schema(
     sig = inspect.signature(func)
     params = list(sig.parameters.items())
     takes_context = False
+    skips_receiver = False
     filtered_params = []
+    # Index into `params` where non-receiver, non-context processing begins.
+    _params_start = 0
 
     if params:
         first_name, first_param = params[0]
         # Prefer the evaluated type hint if available
         ann = type_hints.get(first_name, first_param.annotation)
-        if ann != inspect._empty:
+        if ann == inspect._empty and first_name in ("self", "cls"):
+            # Unannotated self/cls → this is an instance or class method receiver.
+            # Exclude it from the schema so the LLM never sees it; the tool's __get__
+            # descriptor will supply the receiver at call time.
+            skips_receiver = True
+            _params_start = 1
+        elif ann != inspect._empty:
             origin = get_origin(ann) or ann
             if origin is RunContextWrapper or origin is ToolContext:
                 takes_context = True  # Mark that the function takes context
+                _params_start = 1
             else:
                 filtered_params.append((first_name, first_param))
+                _params_start = 1
         else:
             filtered_params.append((first_name, first_param))
+            _params_start = 1
 
-    # For parameters other than the first, raise error if any use RunContextWrapper or ToolContext.
-    for name, param in params[1:]:
+    # When the first param is a method receiver, the *next* param may be a context arg.
+    if skips_receiver and len(params) > 1:
+        second_name, second_param = params[1]
+        second_ann = type_hints.get(second_name, second_param.annotation)
+        if second_ann != inspect._empty:
+            origin = get_origin(second_ann) or second_ann
+            if origin is RunContextWrapper or origin is ToolContext:
+                takes_context = True
+                _params_start = 2
+
+    # For parameters beyond the first (and optional context), raise an error if any use
+    # RunContextWrapper or ToolContext in an unsupported position.
+    for name, param in params[_params_start:]:
         ann = type_hints.get(name, param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
@@ -312,6 +339,12 @@ def function_schema(
                     f" {func.__name__}"
                 )
         filtered_params.append((name, param))
+
+    # If this is a method, strip the receiver from the stored signature so that
+    # to_call_args() never attempts to populate self/cls from LLM-supplied JSON.
+    if skips_receiver:
+        receiver_name = params[0][0]
+        sig = sig.replace(parameters=[p for n, p in sig.parameters.items() if n != receiver_name])
 
     # We will collect field definitions for create_model as a dict:
     #   field_name -> (type_annotation, default_value_or_Field(...))
@@ -419,5 +452,6 @@ def function_schema(
         params_json_schema=json_schema,
         signature=sig,
         takes_context=takes_context,
+        skips_receiver=skips_receiver,
         strict_json_schema=strict_json_schema,
     )
