@@ -43,6 +43,8 @@ def deserialize_usage(usage_data: Mapping[str, Any]) -> Usage:
                     entry.get("output_tokens_details") or {"reasoning_tokens": 0},
                     OutputTokensDetails(reasoning_tokens=0),
                 ),
+                agent_name=entry.get("agent_name", None),
+                model_name=entry.get("model_name", None),
             )
         )
 
@@ -75,6 +77,20 @@ class RequestUsage:
 
     output_tokens_details: OutputTokensDetails
     """Details about the output tokens for this individual request."""
+
+    agent_name: str | None = None
+    """Name of the agent that made this request, if available.
+
+    Populated automatically when an agent makes a model call so that callers can attribute
+    token usage and costs to specific agents in multi-agent workflows.
+    """
+
+    model_name: str | None = None
+    """Name of the model used for this request, if available.
+
+    Populated automatically when an agent makes a model call so that callers can attribute
+    token usage and costs to specific models.
+    """
 
 
 def _normalize_input_tokens_details(
@@ -154,13 +170,23 @@ class Usage:
         if output_details_none or output_reasoning_none:
             self.output_tokens_details = OutputTokensDetails(reasoning_tokens=0)
 
-    def add(self, other: Usage) -> None:
+    def add(
+        self,
+        other: Usage,
+        *,
+        agent_name: str | None = None,
+        model_name: str | None = None,
+    ) -> None:
         """Add another Usage object to this one, aggregating all fields.
 
         This method automatically preserves request_usage_entries.
 
         Args:
             other: The Usage object to add to this one.
+            agent_name: Optional name of the agent making this request, used to annotate the
+                resulting ``RequestUsage`` entry for per-agent cost attribution.
+            model_name: Optional name of the model used for this request, used to annotate the
+                resulting ``RequestUsage`` entry for per-model cost attribution.
         """
         self.requests += other.requests if other.requests else 0
         self.input_tokens += other.input_tokens if other.input_tokens else 0
@@ -206,10 +232,18 @@ class Usage:
                 total_tokens=other.total_tokens,
                 input_tokens_details=input_details,
                 output_tokens_details=output_details,
+                agent_name=agent_name,
+                model_name=model_name,
             )
             self.request_usage_entries.append(request_usage)
         elif other.request_usage_entries:
             # If the other Usage already has individual request breakdowns, merge them.
+            # Apply agent_name/model_name to entries that don't already have them set.
+            for entry in other.request_usage_entries:
+                if agent_name is not None and entry.agent_name is None:
+                    entry.agent_name = agent_name
+                if model_name is not None and entry.model_name is None:
+                    entry.model_name = model_name
             self.request_usage_entries.extend(other.request_usage_entries)
 
 
@@ -228,7 +262,7 @@ def serialize_usage(usage: Usage) -> dict[str, Any]:
     output_details = _serialize_usage_details(usage.output_tokens_details, {"reasoning_tokens": 0})
 
     def _serialize_request_entry(entry: RequestUsage) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "input_tokens": entry.input_tokens,
             "output_tokens": entry.output_tokens,
             "total_tokens": entry.total_tokens,
@@ -239,6 +273,11 @@ def serialize_usage(usage: Usage) -> dict[str, Any]:
                 entry.output_tokens_details, {"reasoning_tokens": 0}
             ),
         }
+        if entry.agent_name is not None:
+            result["agent_name"] = entry.agent_name
+        if entry.model_name is not None:
+            result["model_name"] = entry.model_name
+        return result
 
     return {
         "requests": usage.requests,

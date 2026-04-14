@@ -260,6 +260,21 @@ def _should_attach_generic_agent_error(exc: Exception) -> bool:
     )
 
 
+def _get_model_name(model: Any) -> str | None:
+    """Extract the string model name from a Model instance, if available.
+
+    Most built-in model implementations (``OpenAIResponsesModel``,
+    ``OpenAIChatCompletionsModel``) expose a ``model`` attribute that contains
+    the underlying model name string.  This helper retrieves it in a
+    forward-compatible, duck-typed way so that third-party model implementations
+    that may not have this attribute are handled gracefully.
+    """
+    model_name = getattr(model, "model", None)
+    if isinstance(model_name, str):
+        return model_name
+    return None
+
+
 async def _should_persist_stream_items(
     *,
     session: Session | None,
@@ -1613,7 +1628,11 @@ async def run_single_turn_streamed(
                     )
 
     if final_response is not None:
-        context_wrapper.usage.add(final_response.usage)
+        context_wrapper.usage.add(
+            final_response.usage,
+            agent_name=agent.name,
+            model_name=_get_model_name(model),
+        )
         await asyncio.gather(
             (
                 public_agent.hooks.on_llm_end(context_wrapper, public_agent, final_response)
@@ -1891,7 +1910,11 @@ async def get_new_response(
         # new deltas.
         server_conversation_tracker.mark_input_as_sent(filtered.input)
 
-    context_wrapper.usage.add(new_response.usage)
+    context_wrapper.usage.add(
+        new_response.usage,
+        agent_name=agent.name,
+        model_name=_get_model_name(model),
+    )
 
     await asyncio.gather(
         (
