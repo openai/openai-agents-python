@@ -14,6 +14,7 @@ from typing import Any, TypeVar, cast
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
+    ResponseCreatedEvent,
     ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
 )
@@ -1484,6 +1485,12 @@ async def run_single_turn_streamed(
 
     async for event in retry_stream:
         streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+
+        # Reset the reasoning snapshot at the start of each new response attempt
+        # (e.g., after a retry) so the snapshot field never contains stale text
+        # from a failed previous attempt.
+        if isinstance(event, ResponseCreatedEvent):
+            _reasoning_snapshot = ""
 
         # Emit a ReasoningDeltaEvent for reasoning/thinking deltas so consumers don't have
         # to unwrap the raw event themselves.
