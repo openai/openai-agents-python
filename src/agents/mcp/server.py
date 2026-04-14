@@ -1010,6 +1010,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             finally:
                 self.session = None
                 self._get_session_id = None
+                # AsyncExitStack cannot be reused after aclose(); reconnect() and second connect()
+                # need a fresh stack or enter_async_context will fail / leak resources (#618).
+                self.exit_stack = AsyncExitStack()
+                self.server_initialize_result = None
 
 
 class MCPServerStdioParams(TypedDict):

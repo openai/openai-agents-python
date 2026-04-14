@@ -67,3 +67,35 @@ async def test_manual_connect_disconnect_works(
 
     await server.cleanup()
     assert server.session is None, "Server should be disconnected"
+
+
+@pytest.mark.asyncio
+@patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.list_tools")
+async def test_connect_after_cleanup_uses_fresh_exit_stack(
+    mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
+):
+    """Reconnect must work: cleanup() closes AsyncExitStack, so connect() needs a new stack."""
+    server = MCPServerStdio(
+        params={
+            "command": tee,
+        },
+        cache_tools_list=True,
+    )
+
+    tools = [
+        MCPTool(name="tool1", inputSchema={}),
+        MCPTool(name="tool2", inputSchema={}),
+    ]
+    mock_list_tools.return_value = ListToolsResult(tools=tools)
+
+    await server.connect()
+    assert server.session is not None
+    await server.cleanup()
+    assert server.session is None
+
+    await server.connect()
+    assert server.session is not None
+    await server.cleanup()
+    assert server.session is None
