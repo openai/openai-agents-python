@@ -787,8 +787,12 @@ class Converter:
                         # with the old encoding are not broken.
                         try:
                             decoded = json.loads(encrypted_content)
-                            if not isinstance(decoded, list):
-                                raise ValueError("expected a list of block dicts")
+                            if not isinstance(decoded, list) or not all(
+                                isinstance(b, dict) and b.get("type") for b in decoded
+                            ):
+                                raise ValueError(
+                                    "expected a list of block dicts with a 'type' field"
+                                )
                             pending_thinking_blocks = decoded
                         except (json.JSONDecodeError, TypeError, ValueError):
                             signatures = encrypted_content.split("\n")
