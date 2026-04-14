@@ -21,6 +21,7 @@ class TurnTrackingRunHooks(RunHooks):
     """Records turn numbers seen by on_turn_start and on_turn_end."""
 
     def __init__(self) -> None:
+        """Initialise empty tracking lists and event counters."""
         self.turn_starts: list[int] = []
         self.turn_ends: list[int] = []
         self.events: dict[str, int] = defaultdict(int)
@@ -31,6 +32,7 @@ class TurnTrackingRunHooks(RunHooks):
         agent: Any,
         turn_number: int,
     ) -> None:
+        """Record the turn number when a turn starts."""
         self.turn_starts.append(turn_number)
         self.events["on_turn_start"] += 1
 
@@ -40,6 +42,7 @@ class TurnTrackingRunHooks(RunHooks):
         agent: Any,
         turn_number: int,
     ) -> None:
+        """Record the turn number when a turn ends."""
         self.turn_ends.append(turn_number)
         self.events["on_turn_end"] += 1
 
@@ -48,6 +51,7 @@ class TurnTrackingAgentHooks(AgentHooks):
     """Records turn numbers seen on agent-level hooks."""
 
     def __init__(self) -> None:
+        """Initialise empty tracking lists."""
         self.turn_starts: list[int] = []
         self.turn_ends: list[int] = []
 
@@ -57,6 +61,7 @@ class TurnTrackingAgentHooks(AgentHooks):
         agent: Any,
         turn_number: int,
     ) -> None:
+        """Record the turn number when a turn starts."""
         self.turn_starts.append(turn_number)
 
     async def on_turn_end(
@@ -65,6 +70,7 @@ class TurnTrackingAgentHooks(AgentHooks):
         agent: Any,
         turn_number: int,
     ) -> None:
+        """Record the turn number when a turn ends."""
         self.turn_ends.append(turn_number)
 
 
@@ -109,16 +115,22 @@ async def test_on_turn_start_fires_before_llm() -> None:
     call_order: list[str] = []
 
     class OrderTrackingHooks(RunHooks):
+        """Tracks the order that turn/LLM lifecycle hooks are called."""
+
         async def on_turn_start(self, context: Any, agent: Any, turn_number: int) -> None:
+            """Append a turn_start marker with the turn number."""
             call_order.append(f"turn_start:{turn_number}")
 
         async def on_llm_start(self, context: Any, agent: Any, system_prompt: Any, input_items: Any) -> None:
-            call_order.append(f"llm_start")
+            """Append an llm_start marker."""
+            call_order.append("llm_start")
 
         async def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
-            call_order.append(f"llm_end")
+            """Append an llm_end marker."""
+            call_order.append("llm_end")
 
         async def on_turn_end(self, context: Any, agent: Any, turn_number: int) -> None:
+            """Append a turn_end marker with the turn number."""
             call_order.append(f"turn_end:{turn_number}")
 
     model = FakeModel()
