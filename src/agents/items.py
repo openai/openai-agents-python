@@ -683,7 +683,14 @@ class ItemHelpers:
         text = ""
         for content_item in message.content:
             if isinstance(content_item, ResponseOutputText):
-                text += content_item.text
+                # ``content_item.text`` is typed as ``str`` per the Responses
+                # API schema, but provider gateways (e.g. LiteLLM) and
+                # ``model_construct`` paths during streaming have been
+                # observed surfacing ``None``. Coerce so callers — including
+                # the SDK's own ``execute_tools_and_side_effects`` — don't
+                # crash with ``TypeError: can only concatenate str (not
+                # "NoneType") to str``.
+                text += content_item.text or ""
 
         return text or None
 
