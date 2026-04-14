@@ -86,6 +86,36 @@ class RunHooksBase(Generic[TContext, TAgent]):
         """Called immediately after a local tool is invoked."""
         pass
 
+    async def on_turn_start(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        turn_number: int,
+    ) -> None:
+        """Called at the start of each agent turn, before the LLM is invoked.
+
+        Args:
+            context: The run context wrapper.
+            agent: The current agent.
+            turn_number: The 1-indexed turn number (increments each time through the agent loop).
+        """
+        pass
+
+    async def on_turn_end(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        turn_number: int,
+    ) -> None:
+        """Called at the end of each agent turn, after all tool calls for that turn complete.
+
+        Args:
+            context: The run context wrapper.
+            agent: The current agent.
+            turn_number: The 1-indexed turn number.
+        """
+        pass
+
 
 class AgentHooksBase(Generic[TContext, TAgent]):
     """A class that receives callbacks on various lifecycle events for a specific agent. You can
@@ -146,6 +176,36 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         result: str,
     ) -> None:
         """Called immediately after a local tool is invoked."""
+        pass
+
+    async def on_turn_start(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        turn_number: int,
+    ) -> None:
+        """Called at the start of each agent turn, before the LLM is invoked.
+
+        Args:
+            context: The run context wrapper.
+            agent: The current agent.
+            turn_number: The 1-indexed turn number (increments each time through the agent loop).
+        """
+        pass
+
+    async def on_turn_end(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        turn_number: int,
+    ) -> None:
+        """Called at the end of each agent turn, after all tool calls for that turn complete.
+
+        Args:
+            context: The run context wrapper.
+            agent: The current agent.
+            turn_number: The 1-indexed turn number.
+        """
         pass
 
     async def on_llm_start(

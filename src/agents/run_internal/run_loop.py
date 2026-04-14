@@ -820,6 +820,17 @@ async def start_streaming(
                 streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                 break
 
+            await asyncio.gather(
+                hooks.on_turn_start(context_wrapper, current_agent, current_turn),
+                (
+                    current_agent.hooks.on_turn_start(
+                        context_wrapper, current_agent, current_turn
+                    )
+                    if current_agent.hooks
+                    else _coro.noop_coroutine()
+                ),
+            )
+
             if current_turn == 1:
                 all_input_guardrails = starting_agent.input_guardrails + (
                     run_config.input_guardrails or []
@@ -907,6 +918,17 @@ async def start_streaming(
                 should_run_agent_start_hooks = False
                 streamed_result._tool_use_tracker_snapshot = serialize_tool_use_tracker(
                     tool_use_tracker
+                )
+
+                await asyncio.gather(
+                    hooks.on_turn_end(context_wrapper, current_agent, current_turn),
+                    (
+                        current_agent.hooks.on_turn_end(
+                            context_wrapper, current_agent, current_turn
+                        )
+                        if current_agent.hooks
+                        else _coro.noop_coroutine()
+                    ),
                 )
 
                 streamed_result.raw_responses = streamed_result.raw_responses + [

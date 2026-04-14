@@ -111,7 +111,7 @@ from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Span, SpanError, agent_span, get_current_trace
 from .tracing.context import TraceCtxManager, create_trace_for_run
 from .tracing.span_data import AgentSpanData
-from .util import _error_tracing
+from .util import _coro, _error_tracing
 
 DEFAULT_AGENT_RUNNER: AgentRunner = None  # type: ignore
 # the value is set at the end of the module
@@ -968,6 +968,17 @@ class AgentRunner:
 
                     logger.debug("Running agent %s (turn %s)", current_agent.name, current_turn)
 
+                    await asyncio.gather(
+                        hooks.on_turn_start(context_wrapper, current_agent, current_turn),
+                        (
+                            current_agent.hooks.on_turn_start(
+                                context_wrapper, current_agent, current_turn
+                            )
+                            if current_agent.hooks
+                            else _coro.noop_coroutine()
+                        ),
+                    )
+
                     if session_persistence_enabled:
                         try:
                             last_saved_input_snapshot_for_rewind = (
@@ -1092,6 +1103,17 @@ class AgentRunner:
                     # Start hooks should only run on the first turn unless reset by a handoff.
                     last_saved_input_snapshot_for_rewind = None
                     should_run_agent_start_hooks = False
+
+                    await asyncio.gather(
+                        hooks.on_turn_end(context_wrapper, current_agent, current_turn),
+                        (
+                            current_agent.hooks.on_turn_end(
+                                context_wrapper, current_agent, current_turn
+                            )
+                            if current_agent.hooks
+                            else _coro.noop_coroutine()
+                        ),
+                    )
 
                     model_responses.append(turn_result.model_response)
                     original_input = turn_result.original_input
