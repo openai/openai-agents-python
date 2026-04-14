@@ -76,6 +76,30 @@ class RunHooksBase(Generic[TContext, TAgent]):
         """Called immediately before a local tool is invoked."""
         pass
 
+    async def on_tool_authorize(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        tool: Tool,
+    ) -> bool:
+        """Called before a tool is executed. Return False to deny the tool call.
+
+        When False is returned, the tool is not invoked and the model receives a
+        denial message instead.  All on_tool_start and on_tool_end hooks are
+        skipped for denied calls.
+
+        Default: always returns True (allow all tool calls).
+
+        Args:
+            context: The run context wrapper.
+            agent: The current agent.
+            tool: The tool about to be invoked.
+
+        Returns:
+            True to allow the tool call, False to deny it.
+        """
+        return True
+
     async def on_tool_end(
         self,
         context: RunContextWrapper[TContext],
@@ -137,6 +161,30 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     ) -> None:
         """Called immediately before a local tool is invoked."""
         pass
+
+    async def on_tool_authorize(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        tool: Tool,
+    ) -> bool:
+        """Called before a tool is executed. Return False to deny the tool call.
+
+        When False is returned, the tool is not invoked and the model receives a
+        denial message instead.  All on_tool_start and on_tool_end hooks are
+        skipped for denied calls.
+
+        Default: always returns True (allow all tool calls).
+
+        Args:
+            context: The run context wrapper.
+            agent: The current agent.
+            tool: The tool about to be invoked.
+
+        Returns:
+            True to allow the tool call, False to deny it.
+        """
+        return True
 
     async def on_tool_end(
         self,

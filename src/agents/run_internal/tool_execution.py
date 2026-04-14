@@ -1591,6 +1591,19 @@ class _FunctionToolBatchExecutor:
         if rejected_message is not None:
             return rejected_message
 
+        # Authorization check: run-level hook first, then agent-level hook.
+        # If either denies the call, skip execution and return the denial string.
+        run_authorized = await self.hooks.on_tool_authorize(
+            tool_context, self.agent, func_tool
+        )
+        agent_authorized = (
+            await agent_hooks.on_tool_authorize(tool_context, self.agent, func_tool)
+            if agent_hooks
+            else True
+        )
+        if not run_authorized or not agent_authorized:
+            return "Tool call denied: authorization hook returned False."
+
         await asyncio.gather(
             self.hooks.on_tool_start(tool_context, self.agent, func_tool),
             (
