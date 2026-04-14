@@ -58,5 +58,27 @@ class AgentUpdatedStreamEvent:
     type: Literal["agent_updated_stream_event"] = "agent_updated_stream_event"
 
 
-StreamEvent: TypeAlias = RawResponsesStreamEvent | RunItemStreamEvent | AgentUpdatedStreamEvent
+@dataclass
+class ReasoningDeltaEvent:
+    """Emitted when a reasoning/thinking delta is received from the model during streaming.
+
+    This is a convenience wrapper over the low-level
+    ``response.reasoning_summary_text.delta`` and ``response.reasoning_text.delta`` raw
+    events.  Both OpenAI o-series reasoning summaries and third-party
+    ``delta.reasoning`` fields (e.g. DeepSeek-R1 via LiteLLM) are surfaced here.
+    """
+
+    delta: str
+    """The incremental reasoning text fragment."""
+
+    snapshot: str
+    """The full reasoning text accumulated so far in this turn."""
+
+    type: Literal["reasoning_delta"] = "reasoning_delta"
+    """The type of the event."""
+
+
+StreamEvent: TypeAlias = (
+    RawResponsesStreamEvent | RunItemStreamEvent | AgentUpdatedStreamEvent | ReasoningDeltaEvent
+)
 """A streaming event from an agent."""
