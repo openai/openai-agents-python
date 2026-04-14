@@ -15,6 +15,7 @@ from typing import Any, cast
 
 from openai.types.chat import ChatCompletionMessageToolCall
 from openai.types.chat.chat_completion_message_tool_call import Function
+from openai.types.responses import ResponseReasoningItem
 
 from agents.extensions.models.litellm_model import InternalChatCompletionMessage
 from agents.models.chatcmpl_converter import Converter
@@ -163,7 +164,8 @@ def test_anthropic_thinking_blocks_with_tool_calls():
 
     # Verify full blocks are stored as JSON in encrypted_content so that both
     # thinking and redacted_thinking blocks survive the round-trip verbatim.
-    assert hasattr(reasoning_item, "encrypted_content"), (
+    assert isinstance(reasoning_item, ResponseReasoningItem)
+    assert reasoning_item.encrypted_content is not None, (
         "Reasoning item should have encrypted_content"
     )
     stored_blocks = json.loads(reasoning_item.encrypted_content)
@@ -356,7 +358,8 @@ def test_anthropic_thinking_blocks_without_tool_calls():
     )
 
     # Verify full blocks are stored as JSON in encrypted_content.
-    assert hasattr(reasoning_item, "encrypted_content"), (
+    assert isinstance(reasoning_item, ResponseReasoningItem)
+    assert reasoning_item.encrypted_content is not None, (
         "Reasoning item should have encrypted_content"
     )
     stored_blocks = json.loads(reasoning_item.encrypted_content)
@@ -459,21 +462,17 @@ def test_redacted_thinking_blocks_preserved_across_turns():
     reasoning_items = [i for i in output_items if getattr(i, "type", None) == "reasoning"]
     assert len(reasoning_items) == 1
 
-    reasoning_item = reasoning_items[0]
+    reasoning_item = cast(ResponseReasoningItem, reasoning_items[0])
 
     # encrypted_content must be present (the block has no "thinking" text, so
     # content will be empty — encrypted_content is the only carrier).
-    assert reasoning_item.encrypted_content, (
+    assert reasoning_item.encrypted_content is not None, (
         "encrypted_content must be set even for redacted_thinking blocks"
     )
     stored_blocks = json.loads(reasoning_item.encrypted_content)
     assert len(stored_blocks) == 1
-    assert stored_blocks[0]["type"] == "redacted_thinking", (
-        "Block type must be preserved verbatim"
-    )
-    assert stored_blocks[0]["data"] == redacted_data, (
-        "Encrypted data must be preserved verbatim"
-    )
+    assert stored_blocks[0]["type"] == "redacted_thinking", "Block type must be preserved verbatim"
+    assert stored_blocks[0]["data"] == redacted_data, "Encrypted data must be preserved verbatim"
 
     # Step 2: output items → next-turn messages
     items_as_dicts: list[dict[str, Any]] = [
@@ -537,11 +536,21 @@ def test_mixed_thinking_and_redacted_thinking_blocks_preserved():
     reasoning_items = [i for i in output_items if getattr(i, "type", None) == "reasoning"]
     assert len(reasoning_items) == 1
 
-    stored_blocks = json.loads(reasoning_items[0].encrypted_content)
+    reasoning_item_mixed = cast(ResponseReasoningItem, reasoning_items[0])
+    assert reasoning_item_mixed.encrypted_content is not None
+    stored_blocks = json.loads(reasoning_item_mixed.encrypted_content)
     assert len(stored_blocks) == 3
-    assert stored_blocks[0] == {"type": "thinking", "thinking": "First, let me check the pods.", "signature": "SigAAA"}
+    assert stored_blocks[0] == {
+        "type": "thinking",
+        "thinking": "First, let me check the pods.",
+        "signature": "SigAAA",
+    }
     assert stored_blocks[1] == {"type": "redacted_thinking", "data": "cmVkYWN0ZWQ="}
-    assert stored_blocks[2] == {"type": "thinking", "thinking": "Now summarising findings.", "signature": "SigBBB"}
+    assert stored_blocks[2] == {
+        "type": "thinking",
+        "thinking": "Now summarising findings.",
+        "signature": "SigBBB",
+    }
 
     items_as_dicts: list[dict[str, Any]] = [
         i.model_dump() if hasattr(i, "model_dump") else cast(dict[str, Any], i)
@@ -560,6 +569,14 @@ def test_mixed_thinking_and_redacted_thinking_blocks_preserved():
     assert isinstance(content, list)
 
     # First three entries are the thinking blocks (in original order)
-    assert content[0] == {"type": "thinking", "thinking": "First, let me check the pods.", "signature": "SigAAA"}
+    assert content[0] == {
+        "type": "thinking",
+        "thinking": "First, let me check the pods.",
+        "signature": "SigAAA",
+    }
     assert content[1] == {"type": "redacted_thinking", "data": "cmVkYWN0ZWQ="}
-    assert content[2] == {"type": "thinking", "thinking": "Now summarising findings.", "signature": "SigBBB"}
+    assert content[2] == {
+        "type": "thinking",
+        "thinking": "Now summarising findings.",
+        "signature": "SigBBB",
+    }
