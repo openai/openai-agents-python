@@ -97,10 +97,13 @@ async def test_reasoning_delta_event_type_field() -> None:
     agent = Agent(name="A", model=model)
     result = Runner.run_streamed(agent, input="hi")
 
+    found = False
     async for event in result.stream_events():
         if isinstance(event, ReasoningDeltaEvent):
             assert event.type == "reasoning_delta"
+            found = True
             break
+    assert found, "Expected at least one ReasoningDeltaEvent but none were emitted"
 
 
 @pytest.mark.asyncio
