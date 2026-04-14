@@ -147,7 +147,14 @@ class Converter:
 
             # Store thinking blocks for Anthropic compatibility
             if hasattr(message, "thinking_blocks") and message.thinking_blocks:
-                blocks_as_dicts = [b for b in message.thinking_blocks if isinstance(b, dict)]
+                # Only include blocks that carry a "type" field.  The last-resort
+                # fallback in LitellmConverter produces {"thinking": str(block)}
+                # dicts without a "type"; including them would cause the replay-
+                # side JSON validation to fall back to legacy parsing and
+                # misinterpret the whole JSON string as a newline-joined signature.
+                blocks_as_dicts = [
+                    b for b in message.thinking_blocks if isinstance(b, dict) and b.get("type")
+                ]
 
                 # Serialise the full blocks as JSON so that both thinking and
                 # redacted_thinking blocks can be reconstructed verbatim on the
