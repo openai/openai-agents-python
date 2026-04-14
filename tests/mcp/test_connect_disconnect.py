@@ -161,8 +161,8 @@ async def test_cleanup_closes_write_stream_before_exit_stack(
         call_order.append("exit_stack_closed")
         return await original_exit_stack_aclose()
 
-    server.session._write_stream.aclose = tracked_write_stream_close  # type: ignore[assignment]
-    server.exit_stack.aclose = tracked_exit_stack_aclose  # type: ignore[assignment]
+    server.session._write_stream.aclose = tracked_write_stream_close  # type: ignore[method-assign]
+    server.exit_stack.aclose = tracked_exit_stack_aclose  # type: ignore[method-assign]
 
     await server.cleanup()
 
