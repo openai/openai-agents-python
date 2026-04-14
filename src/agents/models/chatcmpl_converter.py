@@ -147,14 +147,21 @@ class Converter:
 
             # Store thinking blocks for Anthropic compatibility
             if hasattr(message, "thinking_blocks") and message.thinking_blocks:
-                # Only include blocks that carry a "type" field.  The last-resort
-                # fallback in LitellmConverter produces {"thinking": str(block)}
-                # dicts without a "type"; including them would cause the replay-
-                # side JSON validation to fall back to legacy parsing and
-                # misinterpret the whole JSON string as a newline-joined signature.
-                blocks_as_dicts = [
-                    b for b in message.thinking_blocks if isinstance(b, dict) and b.get("type")
-                ]
+                # Normalise blocks before serialisation.  The last-resort fallback
+                # in LitellmConverter can produce {"thinking": str(block)} dicts
+                # that are missing a "type" field.  Dropping them entirely would
+                # lose thinking content and could still cause Bedrock to reject the
+                # next turn; instead, inject "type": "thinking" so the block is
+                # valid and replayable.  Blocks that are not dicts or have neither
+                # "type" nor "thinking" are discarded as unrecoverable.
+                blocks_as_dicts = []
+                for b in message.thinking_blocks:
+                    if not isinstance(b, dict):
+                        continue
+                    if not b.get("type") and b.get("thinking"):
+                        b = {**b, "type": "thinking"}
+                    if b.get("type"):
+                        blocks_as_dicts.append(b)
 
                 # Serialise the full blocks as JSON so that both thinking and
                 # redacted_thinking blocks can be reconstructed verbatim on the
