@@ -18,6 +18,12 @@ from openai.types.responses import (
     ResponseOutputItemDoneEvent,
 )
 from openai.types.responses.response_output_item import McpCall, McpListTools, ResponseOutputItem
+from openai.types.responses.response_reasoning_summary_text_delta_event import (
+    ResponseReasoningSummaryTextDeltaEvent,
+)
+from openai.types.responses.response_reasoning_text_delta_event import (
+    ResponseReasoningTextDeltaEvent,
+)
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
@@ -71,6 +77,7 @@ from ..sandbox.runtime import SandboxRuntime
 from ..stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
+    ReasoningDeltaEvent,
     RunItemStreamEvent,
 )
 from ..tool import (
@@ -1280,6 +1287,8 @@ async def run_single_turn_streamed(
     emitted_tool_call_ids: set[str] = set()
     emitted_reasoning_item_ids: set[str] = set()
     emitted_tool_search_fingerprints: set[str] = set()
+    # Accumulated reasoning text for ReasoningDeltaEvent snapshot field.
+    _reasoning_snapshot: str = ""
     # Precompute the lookup map used for streaming descriptions. Function tools use the same
     # collision-free lookup keys as runtime dispatch, including deferred top-level aliases.
     tool_map: dict[NamedToolLookupKey, Any] = cast(
@@ -1482,6 +1491,21 @@ async def run_single_turn_streamed(
 
     async for event in retry_stream:
         streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+
+        # Emit a ReasoningDeltaEvent for reasoning/thinking deltas so consumers don't have
+        # to unwrap the raw event themselves.
+        if isinstance(event, ResponseReasoningSummaryTextDeltaEvent):
+            delta_text: str = event.delta or ""
+            _reasoning_snapshot += delta_text
+            streamed_result._event_queue.put_nowait(
+                ReasoningDeltaEvent(delta=delta_text, snapshot=_reasoning_snapshot)
+            )
+        elif isinstance(event, ResponseReasoningTextDeltaEvent):
+            delta_text = event.delta or ""
+            _reasoning_snapshot += delta_text
+            streamed_result._event_queue.put_nowait(
+                ReasoningDeltaEvent(delta=delta_text, snapshot=_reasoning_snapshot)
+            )
 
         terminal_response: Response | None = None
         is_completed_event = False
