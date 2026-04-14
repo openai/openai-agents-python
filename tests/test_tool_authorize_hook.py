@@ -22,6 +22,7 @@ class AllowRunHooks(RunHooks):
     """Always authorizes tool calls; records invocations."""
 
     def __init__(self) -> None:
+        """Initialise empty tracking lists."""
         self.authorize_calls: list[str] = []
         self.start_calls: list[str] = []
         self.end_calls: list[str] = []
@@ -29,13 +30,16 @@ class AllowRunHooks(RunHooks):
     async def on_tool_authorize(
         self, context: Any, agent: Any, tool: Any
     ) -> bool:
+        """Record and authorize the tool call."""
         self.authorize_calls.append(tool.name)
         return True
 
     async def on_tool_start(self, context: Any, agent: Any, tool: Any) -> None:
+        """Record that the tool started."""
         self.start_calls.append(tool.name)
 
     async def on_tool_end(self, context: Any, agent: Any, tool: Any, result: Any) -> None:
+        """Record that the tool ended."""
         self.end_calls.append(tool.name)
 
 
@@ -43,6 +47,7 @@ class DenyRunHooks(RunHooks):
     """Denies all tool calls."""
 
     def __init__(self) -> None:
+        """Initialise empty tracking lists."""
         self.authorize_calls: list[str] = []
         self.start_calls: list[str] = []
         self.end_calls: list[str] = []
@@ -50,13 +55,16 @@ class DenyRunHooks(RunHooks):
     async def on_tool_authorize(
         self, context: Any, agent: Any, tool: Any
     ) -> bool:
+        """Record and deny the tool call."""
         self.authorize_calls.append(tool.name)
         return False
 
     async def on_tool_start(self, context: Any, agent: Any, tool: Any) -> None:
+        """Record that the tool started (should not be called when denied)."""
         self.start_calls.append(tool.name)
 
     async def on_tool_end(self, context: Any, agent: Any, tool: Any, result: Any) -> None:
+        """Record that the tool ended (should not be called when denied)."""
         self.end_calls.append(tool.name)
 
 
@@ -64,11 +72,13 @@ class DenyAgentHooks(AgentHooks):
     """Agent-level deny hook."""
 
     def __init__(self) -> None:
+        """Initialise empty tracking list."""
         self.authorize_calls: list[str] = []
 
     async def on_tool_authorize(
         self, context: Any, agent: Any, tool: Any
     ) -> bool:
+        """Record and deny the tool call."""
         self.authorize_calls.append(tool.name)
         return False
 
@@ -96,13 +106,21 @@ async def test_allow_hook_lets_tool_run() -> None:
 @pytest.mark.asyncio
 async def test_deny_hook_skips_tool_execution() -> None:
     """When on_tool_authorize returns False the tool is not executed and model gets denial."""
-    invoked = []
+    invoked: list[bool] = []
 
     async def my_tool_impl(ctx: Any, args: str) -> str:
+        """Append True to invoked and return a sentinel string (should never be called)."""
         invoked.append(True)
         return "should not be returned"
 
-    func_tool = get_function_tool("my_tool", "should_not_appear")
+    # Wire my_tool_impl directly into FunctionTool so we can assert it was never called.
+    func_tool = FunctionTool(
+        name="my_tool",
+        description="test tool",
+        params_json_schema={},
+        on_invoke_tool=my_tool_impl,
+        strict_json_schema=False,
+    )
     model = FakeModel()
     model.add_multiple_turn_outputs([
         [get_function_tool_call("my_tool", "{}")],
@@ -120,6 +138,8 @@ async def test_deny_hook_skips_tool_execution() -> None:
     assert hooks.end_calls == []
     # And the run still completes (model sees the denial and produces final output)
     assert result.final_output == "done"
+    # Verify my_tool_impl was never actually invoked
+    assert invoked == []
 
 
 @pytest.mark.asyncio
@@ -128,7 +148,10 @@ async def test_deny_hook_sends_denial_message_to_model() -> None:
     received_tool_outputs: list[str] = []
 
     class OutputCapturingHooks(RunHooks):
+        """Captures tool outputs by denying every tool call."""
+
         async def on_tool_authorize(self, context: Any, agent: Any, tool: Any) -> bool:
+            """Deny every tool call unconditionally."""
             return False
 
     model = FakeModel()
@@ -142,10 +165,19 @@ async def test_deny_hook_sends_denial_message_to_model() -> None:
     agent = Agent(name="A", model=model, tools=[func_tool])
     result = await Runner.run(agent, input="hi", hooks=hooks)
 
-    # Check that model received denial message in its input on second turn
-    # The second turn's input items should include a tool output with denial
+    # Check that model received denial message in its input on second turn.
+    # The denial string is stored as the tool output in new_items.
     raw_responses = result.raw_responses
     assert len(raw_responses) >= 1
+    # The denial message must appear as a ToolCallOutputItem in the run's new items.
+    tool_outputs = [
+        str(item.output)
+        for item in result.new_items
+        if hasattr(item, "output") and item.output is not None
+    ]
+    assert any(DENIAL_MSG in output for output in tool_outputs), (
+        f"Expected denial message {DENIAL_MSG!r} in tool outputs, got {tool_outputs}"
+    )
     assert result.final_output == "done"
 
 
