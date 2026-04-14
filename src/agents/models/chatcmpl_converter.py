@@ -778,7 +778,7 @@ class Converter:
             # 7) reasoning message => extract thinking blocks if present
             elif reasoning_item := cls.maybe_reasoning_message(item):
                 # Reconstruct thinking blocks from content (text) and encrypted_content (signature)
-                content_items = reasoning_item.get("content", [])
+                content_items = reasoning_item.get("content") or []
                 encrypted_content = reasoning_item.get("encrypted_content")
 
                 item_provider_data: dict[str, Any] = reasoning_item.get("provider_data", {})  # type: ignore[assignment]
