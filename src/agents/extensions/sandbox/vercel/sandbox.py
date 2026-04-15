@@ -43,7 +43,6 @@ from ....sandbox.errors import (
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
-    WorkspaceStartError,
     WorkspaceWriteTypeError,
 )
 from ....sandbox.manifest import Manifest
@@ -125,21 +124,7 @@ def _resolve_manifest_root(manifest: Manifest | None) -> Manifest:
 
     if manifest.root == _DEFAULT_MANIFEST_ROOT:
         return manifest.model_copy(update={"root": DEFAULT_VERCEL_WORKSPACE_ROOT})
-
-    root = Path(manifest.root)
-    default_root = Path(DEFAULT_VERCEL_WORKSPACE_ROOT)
-    if not root.is_absolute() or root == default_root or default_root in root.parents:
-        return manifest
-
-    raise ConfigurationError(
-        message=(
-            "Vercel sandboxes require manifest.root to stay within "
-            f"{DEFAULT_VERCEL_WORKSPACE_ROOT!r}"
-        ),
-        error_code=ErrorCode.SANDBOX_CONFIG_INVALID,
-        op="start",
-        context={"backend": "vercel", "manifest_root": manifest.root},
-    )
+    return manifest
 
 
 def _validate_network_policy(value: object) -> NetworkPolicy | None:
@@ -323,45 +308,6 @@ class VercelSandboxSession(BaseSandboxSession):
             raise ValueError(str(exc)) from exc
         except (tarfile.TarError, OSError) as exc:
             raise ValueError("invalid tar stream") from exc
-
-    async def _ensure_workspace_root(self) -> None:
-        root = Path(self.state.manifest.root)
-        sandbox = await self._ensure_sandbox()
-        try:
-            finished = await sandbox.run_command("mkdir", ["-p", "--", root.as_posix()])
-        except Exception as exc:
-            raise WorkspaceStartError(path=root, cause=exc) from exc
-        if finished.exit_code != 0:
-            raise WorkspaceStartError(
-                path=root,
-                context={
-                    "exit_code": finished.exit_code,
-                    "stdout": await finished.stdout(),
-                    "stderr": await finished.stderr(),
-                },
-            )
-        try:
-            finished = await sandbox.run_command("test", ["-d", root.as_posix()])
-        except Exception as exc:
-            raise WorkspaceStartError(path=root, cause=exc) from exc
-        if finished.exit_code != 0:
-            raise WorkspaceStartError(
-                path=root,
-                context={
-                    "exit_code": finished.exit_code,
-                    "stdout": await finished.stdout(),
-                    "stderr": await finished.stderr(),
-                },
-            )
-
-    async def start(self) -> None:
-        try:
-            await self._ensure_workspace_root()
-        except WorkspaceStartError:
-            raise
-        except Exception as exc:
-            raise WorkspaceStartError(path=Path(self.state.manifest.root), cause=exc) from exc
-        await super().start()
 
     async def _ensure_sandbox(self, *, source: Any | None = None) -> Any:
         sandbox = self._sandbox
