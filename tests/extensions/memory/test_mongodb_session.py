@@ -115,6 +115,28 @@ class FakeAsyncCollection:
                 doc["_id"] = FakeObjectId()
             self._docs[id(doc["_id"])] = dict(doc)
 
+    async def find_one_and_update(
+        self,
+        query: dict[str, Any],
+        update: dict[str, Any],
+        upsert: bool = False,
+        return_document: bool = False,
+    ) -> dict[str, Any] | None:
+        for doc in self._docs.values():
+            if self._matches(doc, query):
+                # Apply $inc fields.
+                for field, delta in update.get("$inc", {}).items():
+                    doc[field] = doc.get(field, 0) + delta
+                return dict(doc) if return_document else None
+        if upsert:
+            new_doc: dict[str, Any] = {"_id": FakeObjectId()}
+            new_doc.update(update.get("$setOnInsert", {}))
+            for field, delta in update.get("$inc", {}).items():
+                new_doc[field] = new_doc.get(field, 0) + delta
+            self._docs[id(new_doc["_id"])] = new_doc
+            return dict(new_doc) if return_document else None
+        return None
+
     async def update_one(
         self,
         query: dict[str, Any],
@@ -125,9 +147,9 @@ class FakeAsyncCollection:
             if self._matches(doc, query):
                 return  # Exists — $setOnInsert is a no-op on existing docs.
         if upsert:
-            new_doc: dict[str, Any] = {"_id": FakeObjectId()}
-            new_doc.update(update.get("$setOnInsert", {}))
-            self._docs[id(new_doc["_id"])] = new_doc
+            new_doc2: dict[str, Any] = {"_id": FakeObjectId()}
+            new_doc2.update(update.get("$setOnInsert", {}))
+            self._docs[id(new_doc2["_id"])] = new_doc2
 
     async def delete_many(self, query: dict[str, Any]) -> None:
         to_remove = [k for k, d in self._docs.items() if self._matches(d, query)]
@@ -235,8 +257,7 @@ from agents.extensions.memory.mongodb_session import MongoDBSession  # noqa: E40
 def _make_session(session_id: str = "test-session", **kwargs: Any) -> MongoDBSession:
     """Create a MongoDBSession backed by a FakeAsyncMongoClient."""
     client = FakeAsyncMongoClient()
-    MongoDBSession._initialized_keys.clear()
-    MongoDBSession._init_locks.clear()
+    MongoDBSession._init_state.clear()
     return MongoDBSession(
         session_id,
         client=client,  # type: ignore[arg-type]
@@ -353,8 +374,7 @@ async def test_get_items_limit_exceeds_count(session: MongoDBSession) -> None:
 
 async def test_session_settings_limit_used_as_default() -> None:
     """session_settings.limit is applied when no explicit limit is given."""
-    MongoDBSession._initialized_keys.clear()
-    MongoDBSession._init_locks.clear()
+    MongoDBSession._init_state.clear()
     s = MongoDBSession(
         "ls-test",
         client=FakeAsyncMongoClient(),  # type: ignore[arg-type]
@@ -371,8 +391,7 @@ async def test_session_settings_limit_used_as_default() -> None:
 
 async def test_explicit_limit_overrides_session_settings() -> None:
     """An explicit limit passed to get_items must override session_settings.limit."""
-    MongoDBSession._initialized_keys.clear()
-    MongoDBSession._init_locks.clear()
+    MongoDBSession._init_state.clear()
     s = MongoDBSession(
         "override-test",
         client=FakeAsyncMongoClient(),  # type: ignore[arg-type]
@@ -394,8 +413,7 @@ async def test_explicit_limit_overrides_session_settings() -> None:
 
 async def test_sessions_are_isolated() -> None:
     """Two sessions with different IDs must not share data."""
-    MongoDBSession._initialized_keys.clear()
-    MongoDBSession._init_locks.clear()
+    MongoDBSession._init_state.clear()
     client = FakeAsyncMongoClient()
     s1 = MongoDBSession("alice", client=client, database="agents_test")  # type: ignore[arg-type]
     s2 = MongoDBSession("bob", client=client, database="agents_test")  # type: ignore[arg-type]
@@ -409,8 +427,7 @@ async def test_sessions_are_isolated() -> None:
 
 async def test_clear_does_not_affect_other_sessions() -> None:
     """Clearing one session must leave sibling sessions untouched."""
-    MongoDBSession._initialized_keys.clear()
-    MongoDBSession._init_locks.clear()
+    MongoDBSession._init_state.clear()
     client = FakeAsyncMongoClient()
     s1 = MongoDBSession("s1", client=client, database="agents_test")  # type: ignore[arg-type]
     s2 = MongoDBSession("s2", client=client, database="agents_test")  # type: ignore[arg-type]
@@ -529,8 +546,7 @@ async def test_index_creation_runs_only_once(session: MongoDBSession) -> None:
 
 async def test_different_clients_each_run_index_init() -> None:
     """Each distinct AsyncMongoClient gets its own index-creation pass."""
-    MongoDBSession._initialized_keys.clear()
-    MongoDBSession._init_locks.clear()
+    MongoDBSession._init_state.clear()
 
     client_a = FakeAsyncMongoClient()
     client_b = FakeAsyncMongoClient()
@@ -585,8 +601,7 @@ async def test_ping_failure(session: MongoDBSession) -> None:
 
 async def test_close_external_client_not_closed() -> None:
     """close() must NOT close a client that was injected externally."""
-    MongoDBSession._initialized_keys.clear()
-    MongoDBSession._init_locks.clear()
+    MongoDBSession._init_state.clear()
     client = FakeAsyncMongoClient()
     s = MongoDBSession("x", client=client, database="agents_test")  # type: ignore[arg-type]
     assert s._owns_client is False
@@ -597,8 +612,7 @@ async def test_close_external_client_not_closed() -> None:
 
 async def test_close_owned_client_is_closed() -> None:
     """close() must close a client created by from_uri."""
-    MongoDBSession._initialized_keys.clear()
-    MongoDBSession._init_locks.clear()
+    MongoDBSession._init_state.clear()
     fake_client = FakeAsyncMongoClient()
     with patch(
         "agents.extensions.memory.mongodb_session.AsyncMongoClient",
@@ -636,8 +650,7 @@ async def test_runner_integration(agent: Agent) -> None:
 
 async def test_runner_session_isolation(agent: Agent) -> None:
     """Two independent sessions must not bleed history into each other."""
-    MongoDBSession._initialized_keys.clear()
-    MongoDBSession._init_locks.clear()
+    MongoDBSession._init_state.clear()
     client = FakeAsyncMongoClient()
     s1 = MongoDBSession("user-a", client=client, database="agents_test")  # type: ignore[arg-type]
     s2 = MongoDBSession("user-b", client=client, database="agents_test")  # type: ignore[arg-type]
@@ -659,8 +672,7 @@ async def test_runner_with_session_settings_limit(agent: Agent) -> None:
     """RunConfig.session_settings.limit must cap the history sent to the model."""
     from agents import RunConfig
 
-    MongoDBSession._initialized_keys.clear()
-    MongoDBSession._init_locks.clear()
+    MongoDBSession._init_state.clear()
     session = MongoDBSession(
         "limit-test",
         client=FakeAsyncMongoClient(),  # type: ignore[arg-type]
@@ -694,8 +706,7 @@ async def test_runner_with_session_settings_limit(agent: Agent) -> None:
 
 async def test_injected_client_receives_append_metadata() -> None:
     """Append_metadata is called on a caller-supplied client."""
-    MongoDBSession._initialized_keys.clear()
-    MongoDBSession._init_locks.clear()
+    MongoDBSession._init_state.clear()
     client = FakeAsyncMongoClient()
 
     MongoDBSession("meta-test", client=client, database="agents_test")  # type: ignore[arg-type]
@@ -707,8 +718,7 @@ async def test_injected_client_receives_append_metadata() -> None:
 
 async def test_from_uri_passes_driver_info_to_constructor() -> None:
     """driver=_DRIVER_INFO is forwarded to AsyncMongoClient via from_uri."""
-    MongoDBSession._initialized_keys.clear()
-    MongoDBSession._init_locks.clear()
+    MongoDBSession._init_state.clear()
 
     captured_kwargs: dict[str, Any] = {}
 
@@ -728,8 +738,7 @@ async def test_from_uri_passes_driver_info_to_constructor() -> None:
 
 async def test_caller_supplied_driver_info_is_not_overwritten() -> None:
     """A caller-supplied driver kwarg must not be silently replaced."""
-    MongoDBSession._initialized_keys.clear()
-    MongoDBSession._init_locks.clear()
+    MongoDBSession._init_state.clear()
 
     captured_kwargs: dict[str, Any] = {}
     custom_info = FakeDriverInfo(name="MyApp")

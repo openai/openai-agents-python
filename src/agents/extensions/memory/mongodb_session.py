@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import weakref
 from typing import Any
 
 try:
@@ -70,14 +72,29 @@ class MongoDBSession(SessionABC):
     Indexes are created once per ``(client, database, sessions_collection,
     messages_collection)`` combination on the first call to any of the
     session protocol methods.  Subsequent calls skip the setup entirely.
+
+    Each message document carries a ``seq`` field — an integer assigned by
+    atomically incrementing a counter on the session metadata document.  This
+    guarantees a strictly monotonic insertion order that is safe across
+    multiple writers and processes, unlike sorting by ``_id`` / ObjectId which
+    is only second-level accurate and non-monotonic across machines.
     """
 
-    # Class-level registry so index creation only runs once per unique key.
-    # The key includes id(client) so that different AsyncMongoClient instances
-    # (e.g. pointing at different clusters) each get their own init pass.
-    _initialized_keys: set[tuple[int, str, str, str]] = set()
-    _init_locks: dict[tuple[int, str, str, str], asyncio.Lock] = {}
-    _init_locks_guard: asyncio.Lock = asyncio.Lock()
+    # Class-level registry so index creation runs only once per unique
+    # (client, database, sessions_collection, messages_collection) combination.
+    #
+    # WeakKeyDictionary lets the client object itself be the outer key so
+    # that the entry is automatically pruned when the client is garbage-
+    # collected.  This prevents id(client) reuse from causing a new client to
+    # skip index creation because it shares an address with a dead one.
+    #
+    # _init_guard is a plain threading.Lock so it is safe to acquire from any
+    # event loop — an asyncio.Lock binds to the loop that first contends on
+    # it and raises RuntimeError when a different loop tries to acquire it.
+    _init_state: weakref.WeakKeyDictionary[
+        Any, dict[tuple[str, str, str], asyncio.Lock | bool]
+    ] = weakref.WeakKeyDictionary()
+    _init_guard: threading.Lock = threading.Lock()
 
     session_settings: SessionSettings | None = None
 
@@ -120,7 +137,9 @@ class MongoDBSession(SessionABC):
         self._sessions: AsyncCollection[Any] = db[sessions_collection]
         self._messages: AsyncCollection[Any] = db[messages_collection]
 
-        self._init_key = (id(client), database, sessions_collection, messages_collection)
+        # Key within the per-client mapping — no id() needed because the client
+        # object itself is the outer WeakKeyDictionary key.
+        self._init_sub_key = (database, sessions_collection, messages_collection)
 
     # ------------------------------------------------------------------
     # Convenience constructors
@@ -172,33 +191,59 @@ class MongoDBSession(SessionABC):
     # Index initialisation
     # ------------------------------------------------------------------
 
-    async def _get_init_lock(self) -> asyncio.Lock:
-        """Return (creating if necessary) the per-init-key asyncio Lock."""
-        async with self._init_locks_guard:
-            lock = self._init_locks.get(self._init_key)
-            if lock is None:
+    def _get_or_create_init_lock(self) -> tuple[asyncio.Lock, bool]:
+        """Return (lock, already_done) for this session's (client, sub_key) pair.
+
+        Uses a threading.Lock for the registry mutation so it is safe to call
+        from any event loop without risking a cross-loop RuntimeError.
+        """
+        with self._init_guard:
+            per_client = self._init_state.get(self._client)
+            if per_client is None:
+                per_client = {}
+                self._init_state[self._client] = per_client
+
+            entry = per_client.get(self._init_sub_key)
+            if entry is True:
+                # Already initialised.
+                return asyncio.Lock(), True
+            if entry is None:
                 lock = asyncio.Lock()
-                self._init_locks[self._init_key] = lock
-            return lock
+                per_client[self._init_sub_key] = lock
+                return lock, False
+            # entry is an asyncio.Lock — initialisation is in progress.
+            assert isinstance(entry, asyncio.Lock)
+            return entry, False
+
+    def _mark_init_done(self) -> None:
+        """Record that index creation is complete for this (client, sub_key)."""
+        with self._init_guard:
+            per_client = self._init_state.get(self._client)
+            if per_client is not None:
+                per_client[self._init_sub_key] = True
 
     async def _ensure_indexes(self) -> None:
-        """Create required indexes the first time this key is accessed."""
-        if self._init_key in self._initialized_keys:
+        """Create required indexes the first time this (client, sub_key) is accessed."""
+        lock, done = self._get_or_create_init_lock()
+        if done:
             return
 
-        lock = await self._get_init_lock()
         async with lock:
             # Double-checked locking: another coroutine may have finished first.
-            if self._init_key in self._initialized_keys:
+            _, done = self._get_or_create_init_lock()
+            if done:
                 return
 
             # sessions: unique index on session_id.
             await self._sessions.create_index("session_id", unique=True)
 
             # messages: compound index for efficient per-session retrieval and sorting.
-            await self._messages.create_index([("session_id", 1), ("_id", 1)])
+            # seq provides a strictly monotonic insertion-order tie-breaker that is
+            # reliable across multiple writers (unlike ObjectId which is only
+            # second-level accurate).
+            await self._messages.create_index([("session_id", 1), ("seq", 1)])
 
-            self._initialized_keys.add(self._init_key)
+            self._mark_init_done()
 
     # ------------------------------------------------------------------
     # Serialization helpers
@@ -239,12 +284,12 @@ class MongoDBSession(SessionABC):
         query = {"session_id": self.session_id}
 
         if session_limit is None:
-            cursor = self._messages.find(query).sort("_id", 1)
+            cursor = self._messages.find(query).sort("seq", 1)
             docs = await cursor.to_list()
         else:
             # Fetch the latest N documents in reverse order, then reverse the
             # list to restore chronological order.
-            cursor = self._messages.find(query).sort("_id", -1).limit(session_limit)
+            cursor = self._messages.find(query).sort("seq", -1).limit(session_limit)
             docs = await cursor.to_list()
             docs.reverse()
 
@@ -269,19 +314,27 @@ class MongoDBSession(SessionABC):
 
         await self._ensure_indexes()
 
-        # Upsert the session metadata document.
-        await self._sessions.update_one(
+        # Atomically reserve a block of sequence numbers for this batch.
+        # $inc returns the new value, so subtract len(items) to get the first
+        # number in the block.
+        result = await self._sessions.find_one_and_update(
             {"session_id": self.session_id},
-            {"$setOnInsert": {"session_id": self.session_id}},
+            {
+                "$setOnInsert": {"session_id": self.session_id},
+                "$inc": {"_seq": len(items)},
+            },
             upsert=True,
+            return_document=True,
         )
+        next_seq: int = (result["_seq"] if result else len(items)) - len(items)
 
         payload = [
             {
                 "session_id": self.session_id,
+                "seq": next_seq + i,
                 "message_data": await self._serialize_item(item),
             }
-            for item in items
+            for i, item in enumerate(items)
         ]
 
         await self._messages.insert_many(payload, ordered=True)
@@ -296,7 +349,7 @@ class MongoDBSession(SessionABC):
 
         doc = await self._messages.find_one_and_delete(
             {"session_id": self.session_id},
-            sort=[("_id", -1)],
+            sort=[("seq", -1)],
         )
 
         if doc is None:
