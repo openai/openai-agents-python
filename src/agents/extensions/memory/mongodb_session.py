@@ -31,7 +31,6 @@ Usage::
 
 from __future__ import annotations
 
-import asyncio
 import json
 import threading
 import weakref
@@ -83,17 +82,18 @@ class MongoDBSession(SessionABC):
     # Class-level registry so index creation runs only once per unique
     # (client, database, sessions_collection, messages_collection) combination.
     #
-    # WeakKeyDictionary lets the client object itself be the outer key so
-    # that the entry is automatically pruned when the client is garbage-
-    # collected.  This prevents id(client) reuse from causing a new client to
-    # skip index creation because it shares an address with a dead one.
-    #
-    # _init_guard is a plain threading.Lock so it is safe to acquire from any
-    # event loop — an asyncio.Lock binds to the loop that first contends on
-    # it and raises RuntimeError when a different loop tries to acquire it.
-    _init_state: weakref.WeakKeyDictionary[
-        Any, dict[tuple[str, str, str], asyncio.Lock | bool]
-    ] = weakref.WeakKeyDictionary()
+    # Design notes:
+    # - WeakKeyDictionary keyed on the client object: entries are pruned
+    #   automatically when the client is GC'd, so id() reuse can never cause
+    #   a new client to skip index creation.
+    # - Only a threading.Lock (never an asyncio.Lock) touches the registry.
+    #   asyncio.Lock is bound to the event loop that first acquires it; reusing
+    #   one across loops raises RuntimeError.  create_index is idempotent, so
+    #   we only need the threading lock to guard the boolean done flag — no
+    #   async coordination is required.
+    _init_state: weakref.WeakKeyDictionary[Any, dict[tuple[str, str, str], bool]] = (
+        weakref.WeakKeyDictionary()
+    )
     _init_guard: threading.Lock = threading.Lock()
 
     session_settings: SessionSettings | None = None
@@ -191,59 +191,40 @@ class MongoDBSession(SessionABC):
     # Index initialisation
     # ------------------------------------------------------------------
 
-    def _get_or_create_init_lock(self) -> tuple[asyncio.Lock, bool]:
-        """Return (lock, already_done) for this session's (client, sub_key) pair.
-
-        Uses a threading.Lock for the registry mutation so it is safe to call
-        from any event loop without risking a cross-loop RuntimeError.
-        """
+    def _is_init_done(self) -> bool:
+        """Return True if indexes have already been created for this (client, sub_key)."""
         with self._init_guard:
             per_client = self._init_state.get(self._client)
-            if per_client is None:
-                per_client = {}
-                self._init_state[self._client] = per_client
-
-            entry = per_client.get(self._init_sub_key)
-            if entry is True:
-                # Already initialised.
-                return asyncio.Lock(), True
-            if entry is None:
-                lock = asyncio.Lock()
-                per_client[self._init_sub_key] = lock
-                return lock, False
-            # entry is an asyncio.Lock — initialisation is in progress.
-            assert isinstance(entry, asyncio.Lock)
-            return entry, False
+            return per_client is not None and per_client.get(self._init_sub_key, False)
 
     def _mark_init_done(self) -> None:
         """Record that index creation is complete for this (client, sub_key)."""
         with self._init_guard:
             per_client = self._init_state.get(self._client)
-            if per_client is not None:
-                per_client[self._init_sub_key] = True
+            if per_client is None:
+                per_client = {}
+                self._init_state[self._client] = per_client
+            per_client[self._init_sub_key] = True
 
     async def _ensure_indexes(self) -> None:
-        """Create required indexes the first time this (client, sub_key) is accessed."""
-        lock, done = self._get_or_create_init_lock()
-        if done:
+        """Create required indexes the first time this (client, sub_key) is accessed.
+
+        ``create_index`` is idempotent on the server side, so concurrent calls
+        from different coroutines or event loops are safe — at most a redundant
+        round-trip is issued.  The threading-lock-guarded boolean prevents that
+        extra round-trip after the first call completes.
+        """
+        if self._is_init_done():
             return
 
-        async with lock:
-            # Double-checked locking: another coroutine may have finished first.
-            _, done = self._get_or_create_init_lock()
-            if done:
-                return
+        # sessions: unique index on session_id.
+        await self._sessions.create_index("session_id", unique=True)
 
-            # sessions: unique index on session_id.
-            await self._sessions.create_index("session_id", unique=True)
+        # messages: compound index for efficient per-session retrieval and
+        # sorting by the explicit seq counter.
+        await self._messages.create_index([("session_id", 1), ("seq", 1)])
 
-            # messages: compound index for efficient per-session retrieval and sorting.
-            # seq provides a strictly monotonic insertion-order tie-breaker that is
-            # reliable across multiple writers (unlike ObjectId which is only
-            # second-level accurate).
-            await self._messages.create_index([("session_id", 1), ("seq", 1)])
-
-            self._mark_init_done()
+        self._mark_init_done()
 
     # ------------------------------------------------------------------
     # Serialization helpers
