@@ -33,6 +33,122 @@ class FullPriceSellThroughResult(BaseModel):
     )
 
 
+ALLOWED_GROUPINGS = {"Propiedad", "Clase", "CANAL", "Descripcion Bodega"}
+
+# FP threshold: <=1% real discount counts as full price (matches POM methodology)
+FP_THRESHOLD_PCT = 1.0
+
+
+def _compute_full_price_sell_through(by: str = "Propiedad") -> FullPriceSellThroughResult:
+    """Pure function — directly callable, testable, and used by the tool wrapper."""
+    """
+    Compute % of units sold without discount (≤1% REAL discount = full price).
+
+    Uses REAL discount (1 - Precio Vta / Precio Blanco), NOT the unreliable
+    '% Descto.' column which is always 0 for e-commerce channels.
+
+    Reference: POM §1 diagnostic + Simon [Ch 10] Praktiker bankruptcy case.
+
+    Wires real DuckDB if TBC_VAULT_PATH is available; falls back to stub with
+    `coverage="stub-vault-unavailable"` otherwise (degraded-mode pattern per
+    .claude/rules/capability-atomic-scaffold.md).
+    """
+    from tbc_caldero.adapters.duckdb_vault import VaultDW
+
+    # Validate grouping against allowlist (prevent SQL injection via column name)
+    if by not in ALLOWED_GROUPINGS:
+        by = "Propiedad"
+
+    dw = VaultDW.try_connect()
+    if dw is None:
+        # Degraded mode — return stub, mark methodology
+        return FullPriceSellThroughResult(
+            grouping=by,
+            total_rows=0,
+            avg_full_price_pct=0.0,
+            top_3_full_price=[],
+            methodology="stub-vault-unavailable — TBC_VAULT_PATH not set or DW missing",
+        )
+
+    # Real DuckDB query — computes real discount + full-price pct by group
+    # Only rows with non-null prices contribute to the calc
+    sql = f"""
+        WITH priced AS (
+            SELECT
+                "{by}" AS group_col,
+                "Venta Unidad" AS qty,
+                CASE
+                    WHEN "Precio Blanco" > 0 THEN
+                        100.0 * (1.0 - ("Precio Vta." / NULLIF("Precio Blanco", 0)))
+                    ELSE NULL
+                END AS real_discount_pct
+            FROM venta_b2c_2026
+            WHERE "Precio Blanco" > 0
+              AND "Precio Vta." > 0
+              AND "Venta Unidad" > 0  -- Exclude returns/refunds (negative qty)
+        ),
+        grouped AS (
+            SELECT
+                group_col,
+                SUM(qty) AS total_units,
+                SUM(CASE WHEN real_discount_pct <= ? THEN qty ELSE 0 END) AS fp_units
+            FROM priced
+            WHERE group_col IS NOT NULL
+            GROUP BY group_col
+            HAVING SUM(qty) >= 10  -- Filter noise: require meaningful volume
+        )
+        SELECT
+            group_col,
+            total_units,
+            fp_units,
+            (100.0 * fp_units / total_units) AS fp_pct
+        FROM grouped
+        ORDER BY fp_pct DESC
+    """
+
+    try:
+        rows = dw.query(sql, [FP_THRESHOLD_PCT])
+    except Exception as e:
+        return FullPriceSellThroughResult(
+            grouping=by,
+            total_rows=0,
+            avg_full_price_pct=0.0,
+            top_3_full_price=[],
+            methodology=f"error-degraded: {type(e).__name__}: {str(e)[:80]}",
+        )
+
+    if not rows:
+        return FullPriceSellThroughResult(
+            grouping=by,
+            total_rows=0,
+            avg_full_price_pct=0.0,
+            top_3_full_price=[],
+            methodology="no-rows — check venta_b2c_2026 data freshness",
+        )
+
+    # Weighted avg FP% across all groups (weighted by total_units)
+    total_units_all = sum(r["total_units"] for r in rows)
+    total_fp_all = sum(r["fp_units"] for r in rows)
+    avg_fp_pct = (100.0 * total_fp_all / total_units_all) if total_units_all else 0.0
+
+    top_3 = [
+        {
+            "group_name": str(r["group_col"]),
+            "fp_pct": round(r["fp_pct"], 2),
+            "fp_units": int(r["fp_units"]),
+        }
+        for r in rows[:3]
+    ]
+
+    return FullPriceSellThroughResult(
+        grouping=by,
+        total_rows=len(rows),
+        avg_full_price_pct=round(avg_fp_pct, 2),
+        top_3_full_price=top_3,
+        methodology=f"real_discount = 1 - (Precio Vta / Precio Blanco), FP threshold <= {FP_THRESHOLD_PCT}%",
+    )
+
+
 @function_tool
 def full_price_sell_through(
     by: Annotated[
@@ -46,26 +162,10 @@ def full_price_sell_through(
     Uses REAL discount (1 - Precio Vta / Precio Blanco), NOT the unreliable
     '% Descto.' column which is always 0 for e-commerce channels.
 
-    Critical reference: POM §1 diagnostic + Simon [Ch 10] Praktiker bankruptcy case.
+    Reference: POM §1 diagnostic + Simon [Ch 10] Praktiker bankruptcy case.
 
-    SPIKE NOTE: This is a stub returning mock data. In production port, this
-    wrapper will call scripts/pricing_engine.full_price_sell_through() and
-    serialize the DataFrame result. Requires DuckDB adapter (Ola 2 Step 2).
+    Wires real DuckDB if TBC_VAULT_PATH is available; falls back to stub with
+    `coverage="stub-vault-unavailable"` otherwise (degraded-mode pattern per
+    .claude/rules/capability-atomic-scaffold.md).
     """
-    # TODO (Ola 2): wire real DuckDB query via adapter pattern:
-    # from tbc_caldero.adapters.vault_capability import call_vault
-    # df = call_vault("pricing_engine", "full_price_sell_through", by=by)
-    # return FullPriceSellThroughResult.from_dataframe(df)
-
-    # Spike stub — proves the wiring end-to-end without DuckDB dependency
-    return FullPriceSellThroughResult(
-        grouping=by,
-        total_rows=12,
-        avg_full_price_pct=12.2,
-        top_3_full_price=[
-            {"group_name": "MINNIE", "fp_pct": 34.1, "fp_units": 245},
-            {"group_name": "SPIDERMAN", "fp_pct": 28.7, "fp_units": 189},
-            {"group_name": "PAW PATROL", "fp_pct": 22.3, "fp_units": 156},
-        ],
-        methodology="real_discount = 1 - (Precio Vta / Precio Blanco)",
-    )
+    return _compute_full_price_sell_through(by=by)
