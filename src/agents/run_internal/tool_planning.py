@@ -24,9 +24,11 @@ from ..items import (
 from ..run_context import RunContextWrapper
 from ..tool import FunctionTool, MCPToolApprovalRequest
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
+from .agent_bindings import AgentBindings
 from .run_steps import (
     ToolRunApplyPatchCall,
     ToolRunComputerAction,
+    ToolRunCustom,
     ToolRunFunction,
     ToolRunLocalShellCall,
     ToolRunMCPApprovalRequest,
@@ -36,6 +38,7 @@ from .tool_execution import (
     collect_manual_mcp_approvals,
     execute_apply_patch_calls,
     execute_computer_actions,
+    execute_custom_tool_calls,
     execute_function_tool_calls,
     execute_local_shell_calls,
     execute_shell_calls,
@@ -67,7 +70,7 @@ def _hashable_identity_value(value: Any) -> Hashable | None:
     """Convert a tool call field into a stable, hashable representation."""
     if value is None:
         return None
-    if isinstance(value, (dict, list, tuple)):
+    if isinstance(value, dict | list | tuple):
         try:
             return json.dumps(value, sort_keys=True, default=str)
         except Exception:
@@ -82,10 +85,14 @@ def _tool_call_identity(raw: Any) -> tuple[str | None, str | None, Hashable | No
     call_id = getattr(raw, "call_id", None) or getattr(raw, "id", None)
     name = getattr(raw, "name", None)
     args = getattr(raw, "arguments", None)
+    if args is None:
+        args = getattr(raw, "input", None)
     if isinstance(raw, dict):
         call_id = raw.get("call_id") or raw.get("id") or call_id
         name = raw.get("name", name)
         args = raw.get("arguments", args)
+        if args is None:
+            args = raw.get("input")
     return call_id, name, _hashable_identity_value(args)
 
 
@@ -173,6 +180,7 @@ class ToolExecutionPlan:
 
     function_runs: list[ToolRunFunction] = _dc.field(default_factory=list)
     computer_actions: list[ToolRunComputerAction] = _dc.field(default_factory=list)
+    custom_tool_calls: list[ToolRunCustom] = _dc.field(default_factory=list)
     shell_calls: list[ToolRunShellCall] = _dc.field(default_factory=list)
     apply_patch_calls: list[ToolRunApplyPatchCall] = _dc.field(default_factory=list)
     local_shell_calls: list[ToolRunLocalShellCall] = _dc.field(default_factory=list)
@@ -245,6 +253,7 @@ def _build_plan_for_fresh_turn(
     return ToolExecutionPlan(
         function_runs=processed_response.functions,
         computer_actions=processed_response.computer_actions,
+        custom_tool_calls=processed_response.custom_tool_calls,
         shell_calls=processed_response.shell_calls,
         apply_patch_calls=processed_response.apply_patch_calls,
         local_shell_calls=processed_response.local_shell_calls,
@@ -265,6 +274,7 @@ def _build_plan_for_resume_turn(
     function_runs: list[ToolRunFunction],
     computer_actions: list[ToolRunComputerAction],
     shell_calls: list[ToolRunShellCall],
+    custom_tool_calls: list[ToolRunCustom],
     apply_patch_calls: list[ToolRunApplyPatchCall],
 ) -> ToolExecutionPlan:
     """Build a ToolExecutionPlan for a resumed turn."""
@@ -279,6 +289,7 @@ def _build_plan_for_resume_turn(
     return ToolExecutionPlan(
         function_runs=function_runs,
         computer_actions=computer_actions,
+        custom_tool_calls=custom_tool_calls,
         shell_calls=shell_calls,
         apply_patch_calls=apply_patch_calls,
         local_shell_calls=[],
@@ -291,6 +302,7 @@ def _build_plan_for_resume_turn(
 def _collect_tool_interruptions(
     *,
     function_results: Sequence[Any],
+    custom_tool_results: Sequence[RunItem],
     shell_results: Sequence[RunItem],
     apply_patch_results: Sequence[RunItem],
 ) -> list[ToolApprovalItem]:
@@ -307,6 +319,9 @@ def _collect_tool_interruptions(
             nested_interruptions = result.agent_run_result.interruptions
             if nested_interruptions:
                 interruptions.extend(nested_interruptions)
+    for custom_tool_result in custom_tool_results:
+        if isinstance(custom_tool_result, ToolApprovalItem):
+            interruptions.append(custom_tool_result)
     for shell_result in shell_results:
         if isinstance(shell_result, ToolApprovalItem):
             interruptions.append(shell_result)
@@ -320,6 +335,7 @@ def _build_tool_result_items(
     *,
     function_results: Sequence[Any],
     computer_results: Sequence[RunItem],
+    custom_tool_results: Sequence[RunItem],
     shell_results: Sequence[RunItem],
     apply_patch_results: Sequence[RunItem],
     local_shell_results: Sequence[RunItem] | None = None,
@@ -331,6 +347,7 @@ def _build_tool_result_items(
         if isinstance(run_item, RunItemBase):
             results.append(cast(RunItem, run_item))
     results.extend(computer_results)
+    results.extend(custom_tool_results)
     results.extend(shell_results)
     results.extend(apply_patch_results)
     if local_shell_results:
@@ -518,7 +535,7 @@ async def _select_function_tool_runs_for_resume(
 async def _execute_tool_plan(
     *,
     plan: ToolExecutionPlan,
-    agent: Agent[Any],
+    bindings: AgentBindings[Any],
     hooks,
     context_wrapper: RunContextWrapper[Any],
     run_config,
@@ -531,12 +548,15 @@ async def _execute_tool_plan(
     list[RunItem],
     list[RunItem],
     list[RunItem],
+    list[RunItem],
 ]:
     """Execute tool runs captured in a ToolExecutionPlan."""
+    public_agent = bindings.public_agent
     isolate_function_tool_failures = len(plan.function_runs) > 1 or (
         parallel
         and (
             bool(plan.computer_actions)
+            or bool(plan.custom_tool_calls)
             or bool(plan.shell_calls)
             or bool(plan.apply_patch_calls)
             or bool(plan.local_shell_calls)
@@ -546,12 +566,13 @@ async def _execute_tool_plan(
         (
             (function_results, tool_input_guardrail_results, tool_output_guardrail_results),
             computer_results,
+            custom_tool_results,
             shell_results,
             apply_patch_results,
             local_shell_results,
         ) = await asyncio.gather(
             execute_function_tool_calls(
-                agent=agent,
+                bindings=bindings,
                 tool_runs=plan.function_runs,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
@@ -559,28 +580,35 @@ async def _execute_tool_plan(
                 isolate_parallel_failures=isolate_function_tool_failures,
             ),
             execute_computer_actions(
-                agent=agent,
+                public_agent=public_agent,
                 actions=plan.computer_actions,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=run_config,
             ),
+            execute_custom_tool_calls(
+                public_agent=public_agent,
+                calls=plan.custom_tool_calls,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+            ),
             execute_shell_calls(
-                agent=agent,
+                public_agent=public_agent,
                 calls=plan.shell_calls,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=run_config,
             ),
             execute_apply_patch_calls(
-                agent=agent,
+                public_agent=public_agent,
                 calls=plan.apply_patch_calls,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=run_config,
             ),
             execute_local_shell_calls(
-                agent=agent,
+                public_agent=public_agent,
                 calls=plan.local_shell_calls,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
@@ -593,7 +621,7 @@ async def _execute_tool_plan(
             tool_input_guardrail_results,
             tool_output_guardrail_results,
         ) = await execute_function_tool_calls(
-            agent=agent,
+            bindings=bindings,
             tool_runs=plan.function_runs,
             hooks=hooks,
             context_wrapper=context_wrapper,
@@ -601,28 +629,35 @@ async def _execute_tool_plan(
             isolate_parallel_failures=isolate_function_tool_failures,
         )
         computer_results = await execute_computer_actions(
-            agent=agent,
+            public_agent=public_agent,
             actions=plan.computer_actions,
             hooks=hooks,
             context_wrapper=context_wrapper,
             config=run_config,
         )
+        custom_tool_results = await execute_custom_tool_calls(
+            public_agent=public_agent,
+            calls=plan.custom_tool_calls,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
         shell_results = await execute_shell_calls(
-            agent=agent,
+            public_agent=public_agent,
             calls=plan.shell_calls,
             hooks=hooks,
             context_wrapper=context_wrapper,
             config=run_config,
         )
         apply_patch_results = await execute_apply_patch_calls(
-            agent=agent,
+            public_agent=public_agent,
             calls=plan.apply_patch_calls,
             hooks=hooks,
             context_wrapper=context_wrapper,
             config=run_config,
         )
         local_shell_results = await execute_local_shell_calls(
-            agent=agent,
+            public_agent=public_agent,
             calls=plan.local_shell_calls,
             hooks=hooks,
             context_wrapper=context_wrapper,
@@ -634,6 +669,7 @@ async def _execute_tool_plan(
         tool_input_guardrail_results,
         tool_output_guardrail_results,
         computer_results,
+        custom_tool_results,
         shell_results,
         apply_patch_results,
         local_shell_results,

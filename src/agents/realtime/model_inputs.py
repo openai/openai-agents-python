@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Union
+from typing import Any, Literal, TypeAlias
 
-from typing_extensions import NotRequired, TypeAlias, TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from .config import RealtimeSessionModelSettings
 from .model_events import RealtimeModelToolCallEvent
@@ -46,7 +46,7 @@ class RealtimeModelUserInputMessage(TypedDict):
     content: list[RealtimeModelInputTextContent | RealtimeModelInputImageContent]
 
 
-RealtimeModelUserInput: TypeAlias = Union[str, RealtimeModelUserInputMessage]
+RealtimeModelUserInput: TypeAlias = str | RealtimeModelUserInputMessage
 """A user input to be sent to the model."""
 
 
@@ -107,11 +107,11 @@ class RealtimeModelSendSessionUpdate:
     """The updated session settings to send."""
 
 
-RealtimeModelSendEvent: TypeAlias = Union[
-    RealtimeModelSendRawMessage,
-    RealtimeModelSendUserInput,
-    RealtimeModelSendAudio,
-    RealtimeModelSendToolOutput,
-    RealtimeModelSendInterrupt,
-    RealtimeModelSendSessionUpdate,
-]
+RealtimeModelSendEvent: TypeAlias = (
+    RealtimeModelSendRawMessage
+    | RealtimeModelSendUserInput
+    | RealtimeModelSendAudio
+    | RealtimeModelSendToolOutput
+    | RealtimeModelSendInterrupt
+    | RealtimeModelSendSessionUpdate
+)

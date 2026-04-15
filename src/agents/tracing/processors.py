@@ -354,9 +354,9 @@ class BackendSpanExporter(TracingExporter):
         preview = f"<{type_name} truncated>"
         if isinstance(value, dict):
             preview = f"<{type_name} len={len(value)} truncated>"
-        elif isinstance(value, (list, tuple, set, frozenset)):
+        elif isinstance(value, list | tuple | set | frozenset):
             preview = f"<{type_name} len={len(value)} truncated>"
-        elif isinstance(value, (bytes, bytearray, memoryview)):
+        elif isinstance(value, bytes | bytearray | memoryview):
             preview = f"<{type_name} bytes={len(value)} truncated>"
 
         return {

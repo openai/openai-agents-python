@@ -117,6 +117,8 @@ class ToolContext(RunContextWrapper[TContext]):
         tool_call: ResponseFunctionToolCall | None = None,
         agent: AgentBase[Any] | None = None,
         *,
+        tool_name: str | None = None,
+        tool_arguments: str | None = None,
         tool_namespace: str | None = None,
         run_config: RunConfig | None = None,
     ) -> ToolContext:
@@ -127,9 +129,17 @@ class ToolContext(RunContextWrapper[TContext]):
         base_values: dict[str, Any] = {
             f.name: getattr(context, f.name) for f in fields(RunContextWrapper) if f.init
         }
-        tool_name = tool_call.name if tool_call is not None else _assert_must_pass_tool_name()
-        tool_args = (
-            tool_call.arguments if tool_call is not None else _assert_must_pass_tool_arguments()
+        resolved_tool_name = (
+            tool_name
+            if tool_name is not None
+            else (tool_call.name if tool_call is not None else _assert_must_pass_tool_name())
+        )
+        resolved_tool_args = (
+            tool_arguments
+            if tool_arguments is not None
+            else (
+                tool_call.arguments if tool_call is not None else _assert_must_pass_tool_arguments()
+            )
         )
         tool_agent = agent
         if tool_agent is None and isinstance(context, ToolContext):
@@ -139,9 +149,9 @@ class ToolContext(RunContextWrapper[TContext]):
             tool_run_config = context.run_config
 
         tool_context = cls(
-            tool_name=tool_name,
+            tool_name=resolved_tool_name,
             tool_call_id=tool_call_id,
-            tool_arguments=tool_args,
+            tool_arguments=resolved_tool_args,
             tool_call=tool_call,
             tool_namespace=(
                 tool_namespace

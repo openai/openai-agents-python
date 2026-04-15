@@ -1,4 +1,4 @@
-from typing import Any, Generic, Optional
+from typing import Any, Generic
 
 from typing_extensions import TypeVar
 
@@ -19,7 +19,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
         self,
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
-        system_prompt: Optional[str],
+        system_prompt: str | None,
         input_items: list[TResponseInputItem],
     ) -> None:
         """Called just before invoking the LLM for this agent."""
@@ -152,7 +152,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         self,
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
-        system_prompt: Optional[str],
+        system_prompt: str | None,
         input_items: list[TResponseInputItem],
     ) -> None:
         """Called immediately before the agent issues an LLM call."""

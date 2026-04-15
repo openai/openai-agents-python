@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, cast
+from typing import Any, Generic, cast
 
 from agents.prompts import Prompt
 

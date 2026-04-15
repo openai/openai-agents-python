@@ -58,18 +58,25 @@ from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
 from ..run_state import RunState
+from ..sandbox.runtime import SandboxRuntime
 from ..stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
     RunItemStreamEvent,
 )
 from ..tool import FunctionTool, Tool, dispose_resolved_computers
-from ..tracing import Span, SpanError, agent_span, get_current_trace
+from ..tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
 from ..tracing.model_tracing import get_model_tracing_impl
-from ..tracing.span_data import AgentSpanData
+from ..tracing.span_data import AgentSpanData, TaskSpanData
 from ..usage import Usage
 from ..util import _coro, _error_tracing
-from .agent_runner_helpers import apply_resumed_conversation_settings
+from .agent_bindings import AgentBindings, bind_public_agent
+from .agent_runner_helpers import (
+    apply_resumed_conversation_settings,
+    attach_usage_to_span,
+    snapshot_usage,
+    usage_delta,
+)
 from .approvals import approvals_from_step
 from .error_handlers import (
     build_run_error_data,
@@ -101,6 +108,7 @@ from .model_retry import (
     stream_response_with_retry,
 )
 from .oai_conversation import OpenAIServerConversationTracker
+from .prompt_cache_key import PromptCacheKeyResolver, model_settings_with_prompt_cache_key
 from .run_steps import (
     NextStepFinalOutput,
     NextStepHandoff,
@@ -234,11 +242,7 @@ __all__ = [
 def _should_attach_generic_agent_error(exc: Exception) -> bool:
     return not isinstance(
         exc,
-        (
-            ModelBehaviorError,
-            InputGuardrailTripwireTriggered,
-            OutputGuardrailTripwireTriggered,
-        ),
+        ModelBehaviorError | InputGuardrailTripwireTriggered | OutputGuardrailTripwireTriggered,
     )
 
 
@@ -430,6 +434,7 @@ async def start_streaming(
     run_state: RunState[TContext] | None = None,
     *,
     is_resumed_state: bool = False,
+    sandbox_runtime: SandboxRuntime[TContext] | None = None,
 ):
     """Run the streaming loop for a run result."""
     if streamed_result.trace:
@@ -450,171 +455,258 @@ async def start_streaming(
             auto_previous_response_id=auto_previous_response_id,
         )
 
-    resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
-        run_config.reasoning_item_id_policy
-        if run_config.reasoning_item_id_policy is not None
-        else (run_state._reasoning_item_id_policy if run_state is not None else None)
+    current_trace = streamed_result.trace or get_current_trace()
+    current_task_span: Span[TaskSpanData] | None = (
+        task_span(name=current_trace.name) if current_trace else None
     )
-    if run_state is not None:
-        run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
-    streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+    if current_task_span:
+        current_task_span.start(mark_as_current=True)
+    task_usage_start = snapshot_usage(context_wrapper.usage)
 
-    if conversation_id is not None or previous_response_id is not None or auto_previous_response_id:
-        server_conversation_tracker = OpenAIServerConversationTracker(
-            conversation_id=conversation_id,
-            previous_response_id=previous_response_id,
-            auto_previous_response_id=auto_previous_response_id,
-            reasoning_item_id_policy=resolved_reasoning_item_id_policy,
+    try:
+        resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
+            run_config.reasoning_item_id_policy
+            if run_config.reasoning_item_id_policy is not None
+            else (run_state._reasoning_item_id_policy if run_state is not None else None)
         )
-    else:
-        server_conversation_tracker = None
-
-    def _sync_conversation_tracking_from_tracker() -> None:
-        if server_conversation_tracker is None:
-            return
         if run_state is not None:
-            run_state._conversation_id = server_conversation_tracker.conversation_id
-            run_state._previous_response_id = server_conversation_tracker.previous_response_id
-            run_state._auto_previous_response_id = (
+            run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+        streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+
+        if (
+            conversation_id is not None
+            or previous_response_id is not None
+            or auto_previous_response_id
+        ):
+            server_conversation_tracker = OpenAIServerConversationTracker(
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+                reasoning_item_id_policy=resolved_reasoning_item_id_policy,
+            )
+        else:
+            server_conversation_tracker = None
+
+        def _sync_conversation_tracking_from_tracker() -> None:
+            if server_conversation_tracker is None:
+                return
+            if run_state is not None:
+                run_state._conversation_id = server_conversation_tracker.conversation_id
+                run_state._previous_response_id = server_conversation_tracker.previous_response_id
+                run_state._auto_previous_response_id = (
+                    server_conversation_tracker.auto_previous_response_id
+                )
+            streamed_result._conversation_id = server_conversation_tracker.conversation_id
+            streamed_result._previous_response_id = server_conversation_tracker.previous_response_id
+            streamed_result._auto_previous_response_id = (
                 server_conversation_tracker.auto_previous_response_id
             )
-        streamed_result._conversation_id = server_conversation_tracker.conversation_id
-        streamed_result._previous_response_id = server_conversation_tracker.previous_response_id
-        streamed_result._auto_previous_response_id = (
-            server_conversation_tracker.auto_previous_response_id
+
+        if run_state is None:
+            run_state = RunState(
+                context=context_wrapper,
+                original_input=copy_input_items(starting_input),
+                starting_agent=starting_agent,
+                max_turns=max_turns,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
+            run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+            streamed_result._state = run_state
+        elif streamed_result._state is None:
+            streamed_result._state = run_state
+        if run_state is not None:
+            streamed_result._model_input_items = list(run_state._generated_items)
+            # Streamed follow-ups need the same normalized replay signal as sync runs when the
+            # runner's continuation differs from the richer session history.
+            streamed_result._replay_from_model_input_items = list(
+                run_state._generated_items
+            ) != list(run_state._session_items)
+
+        if run_state is not None:
+            run_state._conversation_id = conversation_id
+            run_state._previous_response_id = previous_response_id
+            run_state._auto_previous_response_id = auto_previous_response_id
+        streamed_result._conversation_id = conversation_id
+        streamed_result._previous_response_id = previous_response_id
+        streamed_result._auto_previous_response_id = auto_previous_response_id
+        prompt_cache_key_resolver = PromptCacheKeyResolver.from_run_state(
+            run_state=run_state,
         )
 
-    if run_state is None:
-        run_state = RunState(
-            context=context_wrapper,
-            original_input=copy_input_items(starting_input),
-            starting_agent=starting_agent,
-            max_turns=max_turns,
-            conversation_id=conversation_id,
-            previous_response_id=previous_response_id,
-            auto_previous_response_id=auto_previous_response_id,
-        )
-        run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
-        streamed_result._state = run_state
-    elif streamed_result._state is None:
-        streamed_result._state = run_state
-    if run_state is not None:
-        streamed_result._model_input_items = list(run_state._generated_items)
-        # Streamed follow-ups need the same normalized replay signal as sync runs when the
-        # runner's continuation differs from the richer session history.
-        streamed_result._replay_from_model_input_items = list(run_state._generated_items) != list(
-            run_state._session_items
-        )
+        current_span: Span[AgentSpanData] | None = None
+        if run_state is not None and run_state._current_agent is not None:
+            current_agent = run_state._current_agent
+        else:
+            current_agent = starting_agent
+        if run_state is not None:
+            current_turn = run_state._current_turn
+        else:
+            current_turn = 0
+        should_run_agent_start_hooks = True
+        tool_use_tracker = AgentToolUseTracker()
+        if run_state is not None:
+            hydrate_tool_use_tracker(tool_use_tracker, run_state, starting_agent)
 
-    if run_state is not None:
-        run_state._conversation_id = conversation_id
-        run_state._previous_response_id = previous_response_id
-        run_state._auto_previous_response_id = auto_previous_response_id
-    streamed_result._conversation_id = conversation_id
-    streamed_result._previous_response_id = previous_response_id
-    streamed_result._auto_previous_response_id = auto_previous_response_id
+        pending_server_items: list[RunItem] | None = None
+        session_input_items_for_persistence: list[TResponseInputItem] | None = None
 
-    current_span: Span[AgentSpanData] | None = None
-    if run_state is not None and run_state._current_agent is not None:
-        current_agent = run_state._current_agent
-    else:
-        current_agent = starting_agent
-    if run_state is not None:
-        current_turn = run_state._current_turn
-    else:
-        current_turn = 0
-    should_run_agent_start_hooks = True
-    tool_use_tracker = AgentToolUseTracker()
-    if run_state is not None:
-        hydrate_tool_use_tracker(tool_use_tracker, run_state, starting_agent)
+        if is_resumed_state and server_conversation_tracker is not None and run_state is not None:
+            session_items: list[TResponseInputItem] | None = None
+            if session is not None:
+                try:
+                    session_items = await session.get_items()
+                except Exception:
+                    session_items = None
+            server_conversation_tracker.hydrate_from_state(
+                original_input=run_state._original_input,
+                generated_items=run_state._generated_items,
+                model_responses=run_state._model_responses,
+                session_items=session_items,
+            )
 
-    pending_server_items: list[RunItem] | None = None
-    session_input_items_for_persistence: list[TResponseInputItem] | None = None
+        streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))
 
-    if is_resumed_state and server_conversation_tracker is not None and run_state is not None:
-        session_items: list[TResponseInputItem] | None = None
-        if session is not None:
-            try:
-                session_items = await session.get_items()
-            except Exception:
-                session_items = None
-        server_conversation_tracker.hydrate_from_state(
-            original_input=run_state._original_input,
-            generated_items=run_state._generated_items,
-            model_responses=run_state._model_responses,
-            session_items=session_items,
-        )
-
-    streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))
-
-    prepared_input: str | list[TResponseInputItem]
-    if is_resumed_state and run_state is not None:
-        prepared_input = normalize_resumed_input(starting_input)
-        streamed_result.input = prepared_input
-        streamed_result._original_input_for_persistence = []
-        streamed_result._stream_input_persisted = True
-    else:
-        server_manages_conversation = server_conversation_tracker is not None
-        prepared_input, session_items_snapshot = await prepare_input_with_session(
-            starting_input,
-            session,
-            run_config.session_input_callback,
-            run_config.session_settings,
-            include_history_in_prepared_input=not server_manages_conversation,
-            preserve_dropped_new_items=True,
-        )
-        streamed_result.input = prepared_input
-        streamed_result._original_input = copy_input_items(prepared_input)
-        if server_manages_conversation:
+        prepared_input: str | list[TResponseInputItem]
+        if is_resumed_state and run_state is not None:
+            prepared_input = normalize_resumed_input(starting_input)
+            streamed_result.input = prepared_input
             streamed_result._original_input_for_persistence = []
             streamed_result._stream_input_persisted = True
         else:
-            session_input_items_for_persistence = session_items_snapshot
-            streamed_result._original_input_for_persistence = session_items_snapshot
+            server_manages_conversation = server_conversation_tracker is not None
+            prepared_input, session_items_snapshot = await prepare_input_with_session(
+                starting_input,
+                session,
+                run_config.session_input_callback,
+                run_config.session_settings,
+                include_history_in_prepared_input=not server_manages_conversation,
+                preserve_dropped_new_items=True,
+            )
+            streamed_result.input = prepared_input
+            streamed_result._original_input = copy_input_items(prepared_input)
+            if server_manages_conversation:
+                streamed_result._original_input_for_persistence = []
+                streamed_result._stream_input_persisted = True
+            else:
+                session_input_items_for_persistence = session_items_snapshot
+                streamed_result._original_input_for_persistence = session_items_snapshot
 
-    async def _save_resumed_items(
-        items: list[RunItem], response_id: str | None, store_setting: bool | None
-    ) -> None:
-        await _save_resumed_stream_items(
-            session=session,
-            server_conversation_tracker=server_conversation_tracker,
-            streamed_result=streamed_result,
-            run_state=run_state,
-            items=items,
-            response_id=response_id,
-            store=store_setting,
-        )
+        async def _save_resumed_items(
+            items: list[RunItem], response_id: str | None, store_setting: bool | None
+        ) -> None:
+            await _save_resumed_stream_items(
+                session=session,
+                server_conversation_tracker=server_conversation_tracker,
+                streamed_result=streamed_result,
+                run_state=run_state,
+                items=items,
+                response_id=response_id,
+                store=store_setting,
+            )
 
-    async def _save_stream_items_with_count(
-        items: list[RunItem], response_id: str | None, store_setting: bool | None
-    ) -> None:
-        await _save_stream_items(
-            session=session,
-            server_conversation_tracker=server_conversation_tracker,
-            streamed_result=streamed_result,
-            run_state=run_state,
-            items=items,
-            response_id=response_id,
-            update_persisted_count=True,
-            store=store_setting,
-        )
+        async def _save_stream_items_with_count(
+            items: list[RunItem], response_id: str | None, store_setting: bool | None
+        ) -> None:
+            await _save_stream_items(
+                session=session,
+                server_conversation_tracker=server_conversation_tracker,
+                streamed_result=streamed_result,
+                run_state=run_state,
+                items=items,
+                response_id=response_id,
+                update_persisted_count=True,
+                store=store_setting,
+            )
 
-    async def _save_stream_items_without_count(
-        items: list[RunItem], response_id: str | None, store_setting: bool | None
-    ) -> None:
-        await _save_stream_items(
-            session=session,
-            server_conversation_tracker=server_conversation_tracker,
-            streamed_result=streamed_result,
-            run_state=run_state,
-            items=items,
-            response_id=response_id,
-            update_persisted_count=False,
-            store=store_setting,
-        )
+        async def _save_stream_items_without_count(
+            items: list[RunItem], response_id: str | None, store_setting: bool | None
+        ) -> None:
+            await _save_stream_items(
+                session=session,
+                server_conversation_tracker=server_conversation_tracker,
+                streamed_result=streamed_result,
+                run_state=run_state,
+                items=items,
+                response_id=response_id,
+                update_persisted_count=False,
+                store=store_setting,
+            )
+    except BaseException:
+        if current_task_span:
+            attach_usage_to_span(
+                current_task_span,
+                usage_delta(task_usage_start, context_wrapper.usage),
+            )
+            current_task_span.finish(reset_current=True)
+        if streamed_result.trace:
+            streamed_result.trace.finish(reset_current=True)
+        if not streamed_result.is_complete:
+            streamed_result.is_complete = True
+            streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+        raise
 
     try:
         while True:
+            all_input_guardrails = (
+                starting_agent.input_guardrails + (run_config.input_guardrails or [])
+                if current_turn == 0 and not is_resumed_state
+                else []
+            )
+            sequential_guardrails = [g for g in all_input_guardrails if not g.run_in_parallel]
+            parallel_guardrails = [g for g in all_input_guardrails if g.run_in_parallel]
+            current_bindings = bind_public_agent(current_agent)
+            execution_agent = current_bindings.execution_agent
+            prepared_turn_input = copy_input_items(streamed_result.input)
+            if sandbox_runtime is not None and sandbox_runtime.enabled and sequential_guardrails:
+                # Mirror the non-streaming path: a blocking first-turn guardrail should fire
+                # before sandbox prep can create, start, or mutate sandbox state.
+                existing_input_guardrail_count = len(streamed_result.input_guardrail_results)
+                await run_input_guardrails_with_queue(
+                    starting_agent,
+                    sequential_guardrails,
+                    ItemHelpers.input_to_new_input_list(prepared_turn_input),
+                    context_wrapper,
+                    streamed_result,
+                    None,
+                )
+                for result in streamed_result.input_guardrail_results[
+                    existing_input_guardrail_count:
+                ]:
+                    if result.output.tripwire_triggered:
+                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                        session_input_items_for_persistence = (
+                            await persist_session_items_for_guardrail_trip(
+                                session,
+                                server_conversation_tracker,
+                                session_input_items_for_persistence,
+                                starting_input,
+                                run_state,
+                                store=current_agent.model_settings.resolve(
+                                    run_config.model_settings
+                                ).store,
+                            )
+                        )
+                        raise InputGuardrailTripwireTriggered(result)
+                sequential_guardrails = []
+
+            if sandbox_runtime is not None:
+                prepared_sandbox = await sandbox_runtime.prepare_agent(
+                    current_agent=current_agent,
+                    current_input=prepared_turn_input,
+                    context_wrapper=context_wrapper,
+                    is_resumed_state=is_resumed_state,
+                )
+                current_bindings = prepared_sandbox.bindings
+                execution_agent = current_bindings.execution_agent
+                prepared_turn_input = copy_input_items(prepared_sandbox.input)
+                streamed_result.input = prepared_turn_input
+                streamed_result._original_input = copy_input_items(prepared_turn_input)
+                if run_state is not None:
+                    run_state._original_input = copy_input_items(prepared_turn_input)
+                sandbox_runtime.apply_result_metadata(streamed_result)
+
             if is_resumed_state and run_state is not None and run_state._current_step is not None:
                 if isinstance(run_state._current_step, NextStepInterruption):
                     if not run_state._model_responses or not run_state._last_processed_response:
@@ -623,7 +715,7 @@ async def start_streaming(
                     last_model_response = run_state._model_responses[-1]
 
                     turn_result = await resolve_interrupted_turn(
-                        agent=current_agent,
+                        bindings=current_bindings,
                         original_input=run_state._original_input,
                         original_pre_step_items=run_state._generated_items,
                         new_response=last_model_response,
@@ -638,7 +730,12 @@ async def start_streaming(
                         current_agent, run_state._last_processed_response
                     )
                     streamed_result._tool_use_tracker_snapshot = serialize_tool_use_tracker(
-                        tool_use_tracker
+                        tool_use_tracker,
+                        starting_agent=(
+                            run_state._starting_agent
+                            if run_state is not None and run_state._starting_agent is not None
+                            else starting_agent
+                        ),
                     )
 
                     streamed_result.input = turn_result.original_input
@@ -729,14 +826,14 @@ async def start_streaming(
             if streamed_result.is_complete:
                 break
 
-            all_tools = await get_all_tools(current_agent, context_wrapper)
+            all_tools = await get_all_tools(execution_agent, context_wrapper)
             await initialize_computer_tools(tools=all_tools, context_wrapper=context_wrapper)
 
             if current_span is None:
                 handoff_names = [
-                    h.agent_name for h in await get_handoffs(current_agent, context_wrapper)
+                    h.agent_name for h in await get_handoffs(execution_agent, context_wrapper)
                 ]
-                if output_schema := get_output_schema(current_agent):
+                if output_schema := get_output_schema(execution_agent):
                     output_type_name = output_schema.name()
                 else:
                     output_type_name = "str"
@@ -838,17 +935,11 @@ async def start_streaming(
                 break
 
             if current_turn == 1:
-                all_input_guardrails = starting_agent.input_guardrails + (
-                    run_config.input_guardrails or []
-                )
-                sequential_guardrails = [g for g in all_input_guardrails if not g.run_in_parallel]
-                parallel_guardrails = [g for g in all_input_guardrails if g.run_in_parallel]
-
                 if sequential_guardrails:
                     await run_input_guardrails_with_queue(
                         starting_agent,
                         sequential_guardrails,
-                        ItemHelpers.input_to_new_input_list(prepared_input),
+                        ItemHelpers.input_to_new_input_list(prepared_turn_input),
                         context_wrapper,
                         streamed_result,
                         current_span,
@@ -875,7 +966,7 @@ async def start_streaming(
                         run_input_guardrails_with_queue(
                             starting_agent,
                             parallel_guardrails,
-                            ItemHelpers.input_to_new_input_list(prepared_input),
+                            ItemHelpers.input_to_new_input_list(prepared_turn_input),
                             context_wrapper,
                             streamed_result,
                             current_span,
@@ -887,35 +978,49 @@ async def start_streaming(
                     current_turn,
                     current_agent.name,
                 )
-                if (
-                    session is not None
-                    and server_conversation_tracker is None
-                    and not streamed_result._stream_input_persisted
-                ):
-                    streamed_result._original_input_for_persistence = (
-                        session_input_items_for_persistence
-                        if session_input_items_for_persistence is not None
-                        else []
-                    )
-                turn_result = await run_single_turn_streamed(
-                    streamed_result,
-                    current_agent,
-                    hooks,
-                    context_wrapper,
-                    run_config,
-                    should_run_agent_start_hooks,
-                    tool_use_tracker,
-                    all_tools,
-                    server_conversation_tracker,
-                    pending_server_items=pending_server_items,
-                    session=session,
-                    session_items_to_rewind=(
-                        streamed_result._original_input_for_persistence
-                        if session is not None and server_conversation_tracker is None
-                        else None
-                    ),
-                    reasoning_item_id_policy=resolved_reasoning_item_id_policy,
+                turn_usage_start = snapshot_usage(context_wrapper.usage)
+                current_turn_span = turn_span(
+                    turn=current_turn,
+                    agent_name=current_agent.name,
                 )
+                current_turn_span.start(mark_as_current=True)
+                try:
+                    if (
+                        session is not None
+                        and server_conversation_tracker is None
+                        and not streamed_result._stream_input_persisted
+                    ):
+                        streamed_result._original_input_for_persistence = (
+                            session_input_items_for_persistence
+                            if session_input_items_for_persistence is not None
+                            else []
+                        )
+                    turn_result = await run_single_turn_streamed(
+                        streamed_result,
+                        current_bindings,
+                        hooks,
+                        context_wrapper,
+                        run_config,
+                        should_run_agent_start_hooks,
+                        tool_use_tracker,
+                        all_tools,
+                        server_conversation_tracker,
+                        pending_server_items=pending_server_items,
+                        session=session,
+                        session_items_to_rewind=(
+                            streamed_result._original_input_for_persistence
+                            if session is not None and server_conversation_tracker is None
+                            else None
+                        ),
+                        reasoning_item_id_policy=resolved_reasoning_item_id_policy,
+                        prompt_cache_key_resolver=prompt_cache_key_resolver,
+                    )
+                finally:
+                    attach_usage_to_span(
+                        current_turn_span,
+                        usage_delta(turn_usage_start, context_wrapper.usage),
+                    )
+                    current_turn_span.finish(reset_current=True)
                 logger.debug(
                     "Turn %s complete, next_step type=%s",
                     current_turn,
@@ -923,7 +1028,12 @@ async def start_streaming(
                 )
                 should_run_agent_start_hooks = False
                 streamed_result._tool_use_tracker_snapshot = serialize_tool_use_tracker(
-                    tool_use_tracker
+                    tool_use_tracker,
+                    starting_agent=(
+                        run_state._starting_agent
+                        if run_state is not None and run_state._starting_agent is not None
+                        else starting_agent
+                    ),
                 )
 
                 streamed_result.raw_responses = streamed_result.raw_responses + [
@@ -1093,6 +1203,12 @@ async def start_streaming(
             logger.warning("Failed to dispose computers after streamed run: %s", error)
         if current_span:
             current_span.finish(reset_current=True)
+        if current_task_span:
+            attach_usage_to_span(
+                current_task_span,
+                usage_delta(task_usage_start, context_wrapper.usage),
+            )
+            current_task_span.finish(reset_current=True)
         if streamed_result.trace:
             streamed_result.trace.finish(reset_current=True)
 
@@ -1103,7 +1219,7 @@ async def start_streaming(
 
 async def run_single_turn_streamed(
     streamed_result: RunResultStreaming,
-    agent: Agent[TContext],
+    bindings: AgentBindings[TContext],
     hooks: RunHooks[TContext],
     context_wrapper: RunContextWrapper[TContext],
     run_config: RunConfig,
@@ -1115,8 +1231,11 @@ async def run_single_turn_streamed(
     session_items_to_rewind: list[TResponseInputItem] | None = None,
     pending_server_items: list[RunItem] | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+    prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
 ) -> SingleStepResult:
     """Run a single streamed turn and emit events as results arrive."""
+    public_agent = bindings.public_agent
+    execution_agent = bindings.execution_agent
     emitted_tool_call_ids: set[str] = set()
     emitted_reasoning_item_ids: set[str] = set()
     emitted_tool_search_fingerprints: set[str] = set()
@@ -1162,28 +1281,28 @@ async def run_single_turn_streamed(
             turn_input=turn_input,
         )
         await asyncio.gather(
-            hooks.on_agent_start(agent_hook_context, agent),
+            hooks.on_agent_start(agent_hook_context, public_agent),
             (
-                agent.hooks.on_start(agent_hook_context, agent)
-                if agent.hooks
+                public_agent.hooks.on_start(agent_hook_context, public_agent)
+                if public_agent.hooks
                 else _coro.noop_coroutine()
             ),
         )
 
-    output_schema = get_output_schema(agent)
+    output_schema = get_output_schema(execution_agent)
 
-    streamed_result.current_agent = agent
-    streamed_result._current_agent_output_schema = output_schema
+    streamed_result.current_agent = public_agent
+    streamed_result._current_agent_output_schema = get_output_schema(public_agent)
 
     system_prompt, prompt_config = await asyncio.gather(
-        agent.get_system_prompt(context_wrapper),
-        agent.get_prompt(context_wrapper),
+        execution_agent.get_system_prompt(context_wrapper),
+        execution_agent.get_prompt(context_wrapper),
     )
 
-    handoffs = await get_handoffs(agent, context_wrapper)
-    model = get_model(agent, run_config)
-    model_settings = agent.model_settings.resolve(run_config.model_settings)
-    model_settings = maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
+    handoffs = await get_handoffs(execution_agent, context_wrapper)
+    model = get_model(execution_agent, run_config)
+    model_settings = execution_agent.model_settings.resolve(run_config.model_settings)
+    model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
     final_response: ModelResponse | None = None
 
@@ -1207,7 +1326,7 @@ async def run_single_turn_streamed(
         )
 
     filtered = await maybe_filter_model_input(
-        agent=agent,
+        agent=public_agent,
         run_config=run_config,
         context_wrapper=context_wrapper,
         input_items=input,
@@ -1231,10 +1350,15 @@ async def run_single_turn_streamed(
         raise RuntimeError("Prepared model input is empty")
 
     await asyncio.gather(
-        hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
+        hooks.on_llm_start(context_wrapper, public_agent, filtered.instructions, filtered.input),
         (
-            agent.hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input)
-            if agent.hooks
+            public_agent.hooks.on_llm_start(
+                context_wrapper,
+                public_agent,
+                filtered.instructions,
+                filtered.input,
+            )
+            if public_agent.hooks
             else _coro.noop_coroutine()
         ),
     )
@@ -1243,7 +1367,7 @@ async def run_single_turn_streamed(
         not streamed_result._stream_input_persisted
         and session is not None
         and server_conversation_tracker is None
-        and streamed_result._original_input_for_persistence
+        and streamed_result._original_input_for_persistence is not None
         and len(streamed_result._original_input_for_persistence) > 0
     ):
         streamed_result._stream_input_persisted = True
@@ -1270,6 +1394,19 @@ async def run_single_turn_streamed(
     else:
         logger.debug("No conversation_id available for request")
 
+    prompt_cache_key = (
+        prompt_cache_key_resolver.resolve(
+            model_settings,
+            model=model,
+            conversation_id=conversation_id,
+            session=session,
+            group_id=run_config.group_id,
+        )
+        if prompt_cache_key_resolver is not None
+        else None
+    )
+    model_settings = model_settings_with_prompt_cache_key(model_settings, prompt_cache_key)
+
     async def rewind_model_request() -> None:
         items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
         await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
@@ -1277,6 +1414,7 @@ async def run_single_turn_streamed(
             server_conversation_tracker.rewind_input(filtered.input)
 
     stream_failed_retry_attempts: list[int] = [0]
+
     retry_stream = stream_response_with_retry(
         get_stream=lambda: model.stream_response(
             filtered.instructions,
@@ -1344,7 +1482,7 @@ async def run_single_turn_streamed(
                     RunItemStreamEvent(
                         item=ToolSearchCallItem(
                             raw_item=coerce_tool_search_call_raw_item(output_item),
-                            agent=agent,
+                            agent=public_agent,
                         ),
                         name="tool_search_called",
                     )
@@ -1356,7 +1494,7 @@ async def run_single_turn_streamed(
                     RunItemStreamEvent(
                         item=ToolSearchOutputItem(
                             raw_item=coerce_tool_search_output_raw_item(output_item),
-                            agent=agent,
+                            agent=public_agent,
                         ),
                         name="tool_search_output_created",
                     )
@@ -1398,7 +1536,7 @@ async def run_single_turn_streamed(
 
                     tool_item = ToolCallItem(
                         raw_item=cast(ToolCallItemTypes, output_item),
-                        agent=agent,
+                        agent=public_agent,
                         description=tool_description,
                         title=tool_title,
                     )
@@ -1412,7 +1550,7 @@ async def run_single_turn_streamed(
                 if reasoning_id and reasoning_id not in emitted_reasoning_item_ids:
                     emitted_reasoning_item_ids.add(reasoning_id)
 
-                    reasoning_item = ReasoningItem(raw_item=output_item, agent=agent)
+                    reasoning_item = ReasoningItem(raw_item=output_item, agent=public_agent)
                     streamed_result._event_queue.put_nowait(
                         RunItemStreamEvent(item=reasoning_item, name="reasoning_item_created")
                     )
@@ -1421,11 +1559,11 @@ async def run_single_turn_streamed(
         context_wrapper.usage.add(final_response.usage)
         await asyncio.gather(
             (
-                agent.hooks.on_llm_end(context_wrapper, agent, final_response)
-                if agent.hooks
+                public_agent.hooks.on_llm_end(context_wrapper, public_agent, final_response)
+                if public_agent.hooks
                 else _coro.noop_coroutine()
             ),
-            hooks.on_llm_end(context_wrapper, agent, final_response),
+            hooks.on_llm_end(context_wrapper, public_agent, final_response),
         )
 
     if not final_response:
@@ -1438,7 +1576,7 @@ async def run_single_turn_streamed(
         server_conversation_tracker.track_server_items(final_response)
 
     single_step_result = await get_single_step_result_from_response(
-        agent=agent,
+        bindings=bindings,
         original_input=streamed_result.input,
         pre_step_items=streamed_result._model_input_items,
         new_response=final_response,
@@ -1483,7 +1621,7 @@ async def run_single_turn_streamed(
             item
             for item in items_to_filter
             if not (
-                isinstance(item, (ToolSearchCallItem, ToolSearchOutputItem))
+                isinstance(item, ToolSearchCallItem | ToolSearchOutputItem)
                 and _tool_search_fingerprint(item.raw_item) in emitted_tool_search_fingerprints
             )
         ]
@@ -1497,7 +1635,7 @@ async def run_single_turn_streamed(
 
 async def run_single_turn(
     *,
-    agent: Agent[TContext],
+    bindings: AgentBindings[TContext],
     all_tools: list[Tool],
     original_input: str | list[TResponseInputItem],
     generated_items: list[RunItem],
@@ -1510,8 +1648,11 @@ async def run_single_turn(
     session: Session | None = None,
     session_items_to_rewind: list[TResponseInputItem] | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+    prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
 ) -> SingleStepResult:
     """Run a single non-streaming turn of the agent loop."""
+    public_agent = bindings.public_agent
+    execution_agent = bindings.execution_agent
     try:
         turn_input = ItemHelpers.input_to_new_input_list(original_input)
     except Exception:
@@ -1526,28 +1667,28 @@ async def run_single_turn(
             turn_input=turn_input,
         )
         await asyncio.gather(
-            hooks.on_agent_start(agent_hook_context, agent),
+            hooks.on_agent_start(agent_hook_context, public_agent),
             (
-                agent.hooks.on_start(agent_hook_context, agent)
-                if agent.hooks
+                public_agent.hooks.on_start(agent_hook_context, public_agent)
+                if public_agent.hooks
                 else _coro.noop_coroutine()
             ),
         )
 
     system_prompt, prompt_config = await asyncio.gather(
-        agent.get_system_prompt(context_wrapper),
-        agent.get_prompt(context_wrapper),
+        execution_agent.get_system_prompt(context_wrapper),
+        execution_agent.get_prompt(context_wrapper),
     )
 
-    output_schema = get_output_schema(agent)
-    handoffs = await get_handoffs(agent, context_wrapper)
+    output_schema = get_output_schema(execution_agent)
+    handoffs = await get_handoffs(execution_agent, context_wrapper)
     if server_conversation_tracker is not None:
         input = server_conversation_tracker.prepare_input(original_input, generated_items)
     else:
         input = _prepare_turn_input_items(original_input, generated_items, reasoning_item_id_policy)
 
     new_response = await get_new_response(
-        agent,
+        bindings,
         system_prompt,
         input,
         output_schema,
@@ -1561,10 +1702,11 @@ async def run_single_turn(
         prompt_config,
         session=session,
         session_items_to_rewind=session_items_to_rewind,
+        prompt_cache_key_resolver=prompt_cache_key_resolver,
     )
 
     return await get_single_step_result_from_response(
-        agent=agent,
+        bindings=bindings,
         original_input=original_input,
         pre_step_items=generated_items,
         new_response=new_response,
@@ -1579,7 +1721,7 @@ async def run_single_turn(
 
 
 async def get_new_response(
-    agent: Agent[TContext],
+    bindings: AgentBindings[TContext],
     system_prompt: str | None,
     input: list[TResponseInputItem],
     output_schema: AgentOutputSchemaBase | None,
@@ -1593,10 +1735,13 @@ async def get_new_response(
     prompt_config: ResponsePromptParam | None,
     session: Session | None = None,
     session_items_to_rewind: list[TResponseInputItem] | None = None,
+    prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
 ) -> ModelResponse:
     """Call the model and return the raw response, handling retries and hooks."""
+    public_agent = bindings.public_agent
+    execution_agent = bindings.execution_agent
     filtered = await maybe_filter_model_input(
-        agent=agent,
+        agent=public_agent,
         run_config=run_config,
         context_wrapper=context_wrapper,
         input_items=input,
@@ -1605,23 +1750,23 @@ async def get_new_response(
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 
-    model = get_model(agent, run_config)
-    model_settings = agent.model_settings.resolve(run_config.model_settings)
-    model_settings = maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
+    model = get_model(execution_agent, run_config)
+    model_settings = execution_agent.model_settings.resolve(run_config.model_settings)
+    model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
     if server_conversation_tracker is not None:
         server_conversation_tracker.mark_input_as_sent(filtered.input)
 
     await asyncio.gather(
-        hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
+        hooks.on_llm_start(context_wrapper, public_agent, filtered.instructions, filtered.input),
         (
-            agent.hooks.on_llm_start(
+            public_agent.hooks.on_llm_start(
                 context_wrapper,
-                agent,
+                public_agent,
                 filtered.instructions,
                 filtered.input,
             )
-            if agent.hooks
+            if public_agent.hooks
             else _coro.noop_coroutine()
         ),
     )
@@ -1639,6 +1784,19 @@ async def get_new_response(
         logger.debug("Using conversation_id=%s", conversation_id)
     else:
         logger.debug("No conversation_id available for request")
+
+    prompt_cache_key = (
+        prompt_cache_key_resolver.resolve(
+            model_settings,
+            model=model,
+            conversation_id=conversation_id,
+            session=session,
+            group_id=run_config.group_id,
+        )
+        if prompt_cache_key_resolver is not None
+        else None
+    )
+    model_settings = model_settings_with_prompt_cache_key(model_settings, prompt_cache_key)
 
     async def rewind_model_request() -> None:
         items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
@@ -1677,11 +1835,11 @@ async def get_new_response(
 
     await asyncio.gather(
         (
-            agent.hooks.on_llm_end(context_wrapper, agent, new_response)
-            if agent.hooks
+            public_agent.hooks.on_llm_end(context_wrapper, public_agent, new_response)
+            if public_agent.hooks
             else _coro.noop_coroutine()
         ),
-        hooks.on_llm_end(context_wrapper, agent, new_response),
+        hooks.on_llm_end(context_wrapper, public_agent, new_response),
     )
 
     return new_response

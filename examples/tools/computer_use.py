@@ -5,7 +5,7 @@
 import asyncio
 import base64
 import sys
-from typing import Any, Literal, Union
+from typing import Any, Literal
 
 from playwright.async_api import Browser, Page, Playwright, async_playwright
 
@@ -59,9 +59,9 @@ class LocalPlaywrightComputer(AsyncComputer):
     """A computer, implemented using a local Playwright browser."""
 
     def __init__(self):
-        self._playwright: Union[Playwright, None] = None
-        self._browser: Union[Browser, None] = None
-        self._page: Union[Page, None] = None
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
+        self._page: Page | None = None
 
     async def _get_browser_and_page(self) -> tuple[Browser, Page]:
         width, height = self.dimensions

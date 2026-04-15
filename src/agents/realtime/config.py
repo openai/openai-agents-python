@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal, Union
+from typing import Any, Literal, TypeAlias
 
 from openai.types.realtime.realtime_audio_formats import (
     RealtimeAudioFormats as OpenAIRealtimeAudioFormats,
 )
-from typing_extensions import NotRequired, TypeAlias, TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from agents.prompts import Prompt
 
@@ -16,7 +16,7 @@ from ..model_settings import ToolChoice
 from ..run_config import ToolErrorFormatter
 from ..tool import Tool
 
-RealtimeModelName: TypeAlias = Union[
+RealtimeModelName: TypeAlias = (
     Literal[
         "gpt-realtime",
         "gpt-realtime-1.5",
@@ -30,18 +30,18 @@ RealtimeModelName: TypeAlias = Union[
         "gpt-realtime-mini",
         "gpt-realtime-mini-2025-10-06",
         "gpt-realtime-mini-2025-12-15",
-    ],
-    str,
-]
+    ]
+    | str
+)
 """The name of a realtime model."""
 
 
-RealtimeAudioFormat: TypeAlias = Union[
-    Literal["pcm16", "g711_ulaw", "g711_alaw"],
-    str,
-    Mapping[str, Any],
-    OpenAIRealtimeAudioFormats,
-]
+RealtimeAudioFormat: TypeAlias = (
+    Literal["pcm16", "g711_ulaw", "g711_alaw"]
+    | str
+    | Mapping[str, Any]
+    | OpenAIRealtimeAudioFormats
+)
 """The audio format for realtime audio streams."""
 
 
@@ -264,5 +264,5 @@ class RealtimeUserInputMessage(TypedDict):
     """List of content items (text and image) in the message."""
 
 
-RealtimeUserInput: TypeAlias = Union[str, RealtimeUserInputMessage]
+RealtimeUserInput: TypeAlias = str | RealtimeUserInputMessage
 """User input that can be a string or structured message."""

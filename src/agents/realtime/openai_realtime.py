@@ -6,10 +6,10 @@ import inspect
 import json
 import math
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated, Any, Callable, Literal, Union, cast
+from typing import Annotated, Any, Literal, TypeAlias, cast
 
 import pydantic
 import websockets
@@ -81,7 +81,7 @@ from openai.types.realtime.session_update_event import (
 )
 from openai.types.responses.response_prompt import ResponsePrompt
 from pydantic import Field, TypeAdapter
-from typing_extensions import NotRequired, TypeAlias, TypedDict, assert_never
+from typing_extensions import NotRequired, TypedDict, assert_never
 from websockets.asyncio.client import ClientConnection
 
 from agents.handoffs import Handoff
@@ -142,14 +142,7 @@ from .model_inputs import (
     RealtimeModelSendUserInput,
 )
 
-FormatInput: TypeAlias = Union[
-    str,
-    AudioPCM,
-    AudioPCMU,
-    AudioPCMA,
-    Mapping[str, Any],
-    None,
-]
+FormatInput: TypeAlias = str | AudioPCM | AudioPCMU | AudioPCMA | Mapping[str, Any] | None
 
 
 # Avoid direct imports of non-exported names by referencing via module
@@ -186,7 +179,7 @@ async def get_api_key(key: str | Callable[[], MaybeAwaitable[str]] | None) -> st
 
 
 AllRealtimeServerEvents = Annotated[
-    Union[OpenAIRealtimeServerEvent,],
+    OpenAIRealtimeServerEvent,
     Field(discriminator="type"),
 ]
 
@@ -397,7 +390,7 @@ async def _collect_enabled_handoffs(
         return res
 
     results = await asyncio.gather(*(_check_handoff_enabled(h) for h in handoffs))
-    return [h for h, ok in zip(handoffs, results) if ok]
+    return [h for h, ok in zip(handoffs, results, strict=False) if ok]
 
 
 async def _build_model_settings_from_agent(
@@ -1578,11 +1571,9 @@ class _ConversionHelper:
     ) -> RealtimeMessageItem:
         if not isinstance(
             item,
-            (
-                RealtimeConversationItemUserMessage,
-                RealtimeConversationItemAssistantMessage,
-                RealtimeConversationItemSystemMessage,
-            ),
+            RealtimeConversationItemUserMessage
+            | RealtimeConversationItemAssistantMessage
+            | RealtimeConversationItemSystemMessage,
         ):
             raise ValueError("Unsupported conversation item type for message conversion.")
         content: list[dict[str, Any]] = []

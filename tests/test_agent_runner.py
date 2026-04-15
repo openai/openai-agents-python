@@ -4,8 +4,9 @@ import asyncio
 import json
 import tempfile
 import warnings
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, cast
 from unittest.mock import patch
 
 import httpx
@@ -55,6 +56,7 @@ from agents.items import (
 from agents.lifecycle import RunHooks
 from agents.run import AgentRunner, get_default_agent_runner, set_default_agent_runner
 from agents.run_config import _default_trace_include_sensitive_data
+from agents.run_internal.agent_bindings import bind_public_agent
 from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
@@ -2107,7 +2109,7 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
     agent = Agent(name="test", model=model)
 
     result = await get_new_response(
-        agent=agent,
+        bindings=bind_public_agent(agent),
         system_prompt=None,
         input=[history_item, new_item],
         output_schema=None,
@@ -2152,7 +2154,7 @@ async def test_get_new_response_uses_agent_retry_settings() -> None:
     )
 
     result = await get_new_response(
-        agent=agent,
+        bindings=bind_public_agent(agent),
         system_prompt=None,
         input=[get_text_input_item("hello")],
         output_schema=None,

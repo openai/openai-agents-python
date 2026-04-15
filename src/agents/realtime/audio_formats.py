@@ -32,7 +32,7 @@ def to_realtime_audio_format(
             rate = input_audio_format.get("rate")
             if fmt_type == "audio/pcm":
                 pcm_rate: Literal[24000] | None
-                if isinstance(rate, (int, float)) and int(rate) == 24000:
+                if isinstance(rate, int | float) and int(rate) == 24000:
                     pcm_rate = 24000
                 elif rate is None:
                     pcm_rate = 24000

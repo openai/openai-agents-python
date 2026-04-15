@@ -13,8 +13,10 @@ from .create import (
     response_span,
     speech_group_span,
     speech_span,
+    task_span,
     trace,
     transcription_span,
+    turn_span,
 )
 from .processor_interface import TracingProcessor
 from .processors import default_exporter
@@ -32,7 +34,9 @@ from .span_data import (
     SpanData,
     SpeechGroupSpanData,
     SpeechSpanData,
+    TaskSpanData,
     TranscriptionSpanData,
+    TurnSpanData,
 )
 from .spans import Span, SpanError
 from .traces import Trace
@@ -57,6 +61,8 @@ __all__ = [
     "TracingConfig",
     "TraceCtxManager",
     "trace",
+    "task_span",
+    "turn_span",
     "Trace",
     "SpanError",
     "Span",
@@ -71,7 +77,9 @@ __all__ = [
     "ResponseSpanData",
     "SpeechGroupSpanData",
     "SpeechSpanData",
+    "TaskSpanData",
     "TranscriptionSpanData",
+    "TurnSpanData",
     "TracingProcessor",
     "TraceProvider",
     "gen_trace_id",

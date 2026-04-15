@@ -13,6 +13,7 @@ dependencies = [
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
     "types-requests>=2.0, <3",
+    "websockets>=15.0, <16",
     "mcp>=1.19.0, <2; python_version >= '3.10'",
 ]
 classifiers = [
@@ -36,46 +37,59 @@ Repository = "https://github.com/openai/openai-agents-python"
 [project.optional-dependencies]
 voice = ["numpy>=2.2.0, <3; python_version>='3.10'", "websockets>=15.0, <16"]
 viz = ["graphviz>=0.17"]
-litellm = ["litellm>=1.81.0, <=1.82.6"]
+litellm = ["litellm>=1.83.0"]
 any-llm = ["any-llm-sdk>=1.11.0, <2; python_version >= '3.11'"]
 realtime = ["websockets>=15.0, <16"]
 sqlalchemy = ["SQLAlchemy>=2.0", "asyncpg>=0.29.0"]
 encrypt = ["cryptography>=45.0, <46"]
 redis = ["redis>=7"]
 dapr = ["dapr>=1.16.0", "grpcio>=1.60.0"]
+docker = ["docker>=6.1"]
+blaxel = ["blaxel>=0.2.50", "aiohttp>=3.12,<4"]
+daytona = ["daytona>=0.155.0"]
+cloudflare = ["aiohttp>=3.12,<4"]
+e2b = ["e2b==2.20.0", "e2b-code-interpreter==2.4.1"]
+modal = ["modal==1.3.5"]
+runloop = ["runloop_api_client>=1.16.0,<2.0.0"]
+vercel = ["vercel>=0.5.6,<0.6"]
+s3 = ["boto3>=1.34"]
+temporal = [
+    "temporalio==1.25.0",
+    "textual>=8.2.3,<8.3",
+]
 
 [dependency-groups]
 dev = [
-    "mypy",
-    "ruff==0.9.2",
-    "pytest",
-    "pytest-asyncio",
-    "pytest-mock>=3.14.0",
-    "pytest-xdist",
-    "rich>=13.1.0, <14",
-    "mkdocs>=1.6.0",
-    "mkdocs-material>=9.6.0",
-    "mkdocstrings[python]>=0.28.0",
-    "mkdocs-static-i18n",
-    "coverage>=7.6.12",
-    "playwright==1.50.0",
-    "inline-snapshot>=0.20.7",
-    "pynput",
-    "types-pynput",
-    "sounddevice",
-    "textual",
-    "websockets",
-    "graphviz",
-    "mkdocs-static-i18n>=1.3.0",
-    "eval-type-backport>=0.2.2",
-    "fastapi >= 0.110.0, <1",
-    "aiosqlite>=0.21.0",
-    "cryptography>=45.0, <46",
-    "fakeredis>=2.31.3",
-    "dapr>=1.14.0",
-    "grpcio>=1.60.0",
-    "testcontainers==4.12.0", # pinned to 4.12.0 because 4.13.0 has a warning bug in wait_for_logs, see https://github.com/testcontainers/testcontainers-python/issues/874
-    "pyright==1.1.408",
+  "mypy",
+  "ruff==0.9.2",
+  "pytest",
+  "pytest-asyncio",
+  "pytest-mock>=3.14.0",
+  "pytest-xdist",
+  "rich>=13.1.0, <15",
+  "mkdocs>=1.6.0",
+  "mkdocs-material>=9.6.0",
+  "mkdocstrings[python]>=0.28.0",
+  "mkdocs-static-i18n",
+  "coverage>=7.6.12",
+  "playwright==1.50.0",
+  "inline-snapshot>=0.20.7",
+  "pynput",
+  "types-pynput",
+  "sounddevice",
+  "textual",
+  "websockets",
+  "graphviz",
+  "mkdocs-static-i18n>=1.3.0",
+  "eval-type-backport>=0.2.2",
+  "fastapi >= 0.110.0, <1",
+  "aiosqlite>=0.21.0",
+  "cryptography>=45.0, <46",
+  "fakeredis>=2.31.3",
+  "dapr>=1.14.0",
+  "grpcio>=1.60.0",
+  "testcontainers==4.12.0",       # pinned to 4.12.0 because 4.13.0 has a warning bug in wait_for_logs, see https://github.com/testcontainers/testcontainers-python/issues/874
+  "pyright==1.1.408",
 ]
 
 [tool.uv.workspace]
@@ -94,17 +108,17 @@ packages = ["src/agents"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = [
-    "E",  # pycodestyle errors
-    "W",  # pycodestyle warnings
-    "F",  # pyflakes
-    "I",  # isort
-    "B",  # flake8-bugbear
-    "C4", # flake8-comprehensions
-    "UP", # pyupgrade
+  "E",  # pycodestyle errors
+  "W",  # pycodestyle warnings
+  "F",  # pyflakes
+  "I",  # isort
+  "B",  # flake8-bugbear
+  "C4", # flake8-comprehensions
+  "UP", # pyupgrade
 ]
 isort = { combine-as-imports = true, known-first-party = ["agents"] }
 
@@ -124,19 +138,57 @@ disallow_untyped_calls = false
 module = "sounddevice.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["modal", "modal.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["e2b", "e2b.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["daytona", "daytona.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["runloop_api_client", "runloop_api_client.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["blaxel", "blaxel.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["vercel", "vercel.*"]
+ignore_missing_imports = true
+
 [tool.coverage.run]
 source = ["src/agents"]
-omit = ["tests/*"]
+omit = [
+  "tests/*",
+  "src/agents/sandbox/sandboxes/*.py",
+  "src/agents/sandbox/task_context.py",
+  "src/agents/sandbox/task_runtime.py",
+  "src/agents/sandbox/materialization.py",
+  "src/agents/sandbox/entries/artifacts.py",
+  "src/agents/sandbox/entries/mounts/*.py",
+  "src/agents/sandbox/util/checksums.py",
+  "src/agents/sandbox/util/deep_merge.py",
+  "src/agents/sandbox/util/github.py",
+  "src/agents/sandbox/util/iterator_io.py",
+  "src/agents/sandbox/util/parse_utils.py",
+  "src/agents/sandbox/util/tar_utils.py",
+]
 
 [tool.coverage.report]
 show_missing = true
 sort = "-Cover"
 exclude_also = [
-    # This is only executed while typechecking
-    "if TYPE_CHECKING:",
-    "@abc.abstractmethod",
-    "raise NotImplementedError",
-    "logger.debug",
+  # This is only executed while typechecking
+  "if TYPE_CHECKING:",
+  "@abc.abstractmethod",
+  "raise NotImplementedError",
+  "logger.debug",
 ]
 
 [tool.pytest.ini_options]
@@ -144,12 +196,12 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 testpaths = ["tests"]
 filterwarnings = [
-    # This is a warning that is expected to happen: we have an async filter that raises an exception
-    "ignore:coroutine 'test_async_input_filter_fails.<locals>.invalid_input_filter' was never awaited:RuntimeWarning",
+  # This is a warning that is expected to happen: we have an async filter that raises an exception
+  "ignore:coroutine 'test_async_input_filter_fails.<locals>.invalid_input_filter' was never awaited:RuntimeWarning",
 ]
 markers = [
-    "allow_call_model_methods: mark test as allowing calls to real model implementations",
-    "serial: mark test as requiring serial execution",
+  "allow_call_model_methods: mark test as allowing calls to real model implementations",
+  "serial: mark test as requiring serial execution",
 ]
 
 [tool.inline-snapshot]

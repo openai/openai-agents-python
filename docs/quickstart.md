@@ -78,6 +78,8 @@ Use this rule of thumb:
 
 For the tradeoffs and exact behaviors, see [Running agents](running_agents.md#choose-a-memory-strategy).
 
+Use a plain `Agent` plus `Runner` when the task mainly lives in prompts, tools, and conversation state. If the agent should inspect or modify real files in an isolated workspace, jump to the [Sandbox agents quickstart](sandbox_agents.md).
+
 ## Give your agent tools
 
 You can give an agent tools to look up information or perform actions.
@@ -191,4 +193,5 @@ Learn how to build more complex agentic flows:
 
 -   Learn about how to configure [Agents](agents.md).
 -   Learn about [running agents](running_agents.md) and [sessions](sessions/index.md).
+-   Learn about [Sandbox agents](sandbox_agents.md) if the work should happen inside a real workspace.
 -   Learn about [tools](tools.md), [guardrails](guardrails.md) and [models](models/index.md).

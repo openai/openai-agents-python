@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Union
-
-from typing_extensions import TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from ..guardrail import OutputGuardrailResult
 from ..run_context import RunContextWrapper
@@ -255,21 +253,21 @@ class RealtimeInputAudioTimeoutTriggered:
     type: Literal["input_audio_timeout_triggered"] = "input_audio_timeout_triggered"
 
 
-RealtimeSessionEvent: TypeAlias = Union[
-    RealtimeAgentStartEvent,
-    RealtimeAgentEndEvent,
-    RealtimeHandoffEvent,
-    RealtimeToolStart,
-    RealtimeToolEnd,
-    RealtimeToolApprovalRequired,
-    RealtimeRawModelEvent,
-    RealtimeAudioEnd,
-    RealtimeAudio,
-    RealtimeAudioInterrupted,
-    RealtimeError,
-    RealtimeHistoryUpdated,
-    RealtimeHistoryAdded,
-    RealtimeGuardrailTripped,
-    RealtimeInputAudioTimeoutTriggered,
-]
+RealtimeSessionEvent: TypeAlias = (
+    RealtimeAgentStartEvent
+    | RealtimeAgentEndEvent
+    | RealtimeHandoffEvent
+    | RealtimeToolStart
+    | RealtimeToolEnd
+    | RealtimeToolApprovalRequired
+    | RealtimeRawModelEvent
+    | RealtimeAudioEnd
+    | RealtimeAudio
+    | RealtimeAudioInterrupted
+    | RealtimeError
+    | RealtimeHistoryUpdated
+    | RealtimeHistoryAdded
+    | RealtimeGuardrailTripped
+    | RealtimeInputAudioTimeoutTriggered
+)
 """An event emitted by the realtime session."""

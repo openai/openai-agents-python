@@ -63,6 +63,9 @@ class OpenAIChatCompletionsModel(Model):
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
 
+    def _supports_default_prompt_cache_key(self) -> bool:
+        return ChatCmplHelpers.is_openai(self._get_client())
+
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)
 
@@ -130,7 +133,6 @@ class OpenAIChatCompletionsModel(Model):
                 stream=False,
                 prompt=prompt,
             )
-
             message: ChatCompletionMessage | None = None
             first_choice: Choice | None = None
             if response.choices and len(response.choices) > 0:
@@ -388,31 +390,46 @@ class OpenAIChatCompletionsModel(Model):
 
         stream_param: Literal[True] | Omit = True if stream else omit
 
-        ret = await self._get_client().chat.completions.create(
-            model=self.model,
-            messages=converted_messages,
-            tools=tools_param,
-            temperature=self._non_null_or_omit(model_settings.temperature),
-            top_p=self._non_null_or_omit(model_settings.top_p),
-            frequency_penalty=self._non_null_or_omit(model_settings.frequency_penalty),
-            presence_penalty=self._non_null_or_omit(model_settings.presence_penalty),
-            max_tokens=self._non_null_or_omit(model_settings.max_tokens),
-            tool_choice=tool_choice,
-            response_format=response_format,
-            parallel_tool_calls=parallel_tool_calls,
-            stream=cast(Any, stream_param),
-            stream_options=self._non_null_or_omit(stream_options),
-            store=self._non_null_or_omit(store),
-            reasoning_effort=self._non_null_or_omit(reasoning_effort),
-            verbosity=self._non_null_or_omit(model_settings.verbosity),
-            top_logprobs=self._non_null_or_omit(model_settings.top_logprobs),
-            prompt_cache_retention=self._non_null_or_omit(model_settings.prompt_cache_retention),
-            extra_headers=self._merge_headers(model_settings),
-            extra_query=model_settings.extra_query,
-            extra_body=model_settings.extra_body,
-            metadata=self._non_null_or_omit(model_settings.metadata),
-            **(model_settings.extra_args or {}),
+        create_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": converted_messages,
+            "tools": tools_param,
+            "temperature": self._non_null_or_omit(model_settings.temperature),
+            "top_p": self._non_null_or_omit(model_settings.top_p),
+            "frequency_penalty": self._non_null_or_omit(model_settings.frequency_penalty),
+            "presence_penalty": self._non_null_or_omit(model_settings.presence_penalty),
+            "max_tokens": self._non_null_or_omit(model_settings.max_tokens),
+            "tool_choice": tool_choice,
+            "response_format": response_format,
+            "parallel_tool_calls": parallel_tool_calls,
+            "stream": cast(Any, stream_param),
+            "stream_options": self._non_null_or_omit(stream_options),
+            "store": self._non_null_or_omit(store),
+            "reasoning_effort": self._non_null_or_omit(reasoning_effort),
+            "verbosity": self._non_null_or_omit(model_settings.verbosity),
+            "top_logprobs": self._non_null_or_omit(model_settings.top_logprobs),
+            "prompt_cache_retention": self._non_null_or_omit(model_settings.prompt_cache_retention),
+            "extra_headers": self._merge_headers(model_settings),
+            "extra_query": model_settings.extra_query,
+            "extra_body": model_settings.extra_body,
+            "metadata": self._non_null_or_omit(model_settings.metadata),
+        }
+        duplicate_extra_arg_keys = sorted(
+            set(create_kwargs).intersection(model_settings.extra_args or {})
         )
+        if duplicate_extra_arg_keys:
+            if len(duplicate_extra_arg_keys) == 1:
+                key = duplicate_extra_arg_keys[0]
+                raise TypeError(
+                    f"chat.completions.create() got multiple values for keyword argument '{key}'"
+                )
+            keys = ", ".join(repr(key) for key in duplicate_extra_arg_keys)
+            raise TypeError(
+                f"chat.completions.create() got multiple values for keyword arguments {keys}"
+            )
+        create_kwargs.update(model_settings.extra_args or {})
+
+        ret = await self._get_client().chat.completions.create(**create_kwargs)
 
         if isinstance(ret, ChatCompletion):
             return ret

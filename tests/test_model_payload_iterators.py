@@ -42,7 +42,7 @@ def _force_materialization(value: object) -> None:
     elif isinstance(value, list):
         for nested in value:
             _force_materialization(nested)
-    elif isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
+    elif isinstance(value, Iterable) and not isinstance(value, str | bytes | bytearray):
         list(value)
 
 

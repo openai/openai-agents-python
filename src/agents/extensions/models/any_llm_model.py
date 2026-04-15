@@ -169,7 +169,7 @@ def _flatten_any_llm_reasoning_value(value: Any) -> str:
         if flattened:
             return flattened
 
-    if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+    if isinstance(value, Iterable) and not isinstance(value, str | bytes):
         parts = [_flatten_any_llm_reasoning_value(item) for item in value]
         return "".join(part for part in parts if part)
     return ""

@@ -10,6 +10,11 @@ from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from . import _openai_shared
 from .default_models import get_default_model
 from .interface import Model, ModelProvider
+from .openai_agent_registration import (
+    OpenAIAgentRegistrationConfig,
+    ResolvedOpenAIAgentRegistrationConfig,
+    resolve_openai_agent_registration_config,
+)
 from .openai_chatcompletions import OpenAIChatCompletionsModel
 from .openai_responses import OpenAIResponsesModel, OpenAIResponsesWSModel
 
@@ -43,6 +48,7 @@ class OpenAIProvider(ModelProvider):
         project: str | None = None,
         use_responses: bool | None = None,
         use_responses_websocket: bool | None = None,
+        agent_registration: OpenAIAgentRegistrationConfig | None = None,
     ) -> None:
         """Create a new OpenAI provider.
 
@@ -60,6 +66,7 @@ class OpenAIProvider(ModelProvider):
             use_responses: Whether to use the OpenAI responses API.
             use_responses_websocket: Whether to use websocket transport for the OpenAI responses
                 API.
+            agent_registration: Optional agent registration configuration.
         """
         if openai_client is not None:
             assert api_key is None and base_url is None and websocket_base_url is None, (
@@ -94,6 +101,11 @@ class OpenAIProvider(ModelProvider):
         self._ws_model_cache_by_loop: weakref.WeakKeyDictionary[
             asyncio.AbstractEventLoop, _WSLoopModelCache
         ] = weakref.WeakKeyDictionary()
+        self._agent_registration = resolve_openai_agent_registration_config(agent_registration)
+
+    @property
+    def agent_registration(self) -> ResolvedOpenAIAgentRegistrationConfig | None:
+        return self._agent_registration
 
     # We lazy load the client in case you never actually use OpenAIProvider(). Otherwise
     # AsyncOpenAI() raises an error if you don't have an API key set.

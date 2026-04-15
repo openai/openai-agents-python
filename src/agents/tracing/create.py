@@ -17,7 +17,9 @@ from .span_data import (
     ResponseSpanData,
     SpeechGroupSpanData,
     SpeechSpanData,
+    TaskSpanData,
     TranscriptionSpanData,
+    TurnSpanData,
 )
 from .spans import Span
 from .traces import Trace
@@ -113,6 +115,37 @@ def agent_span(
     """
     return get_trace_provider().create_span(
         span_data=AgentSpanData(name=name, handoffs=handoffs, tools=tools, output_type=output_type),
+        span_id=span_id,
+        parent=parent,
+        disabled=disabled,
+    )
+
+
+def task_span(
+    name: str,
+    span_id: str | None = None,
+    parent: Trace | Span[Any] | None = None,
+    disabled: bool = False,
+) -> Span[TaskSpanData]:
+    """Create a new task span. This represents one top-level Runner invocation."""
+    return get_trace_provider().create_span(
+        span_data=TaskSpanData(name=name),
+        span_id=span_id,
+        parent=parent,
+        disabled=disabled,
+    )
+
+
+def turn_span(
+    turn: int,
+    agent_name: str,
+    span_id: str | None = None,
+    parent: Trace | Span[Any] | None = None,
+    disabled: bool = False,
+) -> Span[TurnSpanData]:
+    """Create a new turn span. This represents one agent loop turn."""
+    return get_trace_provider().create_span(
+        span_data=TurnSpanData(turn=turn, agent_name=agent_name),
         span_id=span_id,
         parent=parent,
         disabled=disabled,

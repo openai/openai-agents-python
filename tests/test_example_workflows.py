@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, cast
 
 import pytest
@@ -28,6 +30,16 @@ from agents import (
 from agents.agent import ToolsToFinalOutputResult
 from agents.items import TResponseInputItem
 from agents.tool import FunctionToolResult, function_tool
+from examples.sandbox.basic import _import_docker_from_env
+from examples.sandbox.docker.docker_runner import (
+    _format_tool_call,
+    _format_tool_output,
+)
+from examples.sandbox.sandbox_agents_as_tools import (
+    PricingPacketReview,
+    RolloutRiskReview,
+    _structured_tool_output_extractor,
+)
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -37,6 +49,29 @@ from .test_responses import (
     get_text_input_item,
     get_text_message,
 )
+
+
+def test_sandbox_basic_direct_run_imports_external_docker_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sdk_dir = tmp_path / "sdk"
+    docker_package = sdk_dir / "docker"
+    docker_package.mkdir(parents=True)
+    docker_package.joinpath("__init__.py").write_text(
+        "def from_env():\n    return 'external docker sdk'\n"
+    )
+
+    script_dir = Path("examples/sandbox").resolve()
+    monkeypatch.setattr(sys, "path", [str(script_dir), str(sdk_dir)])
+    for module_name in list(sys.modules):
+        if module_name == "docker" or module_name.startswith("docker."):
+            monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    docker_from_env = _import_docker_from_env()
+
+    assert docker_from_env() == "external docker sdk"
+    assert sys.path == [str(script_dir), str(sdk_dir)]
 
 
 @dataclass
@@ -485,6 +520,185 @@ async def test_agent_as_tool_streaming_example_collects_events() -> None:
     assert all(
         event["tool_call"] and event["tool_call"].name == "billing_agent" for event in received
     )
+
+
+@pytest.mark.asyncio
+async def test_sandbox_agents_as_tools_example_serializes_structured_reviews() -> None:
+    pricing_model = FakeModel()
+    pricing_model.set_next_output(
+        [
+            get_final_output_message(
+                json.dumps(
+                    {
+                        "requested_discount_percent": 15,
+                        "requested_term_months": 24,
+                        "pricing_risk": "medium",
+                        "summary": "Discount ask is above target band.",
+                        "recommended_next_step": "Trade discount for a stronger give-get.",
+                        "evidence_files": ["pricing_summary.md", "commercial_notes.md"],
+                    }
+                )
+            )
+        ]
+    )
+    rollout_model = FakeModel()
+    rollout_model.set_next_output(
+        [
+            get_final_output_message(
+                json.dumps(
+                    {
+                        "rollout_risk": "medium",
+                        "summary": "Launch timing is compressed.",
+                        "blockers": [
+                            "Regional admin training is incomplete.",
+                            "SSO migration lands in week 2.",
+                        ],
+                        "recommended_next_step": "Require a phased rollout plan.",
+                        "evidence_files": ["rollout_plan.md", "support_history.md"],
+                    }
+                )
+            )
+        ]
+    )
+    orchestrator_model = FakeModel()
+    orchestrator_model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "review_pricing_packet",
+                    json.dumps({"input": "Review pricing"}),
+                    call_id="outer_pricing",
+                ),
+                get_function_tool_call(
+                    "review_rollout_risk",
+                    json.dumps({"input": "Review rollout"}),
+                    call_id="outer_rollout",
+                ),
+                get_function_tool_call(
+                    "get_discount_approval_rule",
+                    json.dumps({"discount_percent": 15}),
+                    call_id="outer_approval",
+                ),
+            ],
+            [get_text_message("Recommendation complete")],
+        ]
+    )
+
+    @function_tool
+    def get_discount_approval_rule(discount_percent: int) -> str:
+        if discount_percent <= 10:
+            return "AE"
+        if discount_percent <= 15:
+            return "RSD"
+        return "Finance + RSD"
+
+    pricing_agent = Agent(
+        name="pricing",
+        model=pricing_model,
+        output_type=PricingPacketReview,
+    )
+    rollout_agent = Agent(
+        name="rollout",
+        model=rollout_model,
+        output_type=RolloutRiskReview,
+    )
+    orchestrator = Agent(
+        name="orchestrator",
+        model=orchestrator_model,
+        tools=[
+            pricing_agent.as_tool(
+                "review_pricing_packet",
+                "Pricing review",
+                custom_output_extractor=_structured_tool_output_extractor,
+            ),
+            rollout_agent.as_tool(
+                "review_rollout_risk",
+                "Rollout review",
+                custom_output_extractor=_structured_tool_output_extractor,
+            ),
+            get_discount_approval_rule,
+        ],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    result = await Runner.run(orchestrator, "Review the renewal")
+
+    assert result.final_output == "Recommendation complete"
+    outer_second_turn_input = cast(
+        list[dict[str, Any]],
+        orchestrator_model.last_turn_args["input"],
+    )
+    outer_tool_outputs = [
+        item for item in outer_second_turn_input if item.get("type") == "function_call_output"
+    ]
+    assert outer_tool_outputs == [
+        {
+            "call_id": "outer_pricing",
+            "output": json.dumps(
+                {
+                    "evidence_files": ["pricing_summary.md", "commercial_notes.md"],
+                    "pricing_risk": "medium",
+                    "recommended_next_step": "Trade discount for a stronger give-get.",
+                    "requested_discount_percent": 15,
+                    "requested_term_months": 24,
+                    "summary": "Discount ask is above target band.",
+                },
+                sort_keys=True,
+            ),
+            "type": "function_call_output",
+        },
+        {
+            "call_id": "outer_rollout",
+            "output": json.dumps(
+                {
+                    "blockers": [
+                        "Regional admin training is incomplete.",
+                        "SSO migration lands in week 2.",
+                    ],
+                    "evidence_files": ["rollout_plan.md", "support_history.md"],
+                    "recommended_next_step": "Require a phased rollout plan.",
+                    "rollout_risk": "medium",
+                    "summary": "Launch timing is compressed.",
+                },
+                sort_keys=True,
+            ),
+            "type": "function_call_output",
+        },
+        {
+            "call_id": "outer_approval",
+            "output": "RSD",
+            "type": "function_call_output",
+        },
+    ]
+
+
+def test_docker_runner_formats_tool_calls_without_dumping_run_item() -> None:
+    assert (
+        _format_tool_call(
+            {
+                "type": "function_call",
+                "name": "read_file",
+                "arguments": json.dumps({"path": "README.md"}),
+            }
+        )
+        == '[tool call] read_file: {"path": "README.md"}'
+    )
+
+    assert (
+        _format_tool_call(
+            {
+                "type": "shell_call",
+                "action": {
+                    "commands": ["find . -maxdepth 2 -type f", "cat README.md"],
+                },
+            }
+        )
+        == "[tool call] shell: find . -maxdepth 2 -type f; cat README.md"
+    )
+
+
+def test_docker_runner_formats_tool_output_as_readable_block() -> None:
+    assert _format_tool_output("$ ls\nREADME.md\nsrc\n") == "[tool output]\n$ ls\nREADME.md\nsrc\n"
 
 
 @pytest.mark.asyncio

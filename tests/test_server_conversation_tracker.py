@@ -10,6 +10,7 @@ from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.result import RunResultStreaming
 from agents.run_config import ModelInputData, RunConfig
 from agents.run_context import RunContextWrapper
+from agents.run_internal.agent_bindings import bind_public_agent
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
 from agents.run_internal.run_loop import get_new_response, run_single_turn_streamed
 from agents.run_internal.tool_use_tracker import AgentToolUseTracker
@@ -681,7 +682,7 @@ async def test_get_new_response_marks_filtered_input_as_sent() -> None:
     run_config = RunConfig(call_model_input_filter=_filter_input)
 
     await get_new_response(
-        agent,
+        bind_public_agent(agent),
         None,
         [item_1, item_2],
         None,
@@ -740,7 +741,7 @@ async def test_run_single_turn_streamed_marks_filtered_input_as_sent() -> None:
 
     await run_single_turn_streamed(
         streamed_result,
-        agent,
+        bind_public_agent(agent),
         RunHooks(),
         context_wrapper,
         run_config,
@@ -815,7 +816,7 @@ async def test_run_single_turn_streamed_seeds_hosted_mcp_metadata_from_pre_step_
 
     await run_single_turn_streamed(
         streamed_result,
-        agent,
+        bind_public_agent(agent),
         RunHooks(),
         context_wrapper,
         run_config,

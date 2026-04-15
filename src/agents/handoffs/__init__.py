@@ -3,12 +3,12 @@ from __future__ import annotations
 import inspect
 import json
 import weakref
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace as dataclasses_replace
-from typing import TYPE_CHECKING, Any, Callable, Generic, cast, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeAlias, cast, overload
 
 from pydantic import TypeAdapter
-from typing_extensions import TypeAlias, TypeVar
+from typing_extensions import TypeVar
 
 from ..exceptions import ModelBehaviorError, UserError
 from ..items import RunItem, TResponseInputItem

@@ -73,6 +73,7 @@ from ..stream_events import StreamEvent
 from ..tool import (
     ApplyPatchTool,
     ComputerTool,
+    CustomTool,
     FunctionTool,
     FunctionToolResult,
     HostedMCPTool,
@@ -84,6 +85,7 @@ from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResul
 from ..tracing import SpanError, handoff_span
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
+from .agent_bindings import AgentBindings
 from .items import (
     REJECTION_MESSAGE,
     apply_patch_rejection_item,
@@ -101,6 +103,7 @@ from .run_steps import (
     SingleStepResult,
     ToolRunApplyPatchCall,
     ToolRunComputerAction,
+    ToolRunCustom,
     ToolRunFunction,
     ToolRunHandoff,
     ToolRunLocalShellCall,
@@ -110,7 +113,7 @@ from .run_steps import (
 from .streaming import stream_step_items_to_queue
 from .tool_execution import (
     build_litellm_json_tool_call,
-    coerce_apply_patch_operation,
+    coerce_apply_patch_operations,
     coerce_shell_call,
     extract_apply_patch_call_id,
     extract_shell_call_id,
@@ -155,7 +158,7 @@ __all__ = [
 
 async def _maybe_finalize_from_tool_results(
     *,
-    agent: Agent[TContext],
+    public_agent: Agent[TContext],
     original_input: str | list[TResponseInputItem],
     new_response: ModelResponse,
     pre_step_items: list[RunItem],
@@ -167,12 +170,12 @@ async def _maybe_finalize_from_tool_results(
     tool_output_guardrail_results: list[ToolOutputGuardrailResult],
 ) -> SingleStepResult | None:
     check_tool_use = await check_for_final_output_from_tools(
-        agent, function_results, context_wrapper
+        public_agent, function_results, context_wrapper
     )
     if not check_tool_use.is_final_output:
         return None
 
-    if not agent.output_type or agent.output_type is str:
+    if not public_agent.output_type or public_agent.output_type is str:
         check_tool_use.final_output = str(check_tool_use.final_output)
 
     if check_tool_use.final_output is None:
@@ -182,7 +185,7 @@ async def _maybe_finalize_from_tool_results(
         )
 
     return await execute_final_output(
-        agent=agent,
+        public_agent=public_agent,
         original_input=original_input,
         new_response=new_response,
         pre_step_items=pre_step_items,
@@ -218,7 +221,7 @@ async def run_final_output_hooks(
 
 async def execute_final_output_step(
     *,
-    agent: Agent[Any],
+    public_agent: Agent[Any],
     original_input: str | list[TResponseInputItem],
     new_response: ModelResponse,
     pre_step_items: list[RunItem],
@@ -235,7 +238,7 @@ async def execute_final_output_step(
 ) -> SingleStepResult:
     """Finalize a turn once final output is known and run end hooks."""
     final_output_hooks = run_final_output_hooks_fn or run_final_output_hooks
-    await final_output_hooks(agent, hooks, context_wrapper, final_output)
+    await final_output_hooks(public_agent, hooks, context_wrapper, final_output)
 
     return SingleStepResult(
         original_input=original_input,
@@ -251,7 +254,7 @@ async def execute_final_output_step(
 
 async def execute_final_output(
     *,
-    agent: Agent[Any],
+    public_agent: Agent[Any],
     original_input: str | list[TResponseInputItem],
     new_response: ModelResponse,
     pre_step_items: list[RunItem],
@@ -268,7 +271,7 @@ async def execute_final_output(
 ) -> SingleStepResult:
     """Convenience wrapper to finalize a turn and run end hooks."""
     return await execute_final_output_step(
-        agent=agent,
+        public_agent=public_agent,
         original_input=original_input,
         new_response=new_response,
         pre_step_items=pre_step_items,
@@ -284,7 +287,7 @@ async def execute_final_output(
 
 async def execute_handoffs(
     *,
-    agent: Agent[TContext],
+    public_agent: Agent[TContext],
     original_input: str | list[TResponseInputItem],
     pre_step_items: list[RunItem],
     new_step_items: list[RunItem],
@@ -310,14 +313,14 @@ async def execute_handoffs(
                 ToolCallOutputItem(
                     output=output_message,
                     raw_item=ItemHelpers.tool_call_output_item(handoff.tool_call, output_message),
-                    agent=agent,
+                    agent=public_agent,
                 )
                 for handoff in run_handoffs[1:]
             ]
         )
 
     actual_handoff = run_handoffs[0]
-    with handoff_span(from_agent=agent.name) as span_handoff:
+    with handoff_span(from_agent=public_agent.name) as span_handoff:
         handoff = actual_handoff.handoff
         new_agent: Agent[Any] = await handoff.on_invoke_handoff(
             context_wrapper, actual_handoff.tool_call.arguments
@@ -336,12 +339,12 @@ async def execute_handoffs(
 
         new_step_items.append(
             HandoffOutputItem(
-                agent=agent,
+                agent=public_agent,
                 raw_item=ItemHelpers.tool_call_output_item(
                     actual_handoff.tool_call,
                     handoff.get_transfer_message(new_agent),
                 ),
-                source_agent=agent,
+                source_agent=public_agent,
                 target_agent=new_agent,
             )
         )
@@ -349,16 +352,16 @@ async def execute_handoffs(
         await asyncio.gather(
             hooks.on_handoff(
                 context=context_wrapper,
-                from_agent=agent,
+                from_agent=public_agent,
                 to_agent=new_agent,
             ),
             (
-                agent.hooks.on_handoff(
+                public_agent.hooks.on_handoff(
                     context_wrapper,
                     agent=new_agent,
-                    source=agent,
+                    source=public_agent,
                 )
-                if agent.hooks
+                if public_agent.hooks
                 else _coro.noop_coroutine()
             ),
         )
@@ -386,7 +389,7 @@ async def execute_handoffs(
 
         if input_filter and handoff_input_data is not None:
             filter_name = getattr(input_filter, "__qualname__", repr(input_filter))
-            from_agent = getattr(agent, "name", agent.__class__.__name__)
+            from_agent = getattr(public_agent, "name", public_agent.__class__.__name__)
             to_agent = getattr(new_agent, "name", new_agent.__class__.__name__)
             logger.debug(
                 "Filtering handoff inputs with %s for %s -> %s",
@@ -498,7 +501,7 @@ async def check_for_final_output_from_tools(
 
 async def execute_tools_and_side_effects(
     *,
-    agent: Agent[TContext],
+    bindings: AgentBindings[TContext],
     original_input: str | list[TResponseInputItem],
     pre_step_items: list[RunItem],
     new_response: ModelResponse,
@@ -509,6 +512,7 @@ async def execute_tools_and_side_effects(
     run_config: RunConfig,
 ) -> SingleStepResult:
     """Run one turn of the loop, coordinating tools, approvals, guardrails, and handoffs."""
+    public_agent = bindings.public_agent
 
     execute_final_output_call = execute_final_output
     execute_handoffs_call = execute_handoffs
@@ -518,7 +522,7 @@ async def execute_tools_and_side_effects(
 
     plan = _build_plan_for_fresh_turn(
         processed_response=processed_response,
-        agent=agent,
+        agent=public_agent,
         context_wrapper=context_wrapper,
         approval_items_by_call_id=approval_items_by_call_id,
     )
@@ -533,12 +537,13 @@ async def execute_tools_and_side_effects(
         tool_input_guardrail_results,
         tool_output_guardrail_results,
         computer_results,
+        custom_tool_results,
         shell_results,
         apply_patch_results,
         local_shell_results,
     ) = await _execute_tool_plan(
         plan=plan,
-        agent=agent,
+        bindings=bindings,
         hooks=hooks,
         context_wrapper=context_wrapper,
         run_config=run_config,
@@ -547,6 +552,7 @@ async def execute_tools_and_side_effects(
         _build_tool_result_items(
             function_results=function_results,
             computer_results=computer_results,
+            custom_tool_results=custom_tool_results,
             shell_results=shell_results,
             apply_patch_results=apply_patch_results,
             local_shell_results=local_shell_results,
@@ -555,6 +561,7 @@ async def execute_tools_and_side_effects(
 
     interruptions = _collect_tool_interruptions(
         function_results=function_results,
+        custom_tool_results=custom_tool_results,
         shell_results=shell_results,
         apply_patch_results=apply_patch_results,
     )
@@ -579,7 +586,7 @@ async def execute_tools_and_side_effects(
         )
 
     await _append_mcp_callback_results(
-        agent=agent,
+        agent=public_agent,
         requests=plan.mcp_requests_with_callback,
         context_wrapper=context_wrapper,
         append_item=new_step_items.append,
@@ -587,7 +594,7 @@ async def execute_tools_and_side_effects(
 
     if run_handoffs := processed_response.handoffs:
         return await execute_handoffs_call(
-            agent=agent,
+            public_agent=public_agent,
             original_input=original_input,
             pre_step_items=pre_step_items,
             new_step_items=new_step_items,
@@ -599,7 +606,7 @@ async def execute_tools_and_side_effects(
         )
 
     tool_final_output = await _maybe_finalize_from_tool_results(
-        agent=agent,
+        public_agent=public_agent,
         original_input=original_input,
         new_response=new_response,
         pre_step_items=pre_step_items,
@@ -626,7 +633,7 @@ async def execute_tools_and_side_effects(
             if output_schema and not output_schema.is_plain_text() and potential_final_output_text:
                 final_output = output_schema.validate_json(potential_final_output_text)
                 return await execute_final_output_call(
-                    agent=agent,
+                    public_agent=public_agent,
                     original_input=original_input,
                     new_response=new_response,
                     pre_step_items=pre_step_items,
@@ -639,7 +646,7 @@ async def execute_tools_and_side_effects(
                 )
             if not output_schema or output_schema.is_plain_text():
                 return await execute_final_output_call(
-                    agent=agent,
+                    public_agent=public_agent,
                     original_input=original_input,
                     new_response=new_response,
                     pre_step_items=pre_step_items,
@@ -664,7 +671,7 @@ async def execute_tools_and_side_effects(
 
 async def resolve_interrupted_turn(
     *,
-    agent: Agent[TContext],
+    bindings: AgentBindings[TContext],
     original_input: str | list[TResponseInputItem],
     original_pre_step_items: list[RunItem],
     new_response: ModelResponse,
@@ -676,6 +683,8 @@ async def resolve_interrupted_turn(
     nest_handoff_history_fn: Callable[..., HandoffInputData] | None = None,
 ) -> SingleStepResult:
     """Continue a turn that was previously interrupted waiting for tool approval."""
+    public_agent = bindings.public_agent
+    execution_agent = bindings.execution_agent
 
     execute_handoffs_call = execute_handoffs
 
@@ -719,7 +728,7 @@ async def resolve_interrupted_turn(
             )
         rejected_function_outputs.append(
             function_rejection_item(
-                agent,
+                public_agent,
                 tool_call,
                 rejection_message=rejection_message,
                 scope_id=tool_state_scope_id,
@@ -770,6 +779,12 @@ async def resolve_interrupted_turn(
     def _apply_patch_call_id_from_run(run: ToolRunApplyPatchCall) -> str:
         return extract_apply_patch_call_id(run.tool_call)
 
+    def _custom_call_id_from_run(run: ToolRunCustom) -> str:
+        call_id = extract_tool_call_id(run.tool_call)
+        if not call_id:
+            raise ModelBehaviorError("Custom tool call is missing call_id.")
+        return call_id
+
     def _computer_call_id_from_run(run: ToolRunComputerAction) -> str:
         call_id = extract_tool_call_id(run.tool_call)
         if not call_id:
@@ -782,6 +797,9 @@ async def resolve_interrupted_turn(
     def _apply_patch_tool_name(run: ToolRunApplyPatchCall) -> str:
         return run.apply_patch_tool.name
 
+    def _custom_tool_name(run: ToolRunCustom) -> str:
+        return run.custom_tool.name
+
     async def _build_shell_rejection(run: ToolRunShellCall, call_id: str) -> RunItem:
         rejection_message = await resolve_approval_rejection_message(
             context_wrapper=context_wrapper,
@@ -793,7 +811,7 @@ async def resolve_interrupted_turn(
         return cast(
             RunItem,
             shell_rejection_item(
-                agent,
+                public_agent,
                 call_id,
                 rejection_message=rejection_message,
             ),
@@ -810,9 +828,31 @@ async def resolve_interrupted_turn(
         return cast(
             RunItem,
             apply_patch_rejection_item(
-                agent,
+                public_agent,
                 call_id,
+                output_type="apply_patch_call_output",
                 rejection_message=rejection_message,
+            ),
+        )
+
+    async def _build_custom_rejection(run: ToolRunCustom, call_id: str) -> RunItem:
+        rejection_message = await resolve_approval_rejection_message(
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+            tool_type="custom",
+            tool_name=run.custom_tool.name,
+            call_id=call_id,
+        )
+        return ToolCallOutputItem(
+            agent=public_agent,
+            output=rejection_message,
+            raw_item=cast(
+                Any,
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": call_id,
+                    "output": rejection_message,
+                },
             ),
         )
 
@@ -826,13 +866,28 @@ async def resolve_interrupted_turn(
         )
 
     async def _apply_patch_needs_approval(run: ToolRunApplyPatchCall) -> bool:
-        operation = coerce_apply_patch_operation(
+        operations = coerce_apply_patch_operations(
             run.tool_call,
             context_wrapper=context_wrapper,
         )
         call_id = extract_apply_patch_call_id(run.tool_call)
+        for operation in operations:
+            if await evaluate_needs_approval_setting(
+                run.apply_patch_tool.needs_approval, context_wrapper, operation, call_id
+            ):
+                return True
+        return False
+
+    async def _custom_tool_needs_approval(run: ToolRunCustom) -> bool:
+        tool_input = get_mapping_or_attr(run.tool_call, "input")
+        call_id = _custom_call_id_from_run(run)
+        if not isinstance(tool_input, str):
+            raise ModelBehaviorError("Custom tool call is missing input.")
         return await evaluate_needs_approval_setting(
-            run.apply_patch_tool.needs_approval, context_wrapper, operation, call_id
+            run.custom_tool.runtime_needs_approval(),
+            context_wrapper,
+            tool_input,
+            call_id,
         )
 
     def _shell_output_exists(call_id: str) -> bool:
@@ -840,6 +895,9 @@ async def resolve_interrupted_turn(
 
     def _apply_patch_output_exists(call_id: str) -> bool:
         return _has_output_item(call_id, "apply_patch_call_output")
+
+    def _custom_tool_output_exists(call_id: str) -> bool:
+        return _has_output_item(call_id, "custom_tool_call_output")
 
     def _computer_output_exists(call_id: str) -> bool:
         return _has_output_item(call_id, "computer_call_output")
@@ -893,20 +951,39 @@ async def resolve_interrupted_turn(
         pending_interruption_keys.add(key)
         pending_interruptions.append(item)
 
+    def _allow_legacy_name_agent_match() -> bool:
+        schema_version = getattr(run_state, "_schema_version", None)
+        if not isinstance(schema_version, str):
+            return False
+        try:
+            version_parts = tuple(int(part) for part in schema_version.split("."))
+        except ValueError:
+            return False
+        # Schema 1.6 and earlier only serialized approval owners by agent name. With duplicate-name
+        # agents, deserialization can legitimately resolve the approval to a sibling instance, so
+        # resume must accept a same-name match for those legacy snapshots. Schema 1.7+ persists
+        # duplicate-name identities, so newer snapshots should continue requiring object identity.
+        return version_parts < (1, 7)
+
+    allow_legacy_name_agent_match = _allow_legacy_name_agent_match()
+
     def _approval_matches_agent(approval: ToolApprovalItem) -> bool:
         approval_agent = approval.agent
         if approval_agent is None:
             return False
-        if approval_agent is agent:
+        if approval_agent is public_agent:
             return True
-        return getattr(approval_agent, "name", None) == agent.name
+        return allow_legacy_name_agent_match and approval_agent.name == public_agent.name
 
-    available_function_tools = await resolve_enabled_function_tools(agent, context_wrapper)
+    available_function_tools = await resolve_enabled_function_tools(
+        execution_agent,
+        context_wrapper,
+    )
     approval_rebuild_function_tools = available_function_tools
-    if pending_approval_items and agent.mcp_servers:
+    if pending_approval_items and execution_agent.mcp_servers:
         approval_rebuild_function_tools = [
             tool
-            for tool in await agent.get_all_tools(context_wrapper)
+            for tool in await execution_agent.get_all_tools(context_wrapper)
             if isinstance(tool, FunctionTool)
         ]
 
@@ -1030,7 +1107,7 @@ async def resolve_interrupted_turn(
         record_rejection=_record_function_rejection,
         pending_interruption_adder=_add_pending_interruption,
         pending_item_builder=lambda run: ToolApprovalItem(
-            agent=agent,
+            agent=public_agent,
             raw_item=run.tool_call,
             tool_name=run.function_tool.name,
             tool_namespace=get_tool_call_namespace(run.tool_call),
@@ -1071,7 +1148,7 @@ async def resolve_interrupted_turn(
         rejection_builder=_build_shell_rejection,
         context_wrapper=context_wrapper,
         approval_items_by_call_id=approval_items_by_call_id,
-        agent=agent,
+        agent=public_agent,
         pending_interruption_adder=_add_pending_interruption,
         needs_approval_checker=_shell_needs_approval,
         output_exists_checker=_shell_output_exists,
@@ -1084,21 +1161,35 @@ async def resolve_interrupted_turn(
         rejection_builder=_build_apply_patch_rejection,
         context_wrapper=context_wrapper,
         approval_items_by_call_id=approval_items_by_call_id,
-        agent=agent,
+        agent=public_agent,
         pending_interruption_adder=_add_pending_interruption,
         needs_approval_checker=_apply_patch_needs_approval,
         output_exists_checker=_apply_patch_output_exists,
     )
 
+    approved_custom_tool_calls, rejected_custom_tool_results = await _collect_runs_by_approval(
+        processed_response.custom_tool_calls,
+        call_id_extractor=_custom_call_id_from_run,
+        tool_name_resolver=_custom_tool_name,
+        rejection_builder=_build_custom_rejection,
+        context_wrapper=context_wrapper,
+        approval_items_by_call_id=approval_items_by_call_id,
+        agent=public_agent,
+        pending_interruption_adder=_add_pending_interruption,
+        needs_approval_checker=_custom_tool_needs_approval,
+        output_exists_checker=_custom_tool_output_exists,
+    )
+
     plan = _build_plan_for_resume_turn(
         processed_response=processed_response,
-        agent=agent,
+        agent=public_agent,
         context_wrapper=context_wrapper,
         approval_items_by_call_id=approval_items_by_call_id,
         pending_interruptions=pending_interruptions,
         pending_interruption_adder=_add_pending_interruption,
         function_runs=function_tool_runs,
         computer_actions=pending_computer_actions,
+        custom_tool_calls=approved_custom_tool_calls,
         shell_calls=approved_shell_calls,
         apply_patch_calls=approved_apply_patch_calls,
     )
@@ -1108,12 +1199,13 @@ async def resolve_interrupted_turn(
         tool_input_guardrail_results,
         tool_output_guardrail_results,
         computer_results,
+        custom_tool_results,
         shell_results,
         apply_patch_results,
         _local_shell_results,
     ) = await _execute_tool_plan(
         plan=plan,
-        agent=agent,
+        bindings=bindings,
         hooks=hooks,
         context_wrapper=context_wrapper,
         run_config=run_config,
@@ -1121,6 +1213,7 @@ async def resolve_interrupted_turn(
 
     for interruption in _collect_tool_interruptions(
         function_results=function_results,
+        custom_tool_results=custom_tool_results,
         shell_results=[],
         apply_patch_results=[],
     ):
@@ -1131,6 +1224,7 @@ async def resolve_interrupted_turn(
     for item in _build_tool_result_items(
         function_results=function_results,
         computer_results=computer_results,
+        custom_tool_results=custom_tool_results,
         shell_results=shell_results,
         apply_patch_results=apply_patch_results,
         local_shell_results=[],
@@ -1143,6 +1237,8 @@ async def resolve_interrupted_turn(
             append_if_new(pending_item)
     for shell_rejection in rejected_shell_results:
         append_if_new(shell_rejection)
+    for custom_tool_rejection in rejected_custom_tool_results:
+        append_if_new(custom_tool_rejection)
     for apply_patch_rejection in rejected_apply_patch_results:
         append_if_new(apply_patch_rejection)
     for approved_response in plan.approved_mcp_responses:
@@ -1164,7 +1260,7 @@ async def resolve_interrupted_turn(
         )
 
     await _append_mcp_callback_results(
-        agent=agent,
+        agent=public_agent,
         requests=plan.mcp_requests_with_callback,
         context_wrapper=context_wrapper,
         append_item=append_if_new,
@@ -1177,7 +1273,7 @@ async def resolve_interrupted_turn(
         original_pre_step_items=original_pre_step_items,
         mcp_approval_requests=processed_response.mcp_approval_requests,
         context_wrapper=context_wrapper,
-        agent=agent,
+        agent=public_agent,
         append_item=append_if_new,
     )
 
@@ -1232,7 +1328,7 @@ async def resolve_interrupted_turn(
 
     if pending_handoffs:
         return await execute_handoffs_call(
-            agent=agent,
+            public_agent=public_agent,
             original_input=original_input,
             pre_step_items=pre_step_items,
             new_step_items=new_items,
@@ -1245,7 +1341,7 @@ async def resolve_interrupted_turn(
         )
 
     tool_final_output = await _maybe_finalize_from_tool_results(
-        agent=agent,
+        public_agent=public_agent,
         original_input=original_input,
         new_response=new_response,
         pre_step_items=pre_step_items,
@@ -1284,6 +1380,7 @@ def process_model_response(
     run_handoffs = []
     functions = []
     computer_actions = []
+    custom_tool_calls = []
     local_shell_calls = []
     shell_calls = []
     apply_patch_calls = []
@@ -1293,6 +1390,7 @@ def process_model_response(
     function_map = build_function_tool_lookup_map(
         [tool for tool in all_tools if isinstance(tool, FunctionTool)]
     )
+    custom_tool_map = {tool.name: tool for tool in all_tools if isinstance(tool, CustomTool)}
     computer_tool = next((tool for tool in all_tools if isinstance(tool, ComputerTool)), None)
     local_shell_tool = next((tool for tool in all_tools if isinstance(tool, LocalShellTool)), None)
     shell_tool = next((tool for tool in all_tools if isinstance(tool, ShellTool)), None)
@@ -1373,7 +1471,7 @@ def process_model_response(
             shell_calls.append(ToolRunShellCall(tool_call=output, shell_tool=shell_tool))
             continue
         if output_type == "shell_call_output" and isinstance(
-            output, (dict, ResponseFunctionShellToolCallOutput)
+            output, dict | ResponseFunctionShellToolCallOutput
         ):
             tools_used.append(shell_tool.name if shell_tool else "shell")
             if isinstance(output, dict):
@@ -1553,35 +1651,48 @@ def process_model_response(
                 raise ModelBehaviorError(
                     "Model produced local shell call without a local shell tool."
                 )
-        elif isinstance(output, ResponseCustomToolCall) and is_apply_patch_name(
-            output.name, apply_patch_tool
-        ):
-            parsed_operation = parse_apply_patch_custom_input(output.input)
-            pseudo_call = {
-                "type": "apply_patch_call",
-                "call_id": output.call_id,
-                "operation": parsed_operation,
-            }
-            items.append(ToolCallItem(raw_item=cast(Any, pseudo_call), agent=agent))
-            if apply_patch_tool:
-                tools_used.append(apply_patch_tool.name)
-                apply_patch_calls.append(
-                    ToolRunApplyPatchCall(
-                        tool_call=pseudo_call,
-                        apply_patch_tool=apply_patch_tool,
+        elif isinstance(output, ResponseCustomToolCall):
+            custom_tool = custom_tool_map.get(output.name)
+            if custom_tool is not None:
+                items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))
+                tools_used.append(custom_tool.name)
+                custom_tool_calls.append(ToolRunCustom(tool_call=output, custom_tool=custom_tool))
+            elif is_apply_patch_name(output.name, apply_patch_tool):
+                parsed_operation = parse_apply_patch_custom_input(output.input)
+                pseudo_call = {
+                    "type": "apply_patch_call",
+                    "call_id": output.call_id,
+                    **parsed_operation,
+                }
+                items.append(ToolCallItem(raw_item=cast(Any, pseudo_call), agent=agent))
+                if apply_patch_tool:
+                    tools_used.append(apply_patch_tool.name)
+                    apply_patch_calls.append(
+                        ToolRunApplyPatchCall(
+                            tool_call=pseudo_call,
+                            apply_patch_tool=apply_patch_tool,
+                        )
                     )
-                )
+                else:
+                    tools_used.append("apply_patch")
+                    _error_tracing.attach_error_to_current_span(
+                        SpanError(
+                            message="Apply patch tool not found",
+                            data={},
+                        )
+                    )
+                    raise ModelBehaviorError(
+                        "Model produced apply_patch call without an apply_patch tool."
+                    )
             else:
-                tools_used.append("apply_patch")
+                items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
-                        message="Apply patch tool not found",
-                        data={},
+                        message="Custom tool not found",
+                        data={"tool_name": output.name},
                     )
                 )
-                raise ModelBehaviorError(
-                    "Model produced apply_patch call without an apply_patch tool."
-                )
+                raise ModelBehaviorError(f"Tool {output.name} not found in agent {agent.name}")
         elif (
             isinstance(output, ResponseFunctionToolCall)
             and is_apply_patch_name(output.name, apply_patch_tool)
@@ -1673,6 +1784,7 @@ def process_model_response(
         handoffs=run_handoffs,
         functions=functions,
         computer_actions=computer_actions,
+        custom_tool_calls=custom_tool_calls,
         local_shell_calls=local_shell_calls,
         shell_calls=shell_calls,
         apply_patch_calls=apply_patch_calls,
@@ -1684,7 +1796,7 @@ def process_model_response(
 
 async def get_single_step_result_from_response(
     *,
-    agent: Agent[TContext],
+    bindings: AgentBindings[TContext],
     all_tools: list[Tool],
     original_input: str | list[TResponseInputItem],
     pre_step_items: list[RunItem],
@@ -1697,8 +1809,9 @@ async def get_single_step_result_from_response(
     tool_use_tracker,
     event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] | None = None,
 ) -> SingleStepResult:
+    item_agent = bindings.public_agent
     processed_response = process_model_response(
-        agent=agent,
+        agent=item_agent,
         all_tools=all_tools,
         response=new_response,
         output_schema=output_schema,
@@ -1706,7 +1819,7 @@ async def get_single_step_result_from_response(
         existing_items=pre_step_items,
     )
 
-    tool_use_tracker.record_processed_response(agent, processed_response)
+    tool_use_tracker.record_processed_response(item_agent, processed_response)
 
     if event_queue is not None and processed_response.new_items:
         handoff_items = [
@@ -1716,7 +1829,7 @@ async def get_single_step_result_from_response(
             stream_step_items_to_queue(cast(list[RunItem], handoff_items), event_queue)
 
     return await execute_tools_and_side_effects(
-        agent=agent,
+        bindings=bindings,
         original_input=original_input,
         pre_step_items=pre_step_items,
         new_response=new_response,

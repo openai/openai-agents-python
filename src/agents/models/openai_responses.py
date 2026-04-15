@@ -16,6 +16,7 @@ from openai import AsyncOpenAI, NotGiven, Omit, omit
 from openai.types import ChatModel
 from openai.types.responses import (
     ApplyPatchToolParam,
+    CustomToolParam,
     FileSearchToolParam,
     FunctionToolParam,
     Response,
@@ -47,6 +48,7 @@ from ..tool import (
     ApplyPatchTool,
     CodeInterpreterTool,
     ComputerTool,
+    CustomTool,
     FileSearchTool,
     FunctionTool,
     HostedMCPTool,
@@ -61,7 +63,7 @@ from ..tool import (
     validate_responses_tool_search_configuration,
 )
 from ..tracing import SpanError, response_span
-from ..usage import Usage
+from ..usage import Usage, model_usage_to_span_usage
 from ..util._json import _to_dump_compatible
 from ..version import __version__
 from ._openai_retry import get_openai_retry_advice
@@ -71,6 +73,7 @@ from ._retry_runtime import (
 )
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
+from .openai_client_utils import is_official_openai_base_url, is_official_openai_client
 
 if TYPE_CHECKING:
     from ..model_settings import ModelSettings
@@ -113,7 +116,7 @@ def _json_dumps_default(value: Any) -> Any:
 
 
 def _is_openai_omitted_value(value: Any) -> bool:
-    return isinstance(value, (Omit, NotGiven))
+    return isinstance(value, Omit | NotGiven)
 
 
 def _require_responses_tool_param(value: object) -> ResponsesToolParam:
@@ -390,6 +393,9 @@ class OpenAIResponsesModel(Model):
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
 
+    def _supports_default_prompt_cache_key(self) -> bool:
+        return is_official_openai_client(self._get_client())
+
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)
 
@@ -472,6 +478,8 @@ class OpenAIResponsesModel(Model):
                     if response.usage
                     else Usage()
                 )
+                if response.usage:
+                    span_response.span_data.usage = model_usage_to_span_usage(usage)
 
                 if tracing.include_data():
                     span_response.span_data.response = response
@@ -569,6 +577,17 @@ class OpenAIResponsesModel(Model):
                 if final_response and tracing.include_data():
                     span_response.span_data.response = final_response
                     span_response.span_data.input = input
+                if final_response and final_response.usage:
+                    span_response.span_data.usage = model_usage_to_span_usage(
+                        Usage(
+                            requests=1,
+                            input_tokens=final_response.usage.input_tokens,
+                            output_tokens=final_response.usage.output_tokens,
+                            total_tokens=final_response.usage.total_tokens,
+                            input_tokens_details=final_response.usage.input_tokens_details,
+                            output_tokens_details=final_response.usage.output_tokens_details,
+                        )
+                    )
 
             except Exception as e:
                 span_response.set_error(
@@ -905,6 +924,11 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
         )
         self._ws_client_close_generation = 0
 
+    def _supports_default_prompt_cache_key(self) -> bool:
+        if self._client.websocket_base_url is not None:
+            return is_official_openai_base_url(self._client.websocket_base_url, websocket=True)
+        return super()._supports_default_prompt_cache_key()
+
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         stateful_request = bool(request.previous_response_id or request.conversation_id)
         wrapped_replay_safety = _get_wrapped_websocket_replay_safety(request.error)
@@ -1223,7 +1247,7 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                 recv=None if timeout.read is None else float(timeout.read),
             )
 
-        if isinstance(timeout, (int, float)):
+        if isinstance(timeout, int | float):
             timeout_seconds = float(timeout)
             return _WebsocketRequestTimeouts(
                 lock=timeout_seconds,
@@ -1714,7 +1738,7 @@ class Converter:
     def _has_unresolved_computer_tool(cls, tools: Sequence[Tool] | None) -> bool:
         return any(
             isinstance(tool, ComputerTool)
-            and not isinstance(tool.computer, (Computer, AsyncComputer))
+            and not isinstance(tool.computer, Computer | AsyncComputer)
             for tool in tools or ()
         )
 
@@ -1901,7 +1925,7 @@ class Converter:
     @classmethod
     def _convert_preview_computer_tool(cls, tool: ComputerTool[Any]) -> ResponsesToolParam:
         computer = tool.computer
-        if not isinstance(computer, (Computer, AsyncComputer)):
+        if not isinstance(computer, Computer | AsyncComputer):
             raise UserError(
                 "Computer tool is not initialized for serialization. Call "
                 "resolve_computer({ tool, run_context }) with a run context first "
@@ -1970,9 +1994,15 @@ class Converter:
                 else _require_responses_tool_param({"type": "computer"}),
                 None,
             )
+        elif isinstance(tool, CustomTool):
+            custom_tool_param: CustomToolParam = tool.tool_config
+            return custom_tool_param, None
         elif isinstance(tool, HostedMCPTool):
             return tool.tool_config, None
         elif isinstance(tool, ApplyPatchTool):
+            tool_config = getattr(tool, "tool_config", None)
+            if tool_config is not None:
+                return _require_responses_tool_param(tool_config), None
             return ApplyPatchToolParam(type="apply_patch"), None
         elif isinstance(tool, ShellTool):
             return (

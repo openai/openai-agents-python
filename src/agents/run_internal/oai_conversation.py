@@ -418,7 +418,7 @@ class OpenAIServerConversationTracker:
                 self._register_prepared_item_source(prepared_item, source_item)
             filtered_initials = []
             for item in initial_items:
-                if item is None or isinstance(item, (str, bytes)):
+                if item is None or isinstance(item, str | bytes):
                     continue
                 filtered_initials.append(item)
             self.remaining_initial_input = filtered_initials or None

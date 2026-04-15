@@ -236,3 +236,36 @@
         max-width: clamp(76rem, 92vw, 92rem);
     }
 }
+
+.sandbox-nowrap-first-column-table th:first-child,
+.sandbox-nowrap-first-column-table td:first-child {
+    white-space: nowrap;
+    width: 1%;
+}
+
+.sandbox-nowrap-first-column-table td:first-child code {
+    word-break: normal;
+    white-space: nowrap;
+}
+
+.sandbox-lifecycle-diagram {
+    text-align: center;
+}
+
+.sandbox-lifecycle-diagram .mermaid svg {
+    max-height: 20rem;
+    max-width: 100%;
+    width: auto !important;
+}
+
+.sandbox-harness-image {
+    text-align: center;
+}
+
+.sandbox-harness-image img {
+    display: block;
+    margin: 0 auto;
+    max-height: 28rem;
+    max-width: 100%;
+    width: auto;
+}
