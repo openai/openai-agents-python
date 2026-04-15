@@ -2578,6 +2578,72 @@ async def test_save_result_to_session_sanitizes_original_input_items() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        cast(
+            dict[str, Any],
+            {"type": "file_search_call", "id": "fs_123", "queries": ["customer profile"]},
+        ),
+        cast(
+            dict[str, Any],
+            {
+                "type": "web_search_call",
+                "id": "ws_123",
+                "action": {"type": "search", "query": "customer profile"},
+            },
+        ),
+        cast(
+            dict[str, Any],
+            {"type": "code_interpreter_call", "id": "ci_123", "status": "completed"},
+        ),
+    ],
+)
+async def test_save_result_to_session_preserves_required_built_in_tool_call_ids(
+    payload: dict[str, Any],
+) -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    agent = Agent(name="agent", model=FakeModel())
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [_DummyRunItem(payload)]),
+        run_state,
+    )
+
+    assert saved_count == 1
+    assert run_state._current_turn_persisted_item_count == 1
+    assert len(session.saved_items) == 1
+    assert cast(dict[str, Any], session.saved_items[0])["id"] == payload["id"]
+
+
+@pytest.mark.asyncio
 async def test_prepare_input_with_session_strips_internal_tool_call_metadata() -> None:
     tool_call = cast(
         TResponseInputItem,

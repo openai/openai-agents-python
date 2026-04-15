@@ -23,7 +23,7 @@ from agents.items import (
 from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.result import RunResult
 from agents.run_context import RunContextWrapper
-from agents.run_internal import items as run_items
+from agents.run_internal import items as run_items, session_persistence as session_persistence
 
 
 def test_drop_orphan_function_calls_preserves_non_mapping_entries() -> None:
@@ -530,6 +530,69 @@ def test_fingerprint_input_item_ignores_internal_tool_call_metadata() -> None:
 
     assert run_items.fingerprint_input_item(base_item) == run_items.fingerprint_input_item(
         with_metadata
+    )
+
+
+def test_sanitize_openai_conversation_item_preserves_required_tool_call_ids() -> None:
+    file_search_call = cast(
+        TResponseInputItem,
+        {
+            "type": "file_search_call",
+            "id": "fs_123",
+            "queries": ["customer profile"],
+            "status": "completed",
+        },
+    )
+    web_search_call = cast(
+        TResponseInputItem,
+        {
+            "type": "web_search_call",
+            "id": "ws_123",
+            "action": {"type": "search", "query": "customer profile"},
+            "status": "completed",
+        },
+    )
+    code_interpreter_call = cast(
+        TResponseInputItem,
+        {
+            "type": "code_interpreter_call",
+            "id": "ci_123",
+            "status": "completed",
+        },
+    )
+    user_message = cast(
+        TResponseInputItem,
+        {"role": "user", "id": "user_123", "content": "hello"},
+    )
+    function_call_output = cast(
+        TResponseInputItem,
+        {"type": "function_call_output", "id": "out_123", "call_id": "call_123", "output": "ok"},
+    )
+
+    assert (
+        cast(
+            dict[str, Any], session_persistence._sanitize_openai_conversation_item(file_search_call)
+        )["id"]
+        == "fs_123"
+    )
+    assert (
+        cast(
+            dict[str, Any], session_persistence._sanitize_openai_conversation_item(web_search_call)
+        )["id"]
+        == "ws_123"
+    )
+    assert (
+        cast(
+            dict[str, Any],
+            session_persistence._sanitize_openai_conversation_item(code_interpreter_call),
+        )["id"]
+        == "ci_123"
+    )
+    assert "id" not in cast(
+        dict[str, Any], session_persistence._sanitize_openai_conversation_item(user_message)
+    )
+    assert "id" not in cast(
+        dict[str, Any], session_persistence._sanitize_openai_conversation_item(function_call_output)
     )
 
 

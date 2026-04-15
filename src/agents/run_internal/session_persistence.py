@@ -569,10 +569,18 @@ def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInp
     """Remove provider-specific fields before fingerprinting or persistence."""
     if isinstance(item, dict):
         clean_item = cast(dict[str, Any], strip_internal_input_item_metadata(item))
-        clean_item.pop("id", None)
+        if _should_strip_openai_conversation_item_id(clean_item):
+            clean_item.pop("id", None)
         clean_item.pop("provider_data", None)
         return cast(TResponseInputItem, clean_item)
     return item
+
+
+def _should_strip_openai_conversation_item_id(item: dict[str, Any]) -> bool:
+    """Return True when the Conversations API does not require an item's ``id`` field."""
+    # Built-in tool calls and assistant-authored items rely on their ids for replay. The only
+    # shapes we know are safe to drop are user messages and function_call_output items.
+    return item.get("role") == "user" or item.get("type") == "function_call_output"
 
 
 def _fingerprint_or_repr(item: TResponseInputItem, *, ignore_ids_for_matching: bool) -> str:
