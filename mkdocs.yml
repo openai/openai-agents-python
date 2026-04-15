@@ -202,7 +202,11 @@ plugins:
             - config.md
             - ドキュメント:
                 - agents.md
-                - sandbox_agents.md
+                - Sandbox エージェント:
+                    - クイックスタート: sandbox_agents.md
+                    - 概念: sandbox/guide.md
+                    - Sandbox クライアント: sandbox/clients.md
+                    - エージェントメモリ: sandbox/memory.md
                 - モデル: models/index.md
                 - tools.md
                 - guardrails.md
@@ -241,7 +245,11 @@ plugins:
             - config.md
             - 문서:
                 - agents.md
-                - sandbox_agents.md
+                - Sandbox 에이전트:
+                    - 빠른 시작: sandbox_agents.md
+                    - 개념: sandbox/guide.md
+                    - 샌드박스 클라이언트: sandbox/clients.md
+                    - 에이전트 메모리: sandbox/memory.md
                 - 모델: models/index.md
                 - tools.md
                 - guardrails.md
@@ -280,7 +288,11 @@ plugins:
             - config.md
             - 文档:
                 - agents.md
-                - sandbox_agents.md
+                - 沙盒智能体:
+                    - 快速入门: sandbox_agents.md
+                    - 概念: sandbox/guide.md
+                    - 沙箱客户端: sandbox/clients.md
+                    - 智能体记忆: sandbox/memory.md
                 - 模型: models/index.md
                 - tools.md
                 - guardrails.md
