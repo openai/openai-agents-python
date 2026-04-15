@@ -167,6 +167,14 @@ class FakeAdminDatabase:
         return {"ok": 1}
 
 
+class FakeDriverInfo:
+    """Minimal stand-in for pymongo.driver_info.DriverInfo."""
+
+    def __init__(self, name: str, version: str | None = None) -> None:
+        self.name = name
+        self.version = version
+
+
 class FakeAsyncMongoClient:
     """In-memory substitute for pymongo AsyncMongoClient."""
 
@@ -174,9 +182,14 @@ class FakeAsyncMongoClient:
         self._databases: dict[str, FakeAsyncDatabase] = defaultdict(FakeAsyncDatabase)
         self._closed = False
         self.admin = FakeAdminDatabase()
+        self._metadata_calls: list[FakeDriverInfo] = []
 
     def __getitem__(self, name: str) -> FakeAsyncDatabase:
         return self._databases[name]
+
+    def append_metadata(self, driver_info: FakeDriverInfo) -> None:
+        """Record append_metadata calls for test assertions."""
+        self._metadata_calls.append(driver_info)
 
     async def aclose(self) -> None:
         self._closed = True
@@ -195,14 +208,17 @@ def _make_fake_pymongo_modules() -> None:
     async_pkg = types.ModuleType("pymongo.asynchronous")
     collection_mod = types.ModuleType("pymongo.asynchronous.collection")
     client_mod = types.ModuleType("pymongo.asynchronous.mongo_client")
+    driver_info_mod = types.ModuleType("pymongo.driver_info")
 
     collection_mod.AsyncCollection = FakeAsyncCollection  # type: ignore[attr-defined]
     client_mod.AsyncMongoClient = FakeAsyncMongoClient  # type: ignore[attr-defined]
+    driver_info_mod.DriverInfo = FakeDriverInfo  # type: ignore[attr-defined]
 
     sys.modules["pymongo"] = pymongo_mod
     sys.modules["pymongo.asynchronous"] = async_pkg
     sys.modules["pymongo.asynchronous.collection"] = collection_mod
     sys.modules["pymongo.asynchronous.mongo_client"] = client_mod
+    sys.modules["pymongo.driver_info"] = driver_info_mod
 
 
 _make_fake_pymongo_modules()
@@ -621,3 +637,69 @@ async def test_runner_with_session_settings_limit(agent: Agent) -> None:
     last_input = agent.model.last_turn_args["input"]
     history_items = [i for i in last_input if i.get("content") != "New question"]
     assert len(history_items) == 2
+
+
+# ---------------------------------------------------------------------------
+# Client metadata (driver handshake)
+# ---------------------------------------------------------------------------
+
+
+async def test_injected_client_receives_append_metadata() -> None:
+    """Pattern B: append_metadata is called on a caller-supplied client."""
+    MongoDBSession._initialized_keys.clear()
+    MongoDBSession._init_locks.clear()
+    client = FakeAsyncMongoClient()
+
+    MongoDBSession("meta-test", client=client, database="agents_test")  # type: ignore[arg-type]
+
+    assert len(client._metadata_calls) == 1
+    info = client._metadata_calls[0]
+    assert info.name == "openai-agents"
+
+
+async def test_from_uri_passes_driver_info_to_constructor() -> None:
+    """Pattern A: driver=_DRIVER_INFO is forwarded to AsyncMongoClient via from_uri."""
+    MongoDBSession._initialized_keys.clear()
+    MongoDBSession._init_locks.clear()
+
+    captured_kwargs: dict[str, Any] = {}
+
+    def _fake_client(uri: str, **kwargs: Any) -> FakeAsyncMongoClient:
+        captured_kwargs.update(kwargs)
+        return FakeAsyncMongoClient()
+
+    with patch(
+        "agents.extensions.memory.mongodb_session.AsyncMongoClient",
+        side_effect=_fake_client,
+    ):
+        MongoDBSession.from_uri("uri-test", uri="mongodb://localhost:27017", database="t")
+
+    assert "driver" in captured_kwargs
+    assert captured_kwargs["driver"].name == "openai-agents"
+
+
+async def test_caller_supplied_driver_info_is_not_overwritten() -> None:
+    """Pattern A: a caller-supplied driver kwarg must not be silently replaced."""
+    MongoDBSession._initialized_keys.clear()
+    MongoDBSession._init_locks.clear()
+
+    captured_kwargs: dict[str, Any] = {}
+    custom_info = FakeDriverInfo(name="MyApp")
+
+    def _fake_client(uri: str, **kwargs: Any) -> FakeAsyncMongoClient:
+        captured_kwargs.update(kwargs)
+        return FakeAsyncMongoClient()
+
+    with patch(
+        "agents.extensions.memory.mongodb_session.AsyncMongoClient",
+        side_effect=_fake_client,
+    ):
+        MongoDBSession.from_uri(
+            "uri-test",
+            uri="mongodb://localhost:27017",
+            database="t",
+            client_kwargs={"driver": custom_info},
+        )
+
+    # The caller's value must be preserved — setdefault must not overwrite it.
+    assert captured_kwargs["driver"] is custom_info

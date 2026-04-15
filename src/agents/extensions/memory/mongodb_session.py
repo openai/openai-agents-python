@@ -36,8 +36,16 @@ import json
 from typing import Any
 
 try:
+    from importlib.metadata import version as _get_version
+
+    _VERSION: str | None = _get_version("openai-agents")
+except Exception:
+    _VERSION = None
+
+try:
     from pymongo.asynchronous.collection import AsyncCollection
     from pymongo.asynchronous.mongo_client import AsyncMongoClient
+    from pymongo.driver_info import DriverInfo
 except ImportError as e:
     raise ImportError(
         "MongoDBSession requires the 'pymongo' package (>=4.13). "
@@ -47,6 +55,9 @@ except ImportError as e:
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
 from ...memory.session_settings import SessionSettings, resolve_session_limit
+
+# Identifies this library in the MongoDB handshake for server-side telemetry.
+_DRIVER_INFO = DriverInfo(name="openai-agents", version=_VERSION)
 
 
 class MongoDBSession(SessionABC):
@@ -98,6 +109,11 @@ class MongoDBSession(SessionABC):
         self._client = client
         self._owns_client = False
 
+        # Pattern B: annotate an externally-supplied client with library metadata.
+        # append_metadata is available in PyMongo >=4.14; guard for older installs.
+        if hasattr(client, "append_metadata"):
+            client.append_metadata(_DRIVER_INFO)
+
         db = client[database]
         self._sessions: AsyncCollection = db[sessions_collection]
         self._messages: AsyncCollection = db[messages_collection]
@@ -138,6 +154,7 @@ class MongoDBSession(SessionABC):
             A :class:`MongoDBSession` connected to the specified MongoDB server.
         """
         client_kwargs = client_kwargs or {}
+        client_kwargs.setdefault("driver", _DRIVER_INFO)
         client: AsyncMongoClient = AsyncMongoClient(uri, **client_kwargs)
         session = cls(
             session_id,
