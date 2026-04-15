@@ -4,8 +4,9 @@ import asyncio
 import json
 import tempfile
 import warnings
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, cast
 from unittest.mock import patch
 
 import httpx
@@ -55,6 +56,7 @@ from agents.items import (
 from agents.lifecycle import RunHooks
 from agents.run import AgentRunner, get_default_agent_runner, set_default_agent_runner
 from agents.run_config import _default_trace_include_sensitive_data
+from agents.run_internal.agent_bindings import bind_public_agent
 from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
@@ -143,6 +145,21 @@ async def run_execute_approved_tools(
     )
 
     return generated_items
+
+
+async def _run_agent_with_optional_streaming(
+    agent: Agent[Any],
+    *,
+    input: str | list[TResponseInputItem],
+    streamed: bool,
+    **kwargs: Any,
+):
+    if streamed:
+        result = Runner.run_streamed(agent, input=input, **kwargs)
+        async for _ in result.stream_events():
+            pass
+        return result
+    return await Runner.run(agent, input=input, **kwargs)
 
 
 def test_set_default_agent_runner_roundtrip():
@@ -1344,6 +1361,101 @@ async def test_opt_in_handoff_history_accumulates_across_multiple_handoffs():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize("nest_source", ["run_config", "handoff"], ids=["run_config", "handoff"])
+async def test_server_managed_handoff_history_auto_disables_with_warning(
+    streamed: bool,
+    nest_source: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+    delegate = Agent(name="delegate", model=delegate_model)
+
+    run_config = RunConfig()
+    triage_handoffs: list[Agent[Any] | Handoff[Any, Any]]
+    if nest_source == "handoff":
+        triage_handoffs = [handoff(delegate, nest_handoff_history=True)]
+    else:
+        triage_handoffs = [delegate]
+        run_config = RunConfig(nest_handoff_history=True)
+
+    triage = Agent(name="triage", model=triage_model, handoffs=triage_handoffs)
+    triage_model.add_multiple_turn_outputs(
+        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
+    )
+    delegate_model.add_multiple_turn_outputs([[get_text_message("done")]])
+
+    with caplog.at_level("WARNING", logger="openai.agents"):
+        result = await _run_agent_with_optional_streaming(
+            triage,
+            input="user_message",
+            streamed=streamed,
+            run_config=run_config,
+            auto_previous_response_id=True,
+        )
+
+    assert result.final_output == "done"
+    assert "do not support nest_handoff_history" in caplog.text
+    assert delegate_model.first_turn_args is not None
+    delegate_input = delegate_model.first_turn_args["input"]
+    assert isinstance(delegate_input, list)
+    assert len(delegate_input) == 1
+    handoff_output = delegate_input[0]
+    assert handoff_output.get("type") == "function_call_output"
+    assert "delegate" in str(handoff_output.get("output"))
+    assert not any(
+        isinstance(item, dict)
+        and item.get("role") == "assistant"
+        and "<CONVERSATION HISTORY>" in str(item.get("content"))
+        for item in delegate_input
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize("filter_source", ["run_config", "handoff"], ids=["run_config", "handoff"])
+async def test_server_managed_handoff_input_filters_still_raise(
+    streamed: bool,
+    filter_source: str,
+) -> None:
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+    delegate = Agent(name="delegate", model=delegate_model)
+
+    def passthrough_filter(data: HandoffInputData) -> HandoffInputData:
+        return data
+
+    run_config = RunConfig()
+    triage_handoffs: list[Agent[Any] | Handoff[Any, Any]]
+    if filter_source == "handoff":
+        triage_handoffs = [handoff(delegate, input_filter=passthrough_filter)]
+    else:
+        triage_handoffs = [delegate]
+        run_config = RunConfig(handoff_input_filter=passthrough_filter)
+
+    triage = Agent(name="triage", model=triage_model, handoffs=triage_handoffs)
+    triage_model.add_multiple_turn_outputs(
+        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
+    )
+    delegate_model.add_multiple_turn_outputs([[get_text_message("done")]])
+
+    with pytest.raises(
+        UserError,
+        match="Server-managed conversations do not support handoff input filters",
+    ):
+        await _run_agent_with_optional_streaming(
+            triage,
+            input="user_message",
+            streamed=streamed,
+            run_config=run_config,
+            auto_previous_response_id=True,
+        )
+
+    assert delegate_model.first_turn_args is None
+
+
+@pytest.mark.asyncio
 async def test_async_input_filter_supported():
     # DO NOT rename this without updating pyproject.toml
 
@@ -2107,7 +2219,7 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
     agent = Agent(name="test", model=model)
 
     result = await get_new_response(
-        agent=agent,
+        bindings=bind_public_agent(agent),
         system_prompt=None,
         input=[history_item, new_item],
         output_schema=None,
@@ -2152,7 +2264,7 @@ async def test_get_new_response_uses_agent_retry_settings() -> None:
     )
 
     result = await get_new_response(
-        agent=agent,
+        bindings=bind_public_agent(agent),
         system_prompt=None,
         input=[get_text_input_item("hello")],
         output_schema=None,

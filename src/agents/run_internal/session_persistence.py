@@ -329,7 +329,7 @@ async def save_result_to_session(
 
     if response_id and is_openai_responses_compaction_aware_session(session):
         has_local_tool_outputs = any(
-            isinstance(item, (ToolCallOutputItem, HandoffOutputItem)) for item in new_items
+            isinstance(item, ToolCallOutputItem | HandoffOutputItem) for item in new_items
         )
         if has_local_tool_outputs:
             defer_compaction = getattr(session, "_defer_compaction", None)

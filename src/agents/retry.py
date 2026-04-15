@@ -4,11 +4,10 @@ import dataclasses
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from inspect import isawaitable
-from typing import Any
+from typing import Any, TypeAlias
 
 from pydantic import Field
 from pydantic.dataclasses import dataclass as pydantic_dataclass
-from typing_extensions import TypeAlias
 
 from .util._types import MaybeAwaitable
 

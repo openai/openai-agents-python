@@ -1,6 +1,5 @@
 import random
-from collections.abc import AsyncIterator
-from typing import Callable
+from collections.abc import AsyncIterator, Callable
 
 from agents import Agent, Runner, TResponseInputItem, function_tool
 from agents.extensions.handoff_prompt import prompt_with_handoff_instructions

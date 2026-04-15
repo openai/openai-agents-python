@@ -6,7 +6,7 @@ search:
 
 ## プロジェクトと仮想環境の作成
 
-これを行うのは 1 回だけで十分です。
+これは一度だけ実行すれば十分です。
 
 ```bash
 mkdir my_project
@@ -16,7 +16,7 @@ python -m venv .venv
 
 ### 仮想環境の有効化
 
-新しいターミナルセッションを開始するたびに、これを実行してください。
+新しいターミナルセッションを開始するたびに実行してください。
 
 ```bash
 source .venv/bin/activate
@@ -30,7 +30,7 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 ### OpenAI API キーの設定
 
-まだ持っていない場合は、OpenAI API キーを作成するために [こちらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)に従ってください。
+まだお持ちでない場合は、OpenAI API キーを作成するために [こちらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key) に従ってください。
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -38,7 +38,7 @@ export OPENAI_API_KEY=sk-...
 
 ## 最初のエージェントの作成
 
-エージェントは instructions、名前、および特定のモデルなどの任意の設定で定義されます。
+エージェントは instructions、名前、および特定のモデルなどの任意の設定で定義します。
 
 ```python
 from agents import Agent
@@ -70,21 +70,23 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-2 回目のターンでは、`result.to_input_list()` を `Runner.run(...)` に戻して渡すか、[session](sessions/index.md) をアタッチするか、`conversation_id` / `previous_response_id` を使って OpenAI のサーバー管理状態を再利用できます。[running agents](running_agents.md) ガイドでは、これらのアプローチを比較しています。
+2 回目のターンでは、`result.to_input_list()` を `Runner.run(...)` に戻して渡すか、[session](sessions/index.md) をアタッチするか、`conversation_id` / `previous_response_id` で OpenAI のサーバー管理状態を再利用できます。[running agents](running_agents.md) ガイドでは、これらのアプローチを比較しています。
 
-目安として、次のルールを使ってください。
+次の目安を使ってください。
 
-| こうしたい場合... | まず使うもの... |
+| 望んでいること | まず使うもの |
 | --- | --- |
 | 完全な手動制御とプロバイダー非依存の履歴 | `result.to_input_list()` |
 | SDK に履歴の読み込みと保存を任せる | [`session=...`](sessions/index.md) |
 | OpenAI 管理のサーバー側継続 | `previous_response_id` または `conversation_id` |
 
-トレードオフと正確な挙動については、[Running agents](running_agents.md#choose-a-memory-strategy) を参照してください。
+トレードオフと正確な動作については、[Running agents](running_agents.md#choose-a-memory-strategy) を参照してください。
 
-## エージェントへのツールの付与
+タスクが主にプロンプト、ツール、会話状態で完結する場合は、プレーンな `Agent` と `Runner` を使用してください。エージェントが分離されたワークスペース内の実ファイルを検査または変更する必要がある場合は、[Sandbox agents quickstart](sandbox_agents.md) に進んでください。
 
-情報を検索したりアクションを実行したりするためのツールを、エージェントに与えることができます。
+## エージェントへのツール付与
+
+エージェントに、情報を調べたりアクションを実行したりするためのツールを与えることができます。
 
 ```python
 import asyncio
@@ -116,16 +118,16 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## 追加エージェントの作成
+## 追加エージェント
 
-マルチエージェントパターンを選ぶ前に、最終回答を誰が担うべきかを決めてください。
+マルチエージェントパターンを選ぶ前に、最終回答を誰が担当するかを決めてください。
 
--   **ハンドオフ**: そのターンの該当部分について、専門担当が会話を引き継ぎます。
--   **Agents as tools**: オーケストレーターが制御を維持し、専門担当をツールとして呼び出します。
+-   **ハンドオフ**: そのターンの該当部分では、専門エージェントが会話を引き継ぎます。
+-   **Agents as tools**: オーケストレーターが制御を維持し、専門エージェントをツールとして呼び出します。
 
-このクイックスタートでは、最初の例として最も短いため **ハンドオフ** を続けて扱います。マネージャースタイルのパターンについては、[Agent orchestration](multi_agent.md) と [Tools: agents as tools](tools.md#agents-as-tools) を参照してください。
+このクイックスタートでは、最初の例として最短であるため **ハンドオフ** を続けて扱います。マネージャースタイルのパターンについては、[Agent orchestration](multi_agent.md) と [Tools: agents as tools](tools.md#agents-as-tools) を参照してください。
 
-追加のエージェントも同じ方法で定義できます。`handoff_description` は、いつ委譲するかについてルーティングエージェントに追加のコンテキストを与えます。
+追加のエージェントも同じ方法で定義できます。`handoff_description` は、いつ委譲するかについてルーティングエージェントに追加コンテキストを与えます。
 
 ```python
 from agents import Agent
@@ -145,7 +147,7 @@ math_tutor_agent = Agent(
 
 ## ハンドオフの定義
 
-エージェントでは、タスクを解決する間に選択できる、外向きのハンドオフオプションの一覧を定義できます。
+エージェントでは、タスク解決中に選択可能な送信先ハンドオフオプションの一覧を定義できます。
 
 ```python
 triage_agent = Agent(
@@ -157,7 +159,7 @@ triage_agent = Agent(
 
 ## エージェントオーケストレーションの実行
 
-ランナーは、個々のエージェントの実行、あらゆるハンドオフ、およびあらゆるツール呼び出しの処理を行います。
+ランナーは、個々のエージェント実行、ハンドオフ、ツール呼び出しを処理します。
 
 ```python
 import asyncio
@@ -181,18 +183,19 @@ if __name__ == "__main__":
 
 リポジトリには、同じ主要パターンの完全なスクリプトが含まれています。
 
--   最初の実行用: [`examples/basic/hello_world.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/hello_world.py)
--   関数ツール用: [`examples/basic/tools.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/tools.py)
--   マルチエージェントルーティング用: [`examples/agent_patterns/routing.py`](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/routing.py)
+-   最初の実行向け: [`examples/basic/hello_world.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/hello_world.py)
+-   関数ツール向け: [`examples/basic/tools.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/tools.py)
+-   マルチエージェントルーティング向け: [`examples/agent_patterns/routing.py`](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/routing.py)
 
-## トレースの表示
+## トレースの確認
 
-エージェント実行中に何が起きたかを確認するには、[OpenAI Dashboard の Trace viewer](https://platform.openai.com/traces) に移動して、エージェント実行のトレースを表示してください。
+エージェント実行中に何が起きたかを確認するには、[OpenAI ダッシュボードの Trace viewer](https://platform.openai.com/traces) に移動して、エージェント実行のトレースを表示してください。
 
 ## 次のステップ
 
-より複雑な agentic フローの構築方法を学びましょう。
+より複雑なエージェントフローの構築方法を学びます。
 
 -   [Agents](agents.md) の設定方法を学ぶ。
--   [running agents](running_agents.md) と [sessions](sessions/index.md) について学ぶ。
--   [tools](tools.md)、[guardrails](guardrails.md)、[models](models/index.md) について学ぶ。
+-   [running agents](running_agents.md) と [sessions](sessions/index.md) を学ぶ。
+-   作業を実際のワークスペース内で行うべき場合は [Sandbox agents](sandbox_agents.md) を学ぶ。
+-   [tools](tools.md)、[guardrails](guardrails.md)、[models](models/index.md) を学ぶ。

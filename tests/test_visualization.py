@@ -1,4 +1,3 @@
-import sys
 from unittest.mock import Mock
 
 import graphviz  # type: ignore
@@ -13,8 +12,7 @@ from agents.extensions.visualization import (
 )
 from agents.handoffs import Handoff
 
-if sys.version_info >= (3, 10):
-    from .mcp.helpers import FakeMCPServer
+from .mcp.helpers import FakeMCPServer
 
 
 @pytest.fixture
@@ -33,8 +31,7 @@ def mock_agent():
     agent.handoffs = [handoff1]
     agent.mcp_servers = []
 
-    if sys.version_info >= (3, 10):
-        agent.mcp_servers = [FakeMCPServer(server_name="MCPServer1")]
+    agent.mcp_servers = [FakeMCPServer(server_name="MCPServer1")]
 
     return agent
 
@@ -149,9 +146,6 @@ def test_draw_graph(mock_agent):
 
 
 def _assert_mcp_nodes(source: str):
-    if sys.version_info < (3, 10):
-        assert "MCPServer1" not in source
-        return
     assert (
         '"MCPServer1" [label="MCPServer1", shape=box, style=filled, '
         "fillcolor=lightgrey, width=1, height=0.5];" in source
@@ -159,9 +153,6 @@ def _assert_mcp_nodes(source: str):
 
 
 def _assert_mcp_edges(source: str):
-    if sys.version_info < (3, 10):
-        assert "MCPServer1" not in source
-        return
     assert '"Agent1" -> "MCPServer1" [style=dashed, penwidth=1.5];' in source
     assert '"MCPServer1" -> "Agent1" [style=dashed, penwidth=1.5];' in source
 

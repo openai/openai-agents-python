@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from typing import Any, Literal, Union, cast
+from typing import Any, Literal, cast
 
 from openai import Omit, omit
 from openai.types.chat import (
@@ -62,11 +62,9 @@ from .reasoning_content_replay import (
     default_should_replay_reasoning_content,
 )
 
-ResponseInputContentWithAudioParam = Union[
-    ResponseInputContentParam,
-    ResponseInputAudioParam,
-    dict[str, Any],
-]
+ResponseInputContentWithAudioParam = (
+    ResponseInputContentParam | ResponseInputAudioParam | dict[str, Any]
+)
 
 
 class Converter:
@@ -732,7 +730,7 @@ class Converter:
             elif func_output := cls.maybe_function_tool_call_output(item):
                 flush_assistant_message()
                 output_content = cast(
-                    Union[str, Iterable[ResponseInputContentWithAudioParam]], func_output["output"]
+                    str | Iterable[ResponseInputContentWithAudioParam], func_output["output"]
                 )
                 if preserve_tool_output_all_content:
                     tool_result_content = cls.extract_all_content(output_content)

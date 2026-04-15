@@ -5,7 +5,9 @@
 import asyncio
 import base64
 import sys
-from typing import Any, Literal, Union
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any, Literal
 
 from playwright.async_api import Browser, Page, Playwright, async_playwright
 
@@ -59,9 +61,9 @@ class LocalPlaywrightComputer(AsyncComputer):
     """A computer, implemented using a local Playwright browser."""
 
     def __init__(self):
-        self._playwright: Union[Playwright, None] = None
-        self._browser: Union[Browser, None] = None
-        self._page: Union[Page, None] = None
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
+        self._page: Page | None = None
 
     async def _get_browser_and_page(self) -> tuple[Browser, Page]:
         width, height = self.dimensions
@@ -118,21 +120,50 @@ class LocalPlaywrightComputer(AsyncComputer):
         png_bytes = await self.page.screenshot(full_page=False)
         return base64.b64encode(png_bytes).decode("utf-8")
 
-    async def click(self, x: int, y: int, button: Button = "left") -> None:
+    def _normalize_keys(self, keys: list[str] | None) -> list[str]:
+        if not keys:
+            return []
+        return [CUA_KEY_TO_PLAYWRIGHT_KEY.get(key.lower(), key) for key in keys]
+
+    @asynccontextmanager
+    async def _hold_keys(self, keys: list[str] | None) -> AsyncIterator[None]:
+        mapped_keys = self._normalize_keys(keys)
+        try:
+            for key in mapped_keys:
+                await self.page.keyboard.down(key)
+            yield
+        finally:
+            for key in reversed(mapped_keys):
+                await self.page.keyboard.up(key)
+
+    async def click(
+        self, x: int, y: int, button: Button = "left", *, keys: list[str] | None = None
+    ) -> None:
         playwright_button: Literal["left", "middle", "right"] = "left"
 
         # Playwright only supports left, middle, right buttons
         if button in ("left", "right", "middle"):
             playwright_button = button  # type: ignore
 
-        await self.page.mouse.click(x, y, button=playwright_button)
+        async with self._hold_keys(keys):
+            await self.page.mouse.click(x, y, button=playwright_button)
 
-    async def double_click(self, x: int, y: int) -> None:
-        await self.page.mouse.dblclick(x, y)
+    async def double_click(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
+        async with self._hold_keys(keys):
+            await self.page.mouse.dblclick(x, y)
 
-    async def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
-        await self.page.mouse.move(x, y)
-        await self.page.evaluate(f"window.scrollBy({scroll_x}, {scroll_y})")
+    async def scroll(
+        self,
+        x: int,
+        y: int,
+        scroll_x: int,
+        scroll_y: int,
+        *,
+        keys: list[str] | None = None,
+    ) -> None:
+        async with self._hold_keys(keys):
+            await self.page.mouse.move(x, y)
+            await self.page.evaluate(f"window.scrollBy({scroll_x}, {scroll_y})")
 
     async def type(self, text: str) -> None:
         await self.page.keyboard.type(text)
@@ -140,24 +171,26 @@ class LocalPlaywrightComputer(AsyncComputer):
     async def wait(self) -> None:
         await asyncio.sleep(1)
 
-    async def move(self, x: int, y: int) -> None:
-        await self.page.mouse.move(x, y)
+    async def move(self, x: int, y: int, *, keys: list[str] | None = None) -> None:
+        async with self._hold_keys(keys):
+            await self.page.mouse.move(x, y)
 
     async def keypress(self, keys: list[str]) -> None:
-        mapped_keys = [CUA_KEY_TO_PLAYWRIGHT_KEY.get(key.lower(), key) for key in keys]
+        mapped_keys = self._normalize_keys(keys)
         for key in mapped_keys:
             await self.page.keyboard.down(key)
         for key in reversed(mapped_keys):
             await self.page.keyboard.up(key)
 
-    async def drag(self, path: list[tuple[int, int]]) -> None:
+    async def drag(self, path: list[tuple[int, int]], *, keys: list[str] | None = None) -> None:
         if not path:
             return
-        await self.page.mouse.move(path[0][0], path[0][1])
-        await self.page.mouse.down()
-        for px, py in path[1:]:
-            await self.page.mouse.move(px, py)
-        await self.page.mouse.up()
+        async with self._hold_keys(keys):
+            await self.page.mouse.move(path[0][0], path[0][1])
+            await self.page.mouse.down()
+            for px, py in path[1:]:
+                await self.page.mouse.move(px, py)
+            await self.page.mouse.up()
 
 
 async def run_agent(

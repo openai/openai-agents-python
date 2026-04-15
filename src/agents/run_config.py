@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, Optional
+from typing import TYPE_CHECKING, Any, Generic, Literal
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -22,9 +23,16 @@ from .util._types import MaybeAwaitable
 if TYPE_CHECKING:
     from .agent import Agent
     from .run_context import RunContextWrapper
+    from .sandbox.manifest import Manifest
+    from .sandbox.session.base_sandbox_session import BaseSandboxSession
+    from .sandbox.session.sandbox_client import BaseSandboxClient
+    from .sandbox.session.sandbox_session_state import SandboxSessionState
+    from .sandbox.snapshot import SnapshotBase, SnapshotSpec
 
 
 DEFAULT_MAX_TURNS = 10
+DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY = 4
+DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY = 4
 
 
 def _default_trace_include_sensitive_data() -> bool:
@@ -61,7 +69,7 @@ class ToolErrorFormatterArgs(Generic[TContext]):
     kind: Literal["approval_rejected"]
     """The category of tool error being formatted."""
 
-    tool_type: Literal["function", "computer", "shell", "apply_patch"]
+    tool_type: Literal["function", "computer", "shell", "apply_patch", "custom"]
     """The tool runtime that produced the error."""
 
     tool_name: str
@@ -77,7 +85,56 @@ class ToolErrorFormatterArgs(Generic[TContext]):
     """The active run context for the current execution."""
 
 
-ToolErrorFormatter = Callable[[ToolErrorFormatterArgs[Any]], MaybeAwaitable[Optional[str]]]
+ToolErrorFormatter = Callable[[ToolErrorFormatterArgs[Any]], MaybeAwaitable[str | None]]
+
+
+@dataclass
+class SandboxConcurrencyLimits:
+    """Concurrency limits for sandbox materialization work."""
+
+    manifest_entries: int | None = DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY
+    """Maximum number of manifest entries to materialize concurrently per sandbox session.
+
+    Set to `None` to disable this manifest entry limit.
+    """
+
+    local_dir_files: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
+    """Maximum number of files to copy concurrently for each local_dir manifest entry.
+
+    Set to `None` to disable this per-local-dir file copy limit.
+    """
+
+    def validate(self) -> None:
+        if self.manifest_entries is not None and self.manifest_entries < 1:
+            raise ValueError("concurrency_limits.manifest_entries must be at least 1")
+        if self.local_dir_files is not None and self.local_dir_files < 1:
+            raise ValueError("concurrency_limits.local_dir_files must be at least 1")
+
+
+@dataclass
+class SandboxRunConfig:
+    """Grouped sandbox runtime configuration for `Runner`."""
+
+    client: BaseSandboxClient[Any] | None = None
+    """Sandbox client used to create or resume sandbox sessions."""
+
+    options: Any | None = None
+    """Sandbox-client-specific options used when creating a fresh session."""
+
+    session: BaseSandboxSession | None = None
+    """Live sandbox session override for the current process."""
+
+    session_state: SandboxSessionState | None = None
+    """Explicit sandbox session state to resume from when not using `RunState` payloads."""
+
+    manifest: Manifest | None = None
+    """Optional sandbox manifest override for fresh session creation."""
+
+    snapshot: SnapshotSpec | SnapshotBase | None = None
+    """Optional sandbox snapshot used for fresh session creation."""
+
+    concurrency_limits: SandboxConcurrencyLimits = field(default_factory=SandboxConcurrencyLimits)
+    """Concurrency limits for sandbox materialization work."""
 
 
 @dataclass
@@ -100,13 +157,17 @@ class RunConfig:
     handoff_input_filter: HandoffInputFilter | None = None
     """A global input filter to apply to all handoffs. If `Handoff.input_filter` is set, then that
     will take precedence. The input filter allows you to edit the inputs that are sent to the new
-    agent. See the documentation in `Handoff.input_filter` for more details.
+    agent. See the documentation in `Handoff.input_filter` for more details. Server-managed
+    conversations (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`)
+    do not support handoff input filters.
     """
 
     nest_handoff_history: bool = False
     """Opt-in beta: wrap prior run history in a single assistant message before handing off when no
     custom input filter is set. This is disabled by default while we stabilize nested handoffs; set
-    to True to enable the collapsed transcript behavior.
+    to True to enable the collapsed transcript behavior. Server-managed conversations
+    (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) automatically
+    disable this behavior with a warning.
     """
 
     handoff_history_mapper: HandoffHistoryMapper | None = None
@@ -191,6 +252,9 @@ class RunConfig:
     - ``"omit"`` strips reasoning item IDs from model input built by the runner.
     """
 
+    sandbox: SandboxRunConfig | None = None
+    """Optional sandbox runtime configuration for `SandboxAgent` execution."""
+
 
 class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
@@ -231,6 +295,8 @@ __all__ = [
     "ReasoningItemIdPolicy",
     "RunConfig",
     "RunOptions",
+    "SandboxConcurrencyLimits",
+    "SandboxRunConfig",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "_default_trace_include_sensitive_data",

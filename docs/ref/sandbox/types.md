@@ -1,0 +1,3 @@
+# `Types`
+
+::: agents.sandbox.types

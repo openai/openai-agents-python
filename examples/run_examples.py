@@ -43,6 +43,7 @@ COMMON_PATH_HINTS = (
 
 DISCOVERY_EXCLUDE = {
     "examples/run_examples.py",
+    "examples/sandbox/tutorials/data/dataroom/setup.py",
 }
 
 # Examples that are noisy, require extra credentials, or hang in auto runs.
@@ -158,6 +159,13 @@ def build_command_path(base_path: str | None = None) -> str:
         candidates.extend(split_path_entries(shell_path))
 
     candidates.extend(str(path) for path in COMMON_PATH_HINTS)
+    return os.pathsep.join(dedupe_existing_paths(candidates))
+
+
+def build_python_path(base_path: str | None = None) -> str:
+    candidates = [str(ROOT_DIR)]
+    if base_path:
+        candidates.extend(split_path_entries(base_path))
     return os.pathsep.join(dedupe_existing_paths(candidates))
 
 
@@ -450,6 +458,7 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
 
         env = os.environ.copy()
         env["PATH"] = command_path
+        env["PYTHONPATH"] = build_python_path(env.get("PYTHONPATH"))
         if auto_mode:
             env["EXAMPLES_INTERACTIVE_MODE"] = "auto"
             env["APPLY_PATCH_AUTO_APPROVE"] = "1"

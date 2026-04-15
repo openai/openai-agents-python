@@ -52,7 +52,7 @@ async def on_codex_stream(payload: CodexToolStreamEvent) -> None:
         log(f"codex stream error: {event.message}")
         return
 
-    if not isinstance(event, (ItemStartedEvent, ItemUpdatedEvent, ItemCompletedEvent)):
+    if not isinstance(event, ItemStartedEvent | ItemUpdatedEvent | ItemCompletedEvent):
         return
 
     item = event.item

@@ -127,6 +127,19 @@ def fetch_normalized_spans(
         span_data = {k: v for k, v in span_data.items() if v is not None}
         if span_data:
             span["data"] = span_data
+        trace_id = span.pop("trace_id")
+        sdk_span_type = None
+        if span["type"] == "custom":
+            custom_data = span_data.get("data")
+            if isinstance(custom_data, dict):
+                sdk_span_type = custom_data.get("sdk_span_type")
+        if span["type"] in {"task", "turn"} or sdk_span_type in {"task", "turn"}:
+            parent = nodes[(trace_id, parent_id)]
+            if "error" in span and "error" not in parent:
+                parent["error"] = span["error"]
+            nodes[(trace_id, span_obj.span_id)] = parent
+            continue
+
         nodes[(span_obj.trace_id, span_obj.span_id)] = span
-        nodes[(span.pop("trace_id"), parent_id)].setdefault("children", []).append(span)
+        nodes[(trace_id, parent_id)].setdefault("children", []).append(span)
     return traces

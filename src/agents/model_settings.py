@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import fields, replace
-from typing import Annotated, Any, Literal, Union, cast
+from typing import Annotated, Any, Literal, TypeAlias, cast
 
 from openai import Omit as _Omit
 from openai._types import Body, Query
@@ -11,7 +11,6 @@ from openai.types.shared import Reasoning
 from pydantic import GetCoreSchemaHandler, TypeAdapter
 from pydantic.dataclasses import dataclass
 from pydantic_core import core_schema
-from typing_extensions import TypeAlias
 
 from .retry import (
     ModelRetryBackoffInput,
@@ -57,8 +56,8 @@ class MCPToolChoice:
 
 
 Omit = Annotated[_Omit, _OmitTypeAnnotation]
-Headers: TypeAlias = Mapping[str, Union[str, Omit]]
-ToolChoice: TypeAlias = Union[Literal["auto", "required", "none"], str, MCPToolChoice, None]
+Headers: TypeAlias = Mapping[str, str | Omit]
+ToolChoice: TypeAlias = Literal["auto", "required", "none"] | str | MCPToolChoice | None
 
 
 @dataclass

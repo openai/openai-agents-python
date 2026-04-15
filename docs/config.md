@@ -2,9 +2,13 @@
 
 This page covers SDK-wide defaults that you usually set once during application startup, such as the default OpenAI key or client, the default OpenAI API shape, tracing export defaults, and logging behavior.
 
+These defaults still apply to sandbox-based workflows, but sandbox workspaces, sandbox clients, and session reuse are configured separately.
+
 If you need to configure a specific agent or run instead, start with:
 
+-   [Agents](agents.md) for instructions, tools, output types, handoffs, and guardrails on a plain `Agent`.
 -   [Running agents](running_agents.md) for `RunConfig`, sessions, and conversation-state options.
+-   [Sandbox agents](sandbox/guide.md) for `SandboxRunConfig`, manifests, capabilities, and sandbox-client-specific workspace setup.
 -   [Models](models/index.md) for model selection and provider configuration.
 -   [Tracing](tracing.md) for per-run tracing metadata and custom trace processors.
 

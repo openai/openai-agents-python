@@ -572,7 +572,7 @@ def test_backend_span_exporter_keeps_generation_usage_for_custom_endpoint(mock_c
 
 
 @patch("httpx.Client")
-def test_backend_span_exporter_does_not_modify_non_generation_usage(mock_client):
+def test_backend_span_exporter_drops_non_generation_usage_for_openai_endpoint(mock_client):
     class DummyItem:
         tracing_api_key = None
 
@@ -590,6 +590,35 @@ def test_backend_span_exporter_does_not_modify_non_generation_usage(mock_client)
     mock_client.return_value.post.return_value = mock_response
 
     exporter = BackendSpanExporter(api_key="test_key")
+    exporter.export([cast(Any, DummyItem())])
+
+    sent_payload = mock_client.return_value.post.call_args.kwargs["json"]["data"][0]
+    assert "usage" not in sent_payload["span_data"]
+    exporter.close()
+
+
+@patch("httpx.Client")
+def test_backend_span_exporter_keeps_non_generation_usage_for_custom_endpoint(mock_client):
+    class DummyItem:
+        tracing_api_key = None
+
+        def export(self):
+            return {
+                "object": "trace.span",
+                "span_data": {
+                    "type": "function",
+                    "usage": {"requests": 1},
+                },
+            }
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(
+        api_key="test_key",
+        endpoint="https://example.com/v1/traces/ingest",
+    )
     exporter.export([cast(Any, DummyItem())])
 
     sent_payload = mock_client.return_value.post.call_args.kwargs["json"]["data"][0]

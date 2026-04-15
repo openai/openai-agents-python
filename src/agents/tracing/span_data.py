@@ -31,7 +31,7 @@ class AgentSpanData(SpanData):
     Includes name, handoffs, tools, and output type.
     """
 
-    __slots__ = ("name", "handoffs", "tools", "output_type")
+    __slots__ = ("name", "handoffs", "tools", "output_type", "metadata")
 
     def __init__(
         self,
@@ -39,11 +39,13 @@ class AgentSpanData(SpanData):
         handoffs: list[str] | None = None,
         tools: list[str] | None = None,
         output_type: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         self.name = name
         self.handoffs: list[str] | None = handoffs
         self.tools: list[str] | None = tools
         self.output_type: str | None = output_type
+        self.metadata = metadata
 
     @property
     def type(self) -> str:
@@ -56,6 +58,77 @@ class AgentSpanData(SpanData):
             "handoffs": self.handoffs,
             "tools": self.tools,
             "output_type": self.output_type,
+        }
+
+
+class TaskSpanData(SpanData):
+    """Represents one top-level Runner run."""
+
+    __slots__ = ("name", "usage", "metadata")
+
+    def __init__(
+        self,
+        name: str,
+        usage: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ):
+        self.name = name
+        self.usage = usage
+        self.metadata = metadata
+
+    @property
+    def type(self) -> str:
+        return "task"
+
+    def export(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "sdk_span_type": self.type,
+            "name": self.name,
+        }
+        if self.usage is not None:
+            data["usage"] = self.usage
+
+        return {
+            "type": "custom",
+            "name": self.type,
+            "data": data,
+        }
+
+
+class TurnSpanData(SpanData):
+    """Represents one agent loop turn."""
+
+    __slots__ = ("turn", "agent_name", "usage", "metadata")
+
+    def __init__(
+        self,
+        turn: int,
+        agent_name: str,
+        usage: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ):
+        self.turn = turn
+        self.agent_name = agent_name
+        self.usage = usage
+        self.metadata = metadata
+
+    @property
+    def type(self) -> str:
+        return "turn"
+
+    def export(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "sdk_span_type": self.type,
+            "turn": self.turn,
+            "agent_name": self.agent_name,
+        }
+        if self.usage is not None:
+            data["usage"] = self.usage
+
+        return {
+            "type": "custom",
+            "name": self.type,
+            "data": data,
         }
 
 
@@ -142,17 +215,19 @@ class ResponseSpanData(SpanData):
     Includes response and input.
     """
 
-    __slots__ = ("response", "input")
+    __slots__ = ("response", "input", "usage")
 
     def __init__(
         self,
         response: Response | None = None,
         input: str | list[ResponseInputItemParam] | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> None:
         self.response = response
         # This is not used by the OpenAI trace processors, but is useful for other tracing
         # processor implementations
         self.input = input
+        self.usage = usage
 
     @property
     def type(self) -> str:
@@ -162,6 +237,7 @@ class ResponseSpanData(SpanData):
         return {
             "type": self.type,
             "response_id": self.response.id if self.response else None,
+            "usage": self.usage,
         }
 
 

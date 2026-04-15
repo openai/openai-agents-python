@@ -8,14 +8,14 @@ import inspect
 import json
 import math
 import weakref
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from types import UnionType
 from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
-    Callable,
+    Concatenate,
     Generic,
     Literal,
     Protocol,
@@ -28,6 +28,7 @@ from typing import (
     overload,
 )
 
+from openai.types.responses import CustomToolParam
 from openai.types.responses.file_search_tool_param import Filters, RankingOptions
 from openai.types.responses.response_computer_tool_call import (
     PendingSafetyCheck,
@@ -38,7 +39,7 @@ from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, 
 from openai.types.responses.web_search_tool import Filters as WebSearchToolFilters
 from openai.types.responses.web_search_tool_param import UserLocation
 from pydantic import BaseModel, TypeAdapter, ValidationError, model_validator
-from typing_extensions import Concatenate, NotRequired, ParamSpec, TypedDict
+from typing_extensions import NotRequired, ParamSpec, TypedDict
 
 from . import _debug
 from ._tool_identity import (
@@ -71,15 +72,17 @@ ToolFunctionWithoutContext = Callable[ToolParams, Any]
 ToolFunctionWithContext = Callable[Concatenate[RunContextWrapper[Any], ToolParams], Any]
 ToolFunctionWithToolContext = Callable[Concatenate[ToolContext, ToolParams], Any]
 
-ToolFunction = Union[
-    ToolFunctionWithoutContext[ToolParams],
-    ToolFunctionWithContext[ToolParams],
-    ToolFunctionWithToolContext[ToolParams],
-]
+ToolFunction = (
+    ToolFunctionWithoutContext[ToolParams]
+    | ToolFunctionWithContext[ToolParams]
+    | ToolFunctionWithToolContext[ToolParams]
+)
 
 DEFAULT_APPROVAL_REJECTION_MESSAGE = "Tool execution was not approved."
 ToolTimeoutBehavior = Literal["error_as_result", "raise_exception"]
 ToolErrorFunction = Callable[[RunContextWrapper[Any], Exception], MaybeAwaitable[str]]
+CustomToolExecutor = Callable[[ToolContext[Any], str], MaybeAwaitable[Any]]
+CustomToolApprovalFunction = Callable[[RunContextWrapper[Any], str, str], MaybeAwaitable[bool]]
 _SYNC_FUNCTION_TOOL_MARKER = "__agents_sync_function_tool__"
 _UNSET_FAILURE_ERROR_FUNCTION = object()
 
@@ -158,12 +161,12 @@ class ToolOutputFileContentDict(TypedDict, total=False):
     filename: NotRequired[str]
 
 
-ValidToolOutputPydanticModels = Union[ToolOutputText, ToolOutputImage, ToolOutputFileContent]
+ValidToolOutputPydanticModels = ToolOutputText | ToolOutputImage | ToolOutputFileContent
 ValidToolOutputPydanticModelsTypeAdapter: TypeAdapter[ValidToolOutputPydanticModels] = TypeAdapter(
     ValidToolOutputPydanticModels
 )
 
-ComputerLike = Union[Computer, AsyncComputer]
+ComputerLike = Computer | AsyncComputer
 ComputerT = TypeVar("ComputerT", bound=ComputerLike)
 ComputerT_co = TypeVar("ComputerT_co", bound=ComputerLike, covariant=True)
 ComputerT_contra = TypeVar("ComputerT_contra", bound=ComputerLike, contravariant=True)
@@ -194,11 +197,7 @@ class ComputerProvider(Generic[ComputerT]):
     dispose: ComputerDispose[ComputerT] | None = None
 
 
-ComputerConfig = Union[
-    ComputerT,
-    ComputerCreate[ComputerT],
-    ComputerProvider[ComputerT],
-]
+ComputerConfig = ComputerLike | ComputerCreate[Any] | ComputerProvider[Any]
 
 
 @dataclass
@@ -515,7 +514,7 @@ class WebSearchTool:
 class ComputerTool(Generic[ComputerT]):
     """A local computer harness exposed through the Responses API computer tool."""
 
-    computer: ComputerConfig[ComputerT]
+    computer: ComputerT | ComputerCreate[ComputerT] | ComputerProvider[ComputerT]
     """The computer implementation, or a factory that produces a computer per run."""
 
     on_safety_check: Callable[[ComputerToolSafetyCheckData], MaybeAwaitable[bool]] | None = None
@@ -547,7 +546,7 @@ _computer_cache: weakref.WeakKeyDictionary[
     ComputerTool[Any],
     weakref.WeakKeyDictionary[RunContextWrapper[Any], _ResolvedComputer],
 ] = weakref.WeakKeyDictionary()
-_computer_initializer_map: weakref.WeakKeyDictionary[ComputerTool[Any], ComputerConfig[Any]] = (
+_computer_initializer_map: weakref.WeakKeyDictionary[ComputerTool[Any], ComputerConfig] = (
     weakref.WeakKeyDictionary()
 )
 _computers_by_run_context: weakref.WeakKeyDictionary[
@@ -597,7 +596,7 @@ async def resolve_computer(
     else:
         computer = cast(ComputerLike, tool.computer)
 
-    if not isinstance(computer, (Computer, AsyncComputer)):
+    if not isinstance(computer, Computer | AsyncComputer):
         raise UserError("The computer tool did not provide a computer instance.")
 
     resolved = _ResolvedComputer(computer=computer, dispose=disposer)
@@ -732,6 +731,24 @@ Takes (run_context, approval_item) and returns approval decision.
 """
 
 
+class CustomToolOnApprovalFunctionResult(TypedDict):
+    """The result of a custom tool on_approval callback."""
+
+    approve: bool
+    """Whether to approve the tool call."""
+
+    reason: NotRequired[str]
+    """An optional reason, if rejected."""
+
+
+CustomToolOnApprovalFunction = Callable[
+    [RunContextWrapper[Any], "ToolApprovalItem"], MaybeAwaitable[CustomToolOnApprovalFunctionResult]
+]
+"""A function that auto-approves or rejects a custom tool call when approval is needed.
+Takes (run_context, approval_item) and returns approval decision.
+"""
+
+
 @dataclass
 class HostedMCPTool:
     """A tool that allows the LLM to use a remote MCP server. The LLM will automatically list and
@@ -841,7 +858,7 @@ class ShellToolInlineSkill(TypedDict):
     type: Literal["inline"]
 
 
-ShellToolContainerSkill = Union[ShellToolSkillReference, ShellToolInlineSkill]
+ShellToolContainerSkill = ShellToolSkillReference | ShellToolInlineSkill
 """Container skill configuration."""
 
 
@@ -867,10 +884,9 @@ class ShellToolContainerNetworkPolicyDisabled(TypedDict):
     type: Literal["disabled"]
 
 
-ShellToolContainerNetworkPolicy = Union[
-    ShellToolContainerNetworkPolicyAllowlist,
-    ShellToolContainerNetworkPolicyDisabled,
-]
+ShellToolContainerNetworkPolicy = (
+    ShellToolContainerNetworkPolicyAllowlist | ShellToolContainerNetworkPolicyDisabled
+)
 """Network policy configuration for hosted shell containers."""
 
 
@@ -898,13 +914,12 @@ class ShellToolContainerReferenceEnvironment(TypedDict):
     container_id: str
 
 
-ShellToolHostedEnvironment = Union[
-    ShellToolContainerAutoEnvironment,
-    ShellToolContainerReferenceEnvironment,
-]
+ShellToolHostedEnvironment = (
+    ShellToolContainerAutoEnvironment | ShellToolContainerReferenceEnvironment
+)
 """Hosted shell environment variants."""
 
-ShellToolEnvironment = Union[ShellToolLocalEnvironment, ShellToolHostedEnvironment]
+ShellToolEnvironment = ShellToolLocalEnvironment | ShellToolHostedEnvironment
 """All supported shell environments."""
 
 
@@ -971,7 +986,7 @@ class ShellCommandRequest:
     data: ShellCallData
 
 
-ShellExecutor = Callable[[ShellCommandRequest], MaybeAwaitable[Union[str, ShellResult]]]
+ShellExecutor = Callable[[ShellCommandRequest], MaybeAwaitable[str | ShellResult]]
 """Executes a shell command sequence and returns either text or structured output."""
 
 
@@ -1062,6 +1077,47 @@ class ApplyPatchTool:
 
 
 @dataclass
+class CustomTool:
+    """A Responses custom tool that uses one raw string input instead of JSON arguments."""
+
+    name: str
+    description: str
+    on_invoke_tool: CustomToolExecutor
+    format: object | None = None
+    needs_approval: bool | CustomToolApprovalFunction = False
+    """Whether the raw custom tool call needs approval before execution."""
+    on_approval: CustomToolOnApprovalFunction | None = None
+    """Optional handler to auto-approve or reject when approval is required."""
+    defer_loading: bool = False
+
+    tool_config: CustomToolParam = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        tool_config: CustomToolParam = {
+            "type": "custom",
+            "name": self.name,
+            "description": self.description,
+        }
+        if self.format is not None:
+            tool_config["format"] = self.format  # type: ignore[typeddict-item]
+        if self.defer_loading:
+            tool_config["defer_loading"] = True
+        self.tool_config = tool_config
+
+    def runtime_needs_approval(self) -> bool | CustomToolApprovalFunction:
+        """Return the callable/bool approval setting used by runtime execution."""
+        return self.needs_approval
+
+    def runtime_on_approval(self) -> CustomToolOnApprovalFunction | None:
+        """Return the approval callback used by runtime execution."""
+        return self.on_approval
+
+    @property
+    def type(self) -> str:
+        return "custom"
+
+
+@dataclass
 class ToolSearchTool:
     """A hosted Responses API tool that lets the model search deferred tools by namespace.
 
@@ -1078,19 +1134,20 @@ class ToolSearchTool:
         return "tool_search"
 
 
-Tool = Union[
-    FunctionTool,
-    FileSearchTool,
-    WebSearchTool,
-    ComputerTool[Any],
-    HostedMCPTool,
-    ShellTool,
-    ApplyPatchTool,
-    LocalShellTool,
-    ImageGenerationTool,
-    CodeInterpreterTool,
-    ToolSearchTool,
-]
+Tool = (
+    FunctionTool
+    | FileSearchTool
+    | WebSearchTool
+    | ComputerTool[Any]
+    | HostedMCPTool
+    | CustomTool
+    | ShellTool
+    | ApplyPatchTool
+    | LocalShellTool
+    | ImageGenerationTool
+    | CodeInterpreterTool
+    | ToolSearchTool
+)
 """A tool that can be used in an agent."""
 
 
@@ -1755,7 +1812,7 @@ def _is_computer_provider(candidate: object) -> bool:
 def _validate_function_tool_timeout_config(tool: FunctionTool) -> None:
     timeout_seconds = tool.timeout_seconds
     if timeout_seconds is not None:
-        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int | float):
             raise TypeError(
                 "FunctionTool timeout_seconds must be a positive number in seconds or None."
             )
@@ -1786,7 +1843,7 @@ def _store_computer_initializer(tool: ComputerTool[Any]) -> None:
         _computer_initializer_map[tool] = config
 
 
-def _get_computer_initializer(tool: ComputerTool[Any]) -> ComputerConfig[Any] | None:
+def _get_computer_initializer(tool: ComputerTool[Any]) -> ComputerConfig | None:
     if tool in _computer_initializer_map:
         return _computer_initializer_map[tool]
 

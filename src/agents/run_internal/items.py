@@ -22,6 +22,7 @@ TOOL_CALL_SESSION_DESCRIPTION_KEY = "_agents_tool_description"
 TOOL_CALL_SESSION_TITLE_KEY = "_agents_tool_title"
 _TOOL_CALL_TO_OUTPUT_TYPE: dict[str, str] = {
     "function_call": "function_call_output",
+    "custom_tool_call": "custom_tool_call_output",
     "shell_call": "shell_call_output",
     "apply_patch_call": "apply_patch_call_output",
     "computer_call": "computer_call_output",
@@ -342,15 +343,19 @@ def apply_patch_rejection_item(
     agent: Any,
     call_id: str,
     *,
+    output_type: Literal["apply_patch_call_output", "custom_tool_call_output"] = (
+        "apply_patch_call_output"
+    ),
     rejection_message: str = REJECTION_MESSAGE,
 ) -> ToolCallOutputItem:
     """Build a ToolCallOutputItem representing a rejected apply_patch call."""
     rejection_raw_item: dict[str, Any] = {
-        "type": "apply_patch_call_output",
+        "type": output_type,
         "call_id": call_id,
-        "status": "failed",
         "output": rejection_message,
     }
+    if output_type == "apply_patch_call_output":
+        rejection_raw_item["status"] = "failed"
     return ToolCallOutputItem(
         agent=agent,
         output=rejection_message,
