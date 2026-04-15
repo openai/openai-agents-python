@@ -741,3 +741,79 @@ async def test_runner_with_session_settings_override():
         assert len(history_items) == 2
 
         session.close()
+
+
+@pytest.mark.asyncio
+async def test_session_stop_on_first_tool_saves_assistant_message():
+    """When tool_use_behavior='stop_on_first_tool', the session should store an assistant
+    message instead of raw function_call + function_call_output items.  This prevents the
+    model from seeing previous tool calls in history and skipping the tool on subsequent
+    calls.
+
+    Regression test for https://github.com/openai/openai-agents-python/issues/1465
+    """
+    from .test_responses import get_function_tool, get_function_tool_call
+
+    model = FakeModel()
+    tool = get_function_tool("get_pm", return_value="PM is Justin Trudeau")
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+
+    session = SQLiteSession("stop_on_first_tool_test")
+
+    # First call: model returns a function call
+    model.set_next_output([get_function_tool_call("get_pm", '{"name": "Canada"}')])
+    result1 = await Runner.run(
+        agent,
+        "Who is the PM of Canada?",
+        session=session,
+    )
+    assert result1.final_output == "PM is Justin Trudeau"
+
+    # Inspect session history: should contain user message + assistant text message,
+    # NOT raw function_call / function_call_output items.
+    history = await session.get_items()
+    types_in_history = [item.get("type") for item in history if isinstance(item, dict)]
+    roles_in_history = [item.get("role") for item in history if isinstance(item, dict)]
+
+    # There should be no function_call or function_call_output items in the session
+    assert "function_call" not in types_in_history, (
+        "Session should not contain raw function_call items when tool_use_behavior "
+        "produces a final output"
+    )
+    assert "function_call_output" not in types_in_history, (
+        "Session should not contain raw function_call_output items when tool_use_behavior "
+        "produces a final output"
+    )
+    # Should have an assistant message with the tool output
+    assert "assistant" in roles_in_history, (
+        "Session should contain a synthesized assistant message with the tool output"
+    )
+
+    # Second call: the model should NOT see the previous tool call in history.
+    # It should receive the user message history and assistant text, not function_call items.
+    model.set_next_output([get_function_tool_call("get_pm", '{"name": "Canada"}')])
+    result2 = await Runner.run(
+        agent,
+        "Who is the PM of Canada?",
+        session=session,
+    )
+    assert result2.final_output == "PM is Justin Trudeau"
+
+    # Verify the model input on the second call does not contain function_call items
+    second_call_input = model.last_turn_args["input"]
+    input_types = [
+        item.get("type") for item in second_call_input if isinstance(item, dict)
+    ]
+    assert "function_call" not in input_types, (
+        "Model input should not contain function_call items from session history"
+    )
+    assert "function_call_output" not in input_types, (
+        "Model input should not contain function_call_output items from session history"
+    )
+
+    session.close()

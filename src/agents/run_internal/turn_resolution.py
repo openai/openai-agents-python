@@ -14,6 +14,7 @@ from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
     ResponseOutputMessage,
+    ResponseOutputText,
 )
 from openai.types.responses.response_code_interpreter_tool_call import (
     ResponseCodeInterpreterToolCall,
@@ -90,6 +91,7 @@ from .items import (
     function_rejection_item,
     shell_rejection_item,
 )
+from ..models.fake_id import FAKE_RESPONSES_ID
 from .run_steps import (
     NOT_FINAL_OUTPUT,
     NextStepFinalOutput,
@@ -181,7 +183,7 @@ async def _maybe_finalize_from_tool_results(
             "you know what you're doing."
         )
 
-    return await execute_final_output(
+    result = await execute_final_output(
         agent=agent,
         original_input=original_input,
         new_response=new_response,
@@ -193,6 +195,34 @@ async def _maybe_finalize_from_tool_results(
         tool_input_guardrail_results=tool_input_guardrail_results,
         tool_output_guardrail_results=tool_output_guardrail_results,
     )
+
+    # When a tool output becomes the final answer (via tool_use_behavior like
+    # stop_on_first_tool), save an assistant message to the session instead of the
+    # raw function_call + function_call_output items.  This prevents subsequent
+    # calls from seeing the previous tool invocation in history, which can cause
+    # the model to skip calling the tool again.
+    if check_tool_use.final_output is not None:
+        output_text = str(check_tool_use.final_output)
+        synthesized_message = MessageOutputItem(
+            agent=agent,
+            raw_item=ResponseOutputMessage(
+                id=FAKE_RESPONSES_ID,
+                type="message",
+                role="assistant",
+                content=[
+                    ResponseOutputText(
+                        text=output_text,
+                        type="output_text",
+                        annotations=[],
+                        logprobs=[],
+                    )
+                ],
+                status="completed",
+            ),
+        )
+        result.session_step_items = [synthesized_message]
+
+    return result
 
 
 async def run_final_output_hooks(

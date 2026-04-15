@@ -1119,30 +1119,36 @@ class AgentRunner:
                                 item for item in items_to_save_turn if item.type != "tool_call_item"
                             ]
                         if session_persistence_enabled:
-                            output_call_ids = {
-                                item.raw_item.get("call_id")
-                                if isinstance(item.raw_item, dict)
-                                else getattr(item.raw_item, "call_id", None)
-                                for item in turn_result.new_step_items
-                                if item.type == "tool_call_output_item"
-                            }
-                            for item in generated_items:
-                                if item.type != "tool_call_item":
-                                    continue
-                                call_id = (
+                            # When session_step_items is explicitly set, the turn
+                            # resolution has already decided what should be persisted
+                            # (e.g. a synthesized assistant message instead of raw
+                            # tool call items).  Skip the tool-call back-fill so we
+                            # don't re-add the items that were intentionally excluded.
+                            if turn_result.session_step_items is None:
+                                output_call_ids = {
                                     item.raw_item.get("call_id")
                                     if isinstance(item.raw_item, dict)
                                     else getattr(item.raw_item, "call_id", None)
-                                )
-                                if (
-                                    call_id in output_call_ids
-                                    and item not in items_to_save_turn
-                                    and not (
-                                        run_state
-                                        and run_state._current_turn_persisted_item_count > 0
+                                    for item in turn_result.new_step_items
+                                    if item.type == "tool_call_output_item"
+                                }
+                                for item in generated_items:
+                                    if item.type != "tool_call_item":
+                                        continue
+                                    call_id = (
+                                        item.raw_item.get("call_id")
+                                        if isinstance(item.raw_item, dict)
+                                        else getattr(item.raw_item, "call_id", None)
                                     )
-                                ):
-                                    items_to_save_turn.append(item)
+                                    if (
+                                        call_id in output_call_ids
+                                        and item not in items_to_save_turn
+                                        and not (
+                                            run_state
+                                            and run_state._current_turn_persisted_item_count > 0
+                                        )
+                                    ):
+                                        items_to_save_turn.append(item)
                             if items_to_save_turn:
                                 logger.debug(
                                     "Persisting turn items (types=%s)",
