@@ -398,6 +398,50 @@ async def test_get_screenshot_drops_modifier_keys_for_legacy_driver_with_warning
 
 
 @pytest.mark.asyncio
+async def test_get_screenshot_drops_modifier_keys_for_non_introspectable_driver_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class NonIntrospectableClick:
+        def __init__(self, calls: list[tuple[str, tuple[Any, ...]]]) -> None:
+            self._calls = calls
+
+        @property
+        def __signature__(self) -> Any:
+            raise ValueError("signature unavailable")
+
+        def __call__(self, x: int, y: int, button: str) -> None:
+            self._calls.append(("click", (x, y, button)))
+
+    class NonIntrospectableDriver:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[Any, ...]]] = []
+            self.click = NonIntrospectableClick(self.calls)
+
+        def screenshot(self) -> str:
+            self.calls.append(("screenshot", ()))
+            return "non_introspectable"
+
+    tool_call = ResponseComputerToolCall(
+        id="c8",
+        type="computer_call",
+        action=_action_with_keys(
+            ActionClick, type="click", x=2, y=5, button="left", keys=["shift"]
+        ),
+        call_id="c8",
+        pending_safety_checks=[],
+        status="completed",
+    )
+
+    driver = NonIntrospectableDriver()
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        screenshot_output = await ComputerAction._execute_action_and_capture(driver, tool_call)
+
+    assert driver.calls == [("click", (2, 5, "left")), ("screenshot", ())]
+    assert screenshot_output == "non_introspectable"
+    assert "does not accept keyword argument(s) keys" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_get_screenshot_preserves_modifier_keys_for_kwargs_driver() -> None:
     class KwargsDriver:
         def __init__(self) -> None:
@@ -411,10 +455,10 @@ async def test_get_screenshot_preserves_modifier_keys_for_kwargs_driver() -> Non
             self.calls.append(("move", (x, y), kwargs))
 
     tool_call = ResponseComputerToolCall(
-        id="c8",
+        id="c9",
         type="computer_call",
         action=_action_with_keys(ActionMove, type="move", x=10, y=12, keys=["meta"]),
-        call_id="c8",
+        call_id="c9",
         pending_safety_checks=[],
         status="completed",
     )
@@ -433,12 +477,12 @@ async def test_get_screenshot_preserves_modifier_keys_for_kwargs_driver() -> Non
 async def test_get_screenshot_preserves_modifier_keys_for_batched_actions() -> None:
     computer = LoggingComputer(screenshot_return="batched_keys")
     tool_call = ResponseComputerToolCall(
-        id="c9",
+        id="c10",
         type="computer_call",
         actions=[
             _action_with_keys(BatchedClick, type="click", x=11, y=12, button="left", keys=["ctrl"])
         ],
-        call_id="c9",
+        call_id="c10",
         pending_safety_checks=[],
         status="completed",
     )

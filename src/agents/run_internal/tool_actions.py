@@ -338,7 +338,10 @@ class ComputerAction:
 
     @staticmethod
     def _supported_keyword_arguments(method: Any) -> set[str | None]:
-        signature = inspect.signature(method)
+        try:
+            signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            return set()
         supported: set[str | None] = {
             parameter.name
             for parameter in signature.parameters.values()
