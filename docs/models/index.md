@@ -133,6 +133,30 @@ result = await Runner.run(
 )
 ```
 
+OpenAI-backed providers also accept optional agent registration config. This is an advanced option for cases where your OpenAI setup expects provider-level registration metadata such as a harness ID.
+
+```python
+from agents import (
+    Agent,
+    OpenAIAgentRegistrationConfig,
+    OpenAIProvider,
+    RunConfig,
+    Runner,
+)
+
+provider = OpenAIProvider(
+    use_responses_websocket=True,
+    agent_registration=OpenAIAgentRegistrationConfig(harness_id="your-harness-id"),
+)
+
+agent = Agent(name="Assistant")
+result = await Runner.run(
+    agent,
+    "Hello",
+    run_config=RunConfig(model_provider=provider),
+)
+```
+
 #### Advanced routing with `MultiProvider`
 
 If you need prefix-based model routing (for example mixing `openai/...` and `any-llm/...` model names in one run), use [`MultiProvider`][agents.MultiProvider] and set `openai_use_responses_websocket=True` there instead.
@@ -169,6 +193,8 @@ result = await Runner.run(
 ```
 
 Use `openai_prefix_mode="model_id"` when a backend expects the literal `openai/...` string. Use `unknown_prefix_mode="model_id"` when the backend expects other namespaced model IDs such as `openrouter/openai/gpt-4.1-mini`. These options also work on `MultiProvider` outside websocket transport; this example keeps websocket enabled because it is part of the transport setup described in this section. The same options are also available on [`responses_websocket_session()`][agents.responses_websocket_session].
+
+If you need the same provider-level registration metadata while routing through `MultiProvider`, pass `openai_agent_registration=OpenAIAgentRegistrationConfig(...)` and it will be forwarded to the underlying OpenAI provider.
 
 If you use a custom OpenAI-compatible endpoint or proxy, websocket transport also requires a compatible websocket `/responses` endpoint. In those setups you may need to set `websocket_base_url` explicitly.
 
