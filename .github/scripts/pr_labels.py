@@ -22,6 +22,7 @@ ALLOWED_LABELS: Final[set[str]] = {
     "feature:extensions",
     "feature:mcp",
     "feature:realtime",
+    "feature:sandboxes",
     "feature:sessions",
     "feature:tracing",
     "feature:voice",
@@ -41,8 +42,8 @@ MODEL_ONLY_LABELS: Final[set[str]] = {
 FEATURE_LABELS: Final[set[str]] = ALLOWED_LABELS - DETERMINISTIC_LABELS - MODEL_ONLY_LABELS
 
 SOURCE_FEATURE_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
-    "feature:extensions": ("src/agents/extensions/",),
     "feature:realtime": ("src/agents/realtime/",),
+    "feature:sandboxes": ("src/agents/sandbox/", "src/agents/extensions/sandbox/"),
     "feature:voice": ("src/agents/voice/",),
     "feature:mcp": ("src/agents/mcp/",),
     "feature:tracing": ("src/agents/tracing/",),
@@ -186,6 +187,9 @@ def infer_specific_feature_labels(changed_files: Sequence[str]) -> set[str]:
         if any(path.startswith(prefix) for path in source_files for prefix in prefixes):
             labels.add(label)
 
+    if any(path.startswith("src/agents/extensions/") for path in source_files):
+        labels.add("feature:extensions")
+
     if any(
         path.startswith(("src/agents/models/", "src/agents/extensions/models/"))
         and ("chatcmpl" in path or "chatcompletions" in path)
@@ -327,6 +331,9 @@ def compute_desired_labels(
         desired.update(title_intent_labels)
     elif codex_ran and codex_output_valid:
         desired.update(codex_model_only_labels)
+
+    if any(path.startswith("src/agents/extensions/sandbox/") for path in changed_files):
+        desired.update({"feature:extensions", "feature:sandboxes"})
 
     return desired
 
