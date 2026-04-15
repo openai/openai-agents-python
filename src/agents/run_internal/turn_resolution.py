@@ -410,7 +410,7 @@ async def execute_handoffs(
         )
         input_filter, should_nest_history = _resolve_server_managed_handoff_behavior(
             handoff=handoff,
-            from_agent=agent,
+            from_agent=public_agent,
             to_agent=new_agent,
             run_config=run_config,
             server_manages_conversation=server_manages_conversation,
