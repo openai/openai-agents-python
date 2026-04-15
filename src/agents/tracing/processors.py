@@ -39,6 +39,7 @@ class BackendSpanExporter(TracingExporter):
             "output_tokens",
         }
     )
+    _OPENAI_TRACING_USAGE_SPAN_TYPES = frozenset({"generation"})
     _UNSERIALIZABLE = object()
 
     def __init__(
@@ -203,7 +204,12 @@ class BackendSpanExporter(TracingExporter):
                 did_mutate = True
             sanitized_span_data[field_name] = sanitized_field
 
-        if span_data.get("type") != "generation":
+        if span_data.get("type") not in self._OPENAI_TRACING_USAGE_SPAN_TYPES:
+            if "usage" in span_data:
+                if not did_mutate:
+                    sanitized_span_data = dict(span_data)
+                    did_mutate = True
+                sanitized_span_data.pop("usage", None)
             if not did_mutate:
                 return payload_item
             sanitized_payload_item = dict(payload_item)
