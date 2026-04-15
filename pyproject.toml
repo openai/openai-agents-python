@@ -44,6 +44,7 @@ sqlalchemy = ["SQLAlchemy>=2.0", "asyncpg>=0.29.0"]
 encrypt = ["cryptography>=45.0, <46"]
 redis = ["redis>=7"]
 dapr = ["dapr>=1.16.0", "grpcio>=1.60.0"]
+mongodb = ["pymongo>=4.13"]
 docker = ["docker>=6.1"]
 blaxel = ["blaxel>=0.2.50", "aiohttp>=3.12,<4"]
 daytona = ["daytona>=0.155.0"]
@@ -152,6 +153,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["runloop_api_client", "runloop_api_client.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pymongo", "pymongo.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
