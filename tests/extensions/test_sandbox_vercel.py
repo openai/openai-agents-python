@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import builtins
 import importlib
 import io
 import sys
 import tarfile
 import types
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import httpx
 import pytest
+from anyio import EndOfStream
 from pydantic import BaseModel, PrivateAttr
 
 from agents.sandbox import Manifest
@@ -23,6 +26,8 @@ from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.dependencies import Dependencies
 from agents.sandbox.snapshot import NoopSnapshot, SnapshotBase
 from agents.sandbox.types import User
+
+_ASYNCIO = asyncio
 
 
 class _FakeNetworkPolicyRule(BaseModel):
@@ -88,6 +93,98 @@ class _FakeCommandFinished:
 
     async def stderr(self) -> str:
         return self._stderr
+
+
+@dataclass
+class _FakePtyCommandFinished:
+    exit_code: int
+
+
+class _FakePtyCommand:
+    def __init__(self, *, exit_code: int = 0) -> None:
+        self.exit_code = exit_code
+        self.wait_calls = 0
+
+    async def wait(self) -> _FakePtyCommandFinished:
+        self.wait_calls += 1
+        return _FakePtyCommandFinished(exit_code=self.exit_code)
+
+
+class _FakeAsyncPTYSession:
+    open_calls: list[dict[str, object]] = []
+    next_session: _FakeAsyncPTYSession | None = None
+
+    def __init__(
+        self,
+        *,
+        chunks: list[bytes] | None = None,
+        exit_code: int = 0,
+    ) -> None:
+        self.command = _FakePtyCommand(exit_code=exit_code)
+        self.ready_calls = 0
+        self.write_calls: list[bytes] = []
+        self.close_calls = 0
+        self._queue: _ASYNCIO.Queue[bytes | None] = _ASYNCIO.Queue()
+        self._closed = False
+        self.stream = _FakePtyStream(self)
+        for chunk in chunks or []:
+            self.feed_output(chunk)
+        if chunks is not None:
+            self.finish()
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.open_calls = []
+        cls.next_session = None
+
+    @classmethod
+    async def open(
+        cls, sandbox: object, command: list[str], **kwargs: object
+    ) -> _FakeAsyncPTYSession:
+        cls.open_calls.append({"sandbox": sandbox, "command": list(command), **kwargs})
+        if cls.next_session is None:
+            cls.next_session = _FakeAsyncPTYSession()
+        return cls.next_session
+
+    async def ready(self) -> None:
+        self.ready_calls += 1
+
+    def feed_output(self, chunk: bytes) -> None:
+        self._queue.put_nowait(chunk)
+
+    def finish(self) -> None:
+        self._queue.put_nowait(None)
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self._closed = True
+        self.finish()
+
+
+class _FakePtyStream:
+    def __init__(self, session: _FakeAsyncPTYSession) -> None:
+        self._session = session
+
+    def __aiter__(self) -> _FakePtyStream:
+        return self
+
+    async def __anext__(self) -> bytes:
+        try:
+            return await self.receive()
+        except EndOfStream:
+            raise StopAsyncIteration from None
+
+    async def send(self, data: bytes) -> None:
+        self._session.write_calls.append(data)
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        chunk = await self._session._queue.get()
+        if chunk is None:
+            raise EndOfStream
+        return chunk[:max_bytes]
+
+    async def aclose(self) -> None:
+        await self._session.close()
 
 
 class _FakeClient:
@@ -344,9 +441,11 @@ class _RecordingMount(Mount):
 
 def _load_vercel_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     _FakeAsyncSandbox.reset()
+    _FakeAsyncPTYSession.reset()
 
     fake_vercel = types.ModuleType("vercel")
     fake_vercel_sandbox = cast(Any, types.ModuleType("vercel.sandbox"))
+    fake_vercel_sandbox_pty = cast(Any, types.ModuleType("vercel.sandbox.pty"))
     fake_vercel_sandbox.AsyncSandbox = _FakeAsyncSandbox
     fake_vercel_sandbox.NetworkPolicy = NetworkPolicy
     fake_vercel_sandbox.NetworkPolicyCustom = NetworkPolicyCustom
@@ -355,9 +454,11 @@ def _load_vercel_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     fake_vercel_sandbox.Resources = Resources
     fake_vercel_sandbox.SandboxStatus = types.SimpleNamespace(RUNNING="running")
     fake_vercel_sandbox.SnapshotSource = SnapshotSource
+    fake_vercel_sandbox_pty.AsyncPTYSession = _FakeAsyncPTYSession
 
     monkeypatch.setitem(sys.modules, "vercel", fake_vercel)
     monkeypatch.setitem(sys.modules, "vercel.sandbox", fake_vercel_sandbox)
+    monkeypatch.setitem(sys.modules, "vercel.sandbox.pty", fake_vercel_sandbox_pty)
     sys.modules.pop("agents.extensions.sandbox.vercel.sandbox", None)
     sys.modules.pop("agents.extensions.sandbox.vercel", None)
 
@@ -376,7 +477,7 @@ def test_vercel_package_re_exports_backend_symbols(monkeypatch: pytest.MonkeyPat
     assert package_module.VercelSandboxSessionState is vercel_module.VercelSandboxSessionState
 
 
-def test_vercel_supports_pty_is_disabled_until_provider_methods_exist(
+def test_vercel_supports_pty_when_interactive_and_sdk_support_is_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     vercel_module = _load_vercel_module(monkeypatch)
@@ -397,7 +498,75 @@ def test_vercel_supports_pty_is_disabled_until_provider_methods_exist(
     )
 
     assert not vercel_module.VercelSandboxSession.from_state(noninteractive).supports_pty()
-    assert not vercel_module.VercelSandboxSession.from_state(interactive).supports_pty()
+    assert vercel_module.VercelSandboxSession.from_state(interactive).supports_pty()
+
+
+@pytest.mark.asyncio
+async def test_vercel_pty_exec_start_tracks_live_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    state = vercel_module.VercelSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000201",
+        manifest=Manifest(root="/vercel/sandbox/project"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sandbox-pty-live",
+        interactive=True,
+    )
+    sandbox = _FakeAsyncSandbox(sandbox_id="sandbox-pty-live")
+    session = vercel_module.VercelSandboxSession.from_state(state, sandbox=sandbox)
+    _FakeAsyncPTYSession.next_session = _FakeAsyncPTYSession()
+
+    update = await session.pty_exec_start("python", "-i", shell=False, yield_time_s=0.25)
+
+    assert update.process_id is not None
+    assert update.exit_code is None
+    assert update.output == b""
+    assert _FakeAsyncPTYSession.open_calls == [
+        {
+            "sandbox": sandbox,
+            "command": ["python", "-i"],
+            "cwd": "/vercel/sandbox/project",
+            "_connection_timeout": 30.0,
+        }
+    ]
+    assert _FakeAsyncPTYSession.next_session.ready_calls == 1
+
+    await session.pty_terminate_all()
+    assert _FakeAsyncPTYSession.next_session.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_vercel_pty_write_collects_output_and_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    state = vercel_module.VercelSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000202",
+        manifest=Manifest(root="/vercel/sandbox/project"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sandbox-pty-exit",
+        interactive=True,
+    )
+    sandbox = _FakeAsyncSandbox(sandbox_id="sandbox-pty-exit")
+    session = vercel_module.VercelSandboxSession.from_state(state, sandbox=sandbox)
+    fake_pty = _FakeAsyncPTYSession()
+    _FakeAsyncPTYSession.next_session = fake_pty
+
+    started = await session.pty_exec_start("python", "-i", shell=False, yield_time_s=0.25)
+    assert started.process_id is not None
+
+    fake_pty.feed_output(b"hello from pty\n")
+    fake_pty.command.exit_code = 7
+    fake_pty.finish()
+
+    update = await session.pty_write_stdin(
+        session_id=cast(int, started.process_id),
+        chars="print('x')\n",
+        yield_time_s=0.25,
+    )
+
+    assert fake_pty.write_calls == [b"print('x')\n"]
+    assert update.process_id is None
+    assert update.exit_code == 7
+    assert update.output == b"hello from pty\n"
+    assert fake_pty.close_calls == 1
 
 
 @pytest.mark.asyncio

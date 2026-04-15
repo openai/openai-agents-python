@@ -14,10 +14,14 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import os
 import tarfile
+import time
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
@@ -31,6 +35,7 @@ from vercel.sandbox import (
     SandboxStatus,
     SnapshotSource,
 )
+from vercel.sandbox.pty import AsyncPTYSession
 
 from ....sandbox.errors import (
     ConfigurationError,
@@ -51,6 +56,16 @@ from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
+from ....sandbox.session.pty_types import (
+    PTY_PROCESSES_MAX,
+    PTY_PROCESSES_WARNING,
+    PtyExecUpdate,
+    allocate_pty_process_id,
+    clamp_pty_yield_time_ms,
+    process_id_to_prune_from_meta,
+    resolve_pty_write_yield_time_ms,
+    truncate_text_by_tokens,
+)
 from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
 from ....sandbox.snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from ....sandbox.types import ExecResult, ExposedPortEndpoint, User
@@ -77,6 +92,19 @@ _VERCEL_TRANSIENT_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
     httpx.NetworkError,
     httpx.ProtocolError,
 )
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _VercelPtySessionEntry:
+    session: Any
+    output_chunks: deque[bytes] = field(default_factory=deque)
+    output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    output_notify: asyncio.Event = field(default_factory=asyncio.Event)
+    reader_task: asyncio.Task[None] | None = None
+    done: bool = False
+    exit_code: int | None = None
+    last_used: float = field(default_factory=time.monotonic)
 
 
 def _is_transient_create_error(exc: BaseException) -> bool:
@@ -245,6 +273,9 @@ class VercelSandboxSession(BaseSandboxSession):
     state: VercelSandboxSessionState
     _sandbox: Any | None
     _token: str | None
+    _pty_lock: asyncio.Lock
+    _pty_sessions: dict[int, _VercelPtySessionEntry]
+    _reserved_pty_process_ids: set[int]
 
     def __init__(
         self,
@@ -256,6 +287,9 @@ class VercelSandboxSession(BaseSandboxSession):
         self.state = state
         self._sandbox = sandbox
         self._token = token
+        self._pty_lock = asyncio.Lock()
+        self._pty_sessions = {}
+        self._reserved_pty_process_ids = set()
 
     @classmethod
     def from_state(
@@ -268,7 +302,7 @@ class VercelSandboxSession(BaseSandboxSession):
         return cls(state=state, sandbox=sandbox, token=token)
 
     def supports_pty(self) -> bool:
-        return False
+        return self.state.interactive
 
     def _reject_user_arg(self, *, op: Literal["exec", "read", "write"], user: str | User) -> None:
         user_name = user.name if isinstance(user, User) else user
@@ -453,7 +487,242 @@ class VercelSandboxSession(BaseSandboxSession):
         return bool(sandbox.status == SandboxStatus.RUNNING)
 
     async def shutdown(self) -> None:
+        await self.pty_terminate_all()
         await self._stop_attached_sandbox()
+
+    async def pty_exec_start(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: str | User | None = None,
+        tty: bool = False,
+        yield_time_s: float | None = None,
+        max_output_tokens: int | None = None,
+    ) -> PtyExecUpdate:
+        _ = tty
+        sandbox = await self._ensure_sandbox()
+        sanitized = self._prepare_exec_command(*command, shell=shell, user=user)
+        connect_timeout = 30.0 if timeout is None else timeout
+
+        entry = _VercelPtySessionEntry(session=None)
+        registered = False
+        pruned: _VercelPtySessionEntry | None = None
+        process_count = 0
+
+        try:
+            session = await AsyncPTYSession.open(
+                sandbox,
+                sanitized,
+                cwd=self.state.manifest.root,
+                _connection_timeout=connect_timeout,
+            )
+            await session.ready()
+            entry.session = session
+            entry.reader_task = asyncio.create_task(self._pty_reader(entry))
+
+            async with self._pty_lock:
+                process_id = allocate_pty_process_id(self._reserved_pty_process_ids)
+                self._reserved_pty_process_ids.add(process_id)
+                pruned = self._prune_pty_sessions_if_needed()
+                self._pty_sessions[process_id] = entry
+                process_count = len(self._pty_sessions)
+                registered = True
+        except TimeoutError as e:
+            if not registered:
+                await self._terminate_pty_entry(entry)
+            raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
+        except ExecTimeoutError:
+            raise
+        except Exception as e:
+            if not registered:
+                await self._terminate_pty_entry(entry)
+            raise ExecTransportError(
+                command=command,
+                context={"backend": "vercel", "sandbox_id": self.state.sandbox_id},
+                cause=e,
+            ) from e
+
+        if pruned is not None:
+            await self._terminate_pty_entry(pruned)
+
+        if process_count >= PTY_PROCESSES_WARNING:
+            logger.warning(
+                "PTY process count reached warning threshold: %s active sessions",
+                process_count,
+            )
+
+        yield_time_ms = 10_000 if yield_time_s is None else int(yield_time_s * 1000)
+        output, original_token_count = await self._collect_pty_output(
+            entry=entry,
+            yield_time_ms=clamp_pty_yield_time_ms(yield_time_ms),
+            max_output_tokens=max_output_tokens,
+        )
+        return await self._finalize_pty_update(
+            process_id=process_id,
+            entry=entry,
+            output=output,
+            original_token_count=original_token_count,
+        )
+
+    async def pty_write_stdin(
+        self,
+        *,
+        session_id: int,
+        chars: str,
+        yield_time_s: float | None = None,
+        max_output_tokens: int | None = None,
+    ) -> PtyExecUpdate:
+        async with self._pty_lock:
+            entry = self._resolve_pty_session_entry(
+                pty_processes=self._pty_sessions,
+                session_id=session_id,
+            )
+
+        try:
+            if chars:
+                await entry.session.stream.send(chars.encode("utf-8"))
+        except Exception as e:
+            raise ExecTransportError(
+                command=("pty_write_stdin",),
+                context={
+                    "backend": "vercel",
+                    "sandbox_id": self.state.sandbox_id,
+                    "session_id": session_id,
+                },
+                cause=e,
+            ) from e
+
+        yield_time_ms = 250 if yield_time_s is None else int(yield_time_s * 1000)
+        output, original_token_count = await self._collect_pty_output(
+            entry=entry,
+            yield_time_ms=resolve_pty_write_yield_time_ms(
+                yield_time_ms=yield_time_ms,
+                input_empty=chars == "",
+            ),
+            max_output_tokens=max_output_tokens,
+        )
+        entry.last_used = time.monotonic()
+        return await self._finalize_pty_update(
+            process_id=session_id,
+            entry=entry,
+            output=output,
+            original_token_count=original_token_count,
+        )
+
+    async def pty_terminate_all(self) -> None:
+        async with self._pty_lock:
+            entries = list(self._pty_sessions.values())
+            self._pty_sessions.clear()
+            self._reserved_pty_process_ids.clear()
+        for entry in entries:
+            await self._terminate_pty_entry(entry)
+
+    async def _pty_reader(self, entry: _VercelPtySessionEntry) -> None:
+        """Stream PTY output into the session buffer and capture process exit."""
+        try:
+            async for data in entry.session.stream:
+                if not data:
+                    continue
+                async with entry.output_lock:
+                    entry.output_chunks.append(data)
+                entry.output_notify.set()
+        except Exception as e:
+            logger.debug("PTY reader output stream terminated with error: %s", e)
+        try:
+            finished = await entry.session.command.wait()
+            entry.exit_code = finished.exit_code
+        except Exception as e:
+            logger.debug("PTY reader terminated with error: %s", e)
+        finally:
+            entry.done = True
+            entry.output_notify.set()
+
+    async def _collect_pty_output(
+        self,
+        *,
+        entry: _VercelPtySessionEntry,
+        yield_time_ms: int,
+        max_output_tokens: int | None,
+    ) -> tuple[bytes, int | None]:
+        deadline = time.monotonic() + (yield_time_ms / 1000)
+        output = bytearray()
+
+        while True:
+            async with entry.output_lock:
+                while entry.output_chunks:
+                    output.extend(entry.output_chunks.popleft())
+
+            if time.monotonic() >= deadline:
+                break
+            if entry.done:
+                async with entry.output_lock:
+                    while entry.output_chunks:
+                        output.extend(entry.output_chunks.popleft())
+                break
+
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                break
+            try:
+                await asyncio.wait_for(entry.output_notify.wait(), timeout=remaining_s)
+            except asyncio.TimeoutError:
+                break
+            entry.output_notify.clear()
+
+        text = output.decode("utf-8", errors="replace")
+        truncated, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
+        return truncated.encode("utf-8", errors="replace"), original_token_count
+
+    async def _finalize_pty_update(
+        self,
+        *,
+        process_id: int,
+        entry: _VercelPtySessionEntry,
+        output: bytes,
+        original_token_count: int | None,
+    ) -> PtyExecUpdate:
+        exit_code = entry.exit_code if entry.done else None
+        live_process_id: int | None = process_id
+
+        if entry.done:
+            async with self._pty_lock:
+                removed = self._pty_sessions.pop(process_id, None)
+                self._reserved_pty_process_ids.discard(process_id)
+            if removed is not None:
+                await self._terminate_pty_entry(removed)
+            live_process_id = None
+
+        return PtyExecUpdate(
+            process_id=live_process_id,
+            output=output,
+            exit_code=exit_code,
+            original_token_count=original_token_count,
+        )
+
+    def _prune_pty_sessions_if_needed(self) -> _VercelPtySessionEntry | None:
+        if len(self._pty_sessions) < PTY_PROCESSES_MAX:
+            return None
+        meta = [(pid, entry.last_used, entry.done) for pid, entry in self._pty_sessions.items()]
+        pid = process_id_to_prune_from_meta(meta)
+        if pid is None:
+            return None
+        self._reserved_pty_process_ids.discard(pid)
+        return self._pty_sessions.pop(pid, None)
+
+    async def _terminate_pty_entry(self, entry: _VercelPtySessionEntry) -> None:
+        if entry.session is None:
+            return
+        try:
+            if entry.reader_task is not None and not entry.reader_task.done():
+                entry.reader_task.cancel()
+                try:
+                    await entry.reader_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            await entry.session.close()
+        except Exception as e:
+            logger.debug("PTY entry termination error (non-fatal): %s", e)
 
     async def _persist_with_ephemeral_mounts_removed(
         self,

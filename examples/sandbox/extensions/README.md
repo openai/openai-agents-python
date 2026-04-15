@@ -211,14 +211,17 @@ uv run python examples/sandbox/extensions/vercel_runner.py --stream
 
 Useful flags:
 
+- `--demo pty`
+- `--demo port`
+- `--demo backend-checks`
 - `--workspace-persistence tar`
 - `--workspace-persistence snapshot`
 - `--runtime node22`
 - `--timeout-ms 120000`
 
-The Vercel example stays on the non-PTY path on purpose. It covers command
-execution, workspace materialization, and persistence verification without
-depending on interactive websocket support.
+The default Vercel run mirrors the other cloud runners and stays focused on the
+standard agent flow. Use `--demo` for backend-specific checks such as PTY,
+resume verification, and exposed-port validation.
 
 ## Daytona
 
