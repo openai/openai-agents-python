@@ -67,14 +67,16 @@ class MongoDBSession(SessionABC):
     collection.  A lightweight ``sessions`` collection tracks metadata
     (creation time, last-updated time) for each session.
 
-    Indexes are created once per ``(database, sessions_collection,
+    Indexes are created once per ``(client, database, sessions_collection,
     messages_collection)`` combination on the first call to any of the
     session protocol methods.  Subsequent calls skip the setup entirely.
     """
 
     # Class-level registry so index creation only runs once per unique key.
-    _initialized_keys: set[tuple[str, str, str]] = set()
-    _init_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+    # The key includes id(client) so that different AsyncMongoClient instances
+    # (e.g. pointing at different clusters) each get their own init pass.
+    _initialized_keys: set[tuple[int, str, str, str]] = set()
+    _init_locks: dict[tuple[int, str, str, str], asyncio.Lock] = {}
     _init_locks_guard: asyncio.Lock = asyncio.Lock()
 
     session_settings: SessionSettings | None = None
@@ -118,7 +120,7 @@ class MongoDBSession(SessionABC):
         self._sessions: AsyncCollection = db[sessions_collection]
         self._messages: AsyncCollection = db[messages_collection]
 
-        self._init_key = (database, sessions_collection, messages_collection)
+        self._init_key = (id(client), database, sessions_collection, messages_collection)
 
     # ------------------------------------------------------------------
     # Convenience constructors
@@ -250,8 +252,8 @@ class MongoDBSession(SessionABC):
         for doc in docs:
             try:
                 items.append(await self._deserialize_item(doc["message_data"]))
-            except (json.JSONDecodeError, KeyError):
-                # Skip corrupted or malformed documents.
+            except (json.JSONDecodeError, KeyError, TypeError):
+                # Skip corrupted or malformed documents (including non-string BSON values).
                 continue
 
         return items
@@ -302,7 +304,7 @@ class MongoDBSession(SessionABC):
 
         try:
             return await self._deserialize_item(doc["message_data"])
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, KeyError, TypeError):
             return None
 
     async def clear_session(self) -> None:
@@ -323,7 +325,7 @@ class MongoDBSession(SessionABC):
         caller is responsible for managing its lifecycle.
         """
         if self._owns_client:
-            await self._client.aclose()
+            self._client.close()
 
     async def ping(self) -> bool:
         """Test MongoDB connectivity.

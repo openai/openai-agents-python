@@ -191,9 +191,13 @@ class FakeAsyncMongoClient:
         """Record append_metadata calls for test assertions."""
         self._metadata_calls.append(driver_info)
 
-    async def aclose(self) -> None:
+    def close(self) -> None:
+        """Synchronous close — matches PyMongo's AsyncMongoClient.close() signature."""
         self._closed = True
         self.admin._closed = True
+
+    async def aclose(self) -> None:
+        self.close()
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +488,19 @@ async def test_missing_message_data_field_is_skipped(session: MongoDBSession) ->
     assert len(items) == 1
 
 
+async def test_non_string_message_data_is_skipped(session: MongoDBSession) -> None:
+    """Documents whose message_data is a non-string BSON type are silently skipped."""
+    await session.add_items([{"role": "user", "content": "valid"}])
+
+    # Inject a document where message_data is an integer — json.loads raises TypeError.
+    bad_doc = {"_id": FakeObjectId(), "session_id": session.session_id, "message_data": 42}
+    session._messages._docs[id(bad_doc["_id"])] = bad_doc  # type: ignore[attr-defined]
+
+    items = await session.get_items()
+    assert len(items) == 1
+    assert items[0].get("content") == "valid"
+
+
 # ---------------------------------------------------------------------------
 # Index initialisation (idempotency)
 # ---------------------------------------------------------------------------
@@ -511,6 +528,40 @@ async def test_index_creation_runs_only_once(session: MongoDBSession) -> None:
 
     session._messages.create_index = original_messages  # type: ignore[attr-defined]
     session._sessions.create_index = original_sessions  # type: ignore[attr-defined]
+
+
+async def test_different_clients_each_run_index_init() -> None:
+    """Each distinct AsyncMongoClient gets its own index-creation pass."""
+    MongoDBSession._initialized_keys.clear()
+    MongoDBSession._init_locks.clear()
+
+    client_a = FakeAsyncMongoClient()
+    client_b = FakeAsyncMongoClient()
+
+    call_counts: dict[str, int] = {"a": 0, "b": 0}
+
+    async def counting_a(*args: Any, **kwargs: Any) -> str:
+        call_counts["a"] += 1
+        return "fake_index"
+
+    async def counting_b(*args: Any, **kwargs: Any) -> str:
+        call_counts["b"] += 1
+        return "fake_index"
+
+    s_a = MongoDBSession("x", client=client_a, database="agents_test")  # type: ignore[arg-type]
+    s_b = MongoDBSession("x", client=client_b, database="agents_test")  # type: ignore[arg-type]
+
+    s_a._messages.create_index = counting_a  # type: ignore[attr-defined]
+    s_a._sessions.create_index = counting_a  # type: ignore[attr-defined]
+    s_b._messages.create_index = counting_b  # type: ignore[attr-defined]
+    s_b._sessions.create_index = counting_b  # type: ignore[attr-defined]
+
+    await s_a._ensure_indexes()
+    await s_b._ensure_indexes()
+
+    # Each client must trigger its own index creation (2 calls = sessions + messages).
+    assert call_counts["a"] == 2
+    assert call_counts["b"] == 2
 
 
 # ---------------------------------------------------------------------------
