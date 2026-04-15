@@ -191,13 +191,10 @@ class FakeAsyncMongoClient:
         """Record append_metadata calls for test assertions."""
         self._metadata_calls.append(driver_info)
 
-    def close(self) -> None:
-        """Synchronous close — matches PyMongo's AsyncMongoClient.close() signature."""
+    async def close(self) -> None:
+        """Async close — matches PyMongo's AsyncMongoClient.close() signature."""
         self._closed = True
         self.admin._closed = True
-
-    async def aclose(self) -> None:
-        self.close()
 
 
 # ---------------------------------------------------------------------------
@@ -470,7 +467,7 @@ async def test_corrupted_document_is_skipped(session: MongoDBSession) -> None:
         "session_id": session.session_id,
         "message_data": "not valid json {{{",
     }
-    session._messages._docs[id(bad_doc["_id"])] = bad_doc  # type: ignore[attr-defined]
+    session._messages._docs[id(bad_doc["_id"])] = bad_doc
 
     items = await session.get_items()
     assert len(items) == 1
@@ -482,7 +479,7 @@ async def test_missing_message_data_field_is_skipped(session: MongoDBSession) ->
     await session.add_items([{"role": "user", "content": "valid"}])
 
     bad_doc = {"_id": FakeObjectId(), "session_id": session.session_id}
-    session._messages._docs[id(bad_doc["_id"])] = bad_doc  # type: ignore[attr-defined]
+    session._messages._docs[id(bad_doc["_id"])] = bad_doc
 
     items = await session.get_items()
     assert len(items) == 1
@@ -494,7 +491,7 @@ async def test_non_string_message_data_is_skipped(session: MongoDBSession) -> No
 
     # Inject a document where message_data is an integer — json.loads raises TypeError.
     bad_doc = {"_id": FakeObjectId(), "session_id": session.session_id, "message_data": 42}
-    session._messages._docs[id(bad_doc["_id"])] = bad_doc  # type: ignore[attr-defined]
+    session._messages._docs[id(bad_doc["_id"])] = bad_doc
 
     items = await session.get_items()
     assert len(items) == 1
@@ -509,16 +506,16 @@ async def test_non_string_message_data_is_skipped(session: MongoDBSession) -> No
 async def test_index_creation_runs_only_once(session: MongoDBSession) -> None:
     """_ensure_indexes must call create_index only on the very first call."""
     call_count = 0
-    original_messages = session._messages.create_index  # type: ignore[attr-defined]
-    original_sessions = session._sessions.create_index  # type: ignore[attr-defined]
+    original_messages = session._messages.create_index
+    original_sessions = session._sessions.create_index
 
     async def counting(*args: Any, **kwargs: Any) -> str:
         nonlocal call_count
         call_count += 1
         return "fake_index"
 
-    session._messages.create_index = counting  # type: ignore[attr-defined]
-    session._sessions.create_index = counting  # type: ignore[attr-defined]
+    session._messages.create_index = counting  # type: ignore[method-assign]
+    session._sessions.create_index = counting  # type: ignore[method-assign]
 
     await session._ensure_indexes()
     await session._ensure_indexes()  # Second call must be a no-op.
@@ -526,8 +523,8 @@ async def test_index_creation_runs_only_once(session: MongoDBSession) -> None:
     # Exactly one call per collection (sessions + messages).
     assert call_count == 2
 
-    session._messages.create_index = original_messages  # type: ignore[attr-defined]
-    session._sessions.create_index = original_sessions  # type: ignore[attr-defined]
+    session._messages.create_index = original_messages  # type: ignore[method-assign]
+    session._sessions.create_index = original_sessions  # type: ignore[method-assign]
 
 
 async def test_different_clients_each_run_index_init() -> None:
@@ -551,10 +548,10 @@ async def test_different_clients_each_run_index_init() -> None:
     s_a = MongoDBSession("x", client=client_a, database="agents_test")  # type: ignore[arg-type]
     s_b = MongoDBSession("x", client=client_b, database="agents_test")  # type: ignore[arg-type]
 
-    s_a._messages.create_index = counting_a  # type: ignore[attr-defined]
-    s_a._sessions.create_index = counting_a  # type: ignore[attr-defined]
-    s_b._messages.create_index = counting_b  # type: ignore[attr-defined]
-    s_b._sessions.create_index = counting_b  # type: ignore[attr-defined]
+    s_a._messages.create_index = counting_a  # type: ignore[method-assign]
+    s_a._sessions.create_index = counting_a  # type: ignore[method-assign]
+    s_b._messages.create_index = counting_b  # type: ignore[method-assign]
+    s_b._sessions.create_index = counting_b  # type: ignore[method-assign]
 
     await s_a._ensure_indexes()
     await s_b._ensure_indexes()
@@ -581,9 +578,9 @@ async def test_ping_failure(session: MongoDBSession) -> None:
     async def _fail(*args: Any, **kwargs: Any) -> dict[str, Any]:
         raise ConnectionError("unreachable")
 
-    session._client.admin.command = _fail  # type: ignore[attr-defined]
+    session._client.admin.command = _fail  # type: ignore[method-assign, assignment]
     assert await session.ping() is False
-    session._client.admin.command = original  # type: ignore[attr-defined]
+    session._client.admin.command = original  # type: ignore[method-assign]
 
 
 async def test_close_external_client_not_closed() -> None:

@@ -85,7 +85,7 @@ class MongoDBSession(SessionABC):
         self,
         session_id: str,
         *,
-        client: AsyncMongoClient,
+        client: AsyncMongoClient[Any],
         database: str = "agents",
         sessions_collection: str = "agent_sessions",
         messages_collection: str = "agent_messages",
@@ -117,8 +117,8 @@ class MongoDBSession(SessionABC):
             client.append_metadata(_DRIVER_INFO)
 
         db = client[database]
-        self._sessions: AsyncCollection = db[sessions_collection]
-        self._messages: AsyncCollection = db[messages_collection]
+        self._sessions: AsyncCollection[Any] = db[sessions_collection]
+        self._messages: AsyncCollection[Any] = db[messages_collection]
 
         self._init_key = (id(client), database, sessions_collection, messages_collection)
 
@@ -157,7 +157,7 @@ class MongoDBSession(SessionABC):
         """
         client_kwargs = client_kwargs or {}
         client_kwargs.setdefault("driver", _DRIVER_INFO)
-        client: AsyncMongoClient = AsyncMongoClient(uri, **client_kwargs)
+        client: AsyncMongoClient[Any] = AsyncMongoClient(uri, **client_kwargs)
         session = cls(
             session_id,
             client=client,
@@ -325,7 +325,7 @@ class MongoDBSession(SessionABC):
         caller is responsible for managing its lifecycle.
         """
         if self._owns_client:
-            self._client.close()
+            await self._client.close()
 
     async def ping(self) -> bool:
         """Test MongoDB connectivity.
