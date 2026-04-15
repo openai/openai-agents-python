@@ -109,7 +109,7 @@ class MongoDBSession(SessionABC):
         self._client = client
         self._owns_client = False
 
-        # Pattern B: annotate an externally-supplied client with library metadata.
+        # Annotate an externally-supplied client with library metadata.
         # append_metadata is available in PyMongo >=4.14; guard for older installs.
         if hasattr(client, "append_metadata"):
             client.append_metadata(_DRIVER_INFO)

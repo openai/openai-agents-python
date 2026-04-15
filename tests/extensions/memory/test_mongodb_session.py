@@ -645,7 +645,7 @@ async def test_runner_with_session_settings_limit(agent: Agent) -> None:
 
 
 async def test_injected_client_receives_append_metadata() -> None:
-    """Pattern B: append_metadata is called on a caller-supplied client."""
+    """Append_metadata is called on a caller-supplied client."""
     MongoDBSession._initialized_keys.clear()
     MongoDBSession._init_locks.clear()
     client = FakeAsyncMongoClient()
@@ -658,7 +658,7 @@ async def test_injected_client_receives_append_metadata() -> None:
 
 
 async def test_from_uri_passes_driver_info_to_constructor() -> None:
-    """Pattern A: driver=_DRIVER_INFO is forwarded to AsyncMongoClient via from_uri."""
+    """driver=_DRIVER_INFO is forwarded to AsyncMongoClient via from_uri."""
     MongoDBSession._initialized_keys.clear()
     MongoDBSession._init_locks.clear()
 
@@ -679,7 +679,7 @@ async def test_from_uri_passes_driver_info_to_constructor() -> None:
 
 
 async def test_caller_supplied_driver_info_is_not_overwritten() -> None:
-    """Pattern A: a caller-supplied driver kwarg must not be silently replaced."""
+    """A caller-supplied driver kwarg must not be silently replaced."""
     MongoDBSession._initialized_keys.clear()
     MongoDBSession._init_locks.clear()
 
