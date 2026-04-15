@@ -61,6 +61,9 @@ class RunContextWrapper(Generic[TContext]):
     tool_input: Any | None = None
     """Structured input for the current agent tool run, when available."""
 
+    _generated_items: list[Any] = field(default_factory=list, repr=False)
+    """Internal: conversation items generated so far in the current run."""
+
     @staticmethod
     def _to_str_or_none(value: Any) -> str | None:
         if isinstance(value, str):

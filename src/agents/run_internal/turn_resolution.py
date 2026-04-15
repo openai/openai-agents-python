@@ -1890,6 +1890,10 @@ async def get_single_step_result_from_response(
 
     tool_use_tracker.record_processed_response(item_agent, processed_response)
 
+    # Expose the conversation history so tools can inspect prior items via
+    # ToolContext.conversation_history (addresses #904).
+    context_wrapper._generated_items = list(pre_step_items)
+
     if event_queue is not None and processed_response.new_items:
         handoff_items = [
             item for item in processed_response.new_items if isinstance(item, HandoffCallItem)

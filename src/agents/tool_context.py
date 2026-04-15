@@ -72,6 +72,7 @@ class ToolContext(RunContextWrapper[TContext]):
         turn_input: list[TResponseInputItem] | None = None,
         _approvals: dict[str, _ApprovalRecord] | None = None,
         tool_input: Any | None = None,
+        _generated_items: list[Any] | None = None,
     ) -> None:
         """Preserve the v0.7 positional constructor while accepting new context fields."""
         resolved_usage = Usage() if usage is _MISSING else cast(Usage, usage)
@@ -81,6 +82,7 @@ class ToolContext(RunContextWrapper[TContext]):
             turn_input=list(turn_input or []),
             _approvals={} if _approvals is None else _approvals,
             tool_input=tool_input,
+            _generated_items=list(_generated_items or []),
         )
         self.tool_name = (
             _assert_must_pass_tool_name() if tool_name is _MISSING else cast(str, tool_name)
@@ -103,6 +105,16 @@ class ToolContext(RunContextWrapper[TContext]):
         )
         self.agent = agent
         self.run_config = run_config
+
+    @property
+    def conversation_history(self) -> list[Any]:
+        """The items generated so far in the current agent run.
+
+        This is a snapshot of the conversation history at the time the tool was invoked,
+        allowing tools to inspect prior messages, tool calls, and other items produced
+        during the run. Returns a copy so that mutations do not affect the run state.
+        """
+        return list(self._generated_items)
 
     @property
     def qualified_tool_name(self) -> str:

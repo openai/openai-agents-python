@@ -353,3 +353,66 @@ async def test_invoke_function_tool_ignores_annotated_string_metadata_when_match
     assert captured_context is not None
     assert not isinstance(captured_context, ToolContext)
     assert captured_context.tool_input == {"city": "Tokyo"}
+
+
+def test_conversation_history_defaults_to_empty() -> None:
+    """conversation_history is empty when no generated items are set."""
+    tool_ctx: ToolContext[None] = ToolContext(
+        context=None,
+        tool_name="tool",
+        tool_call_id="call-1",
+        tool_arguments="{}",
+    )
+    assert tool_ctx.conversation_history == []
+
+
+def test_conversation_history_populated_via_wrapper() -> None:
+    """conversation_history is populated from RunContextWrapper._generated_items."""
+    wrapper: RunContextWrapper[None] = RunContextWrapper(context=None)
+    wrapper._generated_items = ["item_a", "item_b"]
+
+    tool_call = ResponseFunctionToolCall(
+        type="function_call",
+        name="my_tool",
+        call_id="call-10",
+        arguments="{}",
+    )
+    tool_ctx = ToolContext.from_agent_context(
+        wrapper,
+        tool_call_id="call-10",
+        tool_call=tool_call,
+    )
+    assert tool_ctx.conversation_history == ["item_a", "item_b"]
+
+
+def test_conversation_history_returns_copy() -> None:
+    """Mutating the returned list must not affect the underlying state."""
+    wrapper: RunContextWrapper[None] = RunContextWrapper(context=None)
+    wrapper._generated_items = ["item_a"]
+
+    tool_call = ResponseFunctionToolCall(
+        type="function_call",
+        name="my_tool",
+        call_id="call-11",
+        arguments="{}",
+    )
+    tool_ctx = ToolContext.from_agent_context(
+        wrapper,
+        tool_call_id="call-11",
+        tool_call=tool_call,
+    )
+    history = tool_ctx.conversation_history
+    history.append("extra")
+    assert tool_ctx.conversation_history == ["item_a"]
+
+
+def test_conversation_history_via_constructor() -> None:
+    """conversation_history can be set via _generated_items kwarg."""
+    tool_ctx: ToolContext[None] = ToolContext(
+        context=None,
+        tool_name="tool",
+        tool_call_id="call-12",
+        tool_arguments="{}",
+        _generated_items=["x", "y"],
+    )
+    assert tool_ctx.conversation_history == ["x", "y"]

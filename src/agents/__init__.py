@@ -176,6 +176,7 @@ from .tool import (
     resolve_computer,
     tool_namespace,
 )
+from .tool_context import ToolContext
 from .tool_guardrails import (
     ToolGuardrailFunctionOutput,
     ToolInputGuardrail,
@@ -413,6 +414,7 @@ __all__ = [
     "CompactionItem",
     "AgentHookContext",
     "RunContextWrapper",
+    "ToolContext",
     "TContext",
     "RunErrorDetails",
     "RunErrorData",
