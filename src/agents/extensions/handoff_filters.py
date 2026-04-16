@@ -13,6 +13,7 @@ from ..items import (
     MCPListToolsItem,
     ReasoningItem,
     RunItem,
+    ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
     ToolSearchCallItem,
@@ -63,6 +64,7 @@ def _remove_tools_from_items(items: tuple[RunItem, ...]) -> tuple[RunItem, ...]:
             or isinstance(item, MCPListToolsItem)
             or isinstance(item, MCPApprovalRequestItem)
             or isinstance(item, MCPApprovalResponseItem)
+            or isinstance(item, ToolApprovalItem)
         ):
             continue
         filtered_items.append(item)
@@ -86,6 +88,14 @@ def _remove_tool_types_from_input(
         "mcp_approval_request",
         "mcp_approval_response",
         "reasoning",
+        "code_interpreter_call",
+        "image_generation_call",
+        "local_shell_call",
+        "local_shell_call_output",
+        "shell_call",
+        "shell_call_output",
+        "apply_patch_call",
+        "apply_patch_call_output",
     ]
 
     filtered_items: list[TResponseInputItem] = []

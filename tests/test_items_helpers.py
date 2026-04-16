@@ -128,6 +128,27 @@ def test_extract_text_concatenates_all_text_segments() -> None:
     )
 
 
+def test_extract_text_tolerates_none_text_content() -> None:
+    """Regression: ``content_item.text`` can be ``None`` when output items
+    are assembled via ``model_construct`` (e.g. partial streaming responses)
+    or surfaced through provider gateways like LiteLLM. Without the ``or ""``
+    guard, ``extract_text`` raised
+    ``TypeError: can only concatenate str (not "NoneType") to str`` deep
+    inside ``execute_tools_and_side_effects`` and aborted the agent turn.
+    """
+    none_text = ResponseOutputText.model_construct(
+        annotations=[], text=None, type="output_text", logprobs=[]
+    )
+    real_text = ResponseOutputText(annotations=[], text="hello", type="output_text", logprobs=[])
+
+    # Single None-text item: result is None (since concatenated text is "").
+    assert ItemHelpers.extract_text(make_message([none_text])) is None
+
+    # Mixed content: real text is preserved, None is skipped.
+    assert ItemHelpers.extract_text(make_message([real_text, none_text])) == "hello"
+    assert ItemHelpers.extract_text(make_message([none_text, real_text])) == "hello"
+
+
 def test_input_to_new_input_list_from_string() -> None:
     result = ItemHelpers.input_to_new_input_list("hi")
     # Should wrap the string into a list with a single dict containing content and user role.

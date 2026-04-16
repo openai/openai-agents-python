@@ -10,6 +10,7 @@ import math
 import weakref
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 from types import UnionType
 from typing import (
     TYPE_CHECKING,
@@ -165,6 +166,62 @@ ValidToolOutputPydanticModels = ToolOutputText | ToolOutputImage | ToolOutputFil
 ValidToolOutputPydanticModelsTypeAdapter: TypeAdapter[ValidToolOutputPydanticModels] = TypeAdapter(
     ValidToolOutputPydanticModels
 )
+
+
+class ToolOriginType(str, Enum):
+    """Enumerates the runtime source of a function-tool-backed run item."""
+
+    FUNCTION = "function"
+    MCP = "mcp"
+    AGENT_AS_TOOL = "agent_as_tool"
+
+
+@dataclass(frozen=True)
+class ToolOrigin:
+    """Serializable metadata describing where a function-tool-backed item came from."""
+
+    type: ToolOriginType
+    mcp_server_name: str | None = None
+    agent_name: str | None = None
+    agent_tool_name: str | None = None
+
+    def to_json_dict(self) -> dict[str, str]:
+        """Convert the metadata to a JSON-compatible dict."""
+        result: dict[str, str] = {"type": self.type.value}
+        if self.mcp_server_name is not None:
+            result["mcp_server_name"] = self.mcp_server_name
+        if self.agent_name is not None:
+            result["agent_name"] = self.agent_name
+        if self.agent_tool_name is not None:
+            result["agent_tool_name"] = self.agent_tool_name
+        return result
+
+    @classmethod
+    def from_json_dict(cls, data: Any) -> ToolOrigin | None:
+        """Deserialize tool origin metadata from JSON-compatible data."""
+        if not isinstance(data, Mapping):
+            return None
+
+        raw_type = data.get("type")
+        if not isinstance(raw_type, str):
+            return None
+
+        try:
+            origin_type = ToolOriginType(raw_type)
+        except ValueError:
+            return None
+
+        def _optional_string(key: str) -> str | None:
+            value = data.get(key)
+            return value if isinstance(value, str) else None
+
+        return cls(
+            type=origin_type,
+            mcp_server_name=_optional_string("mcp_server_name"),
+            agent_name=_optional_string("agent_name"),
+            agent_tool_name=_optional_string("agent_tool_name"),
+        )
+
 
 ComputerLike = Computer | AsyncComputer
 ComputerT = TypeVar("ComputerT", bound=ComputerLike)
@@ -325,6 +382,12 @@ class FunctionTool:
     _mcp_title: str | None = field(default=None, kw_only=True, repr=False)
     """Internal MCP display title used for ToolCallItem metadata."""
 
+    _tool_origin: ToolOrigin | None = field(default=None, kw_only=True, repr=False)
+    """Internal scalar metadata describing the origin of function-tool-backed items."""
+
+    _emit_tool_origin: bool = field(default=True, kw_only=True, repr=False)
+    """Whether runtime item generation should emit tool origin metadata for this tool."""
+
     @property
     def qualified_name(self) -> str:
         """Return the public qualified name used to identify this function tool."""
@@ -427,6 +490,7 @@ def _build_wrapped_function_tool(
     defer_loading: bool = False,
     sync_invoker: bool = False,
     mcp_title: str | None = None,
+    tool_origin: ToolOrigin | None = None,
 ) -> FunctionTool:
     """Create a FunctionTool with copied-tool-aware failure handling bound in one place."""
     on_invoke_tool = with_function_tool_failure_error_handler(
@@ -452,9 +516,17 @@ def _build_wrapped_function_tool(
             timeout_error_function=timeout_error_function,
             defer_loading=defer_loading,
             _mcp_title=mcp_title,
+            _tool_origin=tool_origin,
         ),
         failure_error_function,
     )
+
+
+def get_function_tool_origin(function_tool: FunctionTool) -> ToolOrigin | None:
+    """Return scalar origin metadata for a function tool."""
+    if not function_tool._emit_tool_origin:
+        return None
+    return function_tool._tool_origin or ToolOrigin(type=ToolOriginType.FUNCTION)
 
 
 @dataclass

@@ -6,35 +6,35 @@ search:
 
 !!! warning "ベータ機能"
 
-    サンドボックスエージェントは ベータ版 です。一般提供前に API の詳細、デフォルト値、対応機能は変更される可能性があり、時間とともにより高度な機能が追加される予定です。
+    Sandbox Agents はベータ版です。一般提供までの間に API の詳細、デフォルト値、対応機能は変更される可能性があり、また時間の経過とともにより高度な機能が追加される予定です。
 
-モダンなエージェントは、ファイルシステム上の実際のファイルを操作できると最も効果的に動作します。Agents SDK の **Sandbox Agents** は、モデルに永続的なワークスペースを提供し、そこでは大規模なドキュメントセットの検索、ファイル編集、コマンド実行、成果物の生成、保存されたサンドボックス状態からの作業再開ができます。
+現代的なエージェントは、ファイルシステム内の実際のファイルを操作できるときに最も効果的に動作します。Agents SDK の **Sandbox Agents** は、モデルに永続的なワークスペースを提供し、そこでは大規模なドキュメント群の検索、ファイル編集、コマンド実行、成果物の生成、保存された sandbox 状態からの作業再開が可能です。
 
-SDK は、ファイルのステージング、ファイルシステムツール、シェルアクセス、サンドボックスのライフサイクル、スナップショット、プロバイダー固有の接続処理を自分で組み合わせることなく、その実行ハーネスを提供します。通常の `Agent` と `Runner` のフローはそのままに、ワークスペース用の `Manifest`、サンドボックスネイティブツール用の capabilities、実行場所を指定する `SandboxRunConfig` を追加します。
+SDK は、ファイルのステージング、ファイルシステムツール、シェルアクセス、sandbox のライフサイクル、スナップショット、プロバイダー固有の接続処理を自分で組み合わせることなく、その実行ハーネスを提供します。通常の `Agent` と `Runner` のフローはそのまま維持しつつ、ワークスペース用の `Manifest` 、 sandbox ネイティブツール用の capabilities 、そして作業の実行場所を指定する `SandboxRunConfig` を追加できます。
 
 ## 前提条件
 
 - Python 3.10 以上
 - OpenAI Agents SDK の基本的な知識
-- サンドボックスクライアント。ローカル開発では、まず `UnixLocalSandboxClient` を使用してください。
+- sandbox クライアント。ローカル開発では、まず `UnixLocalSandboxClient` から始めてください。
 
 ## インストール
 
-まだ SDK をインストールしていない場合:
+まだ SDK をインストールしていない場合は、次を実行してください。
 
 ```bash
 pip install openai-agents
 ```
 
-Docker バックエンドのサンドボックスの場合:
+Docker ベースの sandbox の場合:
 
 ```bash
 pip install "openai-agents[docker]"
 ```
 
-## ローカルサンドボックスエージェントの作成
+## ローカル sandbox エージェントの作成
 
-この例では、`repo/` 配下にローカルリポジトリをステージングし、ローカルスキルを遅延読み込みし、ランナーが実行時に Unix ローカルのサンドボックスセッションを作成できるようにします。
+この例では、ローカルのリポジトリを `repo/` 配下にステージングし、ローカル skills を遅延読み込みし、 runner が実行時に Unix ローカル sandbox セッションを作成できるようにします。
 
 ```python
 import asyncio
@@ -92,24 +92,24 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-[examples/sandbox/docs/coding_task.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py) を参照してください。これは小さなシェルベースのリポジトリを使用しており、Unix ローカル実行全体で決定論的に例を検証できます。
+[examples/sandbox/docs/coding_task.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py) を参照してください。この例では小さなシェルベースのリポジトリを使用しているため、Unix ローカル実行全体で決定論的に検証できます。
 
-## 主要な選択肢
+## 主な選択肢
 
-基本的な実行が動作したら、次に多くの人が選ぶのは以下です。
+基本的な実行が動作したら、次に多くの人が選ぶ項目は以下です。
 
-- `default_manifest`: 新しいサンドボックスセッション用のファイル、リポジトリ、ディレクトリ、マウント
-- `instructions`: プロンプト全体に適用する短いワークフロールール
-- `base_instructions`: SDK のサンドボックスプロンプトを置き換えるための高度なエスケープハッチ
-- `capabilities`: ファイルシステム編集 / 画像検査、シェル、スキル、メモリ、コンパクションなどのサンドボックスネイティブツール
-- `run_as`: モデル向けツールにおけるサンドボックスユーザー ID
-- `SandboxRunConfig.client`: サンドボックスバックエンド
-- `SandboxRunConfig.session`、`session_state`、または `snapshot`: 後続の実行で以前の作業に再接続する方法
+- `default_manifest`: 新しい sandbox セッション用のファイル、リポジトリ、ディレクトリ、マウント
+- `instructions`: プロンプト全体に適用される短いワークフロールール
+- `base_instructions`: SDK の sandbox プロンプトを置き換えるための高度なエスケープハッチ
+- `capabilities`: ファイルシステム編集 / 画像検査、シェル、 skills 、メモリ、 compaction などの sandbox ネイティブツール
+- `run_as`: モデル向けツールにおける sandbox ユーザー ID
+- `SandboxRunConfig.client`: sandbox バックエンド
+- `SandboxRunConfig.session` 、 `session_state` 、または `snapshot`: 後続の実行を以前の作業に再接続する方法
 
-## 次のステップ
+## 次の参照先
 
-- [概念](sandbox/guide.md): マニフェスト、capabilities、権限、スナップショット、実行設定、構成パターンを理解します。
-- [サンドボックスクライアント](sandbox/clients.md): Unix ローカル、Docker、ホスト型プロバイダー、マウント戦略を選択します。
-- [エージェントメモリ](sandbox/memory.md): 以前のサンドボックス実行からの学びを保持し再利用します。
+- [概念](sandbox/guide.md): manifests 、 capabilities 、 permissions 、 snapshots 、 run config 、構成パターンを理解します。
+- [Sandbox クライアント](sandbox/clients.md): Unix ローカル、 Docker 、ホスト型プロバイダー、マウント戦略を選びます。
+- [エージェントメモリ](sandbox/memory.md): 以前の sandbox 実行から得た学びを保持し、再利用します。
 
-シェルアクセスが時々使う 1 つのツールに過ぎない場合は、[ツールガイド](tools.md) のホスト型シェルから始めてください。ワークスペース分離、サンドボックスクライアントの選択、またはサンドボックスセッション再開の挙動が設計の一部である場合は、サンドボックスエージェントを使用してください。
+シェルアクセスが時々使うツールの 1 つにすぎない場合は、[ツールガイド](tools.md) のホスト型シェルから始めてください。ワークスペースの分離、sandbox クライアントの選択、または sandbox セッションの再開動作が設計の一部である場合は、sandbox エージェントを使用してください。

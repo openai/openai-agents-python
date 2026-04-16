@@ -46,6 +46,8 @@ from .tool import (
     FunctionToolResult,
     Tool,
     ToolErrorFunction,
+    ToolOrigin,
+    ToolOriginType,
     _build_handled_function_tool_error_handler,
     _build_wrapped_function_tool,
     _log_function_tool_invocation,
@@ -886,6 +888,11 @@ class Agent(AgentBase, Generic[TContext]):
             strict_json_schema=True,
             is_enabled=is_enabled,
             needs_approval=needs_approval,
+            tool_origin=ToolOrigin(
+                type=ToolOriginType.AGENT_AS_TOOL,
+                agent_name=self.name,
+                agent_tool_name=tool_name_resolved,
+            ),
         )
         run_agent_tool._is_agent_tool = True
         run_agent_tool._agent_instance = self

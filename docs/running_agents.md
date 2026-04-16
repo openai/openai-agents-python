@@ -163,7 +163,7 @@ Use `tool_error_formatter` to customize the message that is returned to the mode
 The formatter receives [`ToolErrorFormatterArgs`][agents.run_config.ToolErrorFormatterArgs] with:
 
 -   `kind`: The error category. Today this is `"approval_rejected"`.
--   `tool_type`: The tool runtime (`"function"`, `"computer"`, `"shell"`, or `"apply_patch"`).
+-   `tool_type`: The tool runtime (`"function"`, `"computer"`, `"shell"`, `"apply_patch"`, or `"custom"`).
 -   `tool_name`: The tool name.
 -   `call_id`: The tool call ID.
 -   `default_message`: The SDK's default model-visible message.
