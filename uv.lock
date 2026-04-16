@@ -939,6 +939,24 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/63/fe/a17c106a1f4061ce83f04d14bcedcfb2c38c7793ea56bfb906a6fadae8cb/evdev-1.9.2.tar.gz", hash = "sha256:5d3278892ce1f92a74d6bf888cc8525d9f68af85dbe336c95d1c87fb8f423069", size = 33301, upload-time = "2025-05-01T19:53:47.69Z" }
 
 [[package]]
+name = "exa-py"
+version = "2.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpcore" },
+    { name = "httpx" },
+    { name = "openai" },
+    { name = "pydantic" },
+    { name = "python-dotenv" },
+    { name = "requests" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ab/d2/22f8e5b83fb7ff1a5b19528b21bb908504c8b6a716309b169801881e64ff/exa_py-2.12.0.tar.gz", hash = "sha256:2cd5fe2d47d8e0221f87dcb2be0f007cc0a1f0a643b16dfc586ab1421998f4fc", size = 58731, upload-time = "2026-04-15T12:55:17.616Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ea/87/e5c458741a34c945d6b612ec54f00088a6869ffc4f3f8a7b06ae080ec6af/exa_py-2.12.0-py3-none-any.whl", hash = "sha256:78b954ca99151228e4b853bd25e58829048a9a601d6187001befa512e0143f8f", size = 73896, upload-time = "2026-04-15T12:55:16.03Z" },
+]
+
+[[package]]
 name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2460,6 +2478,9 @@ e2b = [
 encrypt = [
     { name = "cryptography" },
 ]
+exa = [
+    { name = "exa-py" },
+]
 litellm = [
     { name = "litellm" },
 ]
@@ -2545,6 +2566,7 @@ requires-dist = [
     { name = "docker", marker = "extra == 'docker'", specifier = ">=6.1" },
     { name = "e2b", marker = "extra == 'e2b'", specifier = "==2.20.0" },
     { name = "e2b-code-interpreter", marker = "extra == 'e2b'", specifier = "==2.4.1" },
+    { name = "exa-py", marker = "extra == 'exa'", specifier = ">=2.0.0" },
     { name = "graphviz", marker = "extra == 'viz'", specifier = ">=0.17" },
     { name = "griffelib", specifier = ">=2,<3" },
     { name = "grpcio", marker = "extra == 'dapr'", specifier = ">=1.60.0" },
@@ -2567,7 +2589,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<16" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<16" },
 ]
-provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "docker", "blaxel", "daytona", "cloudflare", "e2b", "modal", "runloop", "vercel", "s3", "temporal"]
+provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "docker", "blaxel", "daytona", "cloudflare", "exa", "e2b", "modal", "runloop", "vercel", "s3", "temporal"]
 
 [package.metadata.requires-dev]
 dev = [

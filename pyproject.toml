@@ -48,6 +48,7 @@ docker = ["docker>=6.1"]
 blaxel = ["blaxel>=0.2.50", "aiohttp>=3.12,<4"]
 daytona = ["daytona>=0.155.0"]
 cloudflare = ["aiohttp>=3.12,<4"]
+exa = ["exa-py>=2.0.0"]
 e2b = ["e2b==2.20.0", "e2b-code-interpreter==2.4.1"]
 modal = ["modal==1.3.5"]
 runloop = ["runloop_api_client>=1.16.0,<2.0.0"]
@@ -140,6 +141,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["modal", "modal.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["exa_py", "exa_py.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
