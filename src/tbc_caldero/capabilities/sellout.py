@@ -33,6 +33,103 @@ class SellThroughFlashResult(BaseModel):
     methodology: str
 
 
+def _compute_sell_through_flash(week: str = "current") -> SellThroughFlashResult:
+    """Pure function — computes velocity flash from real DW data."""
+    from tbc_caldero.adapters.duckdb_vault import VaultDW
+
+    dw = VaultDW.try_connect()
+    if dw is None:
+        return SellThroughFlashResult(
+            week="unknown",
+            total_properties_scanned=0,
+            alerts_count=0,
+            red_alerts=[],
+            yellow_alerts=[],
+            methodology="stub-vault-unavailable",
+        )
+
+    # Compute weekly velocity per property (units/week)
+    # Data is March 2026, split into ISO weeks
+    sql = """
+        WITH weekly AS (
+            SELECT
+                "Propiedad" AS prop,
+                EXTRACT(WEEK FROM "Fecha Docto.") AS wk,
+                SUM("Venta Unidad") AS units
+            FROM venta_b2c_2026
+            WHERE "Venta Unidad" > 0 AND "Propiedad" IS NOT NULL
+            GROUP BY "Propiedad", EXTRACT(WEEK FROM "Fecha Docto.")
+        ),
+        last_two AS (
+            SELECT prop, wk, units,
+                   ROW_NUMBER() OVER (PARTITION BY prop ORDER BY wk DESC) AS rn
+            FROM weekly
+        ),
+        pivoted AS (
+            SELECT
+                prop,
+                MAX(CASE WHEN rn = 1 THEN units END) AS latest_units,
+                MAX(CASE WHEN rn = 1 THEN wk END) AS latest_wk,
+                MAX(CASE WHEN rn = 2 THEN units END) AS prev_units
+            FROM last_two WHERE rn <= 2
+            GROUP BY prop
+            HAVING MAX(CASE WHEN rn = 1 THEN units END) IS NOT NULL
+               AND MAX(CASE WHEN rn = 2 THEN units END) IS NOT NULL
+               AND MAX(CASE WHEN rn = 2 THEN units END) > 0
+        )
+        SELECT
+            prop,
+            latest_units,
+            prev_units,
+            latest_wk,
+            100.0 * (latest_units - prev_units) / prev_units AS wow_change_pct
+        FROM pivoted
+        WHERE prev_units >= 5
+        ORDER BY wow_change_pct ASC
+    """
+
+    try:
+        rows = dw.query(sql)
+    except Exception as e:
+        return SellThroughFlashResult(
+            week="error", total_properties_scanned=0, alerts_count=0,
+            red_alerts=[], yellow_alerts=[],
+            methodology=f"error-degraded: {type(e).__name__}: {str(e)[:80]}",
+        )
+
+    latest_wk = int(rows[0]["latest_wk"]) if rows else 0
+    red: list[SellThroughAlert] = []
+    yellow: list[SellThroughAlert] = []
+
+    for r in rows:
+        wow = r["wow_change_pct"]
+        if wow <= -20:
+            red.append(SellThroughAlert(
+                property_name=str(r["prop"]),
+                sell_through_pct=float(r["latest_units"]),
+                week_change_pct=round(float(wow), 1),
+                severity="red",
+                action_hint="Velocity cliff — consider markdown or reallocation",
+            ))
+        elif wow <= -10:
+            yellow.append(SellThroughAlert(
+                property_name=str(r["prop"]),
+                sell_through_pct=float(r["latest_units"]),
+                week_change_pct=round(float(wow), 1),
+                severity="yellow",
+                action_hint="Monitor — declining velocity",
+            ))
+
+    return SellThroughFlashResult(
+        week=f"2026-W{latest_wk}",
+        total_properties_scanned=len(rows),
+        alerts_count=len(red) + len(yellow),
+        red_alerts=red[:5],
+        yellow_alerts=yellow[:5],
+        methodology="velocity (units/week) week-over-week change, min 5u prev week",
+    )
+
+
 @function_tool
 def sell_through_flash(
     week: Annotated[str, "ISO week or 'current' for latest"] = "current",
@@ -40,36 +137,15 @@ def sell_through_flash(
     """
     Weekly sell-through flash — detects properties with anomalous velocity.
 
-    Red alerts: properties dropping sell-through >20% week-over-week.
-    Yellow alerts: properties with sell-through <15% overall.
-    Green: everything else.
+    Red alerts: properties dropping velocity >20% week-over-week.
+    Yellow alerts: properties dropping 10-20%.
+
+    Coverage: partial-no-stock (velocity only, not true sell-through which
+    requires stock data). Still useful as early warning signal.
 
     Source: scripts/sell_through_flash.py::run_flash (vault)
     """
-    return SellThroughFlashResult(
-        week="2026-W15",
-        total_properties_scanned=48,
-        alerts_count=5,
-        red_alerts=[
-            SellThroughAlert(
-                property_name="FROZEN",
-                sell_through_pct=8.2,
-                week_change_pct=-27.4,
-                severity="red",
-                action_hint="Consider markdown or reallocation — velocity cliff",
-            ),
-        ],
-        yellow_alerts=[
-            SellThroughAlert(
-                property_name="HELLO KITTY",
-                sell_through_pct=13.5,
-                week_change_pct=-8.1,
-                severity="yellow",
-                action_hint="Monitor — approaching TRAMPA threshold",
-            ),
-        ],
-        methodology="real_discount threshold + week-over-week velocity delta",
-    )
+    return _compute_sell_through_flash(week=week)
 
 
 # ─── Ecomm YoY Panel ──────────────────────────────────────────────────

@@ -40,40 +40,85 @@ class PLQueryResult(BaseModel):
     line_items: list[PLLineItem]
 
 
+def _compute_pl_query(period: str = "latest") -> PLQueryResult:
+    """Pure function — queries P&L from real DW."""
+    from tbc_caldero.adapters.duckdb_vault import VaultDW
+
+    dw = VaultDW.try_connect()
+    if dw is None:
+        return PLQueryResult(
+            period=period, coverage="stub-vault-unavailable",
+            coverage_notes="Vault unavailable",
+            revenue_clp=0, cogs_clp=0, gross_margin_clp=0, opex_clp=None,
+            ebitda_clp=0, ebitda_is_proxy=True, line_items=[],
+        )
+
+    try:
+        rows = dw.query("""
+            SELECT
+                SUM("Venta Neta (MO) SAP") AS revenue,
+                SUM("Total Costo Vta") AS cogs,
+                SUM("Contribucion Frontal (MO) SAP") AS cf
+            FROM venta_b2c_2026
+            WHERE "Venta Unidad" > 0
+        """)
+    except Exception as e:
+        return PLQueryResult(
+            period=period, coverage=f"error: {type(e).__name__}",
+            coverage_notes=str(e)[:200],
+            revenue_clp=0, cogs_clp=0, gross_margin_clp=0, opex_clp=None,
+            ebitda_clp=0, ebitda_is_proxy=True, line_items=[],
+        )
+
+    if not rows or rows[0]["revenue"] is None:
+        return PLQueryResult(
+            period=period, coverage="no-data",
+            coverage_notes="Query returned no rows",
+            revenue_clp=0, cogs_clp=0, gross_margin_clp=0, opex_clp=None,
+            ebitda_clp=0, ebitda_is_proxy=True, line_items=[],
+        )
+
+    r = rows[0]
+    revenue = int(r["revenue"])
+    cogs = int(r["cogs"])
+    cf = int(r["cf"])
+    gross_margin = revenue - cogs
+
+    items = [
+        PLLineItem(line="Revenue (Venta Neta)", value_clp=revenue,
+                   pct_revenue=100.0),
+        PLLineItem(line="COGS (Total Costo Vta)", value_clp=-cogs,
+                   pct_revenue=round(-100.0 * cogs / revenue, 1) if revenue else 0),
+        PLLineItem(line="Gross Margin", value_clp=gross_margin,
+                   pct_revenue=round(100.0 * gross_margin / revenue, 1) if revenue else 0),
+        PLLineItem(line="Contribución Frontal", value_clp=cf,
+                   pct_revenue=round(100.0 * cf / revenue, 1) if revenue else 0),
+    ]
+
+    return PLQueryResult(
+        period="2026-03 (26d)",
+        coverage="partial-no-opex",
+        coverage_notes=(
+            "DW venta_b2c_2026: Revenue, COGS, CF reales. OPEX no disponible — "
+            "EBITDA = proxy (Contribución Frontal). Royalty breakdown pendiente."
+        ),
+        revenue_clp=revenue, cogs_clp=cogs, gross_margin_clp=gross_margin,
+        opex_clp=None, ebitda_clp=cf, ebitda_is_proxy=True, line_items=items,
+    )
+
+
 @function_tool
 def pl_query(
     period: Annotated[str, "Month YYYY-MM or 'latest'"] = "latest",
 ) -> PLQueryResult:
     """
-    Query the TBC P&L for a given period.
+    Query the TBC B2C P&L for a given period.
 
-    Coverage: currently partial (SAP connector bloqueado). Falls back to
-    Barbara's planilla mágica export. EBITDA is a proxy (= MC) because
-    OPEX is not in the current export.
+    Coverage: partial-no-opex. EBITDA = proxy (Contribución Frontal).
 
     Source: scripts/pl_query.py (vault, Fase 1 Finance 2026-04-12)
-    Pattern: .claude/rules/capability-atomic-scaffold.md
     """
-    return PLQueryResult(
-        period="2026-03",
-        coverage="partial-no-sap",
-        coverage_notes=(
-            "SAP connector bloqueado — falling back to Barbara's Rolling Forecast "
-            "export. OPEX not included. EBITDA reported here is a proxy (= MC)."
-        ),
-        revenue_clp=707_000_000,
-        cogs_clp=246_000_000,
-        gross_margin_clp=461_000_000,
-        opex_clp=None,
-        ebitda_clp=63_000_000,
-        ebitda_is_proxy=True,
-        line_items=[
-            PLLineItem(line="Revenue", value_clp=707_000_000, pct_revenue=100.0),
-            PLLineItem(line="COGS", value_clp=-246_000_000, pct_revenue=-34.8),
-            PLLineItem(line="Royalty", value_clp=-57_000_000, pct_revenue=-8.1),
-            PLLineItem(line="Gross Margin", value_clp=404_000_000, pct_revenue=57.1),
-        ],
-    )
+    return _compute_pl_query(period=period)
 
 
 # ─── Allocation Query ─────────────────────────────────────────────────
