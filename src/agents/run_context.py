@@ -61,6 +61,16 @@ class RunContextWrapper(Generic[TContext]):
     tool_input: Any | None = None
     """Structured input for the current agent tool run, when available."""
 
+    tool_call_id: str | None = field(default=None, init=False)
+    """The tool call ID for the current tool invocation, when available.
+
+    Populated on :class:`ToolContext` instances that are passed to
+    :meth:`RunHooksBase.on_tool_start <agents.lifecycle.RunHooksBase.on_tool_start>` and
+    :meth:`RunHooksBase.on_tool_end <agents.lifecycle.RunHooksBase.on_tool_end>` for
+    function-tool invocations. ``None`` for non-function-tool hook invocations and for plain
+    :class:`RunContextWrapper` instances used outside of a tool call.
+    """
+
     @staticmethod
     def _to_str_or_none(value: Any) -> str | None:
         if isinstance(value, str):
@@ -461,6 +471,7 @@ class RunContextWrapper(Generic[TContext]):
         fork._approvals = self._approvals
         fork.turn_input = self.turn_input
         fork.tool_input = tool_input
+        fork.tool_call_id = self.tool_call_id
         return fork
 
     def _fork_without_tool_input(self) -> RunContextWrapper[TContext]:
@@ -469,6 +480,7 @@ class RunContextWrapper(Generic[TContext]):
         fork.usage = self.usage
         fork._approvals = self._approvals
         fork.turn_input = self.turn_input
+        fork.tool_call_id = self.tool_call_id
         return fork
 
 

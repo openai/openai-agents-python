@@ -16,6 +16,7 @@ from tests.test_agent_llm_hooks import AgentHooksForTests
 from .fake_model import FakeModel
 from .test_responses import (
     get_function_tool,
+    get_function_tool_call,
     get_text_message,
 )
 
@@ -318,3 +319,49 @@ async def test_run_hooks_receives_turn_input_streamed():
     turn_input = hooks.captured_turn_inputs[0]
     assert len(turn_input) == 1
     assert turn_input[0]["content"] == "streamed input"
+
+
+class RunHooksToolCallId(RunHooks):
+    """Capture tool_call_id from on_tool_start and on_tool_end via RunContextWrapper directly."""
+
+    def __init__(self):
+        self.start_ids: list[str | None] = []
+        self.end_ids: list[str | None] = []
+
+    async def on_tool_start(
+        self, context: RunContextWrapper[TContext], agent: Agent[TContext], tool: Tool
+    ) -> None:
+        # tool_call_id is now accessible directly on RunContextWrapper, no isinstance check needed.
+        self.start_ids.append(context.tool_call_id)
+
+    async def on_tool_end(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: Agent[TContext],
+        tool: Tool,
+        result: str,
+    ) -> None:
+        self.end_ids.append(context.tool_call_id)
+
+
+@pytest.mark.asyncio
+async def test_tool_call_id_exposed_on_run_context_wrapper():
+    """tool_call_id on RunContextWrapper is set during on_tool_start/on_tool_end."""
+    hooks = RunHooksToolCallId()
+    model = FakeModel()
+    agent = Agent(name="A", model=model, tools=[get_function_tool("my_tool", "ok")])
+
+    model.set_next_output([get_function_tool_call("my_tool", "{}", call_id="call_abc123")])
+    model.add_multiple_turn_outputs([[get_text_message("done")]])
+
+    await Runner.run(agent, input="go", hooks=hooks)
+
+    assert hooks.start_ids == ["call_abc123"], f"Expected [call_abc123], got {hooks.start_ids}"
+    assert hooks.end_ids == ["call_abc123"], f"Expected [call_abc123], got {hooks.end_ids}"
+
+
+@pytest.mark.asyncio
+async def test_tool_call_id_is_none_outside_tool_context():
+    """tool_call_id on a plain RunContextWrapper (outside a tool call) is None."""
+    ctx = RunContextWrapper(context=None)
+    assert ctx.tool_call_id is None
