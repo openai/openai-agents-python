@@ -205,9 +205,8 @@ def exa_search_tool(
             end_published_date: Filter results published before this date (ISO 8601).
         """
         kwargs: dict[str, Any] = {
-            "query": query,
             "num_results": num_results or default_num_results,
-            **contents_kwargs,
+            "contents": contents_kwargs if contents_kwargs else False,
         }
 
         if search_type:
@@ -227,7 +226,7 @@ def exa_search_tool(
         if end_published_date:
             kwargs["end_published_date"] = end_published_date
 
-        response = client.search_and_contents(**kwargs)
+        response = client.search(query, **kwargs)
         parsed = _parse_results(response)
         return _format_results(parsed)
 
