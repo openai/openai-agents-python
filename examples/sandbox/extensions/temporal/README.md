@@ -46,12 +46,7 @@ any cloud provider API keys.
    ```
 
 The `just worker` and `just tui` commands automatically install dependencies
-and patch the installed `temporalio` package with vendored sandbox support.
-This patch step is temporary -- the next `temporalio` release will include
-sandbox support natively, at which point the vendored plugin and patch step
-will be removed. Until then, running the Python scripts directly without
-the patch step (i.e. skipping `just worker`/`just tui`) will fail at import
-time.
+before starting.
 
 ## TUI commands
 

@@ -40,9 +40,7 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel, SerializeAsAny, field_validator, model_serializer
 from temporalio import workflow
 from temporalio.client import Client
-from temporalio.contrib.openai_agents.workflow import (  # type: ignore[attr-defined]
-    temporal_sandbox_client,
-)
+from temporalio.contrib.openai_agents.workflow import temporal_sandbox_client
 from temporalio.worker import Worker
 from temporalio.worker.workflow_sandbox import (
     SandboxedWorkflowRunner,
@@ -633,7 +631,7 @@ async def run_worker() -> None:
         query_workflow_snapshot,
         switch_workflow_backend,
     )
-    from temporalio.contrib.openai_agents import (  # type: ignore[attr-defined]
+    from temporalio.contrib.openai_agents import (
         ModelActivityParameters,
         OpenAIAgentsPlugin,
         SandboxClientProvider,
@@ -656,7 +654,7 @@ async def run_worker() -> None:
     except docker.errors.DockerException:
         pass
 
-    plugin = OpenAIAgentsPlugin(  # type: ignore[call-arg]
+    plugin = OpenAIAgentsPlugin(
         model_params=ModelActivityParameters(
             start_to_close_timeout=timedelta(seconds=120),
         ),

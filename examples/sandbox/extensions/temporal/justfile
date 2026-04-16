@@ -3,11 +3,6 @@
 set dotenv-load
 set dotenv-path := ".env"
 
-# TEMPORARY: Import patch helpers until temporalio ships with sandbox support.
-# Remove this import (and patch_plugin.justfile) once the released package
-# includes `temporalio.contrib.openai_agents.sandbox`.
-import '_vendored_plugin/patch_plugin.justfile'
-
 # Ensure extras are installed
 [private]
 sync:
@@ -18,9 +13,9 @@ temporal:
     temporal server start-dev
 
 # Start the Temporal worker
-worker: sync patch
+worker: sync
     uv run --extra temporal --extra daytona --extra e2b --extra docker python temporal_sandbox_agent.py worker
 
 # Start the TUI client
-tui: sync patch
+tui: sync
     uv run --extra temporal --extra daytona --extra e2b --extra docker python temporal_sandbox_agent.py run
