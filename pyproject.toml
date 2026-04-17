@@ -57,6 +57,7 @@ temporal = [
     "temporalio==1.26.0",
     "textual>=8.2.3,<8.3",
 ]
+agentspan = ["agentspan>=0.1.0"]
 
 [dependency-groups]
 dev = [
