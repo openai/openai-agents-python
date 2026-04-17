@@ -1,6 +1,6 @@
 """MongoDB-powered Session backend.
 
-Requires ``pymongo>=4.13``, which ships the native async API
+Requires ``pymongo>=4.14``, which ships the native async API
 (``AsyncMongoClient``).  Install it with::
 
     pip install openai-agents[mongodb]
@@ -49,7 +49,7 @@ try:
     from pymongo.driver_info import DriverInfo
 except ImportError as e:
     raise ImportError(
-        "MongoDBSession requires the 'pymongo' package (>=4.13). "
+        "MongoDBSession requires the 'pymongo' package (>=4.14). "
         "Install it with: pip install openai-agents[mongodb]"
     ) from e
 
@@ -128,10 +128,7 @@ class MongoDBSession(SessionABC):
         self._client = client
         self._owns_client = False
 
-        # Annotate an externally-supplied client with library metadata.
-        # append_metadata is available in PyMongo >=4.14; guard for older installs.
-        if hasattr(client, "append_metadata"):
-            client.append_metadata(_DRIVER_INFO)
+        client.append_metadata(_DRIVER_INFO)
 
         db = client[database]
         self._sessions: AsyncCollection[Any] = db[sessions_collection]
