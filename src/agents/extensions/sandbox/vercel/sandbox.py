@@ -14,10 +14,11 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import tarfile
 import uuid
 from collections.abc import Awaitable, Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
