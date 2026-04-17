@@ -43,6 +43,7 @@ from ....sandbox.errors import (
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
+    WorkspaceStartError,
     WorkspaceWriteTypeError,
 )
 from ....sandbox.manifest import Manifest
@@ -308,6 +309,24 @@ class VercelSandboxSession(BaseSandboxSession):
             raise ValueError(str(exc)) from exc
         except (tarfile.TarError, OSError) as exc:
             raise ValueError("invalid tar stream") from exc
+
+    async def _prepare_backend_workspace(self) -> None:
+        root = PurePosixPath(os.path.normpath(self.state.manifest.root))
+        try:
+            sandbox = await self._ensure_sandbox()
+            finished = await sandbox.run_command("mkdir", ["-p", "--", root.as_posix()])
+        except Exception as exc:
+            raise WorkspaceStartError(path=Path(str(root)), cause=exc) from exc
+
+        if finished.exit_code != 0:
+            raise WorkspaceStartError(
+                path=Path(str(root)),
+                context={
+                    "exit_code": finished.exit_code,
+                    "stdout": await finished.stdout(),
+                    "stderr": await finished.stderr(),
+                },
+            )
 
     async def _ensure_sandbox(self, *, source: Any | None = None) -> Any:
         sandbox = self._sandbox

@@ -541,8 +541,7 @@ async def test_vercel_start_uses_base_session_contract_and_materializes_workspac
     await session.start()
     payload = await session.read(Path("notes.txt"))
 
-    assert ("mkdir", ["-p", "--", "/workspace"], None) not in sandbox.run_command_calls
-    assert ("test", ["-d", "/workspace"], None) not in sandbox.run_command_calls
+    assert sandbox.run_command_calls[0] == ("mkdir", ["-p", "--", "/workspace"], None)
     assert ("mkdir", ["-p", "/workspace"], "/workspace") in sandbox.run_command_calls
     assert session.state.workspace_root_ready is True
     assert payload.read() == b"payload"
@@ -568,12 +567,34 @@ async def test_vercel_start_materializes_entries_under_literal_manifest_root(
     await session.start()
     payload = await session.read(Path("notes.txt"))
 
-    assert ("mkdir", ["-p", "--", "/workspace/my app"], None) not in sandbox.run_command_calls
-    assert ("test", ["-d", "/workspace/my app"], None) not in sandbox.run_command_calls
+    assert sandbox.run_command_calls[0] == ("mkdir", ["-p", "--", "/workspace/my app"], None)
     assert ("mkdir", ["-p", "/workspace/my app"], "/workspace/my app") in sandbox.run_command_calls
     assert sandbox.write_files_calls == [
         [{"path": "/workspace/my app/notes.txt", "content": b"payload"}]
     ]
+    assert payload.read() == b"payload"
+
+
+@pytest.mark.asyncio
+async def test_vercel_start_bootstraps_arbitrary_absolute_root_before_using_it_as_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+
+    state = vercel_module.VercelSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000014",
+        manifest=Manifest(root="/tmp/outside", entries={"notes.txt": File(content=b"payload")}),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sandbox-start-outside",
+    )
+    sandbox = _FakeAsyncSandbox(sandbox_id="sandbox-start-outside")
+    session = vercel_module.VercelSandboxSession.from_state(state, sandbox=sandbox)
+
+    await session.start()
+    payload = await session.read(Path("notes.txt"))
+
+    assert sandbox.run_command_calls[0] == ("mkdir", ["-p", "--", "/tmp/outside"], None)
+    assert ("mkdir", ["-p", "/tmp/outside"], "/tmp/outside") in sandbox.run_command_calls
     assert payload.read() == b"payload"
 
 
