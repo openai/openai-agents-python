@@ -615,3 +615,117 @@ def test_tool_call_item_to_input_item_keeps_payload_api_safe() -> None:
     assert result_dict["type"] == "function_call"
     assert "title" not in result_dict
     assert "description" not in result_dict
+
+
+# ---------------------------------------------------------------------------
+# ToolCallItem / ToolCallOutputItem convenience properties
+# ---------------------------------------------------------------------------
+
+
+def test_tool_call_item_tool_name_from_function_call() -> None:
+    """tool_name is extracted from ResponseFunctionToolCall.name."""
+    agent = Agent(name="test", instructions="test")
+    raw_item = ResponseFunctionToolCall(
+        id="fc_1",
+        call_id="call_abc",
+        name="my_tool",
+        arguments="{}",
+        type="function_call",
+        status="completed",
+    )
+    item = ToolCallItem(agent=agent, raw_item=raw_item)
+    assert item.tool_name == "my_tool"
+
+
+def test_tool_call_item_tool_name_from_dict() -> None:
+    """tool_name is extracted from a raw dict with a 'name' key."""
+    agent = Agent(name="test", instructions="test")
+    raw_item: dict[str, Any] = {"type": "function_call", "name": "dict_tool", "call_id": "cid_1"}
+    item = ToolCallItem(agent=agent, raw_item=raw_item)
+    assert item.tool_name == "dict_tool"
+
+
+def test_tool_call_item_tool_name_none_for_computer_call() -> None:
+    """tool_name is None for tool types that carry no 'name' field."""
+    from openai.types.responses.response_computer_tool_call import ResponseComputerToolCall
+
+    agent = Agent(name="test", instructions="test")
+    raw_item = ResponseComputerToolCall(
+        id="cu_1",
+        call_id="call_cu",
+        type="computer_call",
+        status="completed",
+        action={"type": "screenshot"},
+        actions=[],
+        pending_safety_checks=[],
+    )
+    item = ToolCallItem(agent=agent, raw_item=raw_item)
+    assert item.tool_name is None
+
+
+def test_tool_call_item_call_id_from_function_call() -> None:
+    """call_id is extracted from ResponseFunctionToolCall.call_id."""
+    agent = Agent(name="test", instructions="test")
+    raw_item = ResponseFunctionToolCall(
+        id="fc_2",
+        call_id="call_xyz",
+        name="another_tool",
+        arguments="{}",
+        type="function_call",
+        status="completed",
+    )
+    item = ToolCallItem(agent=agent, raw_item=raw_item)
+    assert item.call_id == "call_xyz"
+
+
+def test_tool_call_item_call_id_from_dict() -> None:
+    """call_id is extracted from a raw dict with a 'call_id' key."""
+    agent = Agent(name="test", instructions="test")
+    raw_item: dict[str, Any] = {"type": "function_call", "name": "t", "call_id": "cid_dict"}
+    item = ToolCallItem(agent=agent, raw_item=raw_item)
+    assert item.call_id == "cid_dict"
+
+
+def test_tool_call_output_item_call_id_from_dict() -> None:
+    """ToolCallOutputItem.call_id is extracted from the raw dict (TypedDict) payload."""
+    agent = Agent(name="test", instructions="test")
+    raw_item: dict[str, Any] = {
+        "type": "function_call_output",
+        "call_id": "call_out_1",
+        "output": "result",
+    }
+    item = ToolCallOutputItem(agent=agent, raw_item=raw_item, output="result")
+    assert item.call_id == "call_out_1"
+
+
+def test_tool_call_output_item_call_id_none_when_missing() -> None:
+    """ToolCallOutputItem.call_id returns None when the raw item has no call_id."""
+    agent = Agent(name="test", instructions="test")
+    raw_item: dict[str, Any] = {"type": "custom_output", "output": "result"}
+    item = ToolCallOutputItem(agent=agent, raw_item=raw_item, output="result")
+    assert item.call_id is None
+
+
+def test_tool_call_items_can_be_joined_by_call_id() -> None:
+    """Demonstrates the motivating use-case: correlate outputs to calls via call_id."""
+    agent = Agent(name="test", instructions="test")
+
+    call = ToolCallItem(
+        agent=agent,
+        raw_item=ResponseFunctionToolCall(
+            id="fc_join",
+            call_id="call_join",
+            name="join_tool",
+            arguments="{}",
+            type="function_call",
+            status="completed",
+        ),
+    )
+    output = ToolCallOutputItem(
+        agent=agent,
+        raw_item={"type": "function_call_output", "call_id": "call_join", "output": "done"},
+        output="done",
+    )
+
+    assert call.call_id == output.call_id
+    assert call.tool_name == "join_tool"

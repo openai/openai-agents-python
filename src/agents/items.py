@@ -362,6 +362,29 @@ class ToolCallItem(RunItemBase[Any]):
     tool_origin: ToolOrigin | None = None
     """Optional metadata describing the source of a function-tool-backed item."""
 
+    @property
+    def tool_name(self) -> str | None:
+        """Return the tool name from the raw item if available.
+
+        For function tools (e.g. ``ResponseFunctionToolCall``, ``McpCall``) this is the
+        function name.  For hosted tools (computer-use, file-search, web-search …) the raw
+        item typically carries no ``name`` field, so ``None`` is returned.
+        """
+        if isinstance(self.raw_item, dict):
+            candidate = self.raw_item.get("name") or self.raw_item.get("tool_name")
+        else:
+            candidate = getattr(self.raw_item, "name", None) or getattr(
+                self.raw_item, "tool_name", None
+            )
+        return str(candidate) if candidate is not None else None
+
+    @property
+    def call_id(self) -> str | None:
+        """Return the call identifier from the raw item if available."""
+        if isinstance(self.raw_item, dict):
+            return self.raw_item.get("call_id") or self.raw_item.get("id")
+        return getattr(self.raw_item, "call_id", None) or getattr(self.raw_item, "id", None)
+
 
 ToolCallOutputTypes: TypeAlias = (
     FunctionCallOutput
@@ -388,6 +411,17 @@ class ToolCallOutputItem(RunItemBase[Any]):
 
     tool_origin: ToolOrigin | None = None
     """Optional metadata describing the source of a function-tool-backed item."""
+
+    @property
+    def call_id(self) -> str | None:
+        """Return the call identifier from the raw item if available.
+
+        This matches the ``call_id`` on the corresponding :class:`ToolCallItem` and can be
+        used to correlate outputs with their originating tool calls without a manual join.
+        """
+        if isinstance(self.raw_item, dict):
+            return self.raw_item.get("call_id")
+        return getattr(self.raw_item, "call_id", None)
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts the tool output into an input item for the next model turn.
