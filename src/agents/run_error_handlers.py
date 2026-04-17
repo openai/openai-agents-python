@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Union
+from typing import Any, Generic
 
 from typing_extensions import TypedDict
 
@@ -42,7 +43,7 @@ class RunErrorHandlerResult:
 # Handlers may return RunErrorHandlerResult, a dict with final_output, or a raw final output value.
 RunErrorHandler = Callable[
     [RunErrorHandlerInput[TContext]],
-    MaybeAwaitable[Union[RunErrorHandlerResult, dict[str, Any], Any, None]],
+    MaybeAwaitable[RunErrorHandlerResult | dict[str, Any] | Any | None],
 ]
 
 

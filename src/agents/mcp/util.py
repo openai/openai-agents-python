@@ -5,9 +5,9 @@ import copy
 import functools
 import inspect
 import json
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Protocol, Union
+from typing import TYPE_CHECKING, Any, Protocol, Union
 
 import httpx
 from typing_extensions import NotRequired, TypedDict
@@ -27,12 +27,15 @@ from ..tool import (
     FunctionTool,
     Tool,
     ToolErrorFunction,
+    ToolOrigin,
+    ToolOriginType,
     ToolOutputImageDict,
     ToolOutputTextDict,
     _build_handled_function_tool_error_handler,
     _build_wrapped_function_tool,
     default_tool_error_function,
 )
+from ..tool_context import ToolContext
 from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
 from ..util._types import MaybeAwaitable
 
@@ -313,6 +316,10 @@ class MCPUtil:
             strict_json_schema=is_strict,
             needs_approval=needs_approval,
             mcp_title=resolve_mcp_tool_title(tool),
+            tool_origin=ToolOrigin(
+                type=ToolOriginType.MCP,
+                mcp_server_name=server.name,
+            ),
         )
         return function_tool
 
@@ -466,7 +473,10 @@ class MCPUtil:
         current_span = get_current_span()
         if current_span:
             if isinstance(current_span.span_data, FunctionSpanData):
-                current_span.span_data.output = tool_output
+                if not isinstance(context, ToolContext) or (
+                    context.run_config is None or context.run_config.trace_include_sensitive_data
+                ):
+                    current_span.span_data.output = tool_output
                 current_span.span_data.mcp_data = {
                     "server": server.name,
                 }

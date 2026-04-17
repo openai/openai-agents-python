@@ -347,7 +347,7 @@ class RealtimeSession(RealtimeModelListener):
                         # Only attempt to preserve for audio-like content
                         if entry.type in ("audio", "input_audio"):
                             # Use tuple form when checking against multiple classes.
-                            assert isinstance(entry, (InputAudio, AssistantAudio))
+                            assert isinstance(entry, InputAudio | AssistantAudio)
                             # Determine if transcript is missing/empty on the incoming entry
                             entry_transcript = entry.transcript
                             if not entry_transcript:
@@ -1108,5 +1108,5 @@ class RealtimeSession(RealtimeModelListener):
             return res
 
         results = await asyncio.gather(*(_check_handoff_enabled(h) for h in handoffs))
-        enabled = [h for h, ok in zip(handoffs, results) if ok]
+        enabled = [h for h, ok in zip(handoffs, results, strict=False) if ok]
         return enabled

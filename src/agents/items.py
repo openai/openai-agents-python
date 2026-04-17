@@ -5,7 +5,7 @@ import json
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar, cast
 
 import pydantic
 from openai.types.responses import (
@@ -48,12 +48,13 @@ from openai.types.responses.response_output_item import (
 )
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from pydantic import BaseModel
-from typing_extensions import TypeAlias, assert_never
+from typing_extensions import assert_never
 
 from ._tool_identity import FunctionToolLookupKey, get_function_tool_lookup_key, tool_trace_name
 from .exceptions import AgentsException, ModelBehaviorError
 from .logger import logger
 from .tool import (
+    ToolOrigin,
     ToolOutputFileContent,
     ToolOutputImage,
     ToolOutputText,
@@ -78,7 +79,7 @@ TResponseOutputItem = ResponseOutputItem
 TResponseStreamEvent = ResponseStreamEvent
 """A type alias for the ResponseStreamEvent type from the OpenAI SDK."""
 
-T = TypeVar("T", bound=Union[TResponseOutputItem, TResponseInputItem, dict[str, Any]])
+T = TypeVar("T", bound=TResponseOutputItem | TResponseInputItem | dict[str, Any])
 ToolSearchCallRawItem: TypeAlias = ResponseToolSearchCall | dict[str, Any]
 ToolSearchOutputRawItem: TypeAlias = ResponseToolSearchOutputItem | dict[str, Any]
 
@@ -329,17 +330,17 @@ class HandoffOutputItem(RunItemBase[TResponseInputItem]):
             self.__dict__["target_agent"] = None
 
 
-ToolCallItemTypes: TypeAlias = Union[
-    ResponseFunctionToolCall,
-    ResponseComputerToolCall,
-    ResponseFileSearchToolCall,
-    ResponseFunctionWebSearch,
-    McpCall,
-    ResponseCodeInterpreterToolCall,
-    ImageGenerationCall,
-    LocalShellCall,
-    dict[str, Any],
-]
+ToolCallItemTypes: TypeAlias = (
+    ResponseFunctionToolCall
+    | ResponseComputerToolCall
+    | ResponseFileSearchToolCall
+    | ResponseFunctionWebSearch
+    | McpCall
+    | ResponseCodeInterpreterToolCall
+    | ImageGenerationCall
+    | LocalShellCall
+    | dict[str, Any]
+)
 """A type that represents a tool call item."""
 
 
@@ -358,14 +359,17 @@ class ToolCallItem(RunItemBase[Any]):
     title: str | None = None
     """Optional short display label if known at item creation time."""
 
+    tool_origin: ToolOrigin | None = None
+    """Optional metadata describing the source of a function-tool-backed item."""
 
-ToolCallOutputTypes: TypeAlias = Union[
-    FunctionCallOutput,
-    ComputerCallOutput,
-    LocalShellCallOutput,
-    ResponseFunctionShellToolCallOutput,
-    dict[str, Any],
-]
+
+ToolCallOutputTypes: TypeAlias = (
+    FunctionCallOutput
+    | ComputerCallOutput
+    | LocalShellCallOutput
+    | ResponseFunctionShellToolCallOutput
+    | dict[str, Any]
+)
 
 
 @dataclass
@@ -381,6 +385,9 @@ class ToolCallOutputItem(RunItemBase[Any]):
     """
 
     type: Literal["tool_call_output_item"] = "tool_call_output_item"
+
+    tool_origin: ToolOrigin | None = None
+    """Optional metadata describing the source of a function-tool-backed item."""
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts the tool output into an input item for the next model turn.
@@ -464,13 +471,9 @@ class CompactionItem(RunItemBase[TResponseInputItem]):
 
 
 # Union type for tool approval raw items - supports function tools, hosted tools, shell tools, etc.
-ToolApprovalRawItem: TypeAlias = Union[
-    ResponseFunctionToolCall,
-    McpCall,
-    McpApprovalRequest,
-    LocalShellCall,
-    dict[str, Any],  # For flexibility with other tool types
-]
+ToolApprovalRawItem: TypeAlias = (
+    ResponseFunctionToolCall | McpCall | McpApprovalRequest | LocalShellCall | dict[str, Any]
+)
 
 
 @dataclass
@@ -492,6 +495,9 @@ class ToolApprovalItem(RunItemBase[Any]):
 
     tool_namespace: str | None = None
     """Optional Responses API namespace for function-tool approvals."""
+
+    tool_origin: ToolOrigin | None = None
+    """Optional metadata describing where the approved tool call came from."""
 
     tool_lookup_key: FunctionToolLookupKey | None = field(
         default=None,
@@ -601,21 +607,21 @@ class ToolApprovalItem(RunItemBase[Any]):
         )
 
 
-RunItem: TypeAlias = Union[
-    MessageOutputItem,
-    ToolSearchCallItem,
-    ToolSearchOutputItem,
-    HandoffCallItem,
-    HandoffOutputItem,
-    ToolCallItem,
-    ToolCallOutputItem,
-    ReasoningItem,
-    MCPListToolsItem,
-    MCPApprovalRequestItem,
-    MCPApprovalResponseItem,
-    CompactionItem,
-    ToolApprovalItem,
-]
+RunItem: TypeAlias = (
+    MessageOutputItem
+    | ToolSearchCallItem
+    | ToolSearchOutputItem
+    | HandoffCallItem
+    | HandoffOutputItem
+    | ToolCallItem
+    | ToolCallOutputItem
+    | ReasoningItem
+    | MCPListToolsItem
+    | MCPApprovalRequestItem
+    | MCPApprovalResponseItem
+    | CompactionItem
+    | ToolApprovalItem
+)
 """An item generated by an agent."""
 
 
@@ -683,7 +689,14 @@ class ItemHelpers:
         text = ""
         for content_item in message.content:
             if isinstance(content_item, ResponseOutputText):
-                text += content_item.text
+                # ``content_item.text`` is typed as ``str`` per the Responses
+                # API schema, but provider gateways (e.g. LiteLLM) and
+                # ``model_construct`` paths during streaming have been
+                # observed surfacing ``None``. Coerce so callers — including
+                # the SDK's own ``execute_tools_and_side_effects`` — don't
+                # crash with ``TypeError: can only concatenate str (not
+                # "NoneType") to str``.
+                text += content_item.text or ""
 
         return text or None
 
@@ -744,7 +757,7 @@ class ItemHelpers:
 
         # If the output is either a single or list of the known structured output types, convert to
         # ResponseFunctionCallOutputItemListParam. Else, just stringify.
-        if isinstance(output, (list, tuple)):
+        if isinstance(output, list | tuple):
             maybe_converted_output_list = [
                 cls._maybe_get_output_as_structured_function_output(item) for item in output
             ]
@@ -767,7 +780,7 @@ class ItemHelpers:
     def _maybe_get_output_as_structured_function_output(
         cls, output: Any
     ) -> ValidToolOutputPydanticModels | None:
-        if isinstance(output, (ToolOutputText, ToolOutputImage, ToolOutputFileContent)):
+        if isinstance(output, ToolOutputText | ToolOutputImage | ToolOutputFileContent):
             return output
         elif isinstance(output, dict):
             # Require explicit 'type' field in dict to be considered a structured output

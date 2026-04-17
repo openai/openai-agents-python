@@ -17,7 +17,7 @@ A clear and concise description of what the question or bug is.
 
 ### Debug information
 - Agents SDK version: (e.g. `v0.0.3`)
-- Python version (e.g. Python 3.10)
+- Python version (e.g. Python 3.14)
 
 ### Repro steps
 Ideally provide a minimal python script that can be run to reproduce the issue.

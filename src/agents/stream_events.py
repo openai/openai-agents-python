@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Union
-
-from typing_extensions import TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from .agent import Agent
 from .items import RunItem, TResponseStreamEvent
@@ -60,5 +58,5 @@ class AgentUpdatedStreamEvent:
     type: Literal["agent_updated_stream_event"] = "agent_updated_stream_event"
 
 
-StreamEvent: TypeAlias = Union[RawResponsesStreamEvent, RunItemStreamEvent, AgentUpdatedStreamEvent]
+StreamEvent: TypeAlias = RawResponsesStreamEvent | RunItemStreamEvent | AgentUpdatedStreamEvent
 """A streaming event from an agent."""

@@ -24,6 +24,7 @@ from agents.items import (
     MCPListToolsItem,
     MessageOutputItem,
     ReasoningItem,
+    ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
     ToolSearchCallItem,
@@ -1013,5 +1014,59 @@ def test_removes_mixed_mcp_and_function_items() -> None:
     )
     filtered_data = remove_all_tools(handoff_input_data)
     assert len(filtered_data.input_history) == 2
+    assert len(filtered_data.pre_handoff_items) == 1
+    assert len(filtered_data.new_items) == 1
+
+
+def _get_hosted_tool_input_item(type_name: str) -> TResponseInputItem:
+    return cast(TResponseInputItem, {"id": "ht1", "type": type_name})
+
+
+def _get_tool_approval_run_item() -> ToolApprovalItem:
+    return ToolApprovalItem(
+        agent=fake_agent(),
+        raw_item={"type": "function_call", "call_id": "c1", "name": "fn", "arguments": "{}"},
+        tool_name="fn",
+    )
+
+
+def test_removes_hosted_tool_types_from_input_history() -> None:
+    """Hosted tool types in raw input history should be removed by remove_all_tools."""
+    hosted_types = [
+        "code_interpreter_call",
+        "image_generation_call",
+        "local_shell_call",
+        "local_shell_call_output",
+        "shell_call",
+        "shell_call_output",
+        "apply_patch_call",
+        "apply_patch_call_output",
+    ]
+    input_items: list[TResponseInputItem] = [_get_message_input_item("Hello")]
+    for t in hosted_types:
+        input_items.append(_get_hosted_tool_input_item(t))
+    input_items.append(_get_message_input_item("World"))
+
+    handoff_input_data = handoff_data(input_history=tuple(input_items))
+    filtered_data = remove_all_tools(handoff_input_data)
+    assert len(filtered_data.input_history) == 2
+    for item in filtered_data.input_history:
+        assert not isinstance(item, str)
+        assert item.get("type") not in set(hosted_types)
+
+
+def test_removes_tool_approval_from_new_items() -> None:
+    """ToolApprovalItem should be removed from new_items and pre_handoff_items."""
+    handoff_input_data = handoff_data(
+        pre_handoff_items=(
+            _get_tool_approval_run_item(),
+            _get_message_output_run_item("kept"),
+        ),
+        new_items=(
+            _get_tool_approval_run_item(),
+            _get_message_output_run_item("also kept"),
+        ),
+    )
+    filtered_data = remove_all_tools(handoff_input_data)
     assert len(filtered_data.pre_handoff_items) == 1
     assert len(filtered_data.new_items) == 1

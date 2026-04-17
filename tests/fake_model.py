@@ -5,11 +5,11 @@ from typing import Any
 
 from openai.types.responses import (
     Response,
+    ResponseApplyPatchToolCall,
     ResponseCompletedEvent,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
     ResponseCreatedEvent,
-    ResponseCustomToolCall,
     ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
@@ -122,24 +122,19 @@ class FakeModel(Model):
                 )
                 raise output
 
-            # Convert apply_patch_call dicts to ResponseCustomToolCall
-            # to avoid Pydantic validation errors
             converted_output = []
             for item in output:
                 if isinstance(item, dict) and item.get("type") == "apply_patch_call":
-                    import json
-
-                    operation = item.get("operation", {})
-                    operation_json = (
-                        json.dumps(operation) if isinstance(operation, dict) else str(operation)
+                    call_id = str(item.get("call_id") or item.get("id") or "")
+                    converted_output.append(
+                        ResponseApplyPatchToolCall(
+                            type="apply_patch_call",
+                            id=str(item.get("id") or call_id),
+                            call_id=call_id,
+                            status=item.get("status") or "completed",
+                            operation=item.get("operation"),
+                        )
                     )
-                    converted_item = ResponseCustomToolCall(
-                        type="custom_tool_call",
-                        name="apply_patch",
-                        call_id=item.get("call_id") or "",
-                        input=operation_json,
-                    )
-                    converted_output.append(converted_item)
                 else:
                     converted_output.append(item)
 
@@ -338,6 +333,11 @@ class FakeModel(Model):
                 response=response,
                 sequence_number=sequence_number,
             )
+
+
+class PromptCacheFakeModel(FakeModel):
+    def _supports_default_prompt_cache_key(self) -> bool:
+        return True
 
 
 def get_response_obj(

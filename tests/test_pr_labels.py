@@ -60,6 +60,18 @@ def test_infer_fallback_labels_marks_extensions_for_any_llm_changes() -> None:
     assert labels == {"feature:extensions"}
 
 
+def test_infer_fallback_labels_marks_sandboxes_for_core_sandbox_changes() -> None:
+    labels = pr_labels.infer_fallback_labels(["src/agents/sandbox/runtime.py"])
+
+    assert labels == {"feature:sandboxes"}
+
+
+def test_infer_fallback_labels_marks_sandboxes_for_extension_sandbox_changes() -> None:
+    labels = pr_labels.infer_fallback_labels(["src/agents/extensions/sandbox/e2b/sandbox.py"])
+
+    assert labels == {"feature:extensions", "feature:sandboxes"}
+
+
 def test_compute_desired_labels_removes_stale_fallback_labels() -> None:
     desired = pr_labels.compute_desired_labels(
         pr_context=pr_labels.PRContext(),
@@ -136,6 +148,41 @@ def test_compute_desired_labels_infers_extensions_for_extensions_memory_fix() ->
     )
 
     assert desired == {"bug", "feature:extensions"}
+
+
+def test_compute_desired_labels_infers_sandboxes_for_sandbox_fix() -> None:
+    desired = pr_labels.compute_desired_labels(
+        pr_context=pr_labels.PRContext(title="fix: restore sandbox cleanup behavior"),
+        changed_files=[
+            "src/agents/extensions/sandbox/e2b/sandbox.py",
+            "tests/extensions/sandbox/test_e2b_sandbox.py",
+        ],
+        diff_text="",
+        codex_ran=True,
+        codex_output_valid=True,
+        codex_labels=[],
+        base_sha=None,
+        head_sha=None,
+    )
+
+    assert desired == {"bug", "feature:extensions", "feature:sandboxes"}
+
+
+def test_compute_desired_labels_adds_extensions_for_extension_sandbox_when_codex_is_partial() -> (
+    None
+):
+    desired = pr_labels.compute_desired_labels(
+        pr_context=pr_labels.PRContext(),
+        changed_files=["src/agents/extensions/sandbox/e2b/sandbox.py"],
+        diff_text="",
+        codex_ran=True,
+        codex_output_valid=True,
+        codex_labels=["feature:sandboxes"],
+        base_sha=None,
+        head_sha=None,
+    )
+
+    assert desired == {"feature:extensions", "feature:sandboxes"}
 
 
 def test_compute_managed_labels_preserves_model_only_labels_without_signal() -> None:

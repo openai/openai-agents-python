@@ -1,0 +1,3 @@
+# `Files`
+
+::: agents.sandbox.files

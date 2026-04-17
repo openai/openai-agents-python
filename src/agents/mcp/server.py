@@ -4,11 +4,11 @@ import abc
 import asyncio
 import inspect
 import sys
-from collections.abc import AsyncGenerator, Awaitable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar, Union, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, Union, cast
 
 import anyio
 import httpx
@@ -662,14 +662,14 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     def _extract_http_error_from_exception(self, e: BaseException) -> Exception | None:
         """Extract HTTP error from exception or ExceptionGroup."""
-        if isinstance(e, (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException)):
+        if isinstance(e, httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException):
             return e
 
         # Check if it's an ExceptionGroup containing HTTP errors
         if isinstance(e, BaseExceptionGroup):
             for exc in e.exceptions:
                 if isinstance(
-                    exc, (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException)
+                    exc, httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException
                 ):
                     return exc
 
@@ -739,7 +739,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 raise
 
             # For HTTP-related errors, wrap them
-            if isinstance(e, (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException)):
+            if isinstance(e, httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException):
                 self._raise_user_error_for_http_error(e)
 
             # For other errors, re-raise as-is (don't wrap non-HTTP errors)
@@ -1432,12 +1432,10 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
     def _should_retry_in_isolated_session(self, exc: BaseException) -> bool:
         if isinstance(
             exc,
-            (
-                asyncio.CancelledError,
-                ClosedResourceError,
-                httpx.ConnectError,
-                httpx.TimeoutException,
-            ),
+            asyncio.CancelledError
+            | ClosedResourceError
+            | httpx.ConnectError
+            | httpx.TimeoutException,
         ):
             return True
         if isinstance(exc, httpx.HTTPStatusError):

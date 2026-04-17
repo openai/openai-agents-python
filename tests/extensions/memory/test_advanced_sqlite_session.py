@@ -4,7 +4,7 @@ import asyncio
 import json
 import tempfile
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 import pytest
 
@@ -48,9 +48,7 @@ def usage_data() -> Usage:
     )
 
 
-def create_mock_run_result(
-    usage: Optional[Usage] = None, agent: Optional[Agent] = None
-) -> RunResult:
+def create_mock_run_result(usage: Usage | None = None, agent: Agent | None = None) -> RunResult:
     """Helper function to create a mock RunResult for testing."""
     if agent is None:
         agent = Agent(name="test", model=FakeModel())

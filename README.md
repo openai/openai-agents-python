@@ -10,6 +10,7 @@ The OpenAI Agents SDK is a lightweight yet powerful framework for building multi
 ### Core concepts:
 
 1. [**Agents**](https://openai.github.io/openai-agents-python/agents): LLMs configured with instructions, tools, guardrails, and handoffs
+1. [**Sandbox Agents**](https://openai.github.io/openai-agents-python/sandbox_agents): Agents preconfigured to work with a container to perform work over long time horizons.
 1. **[Agents as tools](https://openai.github.io/openai-agents-python/tools/#agents-as-tools) / [Handoffs](https://openai.github.io/openai-agents-python/handoffs/)**: Delegating to other agents for specific tasks
 1. [**Tools**](https://openai.github.io/openai-agents-python/tools/): Various Tools let agents take actions (functions, MCP, hosted tools)
 1. [**Guardrails**](https://openai.github.io/openai-agents-python/guardrails/): Configurable safety checks for input and output validation
@@ -45,19 +46,36 @@ uv add openai-agents
 
 For voice support, install with the optional `voice` group: `uv add 'openai-agents[voice]'`. For Redis session support, install with the optional `redis` group: `uv add 'openai-agents[redis]'`.
 
-## Run your first agent
+## Run your first Sandbox Agent
+
+[Sandbox Agents](https://openai.github.io/openai-agents-python/sandbox_agents) are new in version 0.14.0. A sandbox agent is an agent that uses a computer environment to perform real work with a filesystem, in an environment you configure and control. Sandbox agents are useful when the agent needs to inspect files, run commands, apply patches, or carry workspace state across longer tasks.
 
 ```python
-from agents import Agent, Runner
+from agents import Runner
+from agents.run import RunConfig
+from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
+from agents.sandbox.entries import GitRepo
+from agents.sandbox.sandboxes import UnixLocalSandboxClient
 
-agent = Agent(name="Assistant", instructions="You are a helpful assistant")
+agent = SandboxAgent(
+    name="Workspace Assistant",
+    instructions="Inspect the sandbox workspace before answering.",
+    default_manifest=Manifest(
+        entries={
+            "repo": GitRepo(repo="openai/openai-agents-python", ref="main"),
+        }
+    ),
+)
 
-result = Runner.run_sync(agent, "Write a haiku about recursion in programming.")
+result = Runner.run_sync(
+    agent,
+    "Inspect the repo README and summarize what this project does.",
+    # Run this agent on the local filesystem
+    run_config=RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient())),
+)
 print(result.final_output)
 
-# Code within the code,
-# Functions calling themselves,
-# Infinite loop's dance.
+# This project provides a Python SDK for building multi-agent workflows.
 ```
 
 (_If running this, ensure you set the `OPENAI_API_KEY` environment variable_)

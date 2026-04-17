@@ -1,0 +1,34 @@
+{
+  "scenario_id": "messy_ambiguous_knee_case",
+  "description": "Messy real-world call with ambiguous details requiring follow-up, retrieval, and multiple tool invocations.",
+  "transcript": "Hi, this is Jordan Lee. I had a knee surgery consult and maybe some imaging planned, then I got mixed messages about auth.\nI also saw a bill and I am not sure if this is Blue something PPO or what.\nMy phone is 555-0134 and I think the referral might be REF-90171.\nCan you figure out what I need to do next?",
+  "patient_metadata": {
+    "patient_id": "PAT-1006"
+  },
+  "followup_qa": {
+    "insurance payer": "Blue Cross",
+    "member ID": "BCX-9017710",
+    "date of birth": "04/17/1992",
+    "procedure or visit type": "knee surgery consult",
+    "referral ID": "REF-90171"
+  },
+  "expected": {
+    "intent": "prior_auth_confusion",
+    "required_entities": {
+      "payer": "Blue Cross",
+      "member_id": "BCX-9017710"
+    },
+    "required_tool_calls": [
+      "insurance_eligibility_lookup",
+      "appointment_referral_status_lookup"
+    ],
+    "required_resolution_elements": [
+      "prior authorization",
+      "recommended next step"
+    ],
+    "expected_payer": "Blue Cross"
+  },
+  "gold": {
+    "expected_next_step": "Route to auth queue and share referral pending status with patient."
+  }
+}

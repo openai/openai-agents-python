@@ -4,19 +4,29 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
+
 from ..agent import Agent
 from ..agent_tool_state import set_agent_tool_state_scope
 from ..exceptions import UserError
 from ..guardrail import InputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
 from ..memory import Session
+from ..models.openai_agent_registration import add_openai_harness_id_to_metadata
 from ..result import RunResult
 from ..run_config import RunConfig
 from ..run_context import RunContextWrapper, TContext
 from ..run_state import RunState
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
+from ..tracing import Span
 from ..tracing.config import TracingConfig
 from ..tracing.traces import TraceState
+from ..usage import (
+    Usage,
+    task_usage_to_span_data,
+    total_usage_to_span_metadata,
+    turn_usage_to_span_data,
+)
 from .items import copy_input_items
 from .oai_conversation import OpenAIServerConversationTracker
 from .run_steps import (
@@ -32,6 +42,7 @@ from .tool_use_tracker import AgentToolUseTracker, serialize_tool_use_tracker
 __all__ = [
     "apply_resumed_conversation_settings",
     "append_model_response_if_new",
+    "attach_usage_to_span",
     "build_generated_items_details",
     "build_interruption_result",
     "build_resumed_stream_debug_extra",
@@ -53,10 +64,96 @@ _PARALLEL_INPUT_GUARDRAIL_CANCEL_PATCH_ID = (
 )
 
 
+def snapshot_usage(usage: Usage) -> Usage:
+    """Create a usage snapshot for computing invocation-local deltas."""
+    return Usage(
+        requests=usage.requests,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        total_tokens=usage.total_tokens,
+        input_tokens_details=InputTokensDetails(
+            cached_tokens=(
+                usage.input_tokens_details.cached_tokens
+                if usage.input_tokens_details and usage.input_tokens_details.cached_tokens
+                else 0
+            )
+        ),
+        output_tokens_details=OutputTokensDetails(
+            reasoning_tokens=(
+                usage.output_tokens_details.reasoning_tokens
+                if usage.output_tokens_details and usage.output_tokens_details.reasoning_tokens
+                else 0
+            )
+        ),
+    )
+
+
+def usage_delta(start: Usage, end: Usage) -> Usage:
+    """Return the aggregate usage added between two snapshots."""
+    return Usage(
+        requests=end.requests - start.requests,
+        input_tokens=end.input_tokens - start.input_tokens,
+        output_tokens=end.output_tokens - start.output_tokens,
+        total_tokens=end.total_tokens - start.total_tokens,
+        input_tokens_details=InputTokensDetails(
+            cached_tokens=(
+                (end.input_tokens_details.cached_tokens or 0)
+                - (start.input_tokens_details.cached_tokens or 0)
+            )
+        ),
+        output_tokens_details=OutputTokensDetails(
+            reasoning_tokens=(
+                (end.output_tokens_details.reasoning_tokens or 0)
+                - (start.output_tokens_details.reasoning_tokens or 0)
+            )
+        ),
+    )
+
+
+def attach_usage_to_span(
+    span: Span[Any] | None,
+    usage: Usage,
+) -> None:
+    """Attach aggregate token usage to a span export metadata bag."""
+    cached_tokens = (
+        usage.input_tokens_details.cached_tokens
+        if usage.input_tokens_details and usage.input_tokens_details.cached_tokens
+        else 0
+    )
+    reasoning_tokens = (
+        usage.output_tokens_details.reasoning_tokens
+        if usage.output_tokens_details and usage.output_tokens_details.reasoning_tokens
+        else 0
+    )
+    if span is None or (
+        usage.requests == 0
+        and usage.input_tokens == 0
+        and usage.output_tokens == 0
+        and usage.total_tokens == 0
+        and cached_tokens == 0
+        and reasoning_tokens == 0
+    ):
+        return
+
+    if span.span_data.type == "turn":
+        span.span_data.usage = turn_usage_to_span_data(usage)
+        return
+
+    if span.span_data.type == "task":
+        span.span_data.usage = task_usage_to_span_data(usage)
+        return
+
+    metadata = dict(getattr(span.span_data, "metadata", None) or {})
+    metadata["usage"] = total_usage_to_span_metadata(usage)
+    span.span_data.metadata = metadata
+
+
 def should_cancel_parallel_model_task_on_input_guardrail_trip() -> bool:
     """Return whether an in-flight model task should be cancelled on guardrail trip."""
     try:
-        from temporalio import workflow as temporal_workflow  # type: ignore[import-not-found]
+        from temporalio import (
+            workflow as temporal_workflow,  # type: ignore[import-not-found,unused-ignore]
+        )
     except Exception:
         return True
 
@@ -130,6 +227,11 @@ def resolve_trace_settings(
             metadata = dict(trace_state.metadata)
         if tracing is None and trace_state.tracing_api_key:
             tracing = {"api_key": trace_state.tracing_api_key}
+
+    metadata = add_openai_harness_id_to_metadata(
+        metadata,
+        model_provider=run_config.model_provider,
+    )
 
     return workflow_name, trace_id, group_id, metadata, tracing
 
@@ -253,6 +355,11 @@ def build_interruption_result(
     original_input: str | list[TResponseInputItem],
 ) -> RunResult:
     """Create a RunResult for an interruption path."""
+    identity_root_agent = (
+        run_state._starting_agent
+        if run_state is not None and run_state._starting_agent is not None
+        else current_agent
+    )
     result = RunResult(
         input=result_input,
         new_items=session_items,
@@ -266,7 +373,10 @@ def build_interruption_result(
         context_wrapper=context_wrapper,
         interruptions=interruptions,
         _last_processed_response=processed_response,
-        _tool_use_tracker_snapshot=serialize_tool_use_tracker(tool_use_tracker),
+        _tool_use_tracker_snapshot=serialize_tool_use_tracker(
+            tool_use_tracker,
+            starting_agent=identity_root_agent,
+        ),
         max_turns=max_turns,
     )
     result._current_turn = current_turn

@@ -57,7 +57,7 @@ async def run_input_guardrails_with_queue(
     input: str | list[TResponseInputItem],
     context: RunContextWrapper[TContext],
     streamed_result: RunResultStreaming,
-    parent_span: Span[Any],
+    parent_span: Span[Any] | None,
 ) -> None:
     """Run guardrails concurrently and stream results into the queue."""
     queue = streamed_result._input_guardrail_queue
@@ -70,25 +70,31 @@ async def run_input_guardrails_with_queue(
     try:
         for done in asyncio.as_completed(guardrail_tasks):
             result = await done
+            guardrail_results.append(result)
             if result.output.tripwire_triggered:
+                streamed_result.input_guardrail_results = (
+                    streamed_result.input_guardrail_results + guardrail_results
+                )
+                guardrail_results = []
+                streamed_result._triggered_input_guardrail_result = result
+                queue.put_nowait(result)
                 for t in guardrail_tasks:
                     t.cancel()
                 await asyncio.gather(*guardrail_tasks, return_exceptions=True)
-                _error_tracing.attach_error_to_span(
-                    parent_span,
-                    SpanError(
-                        message="Guardrail tripwire triggered",
-                        data={
-                            "guardrail": result.guardrail.get_name(),
-                            "type": "input_guardrail",
-                        },
-                    ),
+                span_error = SpanError(
+                    message="Guardrail tripwire triggered",
+                    data={
+                        "guardrail": result.guardrail.get_name(),
+                        "type": "input_guardrail",
+                    },
                 )
-                queue.put_nowait(result)
-                guardrail_results.append(result)
+                if parent_span is not None:
+                    _error_tracing.attach_error_to_span(parent_span, span_error)
+                else:
+                    # Early first-turn streamed guardrails can run before the agent span exists.
+                    _error_tracing.attach_error_to_current_span(span_error)
                 break
             queue.put_nowait(result)
-            guardrail_results.append(result)
     except Exception:
         for t in guardrail_tasks:
             t.cancel()

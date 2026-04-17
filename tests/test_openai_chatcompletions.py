@@ -30,18 +30,60 @@ from openai.types.responses import (
 )
 
 from agents import (
+    Agent,
     ModelResponse,
     ModelRetryAdviceRequest,
     ModelSettings,
     ModelTracing,
     OpenAIChatCompletionsModel,
     OpenAIProvider,
+    Runner,
     __version__,
     generation_span,
 )
 from agents.models._retry_runtime import provider_managed_retries_disabled
 from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE, ChatCmplHelpers
 from agents.models.fake_id import FAKE_RESPONSES_ID
+
+
+async def _run_chat_completions_model_with_custom_base_url(
+    model_settings: ModelSettings | None = None,
+) -> dict[str, Any]:
+    class DummyCompletions:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] = {}
+
+        async def create(self, **kwargs: Any) -> Any:
+            self.kwargs = kwargs
+            return ChatCompletion(
+                id="resp-id",
+                created=0,
+                model="fake",
+                object="chat.completion",
+                choices=[
+                    Choice(
+                        index=0,
+                        finish_reason="stop",
+                        message=ChatCompletionMessage(role="assistant", content="ok"),
+                    )
+                ],
+            )
+
+    class DummyClient:
+        def __init__(self, completions: DummyCompletions) -> None:
+            self.chat = type("_Chat", (), {"completions": completions})()
+            self.base_url = httpx.URL("https://custom.example.test/v1/")
+
+    completions = DummyCompletions()
+    model = OpenAIChatCompletionsModel(
+        model="gpt-4",
+        openai_client=DummyClient(completions),  # type: ignore[arg-type]
+    )
+    agent = Agent(name="test", model=model, model_settings=model_settings or ModelSettings())
+
+    await Runner.run(agent, "hi")
+
+    return completions.kwargs
 
 
 @pytest.mark.allow_call_model_methods
@@ -382,6 +424,18 @@ async def test_fetch_response_non_stream(monkeypatch) -> None:
     assert kwargs["tool_choice"] is omit
     assert kwargs["response_format"] is omit
     assert kwargs["stream_options"] is omit
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_custom_base_url_prompt_cache_key_uses_model_settings_only() -> None:
+    default_kwargs = await _run_chat_completions_model_with_custom_base_url()
+    explicit_kwargs = await _run_chat_completions_model_with_custom_base_url(
+        model_settings=ModelSettings(extra_args={"prompt_cache_key": "cache-key"})
+    )
+
+    assert "prompt_cache_key" not in default_kwargs
+    assert explicit_kwargs["prompt_cache_key"] == "cache-key"
 
 
 @pytest.mark.allow_call_model_methods

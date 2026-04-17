@@ -1,9 +1,9 @@
 import abc
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, get_args, get_origin
 
 from pydantic import BaseModel, TypeAdapter
-from typing_extensions import TypedDict, get_args, get_origin
+from typing_extensions import TypedDict
 
 from .exceptions import ModelBehaviorError, UserError
 from .strict_schema import ensure_strict_json_schema

@@ -6,7 +6,7 @@ import logging
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Union, cast
+from typing import Any, cast
 
 from agents.result import RunResult
 from agents.usage import Usage
@@ -430,7 +430,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         structure_data = []
         user_message_count = 0
 
-        for i, (item, msg_id) in enumerate(zip(items, message_ids)):
+        for i, (item, msg_id) in enumerate(zip(items, message_ids, strict=False)):
             msg_type = self._classify_message_type(item)
             tool_name = self._extract_tool_name(item)
 
@@ -1193,7 +1193,7 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         result = await asyncio.to_thread(_get_usage_sync)
 
-        return cast(Union[dict[str, int], None], result)
+        return cast(dict[str, int] | None, result)
 
     async def get_turn_usage(
         self,
@@ -1298,7 +1298,7 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         result = await asyncio.to_thread(_get_turn_usage_sync)
 
-        return cast(Union[list[dict[str, Any]], dict[str, Any]], result)
+        return cast(list[dict[str, Any]] | dict[str, Any], result)
 
     async def _update_turn_usage_internal(self, user_turn_number: int, usage_data: Usage) -> None:
         """Internal method to update usage for a specific turn with full JSON details.

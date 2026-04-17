@@ -39,6 +39,7 @@ class BackendSpanExporter(TracingExporter):
             "output_tokens",
         }
     )
+    _OPENAI_TRACING_USAGE_SPAN_TYPES = frozenset({"generation"})
     _UNSERIALIZABLE = object()
 
     def __init__(
@@ -203,7 +204,12 @@ class BackendSpanExporter(TracingExporter):
                 did_mutate = True
             sanitized_span_data[field_name] = sanitized_field
 
-        if span_data.get("type") != "generation":
+        if span_data.get("type") not in self._OPENAI_TRACING_USAGE_SPAN_TYPES:
+            if "usage" in span_data:
+                if not did_mutate:
+                    sanitized_span_data = dict(span_data)
+                    did_mutate = True
+                sanitized_span_data.pop("usage", None)
             if not did_mutate:
                 return payload_item
             sanitized_payload_item = dict(payload_item)
@@ -296,7 +302,11 @@ class BackendSpanExporter(TracingExporter):
         if isinstance(value, list):
             return self._truncate_list_for_json_limit(value, max_bytes)
 
-        return self._truncated_preview(value)
+        preview = self._truncated_preview(value)
+        if self._value_json_size_bytes(preview) <= max_bytes:
+            return preview
+
+        return value
 
     def _truncate_mapping_for_json_limit(
         self, value: dict[str, Any], max_bytes: int
@@ -350,9 +360,9 @@ class BackendSpanExporter(TracingExporter):
         preview = f"<{type_name} truncated>"
         if isinstance(value, dict):
             preview = f"<{type_name} len={len(value)} truncated>"
-        elif isinstance(value, (list, tuple, set, frozenset)):
+        elif isinstance(value, list | tuple | set | frozenset):
             preview = f"<{type_name} len={len(value)} truncated>"
-        elif isinstance(value, (bytes, bytearray, memoryview)):
+        elif isinstance(value, bytes | bytearray | memoryview):
             preview = f"<{type_name} bytes={len(value)} truncated>"
 
         return {

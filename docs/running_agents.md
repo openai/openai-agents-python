@@ -143,7 +143,7 @@ Use `RunConfig` to override behavior for a single run without changing each agen
 ##### Tracing and observability
 
 -   [`tracing_disabled`][agents.run.RunConfig.tracing_disabled]: Allows you to disable [tracing](tracing.md) for the entire run.
--   [`tracing`][agents.run.RunConfig.tracing]: Pass a [`TracingConfig`][agents.tracing.TracingConfig] to override exporters, processors, or tracing metadata for this run.
+-   [`tracing`][agents.run.RunConfig.tracing]: Pass a [`TracingConfig`][agents.tracing.TracingConfig] to override trace export settings such as the per-run tracing API key.
 -   [`trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data]: Configures whether traces will include potentially sensitive data, such as LLM and tool call inputs/outputs.
 -   [`workflow_name`][agents.run.RunConfig.workflow_name], [`trace_id`][agents.run.RunConfig.trace_id], [`group_id`][agents.run.RunConfig.group_id]: Sets the tracing workflow name, trace ID and trace group ID for the run. We recommend at least setting `workflow_name`. The group ID is an optional field that lets you link traces across multiple runs.
 -   [`trace_metadata`][agents.run.RunConfig.trace_metadata]: Metadata to include on all traces.
@@ -163,7 +163,7 @@ Use `tool_error_formatter` to customize the message that is returned to the mode
 The formatter receives [`ToolErrorFormatterArgs`][agents.run_config.ToolErrorFormatterArgs] with:
 
 -   `kind`: The error category. Today this is `"approval_rejected"`.
--   `tool_type`: The tool runtime (`"function"`, `"computer"`, `"shell"`, or `"apply_patch"`).
+-   `tool_type`: The tool runtime (`"function"`, `"computer"`, `"shell"`, `"apply_patch"`, or `"custom"`).
 -   `tool_name`: The tool name.
 -   `call_id`: The tool call ID.
 -   `default_message`: The SDK's default model-visible message.

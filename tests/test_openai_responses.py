@@ -12,13 +12,16 @@ from openai.types.responses import ResponseCompletedEvent
 from openai.types.shared.reasoning import Reasoning
 
 from agents import (
+    Agent,
     AsyncComputer,
     Computer,
     ComputerTool,
     ModelSettings,
     ModelTracing,
+    Runner,
     ToolSearchTool,
     __version__,
+    trace,
 )
 from agents.exceptions import UserError
 from agents.models._retry_runtime import (
@@ -35,7 +38,37 @@ from agents.models.openai_responses import (
     _should_retry_pre_event_websocket_disconnect,
 )
 from agents.retry import ModelRetryAdviceRequest
+from agents.usage import Usage
 from tests.fake_model import get_response_obj
+from tests.testing_processor import fetch_ordered_spans
+
+
+async def _run_responses_model_with_custom_base_url(
+    model_settings: ModelSettings | None = None,
+) -> dict[str, Any]:
+    class DummyResponses:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] = {}
+
+        async def create(self, **kwargs: Any) -> Any:
+            self.kwargs = kwargs
+            return get_response_obj([])
+
+    class DummyResponsesClient:
+        def __init__(self, responses: DummyResponses) -> None:
+            self.responses = responses
+            self.base_url = httpx.URL("https://custom.example.test/v1/")
+
+    responses = DummyResponses()
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=DummyResponsesClient(responses),  # type: ignore[arg-type]
+    )
+    agent = Agent(name="test", model=model, model_settings=model_settings or ModelSettings())
+
+    await Runner.run(agent, "hi")
+
+    return responses.kwargs
 
 
 class DummyWSConnection:
@@ -191,6 +224,53 @@ async def test_get_response_exposes_request_id():
 
     assert response.response_id == "resp-request-id"
     assert response.request_id == "req_nonstream_123"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_span_exports_usage():
+    class DummyResponses:
+        async def create(self, **kwargs):
+            return get_response_obj(
+                [],
+                response_id="resp-usage",
+                usage=Usage(requests=1, input_tokens=10, output_tokens=4, total_tokens=14),
+            )
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
+
+    with trace("test"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.ENABLED,
+        )
+
+    response_spans = [
+        span.export() for span in fetch_ordered_spans() if span.span_data.type == "response"
+    ]
+    assert len(response_spans) == 1
+    assert response_spans[0]
+    assert response_spans[0]["span_data"] == {
+        "type": "response",
+        "response_id": "resp-usage",
+        "usage": {
+            "requests": 1,
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "total_tokens": 14,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        },
+    }
 
 
 def test_get_client_disables_provider_managed_retries_on_runner_retry() -> None:
@@ -740,6 +820,39 @@ def test_build_response_create_kwargs_rejects_duplicate_extra_args_keys():
             stream=True,
             prompt=None,
         )
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_includes_extra_args_prompt_cache_key():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(extra_args={"prompt_cache_key": "cache-key"}),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert kwargs["prompt_cache_key"] == "cache-key"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_custom_base_url_prompt_cache_key_uses_model_settings_only() -> None:
+    default_kwargs = await _run_responses_model_with_custom_base_url()
+    explicit_kwargs = await _run_responses_model_with_custom_base_url(
+        model_settings=ModelSettings(extra_args={"prompt_cache_key": "cache-key"})
+    )
+
+    assert "prompt_cache_key" not in default_kwargs
+    assert explicit_kwargs["prompt_cache_key"] == "cache-key"
 
 
 @pytest.mark.allow_call_model_methods

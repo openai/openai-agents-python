@@ -18,6 +18,7 @@
           "feature:extensions",
           "feature:mcp",
           "feature:realtime",
+          "feature:sandboxes",
           "feature:sessions",
           "feature:tracing",
           "feature:voice"

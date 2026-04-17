@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 from .openai_conversations_session import OpenAIConversationsSession
 from .openai_responses_compaction_session import OpenAIResponsesCompactionSession
 from .session import (
@@ -8,8 +12,10 @@ from .session import (
     is_openai_responses_compaction_aware_session,
 )
 from .session_settings import SessionSettings
-from .sqlite_session import SQLiteSession
 from .util import SessionInputCallback
+
+if TYPE_CHECKING:
+    from .sqlite_session import SQLiteSession
 
 __all__ = [
     "Session",
@@ -23,3 +29,13 @@ __all__ = [
     "OpenAIResponsesCompactionAwareSession",
     "is_openai_responses_compaction_aware_session",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "SQLiteSession":
+        from .sqlite_session import SQLiteSession
+
+        globals()[name] = SQLiteSession
+        return SQLiteSession
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

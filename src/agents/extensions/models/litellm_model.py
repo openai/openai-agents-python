@@ -506,8 +506,14 @@ class LitellmModel(Model):
             extra_kwargs["extra_query"] = copy(model_settings.extra_query)
         if model_settings.metadata:
             extra_kwargs["metadata"] = copy(model_settings.metadata)
-        if model_settings.extra_body and isinstance(model_settings.extra_body, dict):
-            extra_kwargs.update(model_settings.extra_body)
+        if model_settings.extra_body is not None:
+            extra_body = copy(model_settings.extra_body)
+            if isinstance(extra_body, dict) and reasoning_effort is not None:
+                extra_body.pop("reasoning_effort", None)
+                if not extra_body:
+                    extra_body = None
+            if extra_body is not None:
+                extra_kwargs["extra_body"] = extra_body
 
         # Add kwargs from model_settings.extra_args, filtering out None values
         if model_settings.extra_args:

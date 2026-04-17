@@ -29,12 +29,12 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any, cast
+from typing import Any, Literal, TypeGuard, cast
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from typing_extensions import Literal, TypedDict, TypeGuard
+from typing_extensions import TypedDict
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC

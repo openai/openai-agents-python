@@ -19,6 +19,7 @@ from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
 from ..tool import (
     ApplyPatchTool,
     ComputerTool,
+    CustomTool,
     FunctionTool,
     HostedMCPTool,
     LocalShellTool,
@@ -33,6 +34,7 @@ __all__ = [
     "ToolRunHandoff",
     "ToolRunFunction",
     "ToolRunComputerAction",
+    "ToolRunCustom",
     "ToolRunMCPApprovalRequest",
     "ToolRunLocalShellCall",
     "ToolRunShellCall",
@@ -74,6 +76,12 @@ class ToolRunComputerAction:
 
 
 @dataclass
+class ToolRunCustom:
+    tool_call: Any
+    custom_tool: CustomTool
+
+
+@dataclass
 class ToolRunMCPApprovalRequest:
     request_item: McpApprovalRequest
     mcp_tool: HostedMCPTool
@@ -109,6 +117,7 @@ class ProcessedResponse:
     tools_used: list[str]  # Names of all tools used, including hosted tools
     mcp_approval_requests: list[ToolRunMCPApprovalRequest]  # Only requests with callbacks
     interruptions: list[ToolApprovalItem]  # Tool approval items awaiting user decision
+    custom_tool_calls: list[ToolRunCustom] = dataclasses.field(default_factory=list)
 
     def has_tools_or_approvals_to_run(self) -> bool:
         # Handoffs, functions and computer actions need local processing
@@ -118,6 +127,7 @@ class ProcessedResponse:
                 self.handoffs,
                 self.functions,
                 self.computer_actions,
+                self.custom_tool_calls,
                 self.local_shell_calls,
                 self.shell_calls,
                 self.apply_patch_calls,

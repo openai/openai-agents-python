@@ -13,10 +13,10 @@ from agents.models.interface import ModelTracing
 @pytest.mark.asyncio
 async def test_extra_body_is_forwarded(monkeypatch):
     """
-    Forward `extra_body` entries into litellm.acompletion kwargs.
+    Forward `extra_body` via LiteLLM's dedicated kwarg.
 
-    This ensures that user-provided parameters (e.g. cached_content)
-    arrive alongside default arguments.
+    This ensures that provider-specific request fields stay nested under `extra_body`
+    so LiteLLM can merge them into the upstream request body itself.
     """
     captured: dict[str, object] = {}
 
@@ -43,7 +43,9 @@ async def test_extra_body_is_forwarded(monkeypatch):
         previous_response_id=None,
     )
 
-    assert {"cached_content": "some_cache", "foo": 123}.items() <= captured.items()
+    assert captured["extra_body"] == {"cached_content": "some_cache", "foo": 123}
+    assert "cached_content" not in captured
+    assert "foo" not in captured
 
 
 @pytest.mark.allow_call_model_methods
@@ -79,7 +81,7 @@ async def test_extra_body_reasoning_effort_is_promoted(monkeypatch):
     )
 
     assert captured["reasoning_effort"] == "none"
-    assert captured["cached_content"] == "some_cache"
+    assert captured["extra_body"] == {"cached_content": "some_cache"}
     assert settings.extra_body == {"reasoning_effort": "none", "cached_content": "some_cache"}
 
 
@@ -119,6 +121,7 @@ async def test_reasoning_effort_prefers_model_settings(monkeypatch):
 
     # reasoning_effort is string when no summary is provided (backward compatible)
     assert captured["reasoning_effort"] == "low"
+    assert "extra_body" not in captured
     assert settings.extra_body == {"reasoning_effort": "high"}
 
 
@@ -157,7 +160,53 @@ async def test_extra_body_reasoning_effort_overrides_extra_args(monkeypatch):
 
     assert captured["reasoning_effort"] == "none"
     assert captured["custom_param"] == "custom"
+    assert "extra_body" not in captured
     assert settings.extra_args == {"reasoning_effort": "low", "custom_param": "custom"}
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_extra_body_metadata_stays_nested(monkeypatch):
+    """
+    Keep extra_body metadata nested even when top-level metadata is also set.
+
+    LiteLLM resolves top-level metadata and extra_body separately. Flattening the nested
+    metadata dict loses the caller's intended request shape for OpenAI-compatible proxies.
+    """
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(model, messages=None, **kwargs):
+        captured.update(kwargs)
+        msg = Message(role="assistant", content="ok")
+        choice = Choices(index=0, message=msg)
+        return ModelResponse(choices=[choice], usage=Usage(0, 0, 0))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    settings = ModelSettings(
+        metadata={"sdk": "agents"},
+        extra_body={
+            "metadata": {"trace_user_id": "user-123", "generation_id": "gen-456"},
+            "cached_content": "some_cache",
+        },
+    )
+    model = LitellmModel(model="test-model")
+
+    await model.get_response(
+        system_instructions=None,
+        input=[],
+        model_settings=settings,
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+    )
+
+    assert captured["metadata"] == {"sdk": "agents"}
+    assert captured["extra_body"] == {
+        "metadata": {"trace_user_id": "user-123", "generation_id": "gen-456"},
+        "cached_content": "some_cache",
+    }
 
 
 @pytest.mark.allow_call_model_methods

@@ -2,7 +2,9 @@
 
 Agents are the core building block in your apps. An agent is a large language model (LLM) configured with instructions, tools, and optional runtime behavior such as handoffs, guardrails, and structured outputs.
 
-Use this page when you want to define or customize a single agent. If you are deciding how multiple agents should collaborate, read [Agent orchestration](multi_agent.md).
+Use this page when you want to define or customize a single plain `Agent`. If you are deciding how multiple agents should collaborate, read [Agent orchestration](multi_agent.md). If the agent should run inside an isolated workspace with manifest-defined files and sandbox-native capabilities, read [Sandbox agent concepts](sandbox/guide.md).
+
+The SDK uses the Responses API by default for OpenAI models, but the distinction here is orchestration: `Agent` plus `Runner` lets the SDK manage turns, tools, guardrails, handoffs, and sessions for you. If you want to own that loop yourself, use the Responses API directly instead.
 
 ## Choose the next guide
 
@@ -12,6 +14,7 @@ Use this page as the hub for agent definition. Jump to the adjacent guide that m
 | --- | --- |
 | Choose a model or provider setup | [Models](models/index.md) |
 | Add capabilities to the agent | [Tools](tools.md) |
+| Run an agent against a real repo, document bundle, or isolated workspace | [Sandbox agents quickstart](sandbox_agents.md) |
 | Decide between manager-style orchestration and handoffs | [Agent orchestration](multi_agent.md) |
 | Configure handoff behavior | [Handoffs](handoffs.md) |
 | Run turns, stream events, or manage conversation state | [Running agents](running_agents.md) |
@@ -56,6 +59,8 @@ agent = Agent(
     tools=[get_weather],
 )
 ```
+
+Everything in this section applies to `Agent`. `SandboxAgent` builds on the same ideas, then adds `default_manifest`, `base_instructions`, `capabilities`, and `run_as` for workspace-scoped runs. See [Sandbox agent concepts](sandbox/guide.md).
 
 ## Prompt templates
 
@@ -257,6 +262,7 @@ Typical hook timing:
 -   `on_agent_start` / `on_agent_end`: when a specific agent begins or finishes producing a final output.
 -   `on_llm_start` / `on_llm_end`: immediately around each model call.
 -   `on_tool_start` / `on_tool_end`: around each local tool invocation.
+    For function tools, the hook `context` is typically a `ToolContext`, so you can inspect tool-call metadata such as `tool_call_id`.
 -   `on_handoff`: when control moves from one agent to another.
 
 Use `RunHooks` when you want a single observer for the whole workflow, and `AgentHooks` when one agent needs custom side effects.

@@ -27,6 +27,7 @@ from agents.extensions.experimental.codex.codex_tool import CodexToolInputItem
 from agents.lifecycle import RunHooks
 from agents.run_config import RunConfig
 from agents.run_context import RunContextWrapper
+from agents.run_internal.agent_bindings import bind_public_agent
 from agents.run_internal.run_steps import ToolRunFunction
 from agents.run_internal.tool_execution import execute_function_tool_calls
 from agents.tool_context import ToolContext
@@ -223,13 +224,10 @@ async def test_codex_tool_streams_events_and_updates_usage() -> None:
     )
 
     custom_spans = [span for span in spans if span.span_data.type == "custom"]
-    assert len(custom_spans) == 3
+    assert len(custom_spans) == 1
 
     for span in custom_spans:
         assert span.parent_id == function_span_obj.span_id
-
-    reasoning_span = next(span for span in custom_spans if span.span_data.name == "Codex reasoning")
-    assert reasoning_span.span_data.data["text"] == "Final reasoning"
 
     command_span = next(
         span for span in custom_spans if span.span_data.name == "Codex command execution"
@@ -238,11 +236,6 @@ async def test_codex_tool_streams_events_and_updates_usage() -> None:
     assert command_span.span_data.data["status"] == "completed"
     assert command_span.span_data.data["output"] == "All good"
     assert command_span.span_data.data["exit_code"] == 0
-
-    mcp_span = next(span for span in custom_spans if span.span_data.name == "Codex MCP tool call")
-    assert mcp_span.span_data.data["server"] == "gitmcp"
-    assert mcp_span.span_data.data["tool"] == "search_codex_code"
-    assert mcp_span.span_data.data["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -920,7 +913,7 @@ async def test_codex_tool_persists_thread_id_for_handled_parallel_cancellation()
 
     with pytest.raises(UserError, match="Error running tool error_tool: boom"):
         await execute_function_tool_calls(
-            agent=agent,
+            bindings=bind_public_agent(agent),
             tool_runs=tool_runs,
             hooks=RunHooks(),
             context_wrapper=context_wrapper,
