@@ -83,17 +83,16 @@ class MongoDBSession(SessionABC):
     # (client, database, sessions_collection, messages_collection) combination.
     #
     # Design notes:
-    # - WeakKeyDictionary keyed on the client object: entries are pruned
-    #   automatically when the client is GC'd, so id() reuse can never cause
-    #   a new client to skip index creation.
+    # - Keyed on id(client) so two distinct AsyncMongoClient objects that happen
+    #   to compare equal (same host/port) never share a cache entry.  A
+    #   weakref.finalize callback removes the entry when the client is GC'd,
+    #   preventing stale id() values from being reused by a future client.
     # - Only a threading.Lock (never an asyncio.Lock) touches the registry.
     #   asyncio.Lock is bound to the event loop that first acquires it; reusing
     #   one across loops raises RuntimeError.  create_index is idempotent, so
     #   we only need the threading lock to guard the boolean done flag — no
     #   async coordination is required.
-    _init_state: weakref.WeakKeyDictionary[Any, dict[tuple[str, str, str], bool]] = (
-        weakref.WeakKeyDictionary()
-    )
+    _init_state: dict[int, dict[tuple[str, str, str], bool]] = {}
     _init_guard: threading.Lock = threading.Lock()
 
     session_settings: SessionSettings | None = None
@@ -134,9 +133,12 @@ class MongoDBSession(SessionABC):
         self._sessions: AsyncCollection[Any] = db[sessions_collection]
         self._messages: AsyncCollection[Any] = db[messages_collection]
 
-        # Key within the per-client mapping — no id() needed because the client
-        # object itself is the outer WeakKeyDictionary key.
+        self._client_id = id(client)
         self._init_sub_key = (database, sessions_collection, messages_collection)
+
+        # Remove the cache entry when the client is GC'd so a future client
+        # that happens to reuse the same id() starts fresh.
+        weakref.finalize(client, self._init_state.pop, self._client_id, None)
 
     # ------------------------------------------------------------------
     # Convenience constructors
@@ -191,16 +193,16 @@ class MongoDBSession(SessionABC):
     def _is_init_done(self) -> bool:
         """Return True if indexes have already been created for this (client, sub_key)."""
         with self._init_guard:
-            per_client = self._init_state.get(self._client)
+            per_client = self._init_state.get(self._client_id)
             return per_client is not None and per_client.get(self._init_sub_key, False)
 
     def _mark_init_done(self) -> None:
         """Record that index creation is complete for this (client, sub_key)."""
         with self._init_guard:
-            per_client = self._init_state.get(self._client)
+            per_client = self._init_state.get(self._client_id)
             if per_client is None:
                 per_client = {}
-                self._init_state[self._client] = per_client
+                self._init_state[self._client_id] = per_client
             per_client[self._init_sub_key] = True
 
     async def _ensure_indexes(self) -> None:
