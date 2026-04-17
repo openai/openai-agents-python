@@ -563,8 +563,8 @@ class VercelSandboxSession(BaseSandboxSession):
         if user is not None:
             self._reject_user_arg(op="read", user=user)
 
+        normalized_path = await self._validate_path_access(path)
         sandbox = await self._ensure_sandbox()
-        normalized_path = self.normalize_path(path)
         try:
             payload = await sandbox.read_file(str(normalized_path))
         except Exception as exc:

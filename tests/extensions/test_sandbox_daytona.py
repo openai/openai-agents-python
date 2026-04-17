@@ -199,6 +199,7 @@ class _FakeProcess:
 class _FakeFs:
     def __init__(self) -> None:
         self.create_folder_calls: list[tuple[str, str]] = []
+        self.download_file_calls: list[tuple[str, float | None]] = []
         self.upload_file_calls: list[tuple[bytes, str, float | None]] = []
         self.download_value: bytes = b""
 
@@ -206,7 +207,7 @@ class _FakeFs:
         self.create_folder_calls.append((path, mode))
 
     async def download_file(self, path: str, timeout: float | None = None) -> bytes:
-        _ = (path, timeout)
+        self.download_file_calls.append((path, timeout))
         return self.download_value
 
     async def upload_file(self, data: bytes, path: str, *, timeout: float | None = None) -> None:
@@ -869,6 +870,32 @@ class TestDaytonaSandbox:
                 await session.read("../outside.txt")
             with pytest.raises(daytona_module.InvalidManifestPathError):
                 await session.write("/etc/passwd", io.BytesIO(b"nope"))
+
+    @pytest.mark.asyncio
+    async def test_read_rejects_workspace_symlink_to_ungranted_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        daytona_module = _load_daytona_module(monkeypatch)
+
+        async with daytona_module.DaytonaSandboxClient() as client:
+            session = await client.create(options=daytona_module.DaytonaSandboxClientOptions())
+            sandbox = _FakeAsyncDaytona.current_sandbox
+            assert sandbox is not None
+            sandbox.process.symlinks[f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/link"] = (
+                "/private"
+            )
+
+            with pytest.raises(daytona_module.InvalidManifestPathError) as exc_info:
+                await session.read("link/secret.txt")
+
+        assert sandbox.fs.download_file_calls == []
+        assert str(exc_info.value) == "manifest path must not escape root: link/secret.txt"
+        assert exc_info.value.context == {
+            "rel": "link/secret.txt",
+            "reason": "escape_root",
+            "resolved_path": "workspace escape: /private/secret.txt",
+        }
 
     @pytest.mark.asyncio
     async def test_write_rejects_workspace_symlink_to_read_only_extra_path_grant(

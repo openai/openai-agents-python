@@ -105,6 +105,7 @@ class _FakeFs:
         self.write_error: Exception | None = None
         self.mkdir_error: Exception | None = None
         self.return_str: bool = False
+        self.read_binary_calls: list[str] = []
         self.write_binary_calls: list[tuple[str, bytes]] = []
 
     async def mkdir(self, path: str, permissions: str = "0755") -> None:
@@ -114,6 +115,7 @@ class _FakeFs:
         self.dirs.append(path)
 
     async def read_binary(self, path: str) -> bytes | str:
+        self.read_binary_calls.append(path)
         if self.read_error is not None:
             raise self.read_error
         if path not in self.files:
@@ -358,6 +360,25 @@ class TestBlaxelSandboxSession:
         session = _make_session(fake_sandbox)
         with pytest.raises(WorkspaceReadNotFoundError):
             await session.read("nonexistent.txt")
+
+    @pytest.mark.asyncio
+    async def test_read_rejects_workspace_symlink_to_ungranted_path(
+        self,
+        fake_sandbox: _FakeSandboxInstance,
+    ) -> None:
+        session = _make_session(fake_sandbox)
+        fake_sandbox.process.symlinks["/workspace/link"] = "/private"
+
+        with pytest.raises(InvalidManifestPathError) as exc_info:
+            await session.read("link/secret.txt")
+
+        assert fake_sandbox.fs.read_binary_calls == []
+        assert str(exc_info.value) == "manifest path must not escape root: link/secret.txt"
+        assert exc_info.value.context == {
+            "rel": "link/secret.txt",
+            "reason": "escape_root",
+            "resolved_path": "workspace escape: /private/secret.txt",
+        }
 
     @pytest.mark.asyncio
     async def test_write(self, fake_sandbox: _FakeSandboxInstance) -> None:

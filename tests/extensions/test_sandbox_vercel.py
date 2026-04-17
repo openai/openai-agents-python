@@ -129,6 +129,7 @@ class _FakeAsyncSandbox:
         self.next_command_result = _FakeCommandFinished()
         self.run_command_calls: list[tuple[str, list[str], str | None]] = []
         self.refresh_calls = 0
+        self.read_file_calls: list[tuple[str, str | None]] = []
         self.stop_calls = 0
         self.wait_for_status_calls: list[tuple[object, float | None]] = []
         self.wait_for_status_error: BaseException | None = None
@@ -266,6 +267,7 @@ class _FakeAsyncSandbox:
         return self.next_command_result
 
     async def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
+        self.read_file_calls.append((path, cwd))
         resolved = path if path.startswith("/") or cwd is None else f"{cwd.rstrip('/')}/{path}"
         return self.files.get(resolved)
 
@@ -680,6 +682,34 @@ async def test_vercel_read_and_write_reject_paths_outside_workspace_root(
         await session.read("../outside.txt")
     with pytest.raises(InvalidManifestPathError):
         await session.write("/etc/passwd", io.BytesIO(b"nope"))
+
+
+@pytest.mark.asyncio
+async def test_vercel_read_rejects_workspace_symlink_to_ungranted_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+
+    state = vercel_module.VercelSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000016",
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sandbox-read-escape-link",
+    )
+    sandbox = _FakeAsyncSandbox(sandbox_id="sandbox-read-escape-link")
+    sandbox.symlinks["/workspace/link"] = "/private"
+    session = vercel_module.VercelSandboxSession.from_state(state, sandbox=sandbox)
+
+    with pytest.raises(InvalidManifestPathError) as exc_info:
+        await session.read("link/secret.txt")
+
+    assert sandbox.read_file_calls == []
+    assert str(exc_info.value) == "manifest path must not escape root: link/secret.txt"
+    assert exc_info.value.context == {
+        "rel": "link/secret.txt",
+        "reason": "escape_root",
+        "resolved_path": "workspace escape: /private/secret.txt",
+    }
 
 
 @pytest.mark.asyncio

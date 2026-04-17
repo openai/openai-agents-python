@@ -784,9 +784,10 @@ class DaytonaSandboxSession(BaseSandboxSession):
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         path = Path(path)
         if user is not None:
-            await self._check_read_with_exec(path, user=user)
+            workspace_path = await self._check_read_with_exec(path, user=user)
+        else:
+            workspace_path = await self._validate_path_access(path)
 
-        workspace_path = self.normalize_path(path)
         daytona_exc = _import_daytona_exceptions()
         not_found_exc = daytona_exc.get("not_found")
 
