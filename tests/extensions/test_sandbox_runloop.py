@@ -237,6 +237,9 @@ class _FakeExecution:
             self._apply_tar_extract()
             self._exit_code = 0
             self._done.set()
+        elif self._is_resolve_workspace_path_command(command):
+            self._resolve_workspace_path(command)
+            self._done.set()
         elif " cat -- " in command or command.startswith("cat -- "):
             self._stdout = self._read_file_text(command)
             self._emit(stdout_cb, self._stdout)
@@ -274,6 +277,86 @@ class _FakeExecution:
             return normalized.as_posix().lstrip("/")
         rel_str = relative.as_posix()
         return rel_str if rel_str else "."
+
+    def _is_resolve_workspace_path_command(self, command: str) -> bool:
+        tokens = shlex.split(command)
+        return any(
+            token.startswith("/tmp/openai-agents/bin/resolve-workspace-path-")
+            and len(tokens) >= index + 4
+            for index, token in enumerate(tokens)
+        )
+
+    def _resolve_fake_path(self, raw_path: str, *, depth: int = 0) -> PurePosixPath:
+        if depth > 64:
+            raise RuntimeError(f"symlink resolution depth exceeded: {raw_path}")
+
+        path = PurePosixPath(raw_path)
+        if not path.is_absolute():
+            path = PurePosixPath(self._home_dir) / path
+
+        parts = path.parts
+        current = PurePosixPath("/")
+        for index, part in enumerate(parts[1:], start=1):
+            current = current / part
+            target = self._devbox.symlinks.get(current.as_posix())
+            if target is None:
+                continue
+
+            target_path = PurePosixPath(target)
+            if not target_path.is_absolute():
+                target_path = current.parent / target_path
+            for remaining in parts[index + 1 :]:
+                target_path /= remaining
+            return self._resolve_fake_path(target_path.as_posix(), depth=depth + 1)
+
+        return path
+
+    @staticmethod
+    def _fake_path_is_under(path: PurePosixPath, root: PurePosixPath) -> bool:
+        return path == root or root in path.parents
+
+    def _resolve_workspace_path(self, command: str) -> None:
+        tokens = self._command_tokens()
+        helper_index = next(
+            index
+            for index, token in enumerate(tokens)
+            if token.startswith("/tmp/openai-agents/bin/resolve-workspace-path-")
+        )
+        root = self._resolve_fake_path(tokens[helper_index + 1])
+        candidate = self._resolve_fake_path(tokens[helper_index + 2])
+        for_write = tokens[helper_index + 3]
+        grant_tokens = tokens[helper_index + 4 :]
+
+        if self._fake_path_is_under(candidate, root):
+            self._stdout = f"{candidate.as_posix()}\n"
+            self._exit_code = 0
+            return
+
+        best_grant: tuple[PurePosixPath, str, str] | None = None
+        for index in range(0, len(grant_tokens), 2):
+            grant_original = grant_tokens[index]
+            read_only = grant_tokens[index + 1]
+            grant_root = self._resolve_fake_path(grant_original)
+            if not self._fake_path_is_under(candidate, grant_root):
+                continue
+            if best_grant is None or len(grant_root.parts) > len(best_grant[0].parts):
+                best_grant = (grant_root, grant_original, read_only)
+
+        if best_grant is not None:
+            _grant_root, grant_original, read_only = best_grant
+            if for_write == "1" and read_only == "1":
+                self._stderr = (
+                    f"read-only extra path grant: {grant_original}\n"
+                    f"resolved path: {candidate.as_posix()}\n"
+                )
+                self._exit_code = 114
+                return
+            self._stdout = f"{candidate.as_posix()}\n"
+            self._exit_code = 0
+            return
+
+        self._stderr = f"workspace escape: {candidate.as_posix()}\n"
+        self._exit_code = 111
 
     def _apply_tar_extract(self) -> None:
         tokens = self._command_tokens()
@@ -469,6 +552,7 @@ class _FakeDevbox:
         else:
             self.home_dir = "/home/user"
         self.files: dict[str, bytes] = {}
+        self.symlinks: dict[str, str] = {}
         self.file_download_paths: list[str] = []
         self.file_upload_paths: list[str] = []
         self.tunnel_key: str | None = None
@@ -2334,8 +2418,42 @@ class TestRunloopSandbox:
         assert devbox.files["/tmp/output.txt"] == b"hello"
         assert devbox.file_upload_paths == ["/tmp/output.txt"]
         assert devbox.file_download_paths == ["/tmp/output.txt"]
-        assert len(devbox.exec_calls) == exec_count + 1
-        assert "mkdir -p -- /tmp" in devbox.exec_calls[-1][0]
+        assert len(devbox.exec_calls) == exec_count + 7
+        assert devbox.exec_calls[exec_count + 4][0] == "mkdir -p -- /tmp"
+
+    @pytest.mark.asyncio
+    async def test_write_rejects_workspace_symlink_to_read_only_extra_path_grant(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runloop_module = _load_runloop_module(monkeypatch)
+
+        async with runloop_module.RunloopSandboxClient() as client:
+            session = await client.create(
+                manifest=Manifest(
+                    root="/home/user/project",
+                    extra_path_grants=(SandboxPathGrant(path="/tmp/protected", read_only=True),),
+                ),
+                options=runloop_module.RunloopSandboxClientOptions(),
+            )
+            await session.start()
+            sdk = _FakeAsyncRunloopSDK.created_instances[-1]
+            devbox = sdk.devbox.devboxes[session.state.devbox_id]
+            devbox.symlinks["/home/user/project/link"] = "/tmp/protected"
+
+            with pytest.raises(runloop_module.WorkspaceArchiveWriteError) as exc_info:
+                await session.write("link/result.txt", io.BytesIO(b"blocked"))
+
+        assert devbox.file_upload_paths == []
+        assert str(exc_info.value) == (
+            "failed to write archive for path: /home/user/project/link/result.txt"
+        )
+        assert exc_info.value.context == {
+            "path": "/home/user/project/link/result.txt",
+            "reason": "read_only_extra_path_grant",
+            "grant_path": "/tmp/protected",
+            "resolved_path": "/tmp/protected/result.txt",
+        }
 
     @pytest.mark.asyncio
     async def test_read_wraps_runloop_http_error_with_provider_context(
