@@ -706,12 +706,17 @@ class BaseSandboxSession(abc.ABC):
         path_policy = self._workspace_path_policy()
         workspace_path = path_policy.normalize_path(original_path, for_write=for_write)
         helper_path = await self._ensure_runtime_helper_installed(RESOLVE_WORKSPACE_PATH_HELPER)
-        extra_roots = path_policy.extra_path_grant_roots(writable_only=for_write)
+        extra_grant_args = tuple(
+            arg
+            for root, read_only in path_policy.extra_path_grant_rules()
+            for arg in (str(root), "1" if read_only else "0")
+        )
         command = (
             str(helper_path),
             str(root),
             str(workspace_path),
-            *(str(extra_root) for extra_root in extra_roots),
+            "1" if for_write else "0",
+            *extra_grant_args,
         )
         result = await self.exec(*command, shell=False)
         if result.ok():
@@ -721,7 +726,13 @@ class BaseSandboxSession(abc.ABC):
                 # semantics while the remote realpath check still enforces path confinement.
                 return workspace_path
             raise ExecTransportError(
-                command=("resolve_workspace_path", str(root), str(workspace_path), *extra_roots),
+                command=(
+                    "resolve_workspace_path",
+                    str(root),
+                    str(workspace_path),
+                    "1" if for_write else "0",
+                    *extra_grant_args,
+                ),
                 context={
                     "reason": "empty_stdout",
                     "exit_code": result.exit_code,
@@ -743,8 +754,24 @@ class BaseSandboxSession(abc.ABC):
             )
         if result.exit_code == 113:
             raise ValueError(result.stderr.decode("utf-8", errors="replace").strip())
+        if result.exit_code == 114:
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            context: dict[str, object] = {"reason": "read_only_extra_path_grant"}
+            for line in stderr.splitlines():
+                if line.startswith("read-only extra path grant: "):
+                    context["grant_path"] = line.removeprefix("read-only extra path grant: ")
+                elif line.startswith("resolved path: "):
+                    context["resolved_path"] = line.removeprefix("resolved path: ")
+            raise WorkspaceArchiveWriteError(path=workspace_path, context=context)
         raise ExecNonZeroError(
-            result, command=("resolve_workspace_path", str(root), str(workspace_path), *extra_roots)
+            result,
+            command=(
+                "resolve_workspace_path",
+                str(root),
+                str(workspace_path),
+                "1" if for_write else "0",
+                *extra_grant_args,
+            ),
         )
 
     @abc.abstractmethod

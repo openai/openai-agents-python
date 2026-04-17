@@ -301,7 +301,7 @@ class _FakeE2BCommands:
         if _is_helper_present_command(command):
             return _FakeE2BResult()
         if parts and parts[0] == str(RESOLVE_WORKSPACE_PATH_HELPER.install_path):
-            return _FakeE2BResult(stdout=parts[-1])
+            return _FakeE2BResult(stdout=parts[2])
         if parts and parts[0] == str(WORKSPACE_FINGERPRINT_HELPER.install_path):
             return _FakeE2BResult(
                 stdout='{"fingerprint":"fake-workspace-fingerprint","version":"workspace_tar_sha256_v1"}\n'

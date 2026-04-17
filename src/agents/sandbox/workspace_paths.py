@@ -159,17 +159,15 @@ class WorkspacePathPolicy:
             },
         )
 
-    def extra_path_grant_roots(self, *, writable_only: bool = False) -> tuple[Path, ...]:
-        """Return normalized extra grant roots for remote realpath checks."""
+    def extra_path_grant_rules(self) -> tuple[tuple[Path, bool], ...]:
+        """Return normalized extra grant roots and access modes for remote realpath checks."""
 
-        roots: list[Path] = []
+        rules: list[tuple[Path, bool]] = []
         for grant in self._extra_path_grants:
-            if writable_only and grant.read_only:
-                continue
             root = Path(grant.path)
             _raise_if_filesystem_root(root)
-            roots.append(root)
-        return tuple(roots)
+            rules.append((root, grant.read_only))
+        return tuple(rules)
 
     def _absolute_workspace_posix_path(self, path: Path) -> PurePosixPath:
         normalized = self._absolute_posix_path(path)

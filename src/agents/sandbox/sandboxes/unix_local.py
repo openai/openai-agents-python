@@ -757,6 +757,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 for path, read_only in extra_path_grants
                 if not read_only
             ],
+            *[
+                f"(deny file-write* (subpath {_literal(path)}))"
+                for path, read_only in extra_path_grants
+                if read_only
+            ],
             '(allow file-read-data file-read-metadata (subpath "/usr/bin"))',
             '(allow file-read-data file-read-metadata (subpath "/usr/lib"))',
             '(allow file-read-data file-read-metadata (subpath "/bin"))',

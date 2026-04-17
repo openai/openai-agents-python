@@ -422,15 +422,15 @@ async def test_remote_realpath_empty_success_output_is_transport_error() -> None
         await session._validate_remote_path_access("file.txt")  # noqa: SLF001
 
     assert exc_info.value.context == {
-        "command": ("resolve_workspace_path", "/workspace", "/workspace/file.txt"),
-        "command_str": "resolve_workspace_path /workspace /workspace/file.txt",
+        "command": ("resolve_workspace_path", "/workspace", "/workspace/file.txt", "0"),
+        "command_str": "resolve_workspace_path /workspace /workspace/file.txt 0",
         "reason": "empty_stdout",
         "exit_code": 0,
         "stdout": "",
         "stderr": "",
     }
     assert session.exec_commands == [
-        ("/tmp/resolve_workspace_path", "/workspace", "/workspace/file.txt")
+        ("/tmp/resolve_workspace_path", "/workspace", "/workspace/file.txt", "0")
     ]
 
 
@@ -3840,6 +3840,43 @@ def test_unix_local_darwin_exec_profile_allows_extra_path_grants(tmp_path: Path)
     assert (
         f'(allow file-read-data file-read-metadata (subpath "{read_only_root}"))' in profile_lines
     )
+    assert f'(allow file-write* (subpath "{read_only_root}"))' not in profile_lines
+
+
+def test_unix_local_darwin_exec_profile_denies_nested_read_only_extra_path_grant(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    read_write_root = tmp_path / "read-write"
+    read_only_root = read_write_root / "protected"
+    workspace_root.mkdir()
+    read_only_root.mkdir(parents=True)
+    session = UnixLocalSandboxSession.from_state(
+        UnixLocalSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=Manifest(
+                root=str(workspace_root),
+                extra_path_grants=(
+                    SandboxPathGrant(path=str(read_write_root)),
+                    SandboxPathGrant(path=str(read_only_root), read_only=True),
+                ),
+            ),
+            snapshot=NoopSnapshot(id="darwin-nested-extra-path-grant"),
+            workspace_root_owned=False,
+        )
+    )
+
+    profile = session._darwin_exec_profile(
+        workspace_root,
+        extra_path_grants=session._darwin_extra_path_grant_roots(),
+    )
+    profile_lines = profile.splitlines()
+    parent_write_allow = f'(allow file-write* (subpath "{read_write_root}"))'
+    child_write_deny = f'(deny file-write* (subpath "{read_only_root}"))'
+
+    assert parent_write_allow in profile_lines
+    assert child_write_deny in profile_lines
+    assert profile_lines.index(parent_write_allow) < profile_lines.index(child_write_deny)
     assert f'(allow file-write* (subpath "{read_only_root}"))' not in profile_lines
 
 

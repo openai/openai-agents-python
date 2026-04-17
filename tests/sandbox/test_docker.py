@@ -327,13 +327,57 @@ class _HostBackedDockerSession(DockerSandboxSession):
         if cmd == ["test", "-x", helper_path]:
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
         if cmd and cmd[0] == helper_path:
+            for_write = cmd[3]
             candidate = self._host_path(cmd[2]).resolve(strict=False)
-            roots = [self._host_path(root).resolve(strict=False) for root in [cmd[1], *cmd[3:]]]
-            for root in roots:
+            workspace_root = self._host_path(cmd[1]).resolve(strict=False)
+            try:
+                candidate.relative_to(workspace_root)
+            except ValueError:
+                pass
+            else:
+                return ExecResult(
+                    stdout=str(self._container_path(candidate)).encode("utf-8"),
+                    stderr=b"",
+                    exit_code=0,
+                )
+
+            best_root: Path | None = None
+            best_original = ""
+            best_read_only = False
+            grant_args = cmd[4:]
+            assert len(grant_args) % 2 == 0
+            for original_root, read_only_text in zip(
+                grant_args[::2],
+                grant_args[1::2],
+                strict=False,
+            ):
+                root = self._host_path(original_root).resolve(strict=False)
+                if root == root.parent:
+                    return ExecResult(
+                        stdout=b"",
+                        stderr=(
+                            f"extra path grant must not resolve to filesystem root: {original_root}"
+                        ).encode(),
+                        exit_code=113,
+                    )
                 try:
                     candidate.relative_to(root)
                 except ValueError:
                     continue
+                if best_root is None or len(root.parts) > len(best_root.parts):
+                    best_root = root
+                    best_original = original_root
+                    best_read_only = read_only_text == "1"
+            if best_root is not None:
+                if for_write == "1" and best_read_only:
+                    return ExecResult(
+                        stdout=b"",
+                        stderr=(
+                            f"read-only extra path grant: {best_original}\n"
+                            f"resolved path: {self._container_path(candidate)}\n"
+                        ).encode(),
+                        exit_code=114,
+                    )
                 return ExecResult(
                     stdout=str(self._container_path(candidate)).encode("utf-8"),
                     stderr=b"",
@@ -1006,14 +1050,56 @@ async def test_docker_write_rejects_workspace_symlink_to_read_only_extra_path_gr
         ),
     )
 
-    with pytest.raises(InvalidManifestPathError) as exc_info:
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
         await session.write(Path("tmp-link/result.txt"), io.BytesIO(b"scratch output"))
 
-    assert str(exc_info.value) == "manifest path must not escape root: tmp-link/result.txt"
+    assert str(exc_info.value) == "failed to write archive for path: /workspace/tmp-link/result.txt"
     assert exc_info.value.context == {
-        "rel": "tmp-link/result.txt",
-        "reason": "escape_root",
-        "resolved_path": "workspace escape",
+        "path": "/workspace/tmp-link/result.txt",
+        "reason": "read_only_extra_path_grant",
+        "grant_path": "/tmp",
+        "resolved_path": "/tmp/result.txt",
+    }
+
+
+@pytest.mark.asyncio
+async def test_docker_write_rejects_workspace_symlink_to_nested_read_only_extra_path_grant(
+    tmp_path: Path,
+) -> None:
+    host_root = tmp_path / "container"
+    workspace = host_root / "workspace"
+    extra_root = host_root / "tmp"
+    protected_root = extra_root / "protected"
+    workspace.mkdir(parents=True)
+    protected_root.mkdir(parents=True)
+    (workspace / "tmp-link").symlink_to(extra_root, target_is_directory=True)
+
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(
+            root="/workspace",
+            extra_path_grants=(
+                SandboxPathGrant(path="/tmp"),
+                SandboxPathGrant(path="/tmp/protected", read_only=True),
+            ),
+        ),
+    )
+
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+        await session.write(
+            Path("tmp-link/protected/result.txt"),
+            io.BytesIO(b"scratch output"),
+        )
+
+    assert (
+        str(exc_info.value)
+        == "failed to write archive for path: /workspace/tmp-link/protected/result.txt"
+    )
+    assert exc_info.value.context == {
+        "path": "/workspace/tmp-link/protected/result.txt",
+        "reason": "read_only_extra_path_grant",
+        "grant_path": "/tmp/protected",
+        "resolved_path": "/tmp/protected/result.txt",
     }
 
 

@@ -227,7 +227,7 @@ def _load_modal_module(
                     wait=_with_aio(lambda: 0),
                 )
             if command and command[0] == resolve_helper_path:
-                stdout = str(command[-1]).encode("utf-8")
+                stdout = str(command[2]).encode("utf-8")
             if command and command[0] == fingerprint_helper_path:
                 stdout = (
                     b'{"fingerprint":"fake-workspace-fingerprint",'
@@ -1758,7 +1758,7 @@ async def test_modal_normalize_path_reinstalls_helper_after_runtime_replacement(
     assert any(cmd and cmd[0] == helper_path for cmd in second_run_commands)
     assert commands == [
         ["test", "-x", helper_path],
-        [helper_path, "/workspace", "/workspace/link.txt"],
+        [helper_path, "/workspace", "/workspace/link.txt", "0"],
     ]
 
 

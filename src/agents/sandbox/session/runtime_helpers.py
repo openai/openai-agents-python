@@ -15,8 +15,22 @@ set -eu
 
 root="$1"
 candidate="$2"
-shift 2
+for_write="$3"
+shift 3
 max_symlink_depth=64
+
+case "$for_write" in
+    0|1) ;;
+    *)
+        printf 'for_write must be 0 or 1: %s\\n' "$for_write" >&2
+        exit 64
+        ;;
+esac
+
+if [ $(( $# % 2 )) -ne 0 ]; then
+    printf 'extra path grants must be root/read_only pairs\\n' >&2
+    exit 64
+fi
 
 resolve_path() {
     path="$1"
@@ -69,6 +83,10 @@ resolve_path() {
 }
 
 resolved_candidate=$(resolve_path "$candidate" 0)
+best_grant_root=""
+best_grant_original=""
+best_grant_read_only="0"
+best_grant_len=0
 
 check_root() {
     allowed_root="$1"
@@ -90,14 +108,47 @@ reject_root_grant() {
     fi
 }
 
-for extra_root in "$@"; do
-    reject_root_grant "$extra_root"
+consider_extra_grant() {
+    allowed_root="$1"
+    read_only="$2"
+    case "$read_only" in
+        0|1) ;;
+        *)
+            printf 'extra path grant read_only must be 0 or 1: %s\\n' "$read_only" >&2
+            exit 64
+            ;;
+    esac
+
+    reject_root_grant "$allowed_root"
+    resolved_root=$(resolve_path "$allowed_root" 0)
+    case "$resolved_candidate" in
+        "$resolved_root"|"$resolved_root"/*)
+            root_len=${#resolved_root}
+            if [ "$root_len" -gt "$best_grant_len" ]; then
+                best_grant_root="$resolved_root"
+                best_grant_original="$allowed_root"
+                best_grant_read_only="$read_only"
+                best_grant_len="$root_len"
+            fi
+            ;;
+    esac
+}
+
+while [ "$#" -gt 0 ]; do
+    consider_extra_grant "$1" "$2"
+    shift 2
 done
 
 check_root "$root"
-for extra_root in "$@"; do
-    check_root "$extra_root"
-done
+if [ -n "$best_grant_root" ]; then
+    if [ "$for_write" = "1" ] && [ "$best_grant_read_only" = "1" ]; then
+        printf 'read-only extra path grant: %s\\nresolved path: %s\\n' \
+            "$best_grant_original" "$resolved_candidate" >&2
+        exit 114
+    fi
+    printf '%s\\n' "$resolved_candidate"
+    exit 0
+fi
 
 printf 'workspace escape: %s\\n' "$resolved_candidate" >&2
 exit 111
