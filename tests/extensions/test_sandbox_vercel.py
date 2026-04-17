@@ -13,7 +13,7 @@ import httpx
 import pytest
 from pydantic import BaseModel, PrivateAttr
 
-from agents.sandbox import Manifest
+from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.entries import File, InContainerMountStrategy, Mount, MountpointMountPattern
 from agents.sandbox.entries.mounts.base import InContainerMountAdapter
 from agents.sandbox.errors import ConfigurationError, InvalidManifestPathError
@@ -23,6 +23,7 @@ from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.dependencies import Dependencies
 from agents.sandbox.snapshot import NoopSnapshot, SnapshotBase
 from agents.sandbox.types import User
+from tests._fake_workspace_paths import resolve_fake_workspace_path
 
 
 class _FakeNetworkPolicyRule(BaseModel):
@@ -135,6 +136,7 @@ class _FakeAsyncSandbox:
         self.write_files_calls: list[list[dict[str, object]]] = []
         self.tar_create_result: _FakeCommandFinished | None = None
         self.tar_extract_result: _FakeCommandFinished | None = None
+        self.symlinks: dict[str, str] = {}
 
     @classmethod
     def reset(cls) -> None:
@@ -208,6 +210,17 @@ class _FakeAsyncSandbox:
         _ = (env, sudo)
         args = args or []
         self.run_command_calls.append((cmd, list(args), cwd))
+        resolved = resolve_fake_workspace_path(
+            (cmd, *args),
+            symlinks=self.symlinks,
+            home_dir="/workspace",
+        )
+        if resolved is not None:
+            return _FakeCommandFinished(
+                exit_code=resolved.exit_code,
+                stdout=resolved.stdout,
+                stderr=resolved.stderr,
+            )
         if cmd == "tar" and len(args) >= 3 and args[0] == "cf":
             if self.tar_create_result is not None:
                 return self.tar_create_result
@@ -667,6 +680,38 @@ async def test_vercel_read_and_write_reject_paths_outside_workspace_root(
         await session.read("../outside.txt")
     with pytest.raises(InvalidManifestPathError):
         await session.write("/etc/passwd", io.BytesIO(b"nope"))
+
+
+@pytest.mark.asyncio
+async def test_vercel_write_rejects_workspace_symlink_to_read_only_extra_path_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+
+    state = vercel_module.VercelSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000015",
+        manifest=Manifest(
+            root="/workspace",
+            extra_path_grants=(SandboxPathGrant(path="/tmp/protected", read_only=True),),
+        ),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sandbox-readonly-link",
+    )
+    sandbox = _FakeAsyncSandbox(sandbox_id="sandbox-readonly-link")
+    sandbox.symlinks["/workspace/link"] = "/tmp/protected"
+    session = vercel_module.VercelSandboxSession.from_state(state, sandbox=sandbox)
+
+    with pytest.raises(vercel_module.WorkspaceArchiveWriteError) as exc_info:
+        await session.write("link/out.txt", io.BytesIO(b"blocked"))
+
+    assert sandbox.write_files_calls == []
+    assert str(exc_info.value) == "failed to write archive for path: /workspace/link/out.txt"
+    assert exc_info.value.context == {
+        "path": "/workspace/link/out.txt",
+        "reason": "read_only_extra_path_grant",
+        "grant_path": "/tmp/protected",
+        "resolved_path": "/tmp/protected/out.txt",
+    }
 
 
 @pytest.mark.asyncio

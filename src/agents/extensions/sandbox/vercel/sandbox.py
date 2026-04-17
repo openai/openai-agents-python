@@ -50,6 +50,7 @@ from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
+from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
 from ....sandbox.snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from ....sandbox.types import ExecResult, ExposedPortEndpoint, User
@@ -276,6 +277,12 @@ class VercelSandboxSession(BaseSandboxSession):
         if user is not None:
             self._reject_user_arg(op="exec", user=user)
         return super()._prepare_exec_command(*command, shell=shell, user=user)
+
+    async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
+        return await self._validate_remote_path_access(path, for_write=for_write)
+
+    def _runtime_helpers(self) -> tuple[RuntimeHelperScript, ...]:
+        return (RESOLVE_WORKSPACE_PATH_HELPER,)
 
     def _validate_tar_bytes(self, raw: bytes) -> None:
         try:
@@ -576,7 +583,7 @@ class VercelSandboxSession(BaseSandboxSession):
         if user is not None:
             self._reject_user_arg(op="write", user=user)
 
-        normalized_path = self.normalize_path(path, for_write=True)
+        normalized_path = await self._validate_path_access(path, for_write=True)
         payload = data.read()
         if isinstance(payload, str):
             payload = payload.encode("utf-8")

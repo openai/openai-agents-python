@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from agents.sandbox import Manifest
+from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 from agents.sandbox.errors import (
     ExecTimeoutError,
@@ -29,6 +29,7 @@ from agents.sandbox.errors import (
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExposedPortEndpoint
 from agents.sandbox.util.tar_utils import validate_tar_bytes
+from tests._fake_workspace_paths import resolve_fake_workspace_path
 
 # ---------------------------------------------------------------------------
 # Package re-export test
@@ -71,9 +72,21 @@ class _FakeProcess:
         self.next_result = _FakeExecResult()
         self._results_queue: list[_FakeExecResult] = []
         self.delay: float = 0.0
+        self.symlinks: dict[str, str] = {}
 
     async def exec(self, config: dict[str, Any], **kwargs: object) -> _FakeExecResult:
         self.exec_calls.append((config, dict(kwargs)))
+        resolved = resolve_fake_workspace_path(
+            str(config.get("command", "")),
+            symlinks=self.symlinks,
+            home_dir="/workspace",
+        )
+        if resolved is not None:
+            return _FakeExecResult(
+                exit_code=resolved.exit_code,
+                output=resolved.stdout,
+                stderr=resolved.stderr,
+            )
         if self.delay > 0:
             await asyncio.sleep(self.delay)
         if self._results_queue:
@@ -92,6 +105,7 @@ class _FakeFs:
         self.write_error: Exception | None = None
         self.mkdir_error: Exception | None = None
         self.return_str: bool = False
+        self.write_binary_calls: list[tuple[str, bytes]] = []
 
     async def mkdir(self, path: str, permissions: str = "0755") -> None:
         self.mkdir_calls.append(path)
@@ -110,6 +124,7 @@ class _FakeFs:
         return data
 
     async def write_binary(self, path: str, data: bytes) -> None:
+        self.write_binary_calls.append((path, data))
         if self.write_error is not None:
             raise self.write_error
         self.files[path] = data
@@ -243,6 +258,7 @@ def _make_state(
     root: str = "/workspace",
     pause_on_exit: bool = False,
     sandbox_url: str | None = "https://test.bl.run",
+    extra_path_grants: tuple[SandboxPathGrant, ...] = (),
 ) -> Any:
     from agents.extensions.sandbox.blaxel.sandbox import (
         BlaxelSandboxSessionState,
@@ -251,7 +267,7 @@ def _make_state(
 
     return BlaxelSandboxSessionState(
         session_id=uuid.uuid4(),
-        manifest=Manifest(root=root),
+        manifest=Manifest(root=root, extra_path_grants=extra_path_grants),
         snapshot=NoopSnapshot(id="test-snapshot"),
         sandbox_name=sandbox_name,
         pause_on_exit=pause_on_exit,
@@ -348,6 +364,29 @@ class TestBlaxelSandboxSession:
         session = _make_session(fake_sandbox)
         await session.write("output.txt", io.BytesIO(b"written data"))
         assert fake_sandbox.fs.files["/workspace/output.txt"] == b"written data"
+
+    @pytest.mark.asyncio
+    async def test_write_rejects_workspace_symlink_to_read_only_extra_path_grant(
+        self,
+        fake_sandbox: _FakeSandboxInstance,
+    ) -> None:
+        state = _make_state(
+            extra_path_grants=(SandboxPathGrant(path="/tmp/protected", read_only=True),)
+        )
+        session = _make_session(fake_sandbox, state=state)
+        fake_sandbox.process.symlinks["/workspace/link"] = "/tmp/protected"
+
+        with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+            await session.write("link/out.txt", io.BytesIO(b"blocked"))
+
+        assert fake_sandbox.fs.write_binary_calls == []
+        assert str(exc_info.value) == "failed to write archive for path: /workspace/link/out.txt"
+        assert exc_info.value.context == {
+            "path": "/workspace/link/out.txt",
+            "reason": "read_only_extra_path_grant",
+            "grant_path": "/tmp/protected",
+            "resolved_path": "/tmp/protected/out.txt",
+        }
 
     @pytest.mark.asyncio
     async def test_running(self, fake_sandbox: _FakeSandboxInstance) -> None:

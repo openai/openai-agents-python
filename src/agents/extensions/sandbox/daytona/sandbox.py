@@ -52,6 +52,7 @@ from ....sandbox.session.pty_types import (
     resolve_pty_write_yield_time_ms,
     truncate_text_by_tokens,
 )
+from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
 from ....sandbox.snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from ....sandbox.types import ExecResult, ExposedPortEndpoint, User
@@ -353,6 +354,12 @@ class DaytonaSandboxSession(BaseSandboxSession):
                 await self._sandbox.delete()
         except Exception:
             pass
+
+    async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
+        return await self._validate_remote_path_access(path, for_write=for_write)
+
+    def _runtime_helpers(self) -> tuple[RuntimeHelperScript, ...]:
+        return (RESOLVE_WORKSPACE_PATH_HELPER,)
 
     async def mkdir(
         self,
@@ -811,7 +818,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
         if not isinstance(payload, bytes | bytearray):
             raise WorkspaceWriteTypeError(path=path, actual_type=type(payload).__name__)
 
-        workspace_path = self.normalize_path(path, for_write=True)
+        workspace_path = await self._validate_path_access(path, for_write=True)
         try:
             await self._sandbox.fs.upload_file(
                 bytes(payload),
