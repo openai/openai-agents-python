@@ -405,15 +405,20 @@ def _normalize_compaction_input_file(content_item: dict[str, Any]) -> dict[str, 
     file_id = content_item.get("file_id")
     if isinstance(file_data, str) and file_data:
         normalized["file_data"] = file_data
-        filename = content_item.get("filename")
-        if isinstance(filename, str) and filename:
-            normalized["filename"] = filename
     elif isinstance(file_url, str) and file_url:
         normalized["file_url"] = file_url
     elif isinstance(file_id, str) and file_id:
         normalized["file_id"] = file_id
     else:
         raise ValueError("Compaction input_file item missing file_data, file_url, or file_id.")
+
+    filename = content_item.get("filename")
+    if isinstance(filename, str) and filename:
+        normalized["filename"] = filename
+
+    detail = content_item.get("detail")
+    if isinstance(detail, str) and detail:
+        normalized["detail"] = detail
 
     return normalized
 
