@@ -345,7 +345,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
         mount_path: Path | str,
         options: dict[str, object],
     ) -> None:
-        workspace_path = self.normalize_path(mount_path)
+        workspace_path = await self._validate_path_access(mount_path, for_write=True)
         http = self._session()
         url = self._url("mount")
         payload = {
@@ -389,7 +389,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             ) from e
 
     async def unmount_bucket(self, mount_path: Path | str) -> None:
-        workspace_path = self.normalize_path(mount_path)
+        workspace_path = await self._validate_path_access(mount_path, for_write=True)
         http = self._session()
         url = self._url("unmount")
         payload = {"mountPath": str(workspace_path)}

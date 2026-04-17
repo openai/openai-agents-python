@@ -934,6 +934,42 @@ class TestDaytonaSandbox:
         }
 
     @pytest.mark.asyncio
+    async def test_mkdir_rejects_workspace_symlink_to_read_only_extra_path_grant(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        daytona_module = _load_daytona_module(monkeypatch)
+
+        async with daytona_module.DaytonaSandboxClient() as client:
+            session = await client.create(
+                manifest=Manifest(
+                    root=daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT,
+                    extra_path_grants=(SandboxPathGrant(path="/tmp/protected", read_only=True),),
+                ),
+                options=daytona_module.DaytonaSandboxClientOptions(),
+            )
+            sandbox = _FakeAsyncDaytona.current_sandbox
+            assert sandbox is not None
+            sandbox.process.symlinks[f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/link"] = (
+                "/tmp/protected"
+            )
+
+            with pytest.raises(daytona_module.WorkspaceArchiveWriteError) as exc_info:
+                await session.mkdir("link/newdir")
+
+        assert sandbox.fs.create_folder_calls == []
+        assert str(exc_info.value) == (
+            "failed to write archive for path: "
+            f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/link/newdir"
+        )
+        assert exc_info.value.context == {
+            "path": f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/link/newdir",
+            "reason": "read_only_extra_path_grant",
+            "grant_path": "/tmp/protected",
+            "resolved_path": "/tmp/protected/newdir",
+        }
+
+    @pytest.mark.asyncio
     async def test_mkdir_as_user_checks_permissions_then_uses_files_api(
         self,
         monkeypatch: pytest.MonkeyPatch,

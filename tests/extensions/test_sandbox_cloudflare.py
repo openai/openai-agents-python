@@ -30,6 +30,7 @@ from agents.sandbox.errors import (
     MountConfigError,
     PtySessionNotFoundError,
     WorkspaceArchiveReadError,
+    WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
     WorkspaceWriteTypeError,
 )
@@ -38,6 +39,7 @@ from agents.sandbox.session.dependencies import Dependencies
 from agents.sandbox.session.pty_types import PTY_PROCESSES_MAX, allocate_pty_process_id
 from agents.sandbox.snapshot import NoopSnapshot, SnapshotBase
 from agents.sandbox.types import ExecResult
+from agents.sandbox.workspace_paths import SandboxPathGrant
 
 _WORKER_URL = "https://sandbox-cf.example.workers.dev"
 
@@ -691,6 +693,70 @@ async def test_cloudflare_mount_and_unmount_bucket_use_http_endpoints() -> None:
         },
     }
     assert unmount_call["json"] == {"mountPath": "/workspace/data"}
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_mount_and_unmount_validate_path_access_for_write() -> None:
+    fake_http = _FakeHttp(
+        {
+            "POST /mount": _FakeResponse(status=200, json_body={"ok": True}),
+            "POST /unmount": _FakeResponse(status=200, json_body={"ok": True}),
+        }
+    )
+    sess = _make_session(fake_http=fake_http)
+    calls: list[tuple[str, bool]] = []
+
+    async def _tracking_normalize(path: Path | str, *, for_write: bool = False) -> Path:
+        calls.append((str(path), for_write))
+        return sess.normalize_path(path, for_write=for_write)
+
+    sess._validate_path_access = _tracking_normalize  # type: ignore[method-assign]
+
+    await sess.mount_bucket(
+        bucket="my-bucket",
+        mount_path=Path("/workspace/data"),
+        options={
+            "endpoint": "https://s3.amazonaws.com",
+            "readOnly": True,
+        },
+    )
+    await sess.unmount_bucket(Path("/workspace/data"))
+
+    assert calls == [
+        ("/workspace/data", True),
+        ("/workspace/data", True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_mount_rejects_read_only_extra_path_grant() -> None:
+    fake_http = _FakeHttp({"POST /mount": _FakeResponse(status=200, json_body={"ok": True})})
+    sess = _make_session(
+        state=_make_state(
+            manifest=Manifest(
+                extra_path_grants=(SandboxPathGrant(path="/tmp/protected", read_only=True),)
+            )
+        ),
+        fake_http=fake_http,
+    )
+
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+        await sess.mount_bucket(
+            bucket="my-bucket",
+            mount_path=Path("/tmp/protected/data"),
+            options={
+                "endpoint": "https://s3.amazonaws.com",
+                "readOnly": True,
+            },
+        )
+
+    assert fake_http.calls == []
+    assert str(exc_info.value) == "failed to write archive for path: /tmp/protected/data"
+    assert exc_info.value.context == {
+        "path": "/tmp/protected/data",
+        "reason": "read_only_extra_path_grant",
+        "grant_path": "/tmp/protected",
+    }
 
 
 async def test_cloudflare_read_decodes_streamed_file_payload() -> None:

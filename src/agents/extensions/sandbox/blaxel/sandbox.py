@@ -364,7 +364,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
         if user is not None:
             path = await self._check_mkdir_with_exec(path, parents=parents, user=user)
         else:
-            path = self.normalize_path(path, for_write=True)
+            path = await self._validate_path_access(path, for_write=True)
         if path == Path("/"):
             return
         try:

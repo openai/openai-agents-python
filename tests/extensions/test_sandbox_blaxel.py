@@ -66,6 +66,27 @@ class _FakeExecResult:
         self.pid = pid
 
 
+def _fake_helper_exec_result(command: str, *, symlinks: dict[str, str]) -> _FakeExecResult | None:
+    resolved = resolve_fake_workspace_path(
+        command,
+        symlinks=symlinks,
+        home_dir="/workspace",
+    )
+    if resolved is not None:
+        return _FakeExecResult(
+            exit_code=resolved.exit_code,
+            output=resolved.stdout,
+            stderr=resolved.stderr,
+        )
+
+    if "INSTALL_RUNTIME_HELPER_V1" in command or command.startswith(
+        "test -x /tmp/openai-agents/bin/resolve-workspace-path-"
+    ):
+        return _FakeExecResult()
+
+    return None
+
+
 class _FakeProcess:
     def __init__(self) -> None:
         self.exec_calls: list[tuple[dict[str, Any], dict[str, object]]] = []
@@ -76,17 +97,12 @@ class _FakeProcess:
 
     async def exec(self, config: dict[str, Any], **kwargs: object) -> _FakeExecResult:
         self.exec_calls.append((config, dict(kwargs)))
-        resolved = resolve_fake_workspace_path(
+        helper_result = _fake_helper_exec_result(
             str(config.get("command", "")),
             symlinks=self.symlinks,
-            home_dir="/workspace",
         )
-        if resolved is not None:
-            return _FakeExecResult(
-                exit_code=resolved.exit_code,
-                output=resolved.stdout,
-                stderr=resolved.stderr,
-            )
+        if helper_result is not None:
+            return helper_result
         if self.delay > 0:
             await asyncio.sleep(self.delay)
         if self._results_queue:
@@ -407,6 +423,29 @@ class TestBlaxelSandboxSession:
             "reason": "read_only_extra_path_grant",
             "grant_path": "/tmp/protected",
             "resolved_path": "/tmp/protected/out.txt",
+        }
+
+    @pytest.mark.asyncio
+    async def test_mkdir_rejects_workspace_symlink_to_read_only_extra_path_grant(
+        self,
+        fake_sandbox: _FakeSandboxInstance,
+    ) -> None:
+        state = _make_state(
+            extra_path_grants=(SandboxPathGrant(path="/tmp/protected", read_only=True),)
+        )
+        session = _make_session(fake_sandbox, state=state)
+        fake_sandbox.process.symlinks["/workspace/link"] = "/tmp/protected"
+
+        with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+            await session.mkdir("link/newdir")
+
+        assert fake_sandbox.fs.mkdir_calls == []
+        assert str(exc_info.value) == "failed to write archive for path: /workspace/link/newdir"
+        assert exc_info.value.context == {
+            "path": "/workspace/link/newdir",
+            "reason": "read_only_extra_path_grant",
+            "grant_path": "/tmp/protected",
+            "resolved_path": "/tmp/protected/newdir",
         }
 
     @pytest.mark.asyncio
@@ -2270,11 +2309,17 @@ class TestCleanupPaths:
         async def _counting_exec(config: dict[str, Any], **kw: object) -> _FakeExecResult:
             nonlocal call_count
             call_count += 1
-            if "tar" in config.get("command", ""):
-                if "xf" in config["command"]:
+            command = str(config.get("command", ""))
+            helper_result = _fake_helper_exec_result(
+                command, symlinks=fake_sandbox.process.symlinks
+            )
+            if helper_result is not None:
+                return helper_result
+            if "tar" in command:
+                if "xf" in command:
                     # tar extract succeeds.
                     return _FakeExecResult(exit_code=0, output="")
-            if "rm" in config.get("command", ""):
+            if "rm" in command:
                 raise ConnectionError("rm failed")
             return _FakeExecResult(exit_code=0, output="")
 
@@ -2369,8 +2414,13 @@ class TestFinalCoverageGaps:
         tar_data = _make_tar({"file.txt": b"hello"})
 
         async def _exec_with_rm_fail(config: dict[str, Any], **kw: object) -> _FakeExecResult:
-            cmd = config.get("command", "")
-            if "rm" in cmd:
+            command = str(config.get("command", ""))
+            helper_result = _fake_helper_exec_result(
+                command, symlinks=fake_sandbox.process.symlinks
+            )
+            if helper_result is not None:
+                return helper_result
+            if "rm" in command:
                 raise OSError("rm failed")
             return _FakeExecResult(exit_code=0, output="")
 
@@ -2390,8 +2440,13 @@ class TestFinalCoverageGaps:
         tar_data = _make_tar({"file.txt": b"hello"})
 
         async def _exec_with_rm_fail(config: dict[str, Any], **kw: object) -> _FakeExecResult:
-            cmd = config.get("command", "")
-            if "rm" in cmd:
+            command = str(config.get("command", ""))
+            helper_result = _fake_helper_exec_result(
+                command, symlinks=fake_sandbox.process.symlinks
+            )
+            if helper_result is not None:
+                return helper_result
+            if "rm" in command:
                 raise OSError("rm failed")
             return _FakeExecResult(exit_code=0, output="")
 
