@@ -820,7 +820,7 @@ async def start_streaming(
                 streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                 break
 
-            await asyncio.gather(
+            run_hook_control, agent_hook_control = await asyncio.gather(
                 hooks.on_turn_start(context_wrapper, current_agent, current_turn),
                 (
                     current_agent.hooks.on_turn_start(
@@ -830,6 +830,18 @@ async def start_streaming(
                     else _coro.noop_coroutine()
                 ),
             )
+            if run_hook_control == "stop" or agent_hook_control == "stop":
+                logger.debug(
+                    "Turn %s: on_turn_start hook requested stop; halting run.",
+                    current_turn,
+                )
+                streamed_result._max_turns_handled = True
+                streamed_result.current_turn = current_turn
+                if run_state is not None:
+                    run_state._current_turn = current_turn
+                    run_state._current_step = None
+                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                break
 
             if current_turn == 1:
                 all_input_guardrails = starting_agent.input_guardrails + (

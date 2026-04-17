@@ -65,7 +65,7 @@ from .items import (
     ToolCallOutputItem,
     TResponseInputItem,
 )
-from .lifecycle import AgentHooks, RunHooks
+from .lifecycle import AgentHooks, AgentHooksBase, RunHooks, RunHooksBase, TurnControl
 from .memory import (
     OpenAIConversationsSession,
     OpenAIResponsesCompactionArgs,
@@ -361,7 +361,10 @@ __all__ = [
     "ReasoningItem",
     "ItemHelpers",
     "RunHooks",
+    "RunHooksBase",
     "AgentHooks",
+    "AgentHooksBase",
+    "TurnControl",
     "Session",
     "SessionABC",
     "SessionSettings",

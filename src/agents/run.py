@@ -968,7 +968,7 @@ class AgentRunner:
 
                     logger.debug("Running agent %s (turn %s)", current_agent.name, current_turn)
 
-                    await asyncio.gather(
+                    run_hook_control, agent_hook_control = await asyncio.gather(
                         hooks.on_turn_start(context_wrapper, current_agent, current_turn),
                         (
                             current_agent.hooks.on_turn_start(
@@ -978,6 +978,14 @@ class AgentRunner:
                             else _coro.noop_coroutine()
                         ),
                     )
+                    if run_hook_control == "stop" or agent_hook_control == "stop":
+                        logger.debug(
+                            "Turn %s: on_turn_start hook requested stop; halting run.",
+                            current_turn,
+                        )
+                        raise MaxTurnsExceeded(
+                            f"Run halted by on_turn_start hook at turn {current_turn}"
+                        )
 
                     if session_persistence_enabled:
                         try:
