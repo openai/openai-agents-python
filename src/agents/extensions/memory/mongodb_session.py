@@ -136,10 +136,6 @@ class MongoDBSession(SessionABC):
         self._client_id = id(client)
         self._init_sub_key = (database, sessions_collection, messages_collection)
 
-        # Remove the cache entry when the client is GC'd so a future client
-        # that happens to reuse the same id() starts fresh.
-        weakref.finalize(client, self._init_state.pop, self._client_id, None)
-
     # ------------------------------------------------------------------
     # Convenience constructors
     # ------------------------------------------------------------------
@@ -203,6 +199,10 @@ class MongoDBSession(SessionABC):
             if per_client is None:
                 per_client = {}
                 self._init_state[self._client_id] = per_client
+                # Register the cleanup finalizer exactly once per client identity,
+                # not once per session, to avoid unbounded growth when many
+                # sessions share a single long-lived client.
+                weakref.finalize(self._client, self._init_state.pop, self._client_id, None)
             per_client[self._init_sub_key] = True
 
     async def _ensure_indexes(self) -> None:
