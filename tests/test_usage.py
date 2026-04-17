@@ -610,3 +610,44 @@ async def test_multi_agent_run_attributes_usage_to_correct_agents():
 
     specialist_entry = next(e for e in all_entries if e.agent_name == "Specialist Agent")
     assert specialist_entry.input_tokens == 200
+
+
+def test_add_does_not_mutate_other_entries() -> None:
+    """Adding a Usage with existing request_usage_entries must not mutate the original entries.
+
+    Previously, the elif branch in Usage.add() called entry.agent_name = ... directly on
+    the objects inside other.request_usage_entries, causing silent mis-attribution when the
+    same Usage object was re-used or added to multiple aggregators.
+    """
+    from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
+
+    source_entry = RequestUsage(
+        input_tokens=50,
+        output_tokens=25,
+        total_tokens=75,
+        input_tokens_details=InputTokensDetails(cached_tokens=0),
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+        agent_name=None,
+        model_name=None,
+    )
+
+    # Build a Usage that already has request_usage_entries (requests != 1 path)
+    other = Usage(
+        requests=2,
+        input_tokens=50,
+        output_tokens=25,
+        total_tokens=75,
+        request_usage_entries=[source_entry],
+    )
+
+    agg = Usage()
+    agg.add(other, agent_name="MyAgent", model_name="gpt-4o")
+
+    # The aggregator should have a copy with the annotation applied
+    assert len(agg.request_usage_entries) == 1
+    assert agg.request_usage_entries[0].agent_name == "MyAgent"
+    assert agg.request_usage_entries[0].model_name == "gpt-4o"
+
+    # The original entry must NOT be mutated
+    assert source_entry.agent_name is None, "Original entry was mutated!"
+    assert source_entry.model_name is None, "Original entry was mutated!"

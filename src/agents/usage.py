@@ -238,13 +238,20 @@ class Usage:
             self.request_usage_entries.append(request_usage)
         elif other.request_usage_entries:
             # If the other Usage already has individual request breakdowns, merge them.
-            # Apply agent_name/model_name to entries that don't already have them set.
+            # Apply agent_name/model_name to entries that don't already have them set,
+            # but copy each entry rather than mutating the original objects in place
+            # to avoid silent mis-attribution when the same Usage is added multiple times.
             for entry in other.request_usage_entries:
-                if agent_name is not None and entry.agent_name is None:
-                    entry.agent_name = agent_name
-                if model_name is not None and entry.model_name is None:
-                    entry.model_name = model_name
-            self.request_usage_entries.extend(other.request_usage_entries)
+                annotated_entry = RequestUsage(
+                    input_tokens=entry.input_tokens,
+                    output_tokens=entry.output_tokens,
+                    total_tokens=entry.total_tokens,
+                    input_tokens_details=entry.input_tokens_details,
+                    output_tokens_details=entry.output_tokens_details,
+                    agent_name=agent_name if (agent_name is not None and entry.agent_name is None) else entry.agent_name,
+                    model_name=model_name if (model_name is not None and entry.model_name is None) else entry.model_name,
+                )
+                self.request_usage_entries.append(annotated_entry)
 
 
 def _serialize_usage_details(details: Any, default: dict[str, int]) -> dict[str, Any]:
