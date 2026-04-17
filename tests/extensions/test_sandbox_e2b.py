@@ -1411,7 +1411,7 @@ async def test_e2b_normalize_path_preserves_safe_leaf_symlink_path(
 
     monkeypatch.setattr(session, "exec", _fake_exec)
 
-    normalized = await session._normalize_path_for_io("link.txt")  # noqa: SLF001
+    normalized = await session._validate_path_access("link.txt")  # noqa: SLF001
 
     assert normalized == Path("/workspace/link.txt")
 
@@ -1442,7 +1442,7 @@ async def test_e2b_normalize_path_rejects_symlink_escape(
     monkeypatch.setattr(session, "exec", _fake_exec)
 
     with pytest.raises(InvalidManifestPathError, match="must not escape root"):
-        await session._normalize_path_for_io("link/secret.txt")  # noqa: SLF001
+        await session._validate_path_access("link/secret.txt")  # noqa: SLF001
 
 
 @pytest.mark.asyncio

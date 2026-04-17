@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, PrivateAttr
 from agents import Agent
 from agents.run_context import RunContextWrapper
 from agents.run_state import RunState
-from agents.sandbox import Manifest
+from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.capabilities import Shell
 from agents.sandbox.capabilities.tools.shell_tool import ExecCommandArgs, ExecCommandTool
 from agents.sandbox.entries import File, InContainerMountStrategy, Mount, MountpointMountPattern
@@ -362,11 +362,23 @@ class _FakeFileInterface:
     def __init__(self, devbox: _FakeDevbox) -> None:
         self._devbox = devbox
 
+    def _file_key(self, path: str) -> str:
+        normalized = PurePosixPath(path)
+        home = PurePosixPath(self._devbox.home_dir)
+        try:
+            relative = normalized.relative_to(home)
+        except ValueError:
+            return normalized.as_posix()
+        rel_str = relative.as_posix()
+        return rel_str if rel_str else "."
+
     async def download(self, *, path: str, timeout: float | None = None, **_: object) -> bytes:
         del timeout
-        if path not in self._devbox.files:
+        self._devbox.file_download_paths.append(path)
+        key = self._file_key(path)
+        if key not in self._devbox.files:
             raise _FakeNotFoundError(path)
-        return self._devbox.files[path]
+        return self._devbox.files[key]
 
     async def upload(
         self,
@@ -377,7 +389,8 @@ class _FakeFileInterface:
         **_: object,
     ) -> object:
         del timeout
-        self._devbox.files[path] = bytes(file)
+        self._devbox.file_upload_paths.append(path)
+        self._devbox.files[self._file_key(path)] = bytes(file)
         return {}
 
 
@@ -456,6 +469,8 @@ class _FakeDevbox:
         else:
             self.home_dir = "/home/user"
         self.files: dict[str, bytes] = {}
+        self.file_download_paths: list[str] = []
+        self.file_upload_paths: list[str] = []
         self.tunnel_key: str | None = None
         self.enable_tunnel_calls: list[dict[str, object]] = []
         self.exec_calls: list[tuple[str, dict[str, object]]] = []
@@ -2270,7 +2285,7 @@ class TestRunloopSandbox:
         assert "polling_config" in params
 
     @pytest.mark.asyncio
-    async def test_read_and_write_use_home_relative_paths(
+    async def test_read_and_write_use_normalized_absolute_paths(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -2289,6 +2304,38 @@ class TestRunloopSandbox:
 
         assert payload.read() == b"hello"
         assert devbox.files["project/output.txt"] == b"hello"
+        assert devbox.file_upload_paths == ["/home/user/project/output.txt"]
+        assert devbox.file_download_paths == ["/home/user/project/output.txt"]
+
+    @pytest.mark.asyncio
+    async def test_read_and_write_extra_path_grant_use_file_api_directly(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runloop_module = _load_runloop_module(monkeypatch)
+
+        async with runloop_module.RunloopSandboxClient() as client:
+            session = await client.create(
+                manifest=Manifest(
+                    root="/home/user/project",
+                    extra_path_grants=(SandboxPathGrant(path="/tmp"),),
+                ),
+                options=runloop_module.RunloopSandboxClientOptions(),
+            )
+            await session.start()
+            sdk = _FakeAsyncRunloopSDK.created_instances[-1]
+            devbox = sdk.devbox.devboxes[session.state.devbox_id]
+            exec_count = len(devbox.exec_calls)
+
+            await session.write("/tmp/output.txt", io.BytesIO(b"hello"))
+            payload = await session.read("/tmp/output.txt")
+
+        assert payload.read() == b"hello"
+        assert devbox.files["/tmp/output.txt"] == b"hello"
+        assert devbox.file_upload_paths == ["/tmp/output.txt"]
+        assert devbox.file_download_paths == ["/tmp/output.txt"]
+        assert len(devbox.exec_calls) == exec_count + 1
+        assert "mkdir -p -- /tmp" in devbox.exec_calls[-1][0]
 
     @pytest.mark.asyncio
     async def test_read_wraps_runloop_http_error_with_provider_context(

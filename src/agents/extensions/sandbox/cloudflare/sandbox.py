@@ -319,8 +319,8 @@ class CloudflareSandboxSession(BaseSandboxSession):
     def _current_runtime_helper_cache_key(self) -> object | None:
         return self.state.sandbox_id
 
-    async def _normalize_path_for_io(self, path: Path | str) -> Path:
-        return await self._normalize_path_for_remote_io(path)
+    async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
+        return await self._validate_remote_path_access(path, for_write=for_write)
 
     async def _resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
         """Cloudflare sandboxes do not yet support exposed port resolution."""
@@ -969,7 +969,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
         if user is not None:
             await self._check_read_with_exec(path, user=user)
 
-        workspace_path = await self._normalize_path_for_io(path)
+        workspace_path = await self._validate_path_access(path)
         http = self._session()
         url_path = quote(str(workspace_path).lstrip("/"), safe="/")
         url = self._url(f"file/{url_path}")
@@ -1040,7 +1040,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             raise WorkspaceWriteTypeError(path=path, actual_type=type(payload).__name__)
 
         payload_bytes = bytes(payload)
-        workspace_path = await self._normalize_path_for_io(path)
+        workspace_path = await self._validate_path_access(path, for_write=True)
 
         http = self._session()
         url_path = quote(str(workspace_path).lstrip("/"), safe="/")

@@ -364,7 +364,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
         if user is not None:
             path = await self._check_mkdir_with_exec(path, parents=parents, user=user)
         else:
-            path = self.normalize_path(path)
+            path = self.normalize_path(path, for_write=True)
         if path == Path("/"):
             return
         try:
@@ -811,7 +811,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
         if not isinstance(payload, bytes | bytearray):
             raise WorkspaceWriteTypeError(path=path, actual_type=type(payload).__name__)
 
-        workspace_path = self.normalize_path(path)
+        workspace_path = self.normalize_path(path, for_write=True)
         try:
             await self._sandbox.fs.upload_file(
                 bytes(payload),

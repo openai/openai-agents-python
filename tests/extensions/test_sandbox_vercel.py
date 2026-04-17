@@ -16,7 +16,7 @@ from pydantic import BaseModel, PrivateAttr
 from agents.sandbox import Manifest
 from agents.sandbox.entries import File, InContainerMountStrategy, Mount, MountpointMountPattern
 from agents.sandbox.entries.mounts.base import InContainerMountAdapter
-from agents.sandbox.errors import ConfigurationError
+from agents.sandbox.errors import ConfigurationError, InvalidManifestPathError
 from agents.sandbox.manifest import Environment
 from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
@@ -641,9 +641,9 @@ async def test_vercel_normalize_path_rejects_workspace_escape_and_allows_absolut
     )
     inner = session._inner
 
-    with pytest.raises(vercel_module.InvalidManifestPathError):
+    with pytest.raises(InvalidManifestPathError):
         inner.normalize_path("../outside.txt")
-    with pytest.raises(vercel_module.InvalidManifestPathError):
+    with pytest.raises(InvalidManifestPathError):
         inner.normalize_path("/etc/passwd")
 
     assert inner.normalize_path("/vercel/sandbox/project/nested/file.txt") == Path(
@@ -663,9 +663,9 @@ async def test_vercel_read_and_write_reject_paths_outside_workspace_root(
         options=vercel_module.VercelSandboxClientOptions(),
     )
 
-    with pytest.raises(vercel_module.InvalidManifestPathError):
+    with pytest.raises(InvalidManifestPathError):
         await session.read("../outside.txt")
-    with pytest.raises(vercel_module.InvalidManifestPathError):
+    with pytest.raises(InvalidManifestPathError):
         await session.write("/etc/passwd", io.BytesIO(b"nope"))
 
 

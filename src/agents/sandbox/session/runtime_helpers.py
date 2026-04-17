@@ -15,6 +15,7 @@ set -eu
 
 root="$1"
 candidate="$2"
+shift 2
 max_symlink_depth=64
 
 resolve_path() {
@@ -67,18 +68,39 @@ resolve_path() {
     printf '%s\\n' "$candidate_path"
 }
 
-resolved_root=$(resolve_path "$root" 0)
 resolved_candidate=$(resolve_path "$candidate" 0)
 
-case "$resolved_candidate" in
-    "$resolved_root"|"$resolved_root"/*)
-        printf '%s\\n' "$resolved_candidate"
-        ;;
-    *)
-        printf 'workspace escape: %s\\n' "$resolved_candidate" >&2
-        exit 111
-        ;;
-esac
+check_root() {
+    allowed_root="$1"
+    resolved_root=$(resolve_path "$allowed_root" 0)
+    case "$resolved_candidate" in
+        "$resolved_root"|"$resolved_root"/*)
+            printf '%s\\n' "$resolved_candidate"
+            exit 0
+            ;;
+    esac
+}
+
+reject_root_grant() {
+    allowed_root="$1"
+    resolved_root=$(resolve_path "$allowed_root" 0)
+    if [ "$resolved_root" = "/" ]; then
+        printf 'extra path grant must not resolve to filesystem root: %s\\n' "$allowed_root" >&2
+        exit 113
+    fi
+}
+
+for extra_root in "$@"; do
+    reject_root_grant "$extra_root"
+done
+
+check_root "$root"
+for extra_root in "$@"; do
+    check_root "$extra_root"
+done
+
+printf 'workspace escape: %s\\n' "$resolved_candidate" >&2
+exit 111
 """.strip()
 
 _WORKSPACE_FINGERPRINT_SCRIPT: Final[str] = """
