@@ -26,6 +26,34 @@ class TestCompactionCapability:
         }
         assert isinstance(capability.policy, StaticCompactionPolicy)
 
+    def test_sampling_params_infers_hyphenated_model_threshold(self) -> None:
+        capability = Compaction()
+
+        sampling_params = capability.sampling_params({"model": "gpt-5-2"})
+
+        assert sampling_params == {
+            "context_management": [
+                {
+                    "type": "compaction",
+                    "compact_threshold": 360_000,
+                }
+            ]
+        }
+
+    def test_sampling_params_falls_back_for_unknown_model(self) -> None:
+        capability = Compaction()
+
+        sampling_params = capability.sampling_params({"model": "azure-prod-deployment"})
+
+        assert sampling_params == {
+            "context_management": [
+                {
+                    "type": "compaction",
+                    "compact_threshold": 240_000,
+                }
+            ]
+        }
+
     def test_process_context_keeps_items_from_last_compaction(self) -> None:
         """Tests compaction truncates history to the last compaction item, inclusive."""
 
