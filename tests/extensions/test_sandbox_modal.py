@@ -227,7 +227,7 @@ def _load_modal_module(
                     wait=_with_aio(lambda: 0),
                 )
             if command and command[0] == resolve_helper_path:
-                stdout = str(command[-1]).encode("utf-8")
+                stdout = str(command[2]).encode("utf-8")
             if command and command[0] == fingerprint_helper_path:
                 stdout = (
                     b'{"fingerprint":"fake-workspace-fingerprint",'
@@ -1657,7 +1657,7 @@ async def test_modal_normalize_path_preserves_safe_leaf_symlink_path(
 
     monkeypatch.setattr(session, "exec", _fake_exec)
 
-    normalized = await session._normalize_path_for_io("link.txt")  # noqa: SLF001
+    normalized = await session._validate_path_access("link.txt")  # noqa: SLF001
 
     assert normalized == Path("/workspace/link.txt")
 
@@ -1694,7 +1694,7 @@ async def test_modal_normalize_path_rejects_symlink_escape(
     monkeypatch.setattr(session, "exec", _fake_exec)
 
     with pytest.raises(InvalidManifestPathError, match="must not escape root"):
-        await session._normalize_path_for_io("link/secret.txt")  # noqa: SLF001
+        await session._validate_path_access("link/secret.txt")  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -1735,16 +1735,16 @@ async def test_modal_normalize_path_reinstalls_helper_after_runtime_replacement(
 
     monkeypatch.setattr(session, "exec", _fake_exec)
 
-    assert await session._normalize_path_for_io("link.txt") == Path("/workspace/link.txt")
+    assert await session._validate_path_access("link.txt") == Path("/workspace/link.txt")
     first_run_commands = list(commands)
     commands.clear()
 
     state.sandbox_id = None
-    assert await session._normalize_path_for_io("link.txt") == Path("/workspace/link.txt")
+    assert await session._validate_path_access("link.txt") == Path("/workspace/link.txt")
     second_run_commands = list(commands)
     commands.clear()
 
-    assert await session._normalize_path_for_io("link.txt") == Path("/workspace/link.txt")
+    assert await session._validate_path_access("link.txt") == Path("/workspace/link.txt")
 
     helper_path = str(RESOLVE_WORKSPACE_PATH_HELPER.install_path)
     assert any(
@@ -1758,7 +1758,7 @@ async def test_modal_normalize_path_reinstalls_helper_after_runtime_replacement(
     assert any(cmd and cmd[0] == helper_path for cmd in second_run_commands)
     assert commands == [
         ["test", "-x", helper_path],
-        [helper_path, "/workspace", "/workspace/link.txt"],
+        [helper_path, "/workspace", "/workspace/link.txt", "0"],
     ]
 
 

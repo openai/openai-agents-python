@@ -57,6 +57,7 @@ from ..util.tar_utils import (
     safe_extract_tarfile,
     should_skip_tar_member,
 )
+from ..workspace_paths import _raise_if_filesystem_root
 
 _DEFAULT_WORKSPACE_PREFIX = "sandbox-local-"
 _DEFAULT_MANIFEST_ROOT = cast(str, Manifest.model_fields["root"].default)
@@ -587,6 +588,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 command_parts=command_parts,
                 env=env,
             ),
+            extra_path_grants=self._darwin_extra_path_grant_roots(),
         )
         return [sandbox_exec, "-p", profile, *command_parts]
 
@@ -688,11 +690,38 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         _append(executable)
         return allowed
 
+    def _darwin_extra_path_grant_roots(self) -> list[tuple[Path, bool]]:
+        roots: list[tuple[Path, bool]] = []
+        seen: set[tuple[str, bool]] = set()
+
+        def _append(path: Path, *, read_only: bool) -> None:
+            _raise_if_filesystem_root(path, resolved=True)
+            key = (path.as_posix(), read_only)
+            if key in seen:
+                return
+            seen.add(key)
+            roots.append((path, read_only))
+
+        for grant in self.state.manifest.extra_path_grants:
+            grant_path = Path(grant.path).expanduser()
+            try:
+                resolved = grant_path.resolve(strict=False)
+            except OSError:
+                _append(grant_path, read_only=grant.read_only)
+                continue
+            _raise_if_filesystem_root(resolved, resolved=True)
+            _append(grant_path, read_only=grant.read_only)
+            if resolved != grant_path:
+                _append(resolved, read_only=grant.read_only)
+
+        return roots
+
     def _darwin_exec_profile(
         self,
         workspace_root: Path,
         *,
         extra_read_paths: Sequence[Path] = (),
+        extra_path_grants: Sequence[tuple[Path, bool]] = (),
     ) -> str:
         def _literal(path: Path | str) -> str:
             escaped = str(path).replace("\\", "\\\\").replace('"', '\\"')
@@ -718,6 +747,20 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             *[
                 f"(allow file-read-data file-read-metadata (subpath {_literal(path)}))"
                 for path in extra_read_paths
+            ],
+            *[
+                f"(allow file-read-data file-read-metadata (subpath {_literal(path)}))"
+                for path, _read_only in extra_path_grants
+            ],
+            *[
+                f"(allow file-write* (subpath {_literal(path)}))"
+                for path, read_only in extra_path_grants
+                if not read_only
+            ],
+            *[
+                f"(deny file-write* (subpath {_literal(path)}))"
+                for path, read_only in extra_path_grants
+                if read_only
             ],
             '(allow file-read-data file-read-metadata (subpath "/usr/bin"))',
             '(allow file-read-data file-read-metadata (subpath "/usr/lib"))',
@@ -755,8 +798,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         rewritten[2] = workspace_cd
         return "/", rewritten
 
-    def normalize_path(self, path: Path | str) -> Path:
-        return self._workspace_path_policy().normalize_path_for_host_io(path)
+    def normalize_path(self, path: Path | str, *, for_write: bool = False) -> Path:
+        policy = self._workspace_path_policy()
+        return policy.normalize_path(path, for_write=for_write, resolve_symlinks=True)
 
     async def ls(
         self,
@@ -810,7 +854,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         if user is not None:
             normalized = await self._check_mkdir_with_exec(path, parents=parents, user=user)
         else:
-            normalized = self.normalize_path(path)
+            normalized = self.normalize_path(path, for_write=True)
         try:
             normalized.mkdir(parents=parents, exist_ok=True)
         except OSError as e:
@@ -826,7 +870,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         if user is not None:
             normalized = await self._check_rm_with_exec(path, recursive=recursive, user=user)
         else:
-            normalized = self.normalize_path(path)
+            normalized = self.normalize_path(path, for_write=True)
         try:
             if normalized.is_dir() and not normalized.is_symlink():
                 if recursive:
@@ -867,7 +911,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     ) -> None:
         payload = coerce_write_payload(path=path, data=data)
 
-        workspace_path = self.normalize_path(path)
+        workspace_path = self.normalize_path(path, for_write=True)
         if user is not None:
             await self._write_stream_with_exec(workspace_path, payload.stream, user=user)
             return

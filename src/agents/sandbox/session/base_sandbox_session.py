@@ -111,7 +111,9 @@ class BaseSandboxSession(abc.ABC):
     _pre_stop_hooks_ran: bool = False
     _runtime_helpers_installed: set[Path] | None = None
     _runtime_helper_cache_key: object = _RUNTIME_HELPER_CACHE_KEY_UNSET
-    _workspace_path_policy_cache: tuple[str, WorkspacePathPolicy] | None = None
+    _workspace_path_policy_cache: (
+        tuple[str, tuple[tuple[str, bool], ...], WorkspacePathPolicy] | None
+    ) = None
     # True when start() is reusing a backend whose workspace files may still be present.
     # This controls whether start() can avoid a full manifest apply for non-snapshot resumes.
     _start_workspace_state_preserved: bool = False
@@ -669,39 +671,68 @@ class BaseSandboxSession(abc.ABC):
 
     def _workspace_path_policy(self) -> WorkspacePathPolicy:
         root = self.state.manifest.root
+        grants_key = tuple(
+            (grant.path, grant.read_only) for grant in self.state.manifest.extra_path_grants
+        )
         cached = self._workspace_path_policy_cache
-        if cached is not None and cached[0] == root:
-            return cached[1]
+        if cached is not None and cached[0] == root and cached[1] == grants_key:
+            return cached[2]
 
-        policy = WorkspacePathPolicy(root=root)
-        self._workspace_path_policy_cache = (root, policy)
+        policy = WorkspacePathPolicy(
+            root=root,
+            extra_path_grants=self.state.manifest.extra_path_grants,
+        )
+        self._workspace_path_policy_cache = (root, grants_key, policy)
         return policy
 
-    async def _normalize_path_for_io(self, path: Path | str) -> Path:
-        return self.normalize_path(path)
+    async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
+        return self.normalize_path(path, for_write=for_write)
 
-    async def _normalize_path_for_remote_io(self, path: Path | str) -> Path:
-        """Validate a workspace path against the remote sandbox filesystem before IO.
+    async def _validate_remote_path_access(
+        self,
+        path: Path | str,
+        *,
+        for_write: bool = False,
+    ) -> Path:
+        """Validate an SDK file path against the remote sandbox filesystem before IO.
 
         The returned path is the normalized workspace path, not the resolved realpath. This keeps
         safe leaf symlink operations working normally, such as removing a symlink instead of its
-        target, while still rejecting paths whose resolved remote target escapes the workspace.
+        target, while still rejecting paths whose resolved remote target escapes all allowed roots.
         """
 
         original_path = Path(path)
         root = Path(self.state.manifest.root)
-        workspace_path = self._workspace_path_policy().absolute_workspace_path(original_path)
+        path_policy = self._workspace_path_policy()
+        workspace_path = path_policy.normalize_path(original_path, for_write=for_write)
         helper_path = await self._ensure_runtime_helper_installed(RESOLVE_WORKSPACE_PATH_HELPER)
-        command = (str(helper_path), str(root), str(workspace_path))
+        extra_grant_args = tuple(
+            arg
+            for root, read_only in path_policy.extra_path_grant_rules()
+            for arg in (str(root), "1" if read_only else "0")
+        )
+        command = (
+            str(helper_path),
+            str(root),
+            str(workspace_path),
+            "1" if for_write else "0",
+            *extra_grant_args,
+        )
         result = await self.exec(*command, shell=False)
         if result.ok():
             resolved = result.stdout.decode("utf-8", errors="replace").strip()
             if resolved:
                 # Preserve the requested workspace path so leaf symlinks keep their normal
-                # semantics while the remote realpath check still enforces workspace confinement.
+                # semantics while the remote realpath check still enforces path confinement.
                 return workspace_path
             raise ExecTransportError(
-                command=("resolve_workspace_path", str(root), str(workspace_path)),
+                command=(
+                    "resolve_workspace_path",
+                    str(root),
+                    str(workspace_path),
+                    "1" if for_write else "0",
+                    *extra_grant_args,
+                ),
                 context={
                     "reason": "empty_stdout",
                     "exit_code": result.exit_code,
@@ -721,8 +752,26 @@ class BaseSandboxSession(abc.ABC):
                     "resolved_path": result.stderr.decode("utf-8", errors="replace").strip(),
                 },
             )
+        if result.exit_code == 113:
+            raise ValueError(result.stderr.decode("utf-8", errors="replace").strip())
+        if result.exit_code == 114:
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            context: dict[str, object] = {"reason": "read_only_extra_path_grant"}
+            for line in stderr.splitlines():
+                if line.startswith("read-only extra path grant: "):
+                    context["grant_path"] = line.removeprefix("read-only extra path grant: ")
+                elif line.startswith("resolved path: "):
+                    context["resolved_path"] = line.removeprefix("resolved path: ")
+            raise WorkspaceArchiveWriteError(path=workspace_path, context=context)
         raise ExecNonZeroError(
-            result, command=("resolve_workspace_path", str(root), str(workspace_path))
+            result,
+            command=(
+                "resolve_workspace_path",
+                str(root),
+                str(workspace_path),
+                "1" if for_write else "0",
+                *extra_grant_args,
+            ),
         )
 
     @abc.abstractmethod
@@ -753,7 +802,7 @@ class BaseSandboxSession(abc.ABC):
         """
 
     async def _check_read_with_exec(self, path: Path, *, user: str | User | None = None) -> Path:
-        workspace_path = await self._normalize_path_for_io(path)
+        workspace_path = await self._validate_path_access(path)
         cmd = ("sh", "-lc", '[ -r "$1" ]', "sh", str(workspace_path))
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
@@ -768,7 +817,7 @@ class BaseSandboxSession(abc.ABC):
         return workspace_path
 
     async def _check_write_with_exec(self, path: Path, *, user: str | User | None = None) -> Path:
-        workspace_path = await self._normalize_path_for_io(path)
+        workspace_path = await self._validate_path_access(path, for_write=True)
         cmd = ("sh", "-lc", _WRITE_ACCESS_CHECK_SCRIPT, "sh", str(workspace_path))
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
@@ -789,7 +838,7 @@ class BaseSandboxSession(abc.ABC):
         parents: bool = False,
         user: str | User | None = None,
     ) -> Path:
-        workspace_path = await self._normalize_path_for_io(path)
+        workspace_path = await self._validate_path_access(path, for_write=True)
         parents_flag = "1" if parents else "0"
         cmd = ("sh", "-lc", _MKDIR_ACCESS_CHECK_SCRIPT, "sh", str(workspace_path), parents_flag)
         result = await self.exec(*cmd, shell=False, user=user)
@@ -817,7 +866,7 @@ class BaseSandboxSession(abc.ABC):
         recursive: bool = False,
         user: str | User | None = None,
     ) -> Path:
-        workspace_path = await self._normalize_path_for_io(path)
+        workspace_path = await self._validate_path_access(path, for_write=True)
         recursive_flag = "1" if recursive else "0"
         cmd = ("sh", "-lc", _RM_ACCESS_CHECK_SCRIPT, "sh", str(workspace_path), recursive_flag)
         result = await self.exec(*cmd, shell=False, user=user)
@@ -873,7 +922,7 @@ class BaseSandboxSession(abc.ABC):
         :param user: Optional sandbox user to list as.
         :returns: A list of `FileEntry` objects.
         """
-        path = await self._normalize_path_for_io(path)
+        path = await self._validate_path_access(path)
 
         cmd = ("ls", "-la", "--", str(path))
         result = await self.exec(*cmd, shell=False, user=user)
@@ -895,7 +944,7 @@ class BaseSandboxSession(abc.ABC):
         :param recursive: If true, remove directories recursively.
         :param user: Optional sandbox user to remove as.
         """
-        path = await self._normalize_path_for_io(path)
+        path = await self._validate_path_access(path, for_write=True)
 
         cmd: list[str] = ["rm"]
         if recursive:
@@ -919,7 +968,7 @@ class BaseSandboxSession(abc.ABC):
         :param parents: If true, create missing parents.
         :param user: Optional sandbox user to create the directory as.
         """
-        path = await self._normalize_path_for_io(path)
+        path = await self._validate_path_access(path, for_write=True)
 
         cmd: list[str] = ["mkdir"]
         if parents:
@@ -956,7 +1005,7 @@ class BaseSandboxSession(abc.ABC):
         if compression_scheme is None or compression_scheme not in ["zip", "tar"]:
             raise InvalidCompressionSchemeError(path=path, scheme=compression_scheme)
 
-        normalized_path = await self._normalize_path_for_io(path)
+        normalized_path = await self._validate_path_access(path, for_write=True)
         destination_root = normalized_path.parent
 
         # Materialize the archive into a local spool once because both `write()` and the
@@ -993,8 +1042,9 @@ class BaseSandboxSession(abc.ABC):
     ) -> str:
         return await WorkspaceEditor(self).apply_patch(operations, patch_format=patch_format)
 
-    def normalize_path(self, path: Path | str) -> Path:
-        return self._workspace_path_policy().absolute_workspace_path(path)
+    def normalize_path(self, path: Path | str, *, for_write: bool = False) -> Path:
+        policy = self._workspace_path_policy()
+        return policy.normalize_path(path, for_write=for_write)
 
     def describe(self) -> str:
         return self.state.manifest.describe()

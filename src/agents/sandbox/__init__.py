@@ -26,6 +26,7 @@ from .snapshot import (
     resolve_snapshot,
 )
 from .types import ExecResult, ExposedPortEndpoint, FileMode, Group, Permissions, User
+from .workspace_paths import SandboxPathGrant
 
 __all__ = [
     "Capability",
@@ -49,6 +50,7 @@ __all__ = [
     "RemoteSnapshotSpec",
     "Permissions",
     "SandboxAgent",
+    "SandboxPathGrant",
     "SandboxConcurrencyLimits",
     "SandboxError",
     "SandboxRunConfig",

@@ -39,7 +39,6 @@ from ....sandbox.errors import (
     ExecTimeoutError,
     ExecTransportError,
     ExposedPortUnavailableError,
-    InvalidManifestPathError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
@@ -50,6 +49,7 @@ from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
+from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
 from ....sandbox.snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from ....sandbox.types import ExecResult, ExposedPortEndpoint, User
@@ -707,18 +707,11 @@ class RunloopSandboxSession(BaseSandboxSession):
     def supports_pty(self) -> bool:
         return False
 
-    def _path_relative_to_home(self, path: Path | str) -> str:
-        normalized = PurePosixPath(str(self.normalize_path(path)))
-        try:
-            relative = normalized.relative_to(self.runloop_home)
-        except ValueError as e:
-            raise InvalidManifestPathError(
-                rel=Path(str(normalized)),
-                reason="absolute",
-                cause=e,
-            ) from e
-        rel_str = relative.as_posix()
-        return rel_str if rel_str else "."
+    async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
+        return await self._validate_remote_path_access(path, for_write=for_write)
+
+    def _runtime_helpers(self) -> tuple[RuntimeHelperScript, ...]:
+        return (RESOLVE_WORKSPACE_PATH_HELPER,)
 
     async def _wrap_command_in_workspace_context(self, command: str) -> str:
         root_q = shlex.quote(self.state.manifest.root)
@@ -876,19 +869,15 @@ class RunloopSandboxSession(BaseSandboxSession):
             ) from e
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
-        """Read a file via Runloop's binary file API using home-relative addressing.
-
-        Callers use manifest-root paths, and the backend converts them into the relative file paths
-        that Runloop expects when downloading workspace contents from the devbox.
-        """
+        """Read a file via Runloop's binary file API."""
         path = Path(path)
         if user is not None:
             await self._check_read_with_exec(path, user=user)
 
-        rel_path = self._path_relative_to_home(path)
+        normalized_path = await self._validate_path_access(path)
         try:
             payload = await self._devbox.file.download(
-                path=rel_path,
+                path=str(normalized_path),
                 timeout=self.state.timeouts.file_download_s,
             )
             return io.BytesIO(bytes(payload))
@@ -914,11 +903,7 @@ class RunloopSandboxSession(BaseSandboxSession):
         *,
         user: str | User | None = None,
     ) -> None:
-        """Write a file through Runloop's upload API using manifest-root workspace paths.
-
-        The session ensures parent directories exist inside the devbox, then translates the target
-        into the active home-relative path that Runloop's file upload endpoint accepts.
-        """
+        """Write a file through Runloop's upload API using manifest-root workspace paths."""
         path = Path(path)
         if user is not None:
             await self._check_write_with_exec(path, user=user)
@@ -929,12 +914,11 @@ class RunloopSandboxSession(BaseSandboxSession):
         if not isinstance(payload, bytes | bytearray):
             raise WorkspaceWriteTypeError(path=path, actual_type=type(payload).__name__)
 
-        workspace_path = self.normalize_path(path)
-        rel_path = self._path_relative_to_home(workspace_path)
+        workspace_path = await self._validate_path_access(path, for_write=True)
         await self.mkdir(workspace_path.parent, parents=True)
         try:
             await self._devbox.file.upload(
-                path=rel_path,
+                path=str(workspace_path),
                 file=bytes(payload),
                 timeout=self.state.timeouts.file_upload_s,
             )
@@ -973,7 +957,7 @@ class RunloopSandboxSession(BaseSandboxSession):
         if user is not None:
             path = await self._check_mkdir_with_exec(path, parents=parents, user=user)
         else:
-            path = self.normalize_path(path)
+            path = await self._validate_path_access(path, for_write=True)
         cmd = ["mkdir"]
         if parents:
             cmd.append("-p")

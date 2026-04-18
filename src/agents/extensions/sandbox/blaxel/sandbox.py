@@ -54,6 +54,7 @@ from ....sandbox.session.pty_types import (
     resolve_pty_write_yield_time_ms,
     truncate_text_by_tokens,
 )
+from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ....sandbox.session.sandbox_client import BaseSandboxClient
 from ....sandbox.snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from ....sandbox.types import ExecResult, ExposedPortEndpoint, User
@@ -345,6 +346,12 @@ class BlaxelSandboxSession(BaseSandboxSession):
         except Exception as e:
             logger.warning("sandbox delete failed during shutdown: %s", e)
 
+    async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
+        return await self._validate_remote_path_access(path, for_write=for_write)
+
+    def _runtime_helpers(self) -> tuple[RuntimeHelperScript, ...]:
+        return (RESOLVE_WORKSPACE_PATH_HELPER,)
+
     # -- file operations -----------------------------------------------------
 
     async def mkdir(
@@ -357,7 +364,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
         if user is not None:
             path = await self._check_mkdir_with_exec(path, parents=parents, user=user)
         else:
-            path = self.normalize_path(path)
+            path = await self._validate_path_access(path, for_write=True)
         if path == Path("/"):
             return
         try:
@@ -372,9 +379,10 @@ class BlaxelSandboxSession(BaseSandboxSession):
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         path = Path(path)
         if user is not None:
-            await self._check_read_with_exec(path, user=user)
+            workspace_path = await self._check_read_with_exec(path, user=user)
+        else:
+            workspace_path = await self._validate_path_access(path)
 
-        workspace_path = self.normalize_path(path)
         try:
             data: Any = await self._sandbox.fs.read_binary(str(workspace_path))
             if isinstance(data, str):
@@ -409,7 +417,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
         if not isinstance(payload, bytes | bytearray):
             raise WorkspaceWriteTypeError(path=path, actual_type=type(payload).__name__)
 
-        workspace_path = self.normalize_path(path)
+        workspace_path = await self._validate_path_access(path, for_write=True)
         try:
             await self._sandbox.fs.write_binary(str(workspace_path), bytes(payload))
         except Exception as e:

@@ -267,8 +267,8 @@ class SandboxSession(BaseSandboxSession):
         super()._set_concurrency_limits(limits)
         self._inner._set_concurrency_limits(limits)
 
-    def normalize_path(self, path: Path | str) -> Path:
-        return self._inner.normalize_path(path)
+    def normalize_path(self, path: Path | str, *, for_write: bool = False) -> Path:
+        return self._inner.normalize_path(path, for_write=for_write)
 
     def supports_pty(self) -> bool:
         return self._inner.supports_pty()
@@ -559,8 +559,8 @@ class SandboxSession(BaseSandboxSession):
     async def pty_terminate_all(self) -> None:
         await self._inner.pty_terminate_all()
 
-    async def _normalize_path_for_io(self, path: Path | str) -> Path:
-        return await self._inner._normalize_path_for_io(path)
+    async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
+        return await self._inner._validate_path_access(path, for_write=for_write)
 
     async def ls(
         self,

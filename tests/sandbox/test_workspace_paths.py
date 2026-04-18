@@ -4,10 +4,13 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
 
-from agents.sandbox.errors import InvalidManifestPathError
+from agents.sandbox import Manifest, SandboxPathGrant
+from agents.sandbox.errors import InvalidManifestPathError, WorkspaceArchiveWriteError
 from agents.sandbox.workspace_paths import WorkspacePathPolicy
 
 PathInput = str | Path
@@ -163,7 +166,7 @@ def test_relative_path(test_case: WorkspacePathCase) -> None:
     )
 
 
-def test_normalize_path_for_host_io(tmp_path: Path) -> None:
+def test_normalize_path_with_symlink_resolution(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"
     workspace.mkdir()
@@ -219,7 +222,180 @@ def test_normalize_path_for_host_io(tmp_path: Path) -> None:
 
     for test_case in test_cases:
         _assert_workspace_path_case(
-            method=lambda policy, path: policy.normalize_path_for_host_io(path),
+            method=lambda policy, path: policy.normalize_path(path, resolve_symlinks=True),
             test_case=test_case,
             root=alias,
         )
+
+
+def test_manifest_serializes_extra_path_grants() -> None:
+    manifest = Manifest(
+        extra_path_grants=(
+            SandboxPathGrant(
+                path="/tmp",
+                description="temporary files",
+            ),
+            SandboxPathGrant(
+                path="/opt/toolchain",
+                read_only=True,
+                description="compiler runtime",
+            ),
+        ),
+    )
+
+    assert manifest.model_dump(mode="json")["extra_path_grants"] == [
+        {
+            "path": "/tmp",
+            "read_only": False,
+            "description": "temporary files",
+        },
+        {
+            "path": "/opt/toolchain",
+            "read_only": True,
+            "description": "compiler runtime",
+        },
+    ]
+
+
+def test_extra_path_grant_accepts_absolute_path() -> None:
+    policy = WorkspacePathPolicy(
+        root="/workspace",
+        extra_path_grants=(SandboxPathGrant(path="/tmp"),),
+    )
+
+    assert policy.normalize_path("/tmp/result.txt") == Path("/tmp/result.txt")
+
+
+def test_extra_path_grant_rejects_ungranted_absolute_path() -> None:
+    policy = WorkspacePathPolicy(
+        root="/workspace",
+        extra_path_grants=(SandboxPathGrant(path="/tmp"),),
+    )
+
+    with pytest.raises(InvalidManifestPathError) as exc_info:
+        policy.normalize_path("/var/result.txt")
+
+    assert str(exc_info.value) == "manifest path must be relative: /var/result.txt"
+    assert exc_info.value.context == {"rel": "/var/result.txt", "reason": "absolute"}
+
+
+def test_extra_path_grant_rejects_write_under_read_only_grant() -> None:
+    policy = WorkspacePathPolicy(
+        root="/workspace",
+        extra_path_grants=(SandboxPathGrant(path="/opt/toolchain", read_only=True),),
+    )
+
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+        policy.normalize_path("/opt/toolchain/cache.db", for_write=True)
+
+    assert str(exc_info.value) == "failed to write archive for path: /opt/toolchain/cache.db"
+    assert exc_info.value.context == {
+        "path": "/opt/toolchain/cache.db",
+        "reason": "read_only_extra_path_grant",
+        "grant_path": "/opt/toolchain",
+    }
+
+
+def test_extra_path_grant_allows_read_under_read_only_grant() -> None:
+    policy = WorkspacePathPolicy(
+        root="/workspace",
+        extra_path_grants=(SandboxPathGrant(path="/opt/toolchain", read_only=True),),
+    )
+
+    assert policy.normalize_path("/opt/toolchain/cache.db") == Path("/opt/toolchain/cache.db")
+
+
+def test_host_io_rejects_write_under_resolved_read_only_extra_path_grant(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    allowed = tmp_path / "allowed"
+    grant_alias = tmp_path / "allowed-alias"
+    workspace.mkdir()
+    allowed.mkdir()
+    os.symlink(allowed, grant_alias, target_is_directory=True)
+    target = allowed / "cache.db"
+    policy = WorkspacePathPolicy(
+        root=workspace,
+        extra_path_grants=(SandboxPathGrant(path=str(grant_alias), read_only=True),),
+    )
+
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+        policy.normalize_path(target, for_write=True, resolve_symlinks=True)
+
+    assert str(exc_info.value) == f"failed to write archive for path: {target}"
+    assert exc_info.value.context == {
+        "path": str(target),
+        "reason": "read_only_extra_path_grant",
+        "grant_path": str(grant_alias),
+    }
+
+
+def test_extra_path_grant_rejects_relative_path() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        SandboxPathGrant(path="tmp")
+
+    errors = exc_info.value.errors(include_url=False)
+    assert len(errors) == 1
+    error = dict(errors[0])
+    ctx = cast(dict[str, Any], error["ctx"])
+    error["ctx"] = {"error": str(ctx["error"])}
+    assert error == {
+        "type": "value_error",
+        "loc": ("path",),
+        "msg": "Value error, sandbox path grant path must be absolute",
+        "input": "tmp",
+        "ctx": {"error": "sandbox path grant path must be absolute"},
+    }
+
+
+def test_extra_path_grant_rejects_root_path() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        SandboxPathGrant(path="/")
+
+    errors = exc_info.value.errors(include_url=False)
+    assert len(errors) == 1
+    error = dict(errors[0])
+    ctx = cast(dict[str, Any], error["ctx"])
+    error["ctx"] = {"error": str(ctx["error"])}
+    assert error == {
+        "type": "value_error",
+        "loc": ("path",),
+        "msg": "Value error, sandbox path grant path must not be filesystem root",
+        "input": "/",
+        "ctx": {"error": "sandbox path grant path must not be filesystem root"},
+    }
+
+
+def test_extra_path_grant_rejects_root_alias_path() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        SandboxPathGrant(path="//")
+
+    errors = exc_info.value.errors(include_url=False)
+    assert len(errors) == 1
+    error = dict(errors[0])
+    ctx = cast(dict[str, Any], error["ctx"])
+    error["ctx"] = {"error": str(ctx["error"])}
+    assert error == {
+        "type": "value_error",
+        "loc": ("path",),
+        "msg": "Value error, sandbox path grant path must not be filesystem root",
+        "input": "//",
+        "ctx": {"error": "sandbox path grant path must not be filesystem root"},
+    }
+
+
+def test_host_io_rejects_extra_path_grant_symlink_to_root(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    root_alias = tmp_path / "root-alias"
+    workspace.mkdir()
+    os.symlink(Path("/"), root_alias, target_is_directory=True)
+    policy = WorkspacePathPolicy(
+        root=workspace,
+        extra_path_grants=(SandboxPathGrant(path=str(root_alias)),),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        policy.normalize_path(Path("/etc/passwd"), resolve_symlinks=True)
+
+    assert str(exc_info.value) == "sandbox path grant path must not resolve to filesystem root"

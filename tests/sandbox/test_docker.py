@@ -20,6 +20,7 @@ import pytest
 from pydantic import Field, PrivateAttr
 
 import agents.sandbox.sandboxes.docker as docker_sandbox
+from agents.sandbox import SandboxPathGrant
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 from agents.sandbox.entries import (
     AzureBlobMount,
@@ -326,17 +327,63 @@ class _HostBackedDockerSession(DockerSandboxSession):
         if cmd == ["test", "-x", helper_path]:
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
         if cmd and cmd[0] == helper_path:
-            root = self._host_path(cmd[1]).resolve(strict=False)
+            for_write = cmd[3]
             candidate = self._host_path(cmd[2]).resolve(strict=False)
+            workspace_root = self._host_path(cmd[1]).resolve(strict=False)
             try:
-                candidate.relative_to(root)
+                candidate.relative_to(workspace_root)
             except ValueError:
-                return ExecResult(stdout=b"", stderr=b"workspace escape", exit_code=111)
-            return ExecResult(
-                stdout=str(self._container_path(candidate)).encode("utf-8"),
-                stderr=b"",
-                exit_code=0,
-            )
+                pass
+            else:
+                return ExecResult(
+                    stdout=str(self._container_path(candidate)).encode("utf-8"),
+                    stderr=b"",
+                    exit_code=0,
+                )
+
+            best_root: Path | None = None
+            best_original = ""
+            best_read_only = False
+            grant_args = cmd[4:]
+            assert len(grant_args) % 2 == 0
+            for original_root, read_only_text in zip(
+                grant_args[::2],
+                grant_args[1::2],
+                strict=False,
+            ):
+                root = self._host_path(original_root).resolve(strict=False)
+                if root == root.parent:
+                    return ExecResult(
+                        stdout=b"",
+                        stderr=(
+                            f"extra path grant must not resolve to filesystem root: {original_root}"
+                        ).encode(),
+                        exit_code=113,
+                    )
+                try:
+                    candidate.relative_to(root)
+                except ValueError:
+                    continue
+                if best_root is None or len(root.parts) > len(best_root.parts):
+                    best_root = root
+                    best_original = original_root
+                    best_read_only = read_only_text == "1"
+            if best_root is not None:
+                if for_write == "1" and best_read_only:
+                    return ExecResult(
+                        stdout=b"",
+                        stderr=(
+                            f"read-only extra path grant: {best_original}\n"
+                            f"resolved path: {self._container_path(candidate)}\n"
+                        ).encode(),
+                        exit_code=114,
+                    )
+                return ExecResult(
+                    stdout=str(self._container_path(candidate)).encode("utf-8"),
+                    stderr=b"",
+                    exit_code=0,
+                )
+            return ExecResult(stdout=b"", stderr=b"workspace escape", exit_code=111)
         if cmd[:2] == ["mkdir", "-p"]:
             self._host_path(cmd[2]).mkdir(parents=True, exist_ok=True)
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
@@ -377,7 +424,7 @@ class _HostBackedDockerSession(DockerSandboxSession):
         user: object = None,
     ) -> list[FileEntry]:
         _ = user
-        container_path = await self._normalize_path_for_io(path)
+        container_path = await self._validate_path_access(path)
         host_path = self._host_path(container_path)
         entries: list[FileEntry] = []
         for child in sorted(host_path.iterdir()):
@@ -930,9 +977,130 @@ async def test_docker_normalize_path_preserves_safe_leaf_symlink_path(tmp_path: 
         manifest=Manifest(root="/workspace"),
     )
 
-    normalized = await session._normalize_path_for_io(Path("link.txt"))  # noqa: SLF001
+    normalized = await session._validate_path_access(Path("link.txt"))  # noqa: SLF001
 
     assert normalized == Path("/workspace/link.txt")
+
+
+@pytest.mark.asyncio
+async def test_docker_read_allows_extra_path_grant(tmp_path: Path) -> None:
+    host_root = tmp_path / "container"
+    workspace = host_root / "workspace"
+    extra_root = host_root / "tmp"
+    workspace.mkdir(parents=True)
+    extra_root.mkdir(parents=True)
+    (extra_root / "result.txt").write_text("scratch output", encoding="utf-8")
+
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(
+            root="/workspace",
+            extra_path_grants=(SandboxPathGrant(path="/tmp"),),
+        ),
+    )
+
+    data = await session.read(Path("/tmp/result.txt"))
+
+    assert data.read() == b"scratch output"
+
+
+@pytest.mark.asyncio
+async def test_docker_write_rejects_read_only_extra_path_grant(tmp_path: Path) -> None:
+    host_root = tmp_path / "container"
+    workspace = host_root / "workspace"
+    extra_root = host_root / "tmp"
+    workspace.mkdir(parents=True)
+    extra_root.mkdir(parents=True)
+
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(
+            root="/workspace",
+            extra_path_grants=(SandboxPathGrant(path="/tmp", read_only=True),),
+        ),
+    )
+
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+        await session.write(Path("/tmp/result.txt"), io.BytesIO(b"scratch output"))
+
+    assert str(exc_info.value) == "failed to write archive for path: /tmp/result.txt"
+    assert exc_info.value.context == {
+        "path": "/tmp/result.txt",
+        "reason": "read_only_extra_path_grant",
+        "grant_path": "/tmp",
+    }
+
+
+@pytest.mark.asyncio
+async def test_docker_write_rejects_workspace_symlink_to_read_only_extra_path_grant(
+    tmp_path: Path,
+) -> None:
+    host_root = tmp_path / "container"
+    workspace = host_root / "workspace"
+    extra_root = host_root / "tmp"
+    workspace.mkdir(parents=True)
+    extra_root.mkdir(parents=True)
+    (workspace / "tmp-link").symlink_to(extra_root, target_is_directory=True)
+
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(
+            root="/workspace",
+            extra_path_grants=(SandboxPathGrant(path="/tmp", read_only=True),),
+        ),
+    )
+
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+        await session.write(Path("tmp-link/result.txt"), io.BytesIO(b"scratch output"))
+
+    assert str(exc_info.value) == "failed to write archive for path: /workspace/tmp-link/result.txt"
+    assert exc_info.value.context == {
+        "path": "/workspace/tmp-link/result.txt",
+        "reason": "read_only_extra_path_grant",
+        "grant_path": "/tmp",
+        "resolved_path": "/tmp/result.txt",
+    }
+
+
+@pytest.mark.asyncio
+async def test_docker_write_rejects_workspace_symlink_to_nested_read_only_extra_path_grant(
+    tmp_path: Path,
+) -> None:
+    host_root = tmp_path / "container"
+    workspace = host_root / "workspace"
+    extra_root = host_root / "tmp"
+    protected_root = extra_root / "protected"
+    workspace.mkdir(parents=True)
+    protected_root.mkdir(parents=True)
+    (workspace / "tmp-link").symlink_to(extra_root, target_is_directory=True)
+
+    session = _HostBackedDockerSession(
+        host_root=host_root,
+        manifest=Manifest(
+            root="/workspace",
+            extra_path_grants=(
+                SandboxPathGrant(path="/tmp"),
+                SandboxPathGrant(path="/tmp/protected", read_only=True),
+            ),
+        ),
+    )
+
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+        await session.write(
+            Path("tmp-link/protected/result.txt"),
+            io.BytesIO(b"scratch output"),
+        )
+
+    assert (
+        str(exc_info.value)
+        == "failed to write archive for path: /workspace/tmp-link/protected/result.txt"
+    )
+    assert exc_info.value.context == {
+        "path": "/workspace/tmp-link/protected/result.txt",
+        "reason": "read_only_extra_path_grant",
+        "grant_path": "/tmp/protected",
+        "resolved_path": "/tmp/protected/result.txt",
+    }
 
 
 @pytest.mark.asyncio

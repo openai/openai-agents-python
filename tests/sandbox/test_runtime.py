@@ -35,6 +35,7 @@ from agents.sandbox import (
     Permissions,
     SandboxAgent,
     SandboxConcurrencyLimits,
+    SandboxPathGrant,
     SandboxRunConfig,
     User,
 )
@@ -53,7 +54,12 @@ from agents.sandbox.entries import (
     MountpointMountPattern,
     S3Mount,
 )
-from agents.sandbox.errors import ExecNonZeroError, ExecTransportError, InvalidManifestPathError
+from agents.sandbox.errors import (
+    ExecNonZeroError,
+    ExecTransportError,
+    InvalidManifestPathError,
+    WorkspaceArchiveWriteError,
+)
 from agents.sandbox.files import EntryKind, FileEntry
 from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.remote_mount_policy import (
@@ -196,7 +202,8 @@ class _PathGuardingSession(_FakeSession):
         super().__init__(manifest)
         self.normalized_paths: list[Path] = []
 
-    async def _normalize_path_for_io(self, path: Path | str) -> Path:
+    async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
+        _ = for_write
         normalized = Path(path)
         self.normalized_paths.append(normalized)
         raise InvalidManifestPathError(rel=normalized, reason="escape_root")
@@ -402,7 +409,7 @@ async def test_remote_realpath_guard_fails_closed_on_symlink_cycle(tmp_path: Pat
 
     with pytest.raises(ExecNonZeroError, match="symlink resolution depth exceeded"):
         await asyncio.wait_for(
-            session._normalize_path_for_remote_io("loop"),  # noqa: SLF001
+            session._validate_remote_path_access("loop"),  # noqa: SLF001
             timeout=1,
         )
 
@@ -412,18 +419,18 @@ async def test_remote_realpath_empty_success_output_is_transport_error() -> None
     session = _EmptyRemoteRealpathSession(Manifest(root="/workspace"))
 
     with pytest.raises(ExecTransportError) as exc_info:
-        await session._normalize_path_for_remote_io("file.txt")  # noqa: SLF001
+        await session._validate_remote_path_access("file.txt")  # noqa: SLF001
 
     assert exc_info.value.context == {
-        "command": ("resolve_workspace_path", "/workspace", "/workspace/file.txt"),
-        "command_str": "resolve_workspace_path /workspace /workspace/file.txt",
+        "command": ("resolve_workspace_path", "/workspace", "/workspace/file.txt", "0"),
+        "command_str": "resolve_workspace_path /workspace /workspace/file.txt 0",
         "reason": "empty_stdout",
         "exit_code": 0,
         "stdout": "",
         "stderr": "",
     }
     assert session.exec_commands == [
-        ("/tmp/resolve_workspace_path", "/workspace", "/workspace/file.txt")
+        ("/tmp/resolve_workspace_path", "/workspace", "/workspace/file.txt", "0")
     ]
 
 
@@ -977,6 +984,27 @@ async def test_runner_merges_sandbox_instructions_and_tools() -> None:
     input_items = model.first_turn_args["input"]
     assert isinstance(input_items, list)
     assert _extract_user_text(input_items[0]) == "hello"
+
+
+def test_filesystem_instructions_omit_extra_path_grants() -> None:
+    manifest = Manifest(
+        root="/workspace",
+        extra_path_grants=(
+            SandboxPathGrant(path="/tmp", description="temporary files"),
+            SandboxPathGrant(
+                path="/opt/toolchain",
+                read_only=True,
+                description="compiler runtime",
+            ),
+        ),
+    )
+
+    assert runtime_agent_preparation_module._filesystem_instructions(manifest) == (
+        "# Filesystem\n"
+        "You have access to a container with a filesystem. The filesystem layout is:\n"
+        "\n"
+        "/workspace"
+    )
 
 
 @pytest.mark.asyncio
@@ -3669,6 +3697,64 @@ async def test_unix_local_exec_runs_without_wrapper_on_linux(
     assert result.stdout.decode("utf-8", errors="replace").strip() == str(workspace_root.resolve())
 
 
+@pytest.mark.asyncio
+async def test_unix_local_file_io_allows_extra_path_grant(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    allowed_root = tmp_path / "allowed"
+    workspace_root.mkdir()
+    allowed_root.mkdir()
+    session = UnixLocalSandboxSession.from_state(
+        UnixLocalSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=Manifest(
+                root=str(workspace_root),
+                extra_path_grants=(SandboxPathGrant(path=str(allowed_root)),),
+            ),
+            snapshot=NoopSnapshot(id="extra-path-grant"),
+            workspace_root_owned=False,
+        )
+    )
+
+    await session.write(allowed_root / "result.txt", io.BytesIO(b"scratch output"))
+    payload = await session.read(allowed_root / "result.txt")
+
+    assert payload.read() == b"scratch output"
+
+
+@pytest.mark.asyncio
+async def test_unix_local_file_io_rejects_write_under_read_only_extra_path_grant(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    allowed_root = tmp_path / "allowed"
+    workspace_root.mkdir()
+    allowed_root.mkdir()
+    (allowed_root / "existing.txt").write_text("readable", encoding="utf-8")
+    session = UnixLocalSandboxSession.from_state(
+        UnixLocalSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=Manifest(
+                root=str(workspace_root),
+                extra_path_grants=(SandboxPathGrant(path=str(allowed_root), read_only=True),),
+            ),
+            snapshot=NoopSnapshot(id="read-only-extra-path-grant"),
+            workspace_root_owned=False,
+        )
+    )
+
+    payload = await session.read(allowed_root / "existing.txt")
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+        await session.write(allowed_root / "result.txt", io.BytesIO(b"scratch output"))
+
+    assert payload.read() == b"readable"
+    assert str(exc_info.value) == f"failed to write archive for path: {allowed_root / 'result.txt'}"
+    assert exc_info.value.context == {
+        "path": str(allowed_root / "result.txt"),
+        "reason": "read_only_extra_path_grant",
+        "grant_path": str(allowed_root),
+    }
+
+
 def test_unix_local_confined_exec_command_allows_common_darwin_interpreter_roots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3717,6 +3803,106 @@ def test_unix_local_confined_exec_command_allows_common_darwin_interpreter_roots
     )
     assert '(deny file-write* (subpath "/opt"))' in profile
     assert '(allow file-write* (subpath "/opt/homebrew"))' not in profile
+
+
+def test_unix_local_darwin_exec_profile_allows_extra_path_grants(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    read_write_root = tmp_path / "read-write"
+    read_only_root = tmp_path / "read-only"
+    workspace_root.mkdir()
+    read_write_root.mkdir()
+    read_only_root.mkdir()
+    session = UnixLocalSandboxSession.from_state(
+        UnixLocalSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=Manifest(
+                root=str(workspace_root),
+                extra_path_grants=(
+                    SandboxPathGrant(path=str(read_write_root)),
+                    SandboxPathGrant(path=str(read_only_root), read_only=True),
+                ),
+            ),
+            snapshot=NoopSnapshot(id="darwin-extra-path-grant"),
+            workspace_root_owned=False,
+        )
+    )
+
+    profile = session._darwin_exec_profile(
+        workspace_root,
+        extra_path_grants=session._darwin_extra_path_grant_roots(),
+    )
+    profile_lines = set(profile.splitlines())
+
+    assert (
+        f'(allow file-read-data file-read-metadata (subpath "{read_write_root}"))' in profile_lines
+    )
+    assert f'(allow file-write* (subpath "{read_write_root}"))' in profile_lines
+    assert (
+        f'(allow file-read-data file-read-metadata (subpath "{read_only_root}"))' in profile_lines
+    )
+    assert f'(allow file-write* (subpath "{read_only_root}"))' not in profile_lines
+
+
+def test_unix_local_darwin_exec_profile_denies_nested_read_only_extra_path_grant(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    read_write_root = tmp_path / "read-write"
+    read_only_root = read_write_root / "protected"
+    workspace_root.mkdir()
+    read_only_root.mkdir(parents=True)
+    session = UnixLocalSandboxSession.from_state(
+        UnixLocalSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=Manifest(
+                root=str(workspace_root),
+                extra_path_grants=(
+                    SandboxPathGrant(path=str(read_write_root)),
+                    SandboxPathGrant(path=str(read_only_root), read_only=True),
+                ),
+            ),
+            snapshot=NoopSnapshot(id="darwin-nested-extra-path-grant"),
+            workspace_root_owned=False,
+        )
+    )
+
+    profile = session._darwin_exec_profile(
+        workspace_root,
+        extra_path_grants=session._darwin_extra_path_grant_roots(),
+    )
+    profile_lines = profile.splitlines()
+    parent_write_allow = f'(allow file-write* (subpath "{read_write_root}"))'
+    child_write_deny = f'(deny file-write* (subpath "{read_only_root}"))'
+
+    assert parent_write_allow in profile_lines
+    assert child_write_deny in profile_lines
+    assert profile_lines.index(parent_write_allow) < profile_lines.index(child_write_deny)
+    assert f'(allow file-write* (subpath "{read_only_root}"))' not in profile_lines
+
+
+def test_unix_local_darwin_exec_profile_rejects_extra_path_grant_symlink_to_root(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    root_alias = tmp_path / "root-alias"
+    workspace_root.mkdir()
+    root_alias.symlink_to(Path("/"), target_is_directory=True)
+    session = UnixLocalSandboxSession.from_state(
+        UnixLocalSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=Manifest(
+                root=str(workspace_root),
+                extra_path_grants=(SandboxPathGrant(path=str(root_alias)),),
+            ),
+            snapshot=NoopSnapshot(id="darwin-extra-path-grant-root-alias"),
+            workspace_root_owned=False,
+        )
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        session._darwin_extra_path_grant_roots()
+
+    assert str(exc_info.value) == "sandbox path grant path must not resolve to filesystem root"
 
 
 @pytest.mark.asyncio

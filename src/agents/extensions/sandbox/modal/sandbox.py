@@ -369,8 +369,8 @@ class ModalSandboxSession(BaseSandboxSession):
         self._modal_snapshot_ephemeral_backup = None
         self._modal_snapshot_ephemeral_backup_path = None
 
-    async def _normalize_path_for_io(self, path: Path | str) -> Path:
-        return await self._normalize_path_for_remote_io(path)
+    async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
+        return await self._validate_remote_path_access(path, for_write=for_write)
 
     def _runtime_helpers(self) -> tuple[RuntimeHelperScript, ...]:
         return (RESOLVE_WORKSPACE_PATH_HELPER,)
@@ -1014,7 +1014,7 @@ class ModalSandboxSession(BaseSandboxSession):
             await self._check_read_with_exec(path, user=user)
 
         # Read by `cat` so the payload is returned as bytes.
-        workspace_path = await self._normalize_path_for_io(path)
+        workspace_path = await self._validate_path_access(path)
         cmd = ["sh", "-lc", f"cat -- {shlex.quote(str(workspace_path))}"]
         try:
             out = await self.exec(*cmd, shell=False)
@@ -1049,7 +1049,7 @@ class ModalSandboxSession(BaseSandboxSession):
         await self._ensure_sandbox()
         assert self._sandbox is not None
 
-        workspace_path = await self._normalize_path_for_io(path)
+        workspace_path = await self._validate_path_access(path, for_write=True)
 
         async def _run_write() -> None:
             assert self._sandbox is not None
