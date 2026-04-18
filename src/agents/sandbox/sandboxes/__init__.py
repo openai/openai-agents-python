@@ -5,12 +5,20 @@ This subpackage contains concrete session/client implementations for different
 execution environments (e.g. Docker, local Unix).
 """
 
-from .unix_local import (
-    UnixLocalSandboxClient,
-    UnixLocalSandboxClientOptions,
-    UnixLocalSandboxSession,
-    UnixLocalSandboxSessionState,
-)
+import sys
+
+_HAS_UNIX_LOCAL = False
+
+if sys.platform != "win32":
+    # The Unix local backend depends on Unix-only stdlib modules like fcntl and termios.
+    from .unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+        UnixLocalSandboxSession,
+        UnixLocalSandboxSessionState,
+    )
+
+    _HAS_UNIX_LOCAL = True
 
 try:
     from .docker import (  # noqa: F401
@@ -25,12 +33,17 @@ except Exception:  # pragma: no cover
     # Docker is an optional extra; keep base imports working without it.
     _HAS_DOCKER = False
 
-__all__ = [
-    "UnixLocalSandboxClient",
-    "UnixLocalSandboxClientOptions",
-    "UnixLocalSandboxSession",
-    "UnixLocalSandboxSessionState",
-]
+__all__: list[str] = []
+
+if _HAS_UNIX_LOCAL:
+    __all__.extend(
+        [
+            "UnixLocalSandboxClient",
+            "UnixLocalSandboxClientOptions",
+            "UnixLocalSandboxSession",
+            "UnixLocalSandboxSessionState",
+        ]
+    )
 
 if _HAS_DOCKER:
     __all__.extend(
