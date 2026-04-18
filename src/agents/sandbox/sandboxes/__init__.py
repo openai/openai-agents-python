@@ -25,7 +25,7 @@ if sys.platform != "win32":
 
     _HAS_UNIX_LOCAL = True
 elif TYPE_CHECKING:  # pragma: no cover
-    from .unix_local import (
+    from .unix_local import (  # noqa: F401
         UnixLocalSandboxClient,
         UnixLocalSandboxClientOptions,
         UnixLocalSandboxSession,
