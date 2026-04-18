@@ -261,8 +261,8 @@ class DockerSandboxSession(BaseSandboxSession):
     def _current_runtime_helper_cache_key(self) -> object | None:
         return self.state.container_id
 
-    async def _normalize_path_for_io(self, path: Path | str) -> Path:
-        return await self._normalize_path_for_remote_io(path)
+    async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
+        return await self._validate_remote_path_access(path, for_write=for_write)
 
     @staticmethod
     def _path_has_nested_skip(path: Path, *, skip_rel_paths: set[Path]) -> bool:
@@ -650,7 +650,7 @@ class DockerSandboxSession(BaseSandboxSession):
         )
 
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
-        workspace_path = await self._normalize_path_for_io(path)
+        workspace_path = await self._validate_path_access(path)
 
         # Read from inside the container instead of `get_archive()`: with Docker
         # volume-driver-backed mounts attached, daemon archive operations can re-run volume mount
@@ -676,7 +676,7 @@ class DockerSandboxSession(BaseSandboxSession):
     ) -> None:
         payload = coerce_write_payload(path=path, data=data)
 
-        path = await self._normalize_path_for_io(path)
+        path = await self._validate_path_access(path, for_write=True)
 
         if user is not None:
             await self._stream_into_exec(

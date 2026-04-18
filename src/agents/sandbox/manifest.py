@@ -11,6 +11,7 @@ from .entries import BaseEntry, Dir, Mount, resolve_workspace_path
 from .errors import InvalidManifestPathError
 from .manifest_render import render_manifest_description
 from .types import Group, User
+from .workspace_paths import SandboxPathGrant
 
 DEFAULT_REMOTE_MOUNT_COMMAND_ALLOWLIST = [
     "ls",
@@ -85,6 +86,7 @@ class Manifest(BaseModel):
     environment: Environment = Field(default_factory=Environment)
     users: list[User] = Field(default_factory=list)
     groups: list[Group] = Field(default_factory=list)
+    extra_path_grants: tuple[SandboxPathGrant, ...] = Field(default_factory=tuple)
     remote_mount_command_allowlist: list[str] = Field(
         default_factory=lambda: list(DEFAULT_REMOTE_MOUNT_COMMAND_ALLOWLIST)
     )

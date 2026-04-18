@@ -216,7 +216,7 @@ Prefer built-in capabilities when they fit. Write a custom capability only when 
 
 ### Manifest
 
-A [`Manifest`][agents.sandbox.manifest.Manifest] describes the workspace for a fresh sandbox session. It can set the workspace `root`, declare files and directories, copy in local files, clone Git repos, attach remote storage mounts, set environment variables, and define users or groups.
+A [`Manifest`][agents.sandbox.manifest.Manifest] describes the workspace for a fresh sandbox session. It can set the workspace `root`, declare files and directories, copy in local files, clone Git repos, attach remote storage mounts, set environment variables, define users or groups, and grant access to specific absolute paths outside the workspace.
 
 Manifest entry paths are workspace-relative. They cannot be absolute paths or escape the workspace with `..`, which keeps the workspace contract portable across local, Docker, and hosted clients.
 
@@ -236,6 +236,21 @@ Use manifest entries for the material the agent needs before work begins:
 Mount entries describe what storage to expose; mount strategies describe how a sandbox backend attaches that storage. See [Sandbox clients](clients.md#mounts-and-remote-storage) for mount options and provider support.
 
 Good manifest design usually means keeping the workspace contract narrow, putting long task recipes in workspace files such as `repo/task.md`, and using relative workspace paths in instructions, for example `repo/task.md` or `output/report.md`. If the agent edits files with the `Filesystem` capability's `apply_patch` tool, remember that patch paths are relative to the sandbox workspace root, not the shell `workdir`.
+
+Use `extra_path_grants` only when the agent needs a concrete absolute path outside the workspace, such as `/tmp` for temporary tool output or `/opt/toolchain` for a read-only runtime. A grant applies to both SDK file APIs and shell execution where the backend can enforce filesystem policy:
+
+```python
+from agents.sandbox import Manifest, SandboxPathGrant
+
+manifest = Manifest(
+    extra_path_grants=(
+        SandboxPathGrant(path="/tmp"),
+        SandboxPathGrant(path="/opt/toolchain", read_only=True),
+    ),
+)
+```
+
+Snapshots and `persist_workspace()` still include only the workspace root. Extra granted paths are runtime access, not durable workspace state.
 
 ### Permissions
 

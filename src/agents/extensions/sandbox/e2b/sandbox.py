@@ -700,8 +700,8 @@ class E2BSandboxSession(BaseSandboxSession):
             )
         return endpoint
 
-    async def _normalize_path_for_io(self, path: Path | str) -> Path:
-        return await self._normalize_path_for_remote_io(path)
+    async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
+        return await self._validate_remote_path_access(path, for_write=for_write)
 
     def _runtime_helpers(self) -> tuple[RuntimeHelperScript, ...]:
         return (RESOLVE_WORKSPACE_PATH_HELPER,)
@@ -1047,7 +1047,7 @@ class E2BSandboxSession(BaseSandboxSession):
         if user is not None:
             await self._check_read_with_exec(path, user=user)
 
-        workspace_path = await self._normalize_path_for_io(path)
+        workspace_path = await self._validate_path_access(path)
 
         e2b_exc = _import_e2b_exceptions()
         not_found_exc = e2b_exc.get("not_found")
@@ -1082,7 +1082,7 @@ class E2BSandboxSession(BaseSandboxSession):
         if not isinstance(payload, bytes | bytearray):
             raise WorkspaceWriteTypeError(path=path, actual_type=type(payload).__name__)
 
-        workspace_path = await self._normalize_path_for_io(path)
+        workspace_path = await self._validate_path_access(path, for_write=True)
 
         try:
             await _sandbox_write_file(
@@ -1117,7 +1117,7 @@ class E2BSandboxSession(BaseSandboxSession):
         if user is not None:
             path = await self._check_mkdir_with_exec(path, parents=parents, user=user)
         else:
-            path = await self._normalize_path_for_io(path)
+            path = await self._validate_path_access(path, for_write=True)
 
         if user is None and not parents:
             parent = path.parent

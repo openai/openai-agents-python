@@ -10,16 +10,21 @@ from ...items import TResponseInputItem
 from .capability import Capability
 
 _DEFAULT_COMPACT_THRESHOLD = 240_000
+_MODEL_NAME_SEPARATOR_TRANSLATION = str.maketrans("", "", ".-")
 
 
-class CompactionModelInfo(BaseModel):
-    context_window: int
+def _model_lookup_key(model: str) -> str:
+    normalized_model = model.strip().lower().removeprefix("openai/")
+    return normalized_model.translate(_MODEL_NAME_SEPARATOR_TRANSLATION)
 
-    @classmethod
-    def for_model(cls, model: str) -> CompactionModelInfo:
-        normalized_model = model.removeprefix("openai/")
 
-        if normalized_model in (
+def _model_context_windows(models: tuple[str, ...], context_window: int) -> dict[str, int]:
+    return {_model_lookup_key(model): context_window for model in models}
+
+
+_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    **_model_context_windows(
+        (
             "gpt-5.4",
             "gpt-5.4-2026-03-05",
             "gpt-5.4-pro",
@@ -30,9 +35,11 @@ class CompactionModelInfo(BaseModel):
             "gpt-4.1-mini-2025-04-14",
             "gpt-4.1-nano",
             "gpt-4.1-nano-2025-04-14",
-        ):
-            return cls(context_window=1_047_576)
-        if normalized_model in (
+        ),
+        1_047_576,
+    ),
+    **_model_context_windows(
+        (
             "gpt-5",
             "gpt-5-2025-08-07",
             "gpt-5-codex",
@@ -57,9 +64,11 @@ class CompactionModelInfo(BaseModel):
             "gpt-5.4-mini-2026-03-17",
             "gpt-5.4-nano",
             "gpt-5.4-nano-2026-03-17",
-        ):
-            return cls(context_window=400_000)
-        if normalized_model in (
+        ),
+        400_000,
+    ),
+    **_model_context_windows(
+        (
             "codex-mini-latest",
             "o1",
             "o1-2024-12-17",
@@ -77,9 +86,11 @@ class CompactionModelInfo(BaseModel):
             "o4-mini-2025-04-16",
             "o4-mini-deep-research",
             "o4-mini-deep-research-2025-06-26",
-        ):
-            return cls(context_window=200_000)
-        if normalized_model in (
+        ),
+        200_000,
+    ),
+    **_model_context_windows(
+        (
             "gpt-4o",
             "gpt-4o-2024-05-13",
             "gpt-4o-2024-08-06",
@@ -90,9 +101,27 @@ class CompactionModelInfo(BaseModel):
             "gpt-5.1-chat-latest",
             "gpt-5.2-chat-latest",
             "gpt-5.3-chat-latest",
-        ):
-            return cls(context_window=128_000)
+        ),
+        128_000,
+    ),
+}
 
+
+class CompactionModelInfo(BaseModel):
+    context_window: int
+
+    @classmethod
+    def maybe_for_model(cls, model: str) -> CompactionModelInfo | None:
+        context_window = _MODEL_CONTEXT_WINDOWS.get(_model_lookup_key(model))
+        if context_window is None:
+            return None
+        return cls(context_window=context_window)
+
+    @classmethod
+    def for_model(cls, model: str) -> CompactionModelInfo:
+        model_info = cls.maybe_for_model(model)
+        if model_info is not None:
+            return model_info
         raise ValueError(f"Unknown context window for model: {model!r}")
 
 
@@ -153,7 +182,11 @@ class Compaction(Capability):
         if policy is None:
             model = sampling_params.get("model")
             if isinstance(model, str) and model:
-                policy = DynamicCompactionPolicy(model_info=CompactionModelInfo.for_model(model))
+                model_info = CompactionModelInfo.maybe_for_model(model)
+                if model_info is None:
+                    policy = StaticCompactionPolicy()
+                else:
+                    policy = DynamicCompactionPolicy(model_info=model_info)
             else:
                 policy = StaticCompactionPolicy()
 

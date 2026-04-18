@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import pytest
 
-from agents.sandbox import Manifest
+from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.capabilities import Shell, ShellToolSet
 from agents.sandbox.capabilities.tools import (
     ExecCommandArgs,
@@ -492,6 +492,47 @@ class TestShellCapability:
             "Output:\n"
             "stdout: cd /workspace/src/project && pwd\n"
             "stderr: cd /workspace/src/project && pwd"
+        )
+
+    @pytest.mark.asyncio
+    async def test_exec_command_tool_allows_extra_path_grant_workdir(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        capability = Shell()
+        session = _ShellSession(
+            Manifest(
+                root="/workspace",
+                extra_path_grants=(SandboxPathGrant(path="/tmp", read_only=True),),
+            )
+        )
+        capability.bind(session)
+        tool = cast(FunctionTool, capability.tools()[0])
+        _patch_shell_tool_clock(
+            monkeypatch,
+            chunk_id="11111111111111111111111111111111",
+            start=310.0,
+            end=310.25,
+        )
+
+        output = await tool.on_invoke_tool(
+            cast(ToolContext[object], None),
+            ExecCommandArgs(
+                cmd="pwd",
+                workdir="/tmp",
+                shell="/bin/bash",
+                login=False,
+            ).model_dump_json(),
+        )
+
+        assert session.exec_calls == [("cd /tmp && pwd", 10.0, ["/bin/bash", "-c"])]
+        assert (
+            output == "Chunk ID: 111111\n"
+            "Wall time: 0.2500 seconds\n"
+            "Process exited with code 7\n"
+            "Output:\n"
+            "stdout: cd /tmp && pwd\n"
+            "stderr: cd /tmp && pwd"
         )
 
     @pytest.mark.asyncio

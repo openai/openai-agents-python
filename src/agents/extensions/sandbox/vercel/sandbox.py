@@ -39,7 +39,6 @@ from ....sandbox.errors import (
     ExecTimeoutError,
     ExecTransportError,
     ExposedPortUnavailableError,
-    InvalidManifestPathError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
@@ -51,6 +50,7 @@ from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
+from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
 from ....sandbox.snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from ....sandbox.types import ExecResult, ExposedPortEndpoint, User
@@ -278,28 +278,11 @@ class VercelSandboxSession(BaseSandboxSession):
             self._reject_user_arg(op="exec", user=user)
         return super()._prepare_exec_command(*command, shell=shell, user=user)
 
-    def normalize_path(self, path: Path | str) -> Path:
-        # Keep normalization lexical so host filesystem quirks do not rewrite sandbox paths.
-        if isinstance(path, str):
-            path = Path(path)
+    async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
+        return await self._validate_remote_path_access(path, for_write=for_write)
 
-        root = PurePosixPath(os.path.normpath(self.state.manifest.root))
-        normalized = PurePosixPath(
-            os.path.normpath(
-                str(path) if path.is_absolute() else str(root / PurePosixPath(*path.parts))
-            )
-        )
-        try:
-            normalized.relative_to(root)
-        except ValueError as exc:
-            reason: Literal["absolute", "escape_root"] = (
-                "absolute" if path.is_absolute() else "escape_root"
-            )
-            raise InvalidManifestPathError(rel=path, reason=reason, cause=exc) from exc
-        return Path(str(normalized))
-
-    async def _normalize_path_for_io(self, path: Path | str) -> Path:
-        return self.normalize_path(path)
+    def _runtime_helpers(self) -> tuple[RuntimeHelperScript, ...]:
+        return (RESOLVE_WORKSPACE_PATH_HELPER,)
 
     def _validate_tar_bytes(self, raw: bytes) -> None:
         try:
@@ -580,8 +563,8 @@ class VercelSandboxSession(BaseSandboxSession):
         if user is not None:
             self._reject_user_arg(op="read", user=user)
 
+        normalized_path = await self._validate_path_access(path)
         sandbox = await self._ensure_sandbox()
-        normalized_path = await self._normalize_path_for_io(path)
         try:
             payload = await sandbox.read_file(str(normalized_path))
         except Exception as exc:
@@ -600,7 +583,7 @@ class VercelSandboxSession(BaseSandboxSession):
         if user is not None:
             self._reject_user_arg(op="write", user=user)
 
-        normalized_path = await self._normalize_path_for_io(path)
+        normalized_path = await self._validate_path_access(path, for_write=True)
         payload = data.read()
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
