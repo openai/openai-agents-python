@@ -45,8 +45,7 @@ except Exception:  # pragma: no cover
     # Docker is an optional extra; keep base imports working without it.
     _HAS_DOCKER = False
 
-__all__ = [
-]
+__all__ = []
 
 if _HAS_UNIX_LOCAL:
     __all__.extend(
