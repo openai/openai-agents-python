@@ -591,6 +591,27 @@ class TestEventHandling:
         assert cast(AssistantAudio, updated_history_item.content[0]).transcript == "hello"
 
     @pytest.mark.asyncio
+    async def test_transcript_delta_history_updated_uses_list_snapshot(
+        self, mock_model, mock_agent
+    ):
+        session = RealtimeSession(mock_model, mock_agent, None)
+
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1", delta="hello", response_id="resp_1"
+            )
+        )
+
+        await session._event_queue.get()  # raw event
+        history_event = await session._event_queue.get()
+        assert isinstance(history_event, RealtimeHistoryUpdated)
+
+        history_event.history.clear()
+
+        assert len(session._history) == 1
+        assert session._history[0].item_id == "item_1"
+
+    @pytest.mark.asyncio
     async def test_ignored_events_only_generate_raw_events(self, mock_model, mock_agent):
         """Test that ignored events (connection_status, other) only generate raw events"""
         session = RealtimeSession(mock_model, mock_agent, None)
