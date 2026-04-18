@@ -93,6 +93,7 @@ For provider-specific setup notes and links for the checked-in extension example
 | `BlaxelSandboxClient` | `openai-agents[blaxel]` | [Blaxel runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/blaxel_runner.py) |
 | `CloudflareSandboxClient` | `openai-agents[cloudflare]` | [Cloudflare runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/cloudflare_runner.py) |
 | `DaytonaSandboxClient` | `openai-agents[daytona]` | [Daytona runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/daytona/daytona_runner.py) |
+| `DeclawSandboxClient` | `openai-agents[declaw]` | [Declaw runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/declaw_runner.py) ([docs](https://docs.declaw.ai)) |
 | `E2BSandboxClient` | `openai-agents[e2b]` | [E2B runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/e2b_runner.py) |
 | `ModalSandboxClient` | `openai-agents[modal]` | [Modal runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/modal_runner.py) |
 | `RunloopSandboxClient` | `openai-agents[runloop]` | [Runloop runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/runloop/runner.py) |

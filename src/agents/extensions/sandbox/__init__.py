@@ -43,6 +43,21 @@ except Exception:  # pragma: no cover
     _HAS_DAYTONA = False
 
 try:
+    from .declaw import (
+        DeclawCloudBucketMountStrategy as DeclawCloudBucketMountStrategy,
+        DeclawSandboxClient as DeclawSandboxClient,
+        DeclawSandboxClientOptions as DeclawSandboxClientOptions,
+        DeclawSandboxSession as DeclawSandboxSession,
+        DeclawSandboxSessionState as DeclawSandboxSessionState,
+        DeclawSandboxTimeouts as DeclawSandboxTimeouts,
+        DeclawSandboxType as DeclawSandboxType,
+    )
+
+    _HAS_DECLAW = True
+except Exception:  # pragma: no cover
+    _HAS_DECLAW = False
+
+try:
     from .blaxel import (
         DEFAULT_BLAXEL_WORKSPACE_ROOT as DEFAULT_BLAXEL_WORKSPACE_ROOT,
         BlaxelCloudBucketMountConfig as BlaxelCloudBucketMountConfig,
@@ -146,6 +161,19 @@ if _HAS_DAYTONA:
             "DaytonaSandboxSession",
             "DaytonaSandboxSessionState",
             "DaytonaSandboxTimeouts",
+        ]
+    )
+
+if _HAS_DECLAW:
+    __all__.extend(
+        [
+            "DeclawCloudBucketMountStrategy",
+            "DeclawSandboxClient",
+            "DeclawSandboxClientOptions",
+            "DeclawSandboxSession",
+            "DeclawSandboxSessionState",
+            "DeclawSandboxTimeouts",
+            "DeclawSandboxType",
         ]
     )
 

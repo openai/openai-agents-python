@@ -831,6 +831,20 @@ wheels = [
 ]
 
 [[package]]
+name = "declaw"
+version = "1.0.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "packaging" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2e/6f/a0fac605f492c1768d3d944971d094e68efa94ad410024db4433ee724680/declaw-1.0.4.tar.gz", hash = "sha256:f63a7a85829fe0f89450fa8af602aeff96605d0f95bec329f8808783547e9ffe", size = 49046, upload-time = "2026-04-18T23:18:38.336Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a9/5c/f2539a003de32325298a74983c1cfeefbf3d553083ed9788497a5b39d8db/declaw-1.0.4-py3-none-any.whl", hash = "sha256:2e007a59434d70bc0c83f29f46b04383b8cc489f1c5bfde9bfcd701e2e96ea05", size = 72846, upload-time = "2026-04-18T23:18:36.573Z" },
+]
+
+[[package]]
 name = "deprecated"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2459,6 +2473,9 @@ dapr = [
 daytona = [
     { name = "daytona" },
 ]
+declaw = [
+    { name = "declaw" },
+]
 docker = [
     { name = "docker" },
 ]
@@ -2555,6 +2572,7 @@ requires-dist = [
     { name = "cryptography", marker = "extra == 'encrypt'", specifier = ">=45.0,<46" },
     { name = "dapr", marker = "extra == 'dapr'", specifier = ">=1.16.0" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = ">=0.155.0" },
+    { name = "declaw", marker = "extra == 'declaw'", specifier = ">=1.0.4" },
     { name = "docker", marker = "extra == 'docker'", specifier = ">=6.1" },
     { name = "e2b", marker = "extra == 'e2b'", specifier = "==2.20.0" },
     { name = "e2b-code-interpreter", marker = "extra == 'e2b'", specifier = "==2.4.1" },
@@ -2581,7 +2599,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<16" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<16" },
 ]
-provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "docker", "blaxel", "daytona", "cloudflare", "e2b", "modal", "runloop", "vercel", "s3", "temporal"]
+provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "docker", "blaxel", "daytona", "declaw", "cloudflare", "e2b", "modal", "runloop", "vercel", "s3", "temporal"]
 
 [package.metadata.requires-dev]
 dev = [
