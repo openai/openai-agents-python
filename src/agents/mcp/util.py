@@ -72,7 +72,7 @@ class HttpClientFactory(Protocol):
 class ToolFilterContext:
     """Context information available to tool filter functions."""
 
-    run_context: RunContextWrapper[Any]
+    run_context: RunContextWrapper
     """The current run context."""
 
     agent: AgentBase
@@ -120,7 +120,7 @@ else:
 class MCPToolMetaContext:
     """Context information available to MCP tool meta resolver functions."""
 
-    run_context: RunContextWrapper[Any]
+    run_context: RunContextWrapper
     """The current run context."""
 
     server_name: str
@@ -207,7 +207,7 @@ class MCPUtil:
         cls,
         servers: list[MCPServer],
         convert_schemas_to_strict: bool,
-        run_context: RunContextWrapper[Any],
+        run_context: RunContextWrapper,
         agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     ) -> list[Tool]:
@@ -238,7 +238,7 @@ class MCPUtil:
         cls,
         server: MCPServer,
         convert_schemas_to_strict: bool,
-        run_context: RunContextWrapper[Any],
+        run_context: RunContextWrapper,
         agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     ) -> list[Tool]:
@@ -300,7 +300,7 @@ class MCPUtil:
                 logger.info(f"Error converting MCP schema to strict mode: {e}")
 
         needs_approval: (
-            bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
+            bool | Callable[[RunContextWrapper, dict[str, Any], str], Awaitable[bool]]
         ) = server._get_needs_approval_for_tool(tool, agent)
 
         function_tool = _build_wrapped_function_tool(
@@ -341,7 +341,7 @@ class MCPUtil:
     async def _resolve_meta(
         cls,
         server: MCPServer,
-        context: RunContextWrapper[Any],
+        context: RunContextWrapper,
         tool_name: str,
         arguments: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
@@ -370,7 +370,7 @@ class MCPUtil:
         cls,
         server: MCPServer,
         tool: MCPTool,
-        context: RunContextWrapper[Any],
+        context: RunContextWrapper,
         input_json: str,
         *,
         meta: dict[str, Any] | None = None,

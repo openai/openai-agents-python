@@ -23,8 +23,8 @@ if TYPE_CHECKING:
 # The handoff input type is the type of data passed when the agent is called via a handoff.
 THandoffInput = TypeVar("THandoffInput", default=Any)
 
-OnHandoffWithInput = Callable[[RunContextWrapper[Any], THandoffInput], Any]
-OnHandoffWithoutInput = Callable[[RunContextWrapper[Any]], Any]
+OnHandoffWithInput = Callable[[RunContextWrapper, THandoffInput], Any]
+OnHandoffWithoutInput = Callable[[RunContextWrapper], Any]
 
 
 @overload
@@ -34,7 +34,7 @@ def realtime_handoff(
     tool_name_override: str | None = None,
     tool_description_override: str | None = None,
     is_enabled: bool
-    | Callable[[RunContextWrapper[Any], RealtimeAgent[Any]], MaybeAwaitable[bool]] = True,
+    | Callable[[RunContextWrapper, RealtimeAgent[Any]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext, RealtimeAgent[TContext]]: ...
 
 
@@ -47,7 +47,7 @@ def realtime_handoff(
     tool_description_override: str | None = None,
     tool_name_override: str | None = None,
     is_enabled: bool
-    | Callable[[RunContextWrapper[Any], RealtimeAgent[Any]], MaybeAwaitable[bool]] = True,
+    | Callable[[RunContextWrapper, RealtimeAgent[Any]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext, RealtimeAgent[TContext]]: ...
 
 
@@ -59,7 +59,7 @@ def realtime_handoff(
     tool_description_override: str | None = None,
     tool_name_override: str | None = None,
     is_enabled: bool
-    | Callable[[RunContextWrapper[Any], RealtimeAgent[Any]], MaybeAwaitable[bool]] = True,
+    | Callable[[RunContextWrapper, RealtimeAgent[Any]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext, RealtimeAgent[TContext]]: ...
 
 
@@ -70,7 +70,7 @@ def realtime_handoff(
     on_handoff: OnHandoffWithInput[THandoffInput] | OnHandoffWithoutInput | None = None,
     input_type: type[THandoffInput] | None = None,
     is_enabled: bool
-    | Callable[[RunContextWrapper[Any], RealtimeAgent[Any]], MaybeAwaitable[bool]] = True,
+    | Callable[[RunContextWrapper, RealtimeAgent[Any]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext, RealtimeAgent[TContext]]:
     """Create a handoff from a RealtimeAgent.
 
@@ -109,7 +109,7 @@ def realtime_handoff(
                 raise UserError("on_handoff must take one argument: context")
 
     async def _invoke_handoff(
-        ctx: RunContextWrapper[Any], input_json: str | None = None
+        ctx: RunContextWrapper, input_json: str | None = None
     ) -> RealtimeAgent[TContext]:
         if input_type is not None and type_adapter is not None:
             if input_json is None:
@@ -147,7 +147,7 @@ def realtime_handoff(
     # If there is a need, we can make this configurable in the future
     input_json_schema = ensure_strict_json_schema(input_json_schema)
 
-    async def _is_enabled(ctx: RunContextWrapper[Any], agent_base: AgentBase[Any]) -> bool:
+    async def _is_enabled(ctx: RunContextWrapper, agent_base: AgentBase[Any]) -> bool:
         assert callable(is_enabled), "is_enabled must be non-null here"
         assert isinstance(agent_base, RealtimeAgent), "Can't handoff to a non-RealtimeAgent"
         result = is_enabled(ctx, agent_base)

@@ -144,16 +144,16 @@ def prepare_sandbox_input(
 def build_sandbox_instructions(
     *,
     base_instructions: str
-    | Callable[[RunContextWrapper[TContext], Agent[TContext]], Awaitable[str | None] | str | None]
+    | Callable[[RunContextWrapper, Agent[TContext]], Awaitable[str | None] | str | None]
     | None,
     additional_instructions: str
-    | Callable[[RunContextWrapper[TContext], Agent[TContext]], Awaitable[str | None] | str | None]
+    | Callable[[RunContextWrapper, Agent[TContext]], Awaitable[str | None] | str | None]
     | None,
     capabilities: Sequence[Capability],
     manifest: Manifest,
-) -> Callable[[RunContextWrapper[TContext], Agent[TContext]], Awaitable[str | None]]:
+) -> Callable[[RunContextWrapper, Agent[TContext]], Awaitable[str | None]]:
     async def _instructions(
-        run_context: RunContextWrapper[TContext],
+        run_context: RunContextWrapper,
         current_agent: Agent[TContext],
     ) -> str | None:
         parts: list[str] = []
@@ -198,9 +198,9 @@ def build_sandbox_instructions(
 async def resolve_instructions(
     *,
     instructions: str
-    | Callable[[RunContextWrapper[TContext], Agent[TContext]], Awaitable[str | None] | str | None]
+    | Callable[[RunContextWrapper, Agent[TContext]], Awaitable[str | None] | str | None]
     | None,
-    run_context: RunContextWrapper[TContext],
+    run_context: RunContextWrapper,
     agent: Agent[TContext],
 ) -> str | None:
     if isinstance(instructions, str):

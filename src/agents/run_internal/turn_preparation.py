@@ -29,10 +29,10 @@ __all__ = [
 
 def validate_run_hooks(
     hooks: RunHooksBase[Any, Agent[Any]] | AgentHooksBase[Any, Agent[Any]] | Any | None,
-) -> RunHooks[Any]:
+) -> RunHooks:
     """Normalize hooks input and enforce RunHooks type."""
     if hooks is None:
-        return RunHooks[Any]()
+        return RunHooks()
     input_hook_type = type(hooks).__name__
     if isinstance(hooks, AgentHooksBase):
         raise TypeError(
@@ -49,7 +49,7 @@ async def maybe_filter_model_input(
     *,
     agent: Agent[TContext],
     run_config: RunConfig,
-    context_wrapper: RunContextWrapper[TContext],
+    context_wrapper: RunContextWrapper,
     input_items: list[TResponseInputItem],
     system_instructions: str | None,
 ) -> ModelInputData:
@@ -82,7 +82,7 @@ async def maybe_filter_model_input(
         raise
 
 
-async def get_handoffs(agent: Agent[Any], context_wrapper: RunContextWrapper[Any]) -> list[Handoff]:
+async def get_handoffs(agent: Agent[Any], context_wrapper: RunContextWrapper) -> list[Handoff]:
     """Return enabled handoffs for the agent."""
     handoffs = []
     for handoff_item in agent.handoffs:
@@ -105,7 +105,7 @@ async def get_handoffs(agent: Agent[Any], context_wrapper: RunContextWrapper[Any
     return enabled
 
 
-async def get_all_tools(agent: Agent[Any], context_wrapper: RunContextWrapper[Any]) -> list[Tool]:
+async def get_all_tools(agent: Agent[Any], context_wrapper: RunContextWrapper) -> list[Tool]:
     """Fetch all tools available to the agent."""
     return await agent.get_all_tools(context_wrapper)
 

@@ -35,8 +35,8 @@ THandoffInput = TypeVar("THandoffInput", default=Any)
 # The agent type that the handoff returns.
 TAgent = TypeVar("TAgent", bound="AgentBase[Any]", default="Agent[Any]")
 
-OnHandoffWithInput = Callable[[RunContextWrapper[Any], THandoffInput], Any]
-OnHandoffWithoutInput = Callable[[RunContextWrapper[Any]], Any]
+OnHandoffWithInput = Callable[[RunContextWrapper, THandoffInput], Any]
+OnHandoffWithoutInput = Callable[[RunContextWrapper], Any]
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,7 @@ class HandoffInputData:
     handoff and the tool output message representing the response from the handoff output.
     """
 
-    run_context: RunContextWrapper[Any] | None = None
+    run_context: RunContextWrapper | None = None
     """
     The run context at the time the handoff was invoked. Note that, since this property was added
     later on, it is optional for backwards compatibility.
@@ -113,7 +113,7 @@ class Handoff(Generic[TContext, TAgent]):
     input.
     """
 
-    on_invoke_handoff: Callable[[RunContextWrapper[Any], str], Awaitable[TAgent]]
+    on_invoke_handoff: Callable[[RunContextWrapper, str], Awaitable[TAgent]]
     """The function that invokes the handoff.
 
     The parameters passed are: (1) the handoff run context, (2) the arguments from the LLM as a
@@ -150,7 +150,7 @@ class Handoff(Generic[TContext, TAgent]):
     """Whether the input JSON schema is in strict mode. We strongly recommend setting this to True
     because it increases the likelihood of correct JSON input."""
 
-    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = (
+    is_enabled: bool | Callable[[RunContextWrapper, AgentBase[Any]], MaybeAwaitable[bool]] = (
         True
     )
     """Whether the handoff is enabled.
@@ -188,7 +188,7 @@ def handoff(
     tool_description_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper, Agent[Any]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext, Agent[TContext]]: ...
 
 
@@ -202,7 +202,7 @@ def handoff(
     tool_name_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper, Agent[Any]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext, Agent[TContext]]: ...
 
 
@@ -215,7 +215,7 @@ def handoff(
     tool_name_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper, Agent[Any]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext, Agent[TContext]]: ...
 
 
@@ -228,7 +228,7 @@ def handoff(
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
     is_enabled: bool
-    | Callable[[RunContextWrapper[Any], Agent[TContext]], MaybeAwaitable[bool]] = True,
+    | Callable[[RunContextWrapper, Agent[TContext]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext, Agent[TContext]]:
     """Create a handoff from an agent.
 
@@ -273,7 +273,7 @@ def handoff(
                 raise UserError("on_handoff must take one argument: context")
 
     async def _invoke_handoff(
-        ctx: RunContextWrapper[Any], input_json: str | None = None
+        ctx: RunContextWrapper, input_json: str | None = None
     ) -> Agent[TContext]:
         if input_type is not None and type_adapter is not None:
             if input_json is None:
@@ -311,7 +311,7 @@ def handoff(
     # configurable in the future.
     input_json_schema = ensure_strict_json_schema(input_json_schema)
 
-    async def _is_enabled(ctx: RunContextWrapper[Any], agent_base: AgentBase[Any]) -> bool:
+    async def _is_enabled(ctx: RunContextWrapper, agent_base: AgentBase[Any]) -> bool:
         from ..agent import Agent
 
         assert callable(is_enabled), "is_enabled must be callable here"

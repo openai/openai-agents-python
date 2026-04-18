@@ -81,7 +81,7 @@ class ToolErrorFormatterArgs(Generic[TContext]):
     default_message: str
     """The SDK default message for this error kind."""
 
-    run_context: RunContextWrapper[TContext]
+    run_context: RunContextWrapper
     """The active run context for the current execution."""
 
 
@@ -265,7 +265,7 @@ class RunOptions(TypedDict, Generic[TContext]):
     max_turns: NotRequired[int]
     """The maximum number of turns to run for."""
 
-    hooks: NotRequired[RunHooks[TContext] | None]
+    hooks: NotRequired[RunHooks | None]
     """Lifecycle hooks for the run."""
 
     run_config: NotRequired[RunConfig | None]

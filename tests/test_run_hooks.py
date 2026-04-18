@@ -8,7 +8,7 @@ from agents.items import ItemHelpers, ModelResponse, TResponseInputItem
 from agents.lifecycle import AgentHooks, RunHooks
 from agents.models.interface import Model
 from agents.run import Runner
-from agents.run_context import AgentHookContext, RunContextWrapper, TContext
+from agents.run_context import AgentHookContext, HandoffContext, LLMContext, RunContextWrapper, TContext
 from agents.tool import Tool
 from agents.tool_context import ToolContext
 from tests.test_agent_llm_hooks import AgentHooksForTests
@@ -30,34 +30,29 @@ class RunHooksForTests(RunHooks):
         self.tool_context_ids.clear()
 
     async def on_agent_start(
-        self, context: AgentHookContext[TContext], agent: Agent[TContext]
+        self, context: AgentHookContext
     ) -> None:
         self.events["on_agent_start"] += 1
 
     async def on_agent_end(
-        self, context: RunContextWrapper[TContext], agent: Agent[TContext], output: Any
+        self, context: AgentHookContext
     ) -> None:
         self.events["on_agent_end"] += 1
 
     async def on_handoff(
         self,
-        context: RunContextWrapper[TContext],
-        from_agent: Agent[TContext],
-        to_agent: Agent[TContext],
+        context: HandoffContext,
     ) -> None:
         self.events["on_handoff"] += 1
 
     async def on_tool_start(
-        self, context: RunContextWrapper[TContext], agent: Agent[TContext], tool: Tool
+        self, context: ToolContext
     ) -> None:
         self.events["on_tool_start"] += 1
 
     async def on_tool_end(
         self,
-        context: RunContextWrapper[TContext],
-        agent: Agent[TContext],
-        tool: Tool,
-        result: str,
+        context: ToolContext,
     ) -> None:
         self.events["on_tool_end"] += 1
         if isinstance(context, ToolContext):
@@ -65,18 +60,13 @@ class RunHooksForTests(RunHooks):
 
     async def on_llm_start(
         self,
-        context: RunContextWrapper[TContext],
-        agent: Agent[TContext],
-        system_prompt: str | None,
-        input_items: list[TResponseInputItem],
+        context: LLMContext,
     ) -> None:
         self.events["on_llm_start"] += 1
 
     async def on_llm_end(
         self,
-        context: RunContextWrapper[TContext],
-        agent: Agent[TContext],
-        response: ModelResponse,
+        context: LLMContext,
     ) -> None:
         self.events["on_llm_end"] += 1
 
@@ -258,7 +248,7 @@ class RunHooksWithTurnInput(RunHooks):
         self.captured_turn_inputs: list[list[Any]] = []
 
     async def on_agent_start(
-        self, context: AgentHookContext[TContext], agent: Agent[TContext]
+        self, context: AgentHookContext
     ) -> None:
         self.captured_turn_inputs.append(list(context.turn_input))
 

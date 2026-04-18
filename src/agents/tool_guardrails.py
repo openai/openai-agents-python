@@ -121,7 +121,7 @@ class ToolGuardrailFunctionOutput:
 class ToolInputGuardrailData:
     """Input data passed to a tool input guardrail function."""
 
-    context: ToolContext[Any]
+    context: ToolContext
     """
     The tool context containing information about the current tool execution.
     """

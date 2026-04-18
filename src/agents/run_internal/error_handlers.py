@@ -129,7 +129,7 @@ async def resolve_run_error_handler_result(
     *,
     error_handlers: RunErrorHandlers[TContext] | None,
     error: MaxTurnsExceeded,
-    context_wrapper: RunContextWrapper[TContext],
+    context_wrapper: RunContextWrapper,
     run_data: RunErrorData,
 ) -> RunErrorHandlerResult | None:
     if not error_handlers:

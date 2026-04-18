@@ -1,77 +1,67 @@
-from typing import Any, Generic
-
-from typing_extensions import TypeVar
+from typing import Any
 
 from .agent import Agent, AgentBase
 from .items import ModelResponse, TResponseInputItem
-from .run_context import AgentHookContext, RunContextWrapper, TContext
+from .run_context import (
+    AgentHookContext,
+    HandoffContext,
+    LLMContext,
+    RunContextWrapper,
+)
 from .tool import Tool
+from .tool_context import ToolContext
 
-TAgent = TypeVar("TAgent", bound=AgentBase, default=AgentBase)
 
 
-class RunHooksBase(Generic[TContext, TAgent]):
+
+class RunHooksBase:
     """A class that receives callbacks on various lifecycle events in an agent run. Subclass and
     override the methods you need.
     """
 
     async def on_llm_start(
         self,
-        context: RunContextWrapper[TContext],
-        agent: Agent[TContext],
-        system_prompt: str | None,
-        input_items: list[TResponseInputItem],
+        context: LLMContext,
     ) -> None:
         """Called just before invoking the LLM for this agent."""
         pass
 
     async def on_llm_end(
         self,
-        context: RunContextWrapper[TContext],
-        agent: Agent[TContext],
-        response: ModelResponse,
+        context: LLMContext,
     ) -> None:
         """Called immediately after the LLM call returns for this agent."""
         pass
 
-    async def on_agent_start(self, context: AgentHookContext[TContext], agent: TAgent) -> None:
+    async def on_agent_start(self, context: AgentHookContext) -> None:
         """Called before the agent is invoked. Called each time the current agent changes.
 
         Args:
             context: The agent hook context.
-            agent: The agent that is about to be invoked.
         """
         pass
 
     async def on_agent_end(
         self,
-        context: AgentHookContext[TContext],
-        agent: TAgent,
-        output: Any,
+        context: AgentHookContext,
     ) -> None:
         """Called when the agent produces a final output.
 
         Args:
             context: The agent hook context.
-            agent: The agent that produced the output.
-            output: The final output produced by the agent.
         """
         pass
 
     async def on_handoff(
         self,
-        context: RunContextWrapper[TContext],
-        from_agent: TAgent,
-        to_agent: TAgent,
+        context: HandoffContext,
     ) -> None:
         """Called when a handoff occurs."""
         pass
 
     async def on_tool_start(
         self,
-        context: RunContextWrapper[TContext],
-        agent: TAgent,
-        tool: Tool,
+        context: ToolContext,
     ) -> None:
         """Called immediately before a local tool is invoked.
 
@@ -84,10 +74,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
 
     async def on_tool_end(
         self,
-        context: RunContextWrapper[TContext],
-        agent: TAgent,
-        tool: Tool,
-        result: str,
+        context: ToolContext,
     ) -> None:
         """Called immediately after a local tool is invoked.
 
@@ -99,43 +86,36 @@ class RunHooksBase(Generic[TContext, TAgent]):
         pass
 
 
-class AgentHooksBase(Generic[TContext, TAgent]):
+class AgentHooksBase:
     """A class that receives callbacks on various lifecycle events for a specific agent. You can
     set this on `agent.hooks` to receive events for that specific agent.
 
     Subclass and override the methods you need.
     """
 
-    async def on_start(self, context: AgentHookContext[TContext], agent: TAgent) -> None:
+    async def on_start(self, context: AgentHookContext) -> None:
         """Called before the agent is invoked. Called each time the running agent is changed to this
         agent.
 
         Args:
             context: The agent hook context.
-            agent: This agent instance.
         """
         pass
 
     async def on_end(
         self,
-        context: AgentHookContext[TContext],
-        agent: TAgent,
-        output: Any,
+        context: AgentHookContext,
     ) -> None:
         """Called when the agent produces a final output.
 
         Args:
             context: The agent hook context.
-            agent: This agent instance.
-            output: The final output produced by the agent.
         """
         pass
 
     async def on_handoff(
         self,
-        context: RunContextWrapper[TContext],
-        agent: TAgent,
-        source: TAgent,
+        context: HandoffContext,
     ) -> None:
         """Called when the agent is being handed off to. The `source` is the agent that is handing
         off to this agent."""
@@ -143,9 +123,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
 
     async def on_tool_start(
         self,
-        context: RunContextWrapper[TContext],
-        agent: TAgent,
-        tool: Tool,
+        context: ToolContext,
     ) -> None:
         """Called immediately before a local tool is invoked.
 
@@ -158,10 +136,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
 
     async def on_tool_end(
         self,
-        context: RunContextWrapper[TContext],
-        agent: TAgent,
-        tool: Tool,
-        result: str,
+        context: ToolContext,
     ) -> None:
         """Called immediately after a local tool is invoked.
 
@@ -174,26 +149,21 @@ class AgentHooksBase(Generic[TContext, TAgent]):
 
     async def on_llm_start(
         self,
-        context: RunContextWrapper[TContext],
-        agent: Agent[TContext],
-        system_prompt: str | None,
-        input_items: list[TResponseInputItem],
+        context: LLMContext,
     ) -> None:
         """Called immediately before the agent issues an LLM call."""
         pass
 
     async def on_llm_end(
         self,
-        context: RunContextWrapper[TContext],
-        agent: Agent[TContext],
-        response: ModelResponse,
+        context: LLMContext,
     ) -> None:
         """Called immediately after the agent receives the LLM response."""
         pass
 
 
-RunHooks = RunHooksBase[TContext, Agent]
+RunHooks = RunHooksBase
 """Run hooks when using `Agent`."""
 
-AgentHooks = AgentHooksBase[TContext, Agent]
+AgentHooks = AgentHooksBase
 """Agent hooks for `Agent`s."""

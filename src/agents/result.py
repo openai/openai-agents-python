@@ -201,7 +201,7 @@ class RunResultBase(abc.ABC):
     tool_output_guardrail_results: list[ToolOutputGuardrailResult]
     """Tool output guardrail results from all tools executed during the run."""
 
-    context_wrapper: RunContextWrapper[Any]
+    context_wrapper: RunContextWrapper
     """The context wrapper for the agent run."""
 
     _trace_state: TraceState | None = field(default=None, init=False, repr=False)

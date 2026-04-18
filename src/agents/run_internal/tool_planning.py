@@ -100,7 +100,7 @@ async def execute_mcp_approval_requests(
     *,
     agent: Agent[Any],
     approval_requests: list[ToolRunMCPApprovalRequest],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
 ) -> list[RunItem]:
     """Run hosted MCP approval callbacks and return approval response items."""
 
@@ -211,7 +211,7 @@ def _collect_mcp_approval_plan(
     *,
     processed_response,
     agent: Agent[Any],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     approval_items_by_call_id: Mapping[str, ToolApprovalItem],
     pending_interruption_adder: Callable[[ToolApprovalItem], None],
 ) -> tuple[list[ToolRunMCPApprovalRequest], list[RunItem]]:
@@ -237,7 +237,7 @@ def _build_plan_for_fresh_turn(
     *,
     processed_response,
     agent: Agent[Any],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     approval_items_by_call_id: Mapping[str, ToolApprovalItem],
 ) -> ToolExecutionPlan:
     """Build a ToolExecutionPlan for a fresh turn."""
@@ -267,7 +267,7 @@ def _build_plan_for_resume_turn(
     *,
     processed_response,
     agent: Agent[Any],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     approval_items_by_call_id: Mapping[str, ToolApprovalItem],
     pending_interruptions: list[ToolApprovalItem],
     pending_interruption_adder: Callable[[ToolApprovalItem], None],
@@ -379,7 +379,7 @@ async def _collect_runs_by_approval(
     call_id_extractor: Callable[[T], str],
     tool_name_resolver: Callable[[T], str],
     rejection_builder: Callable[[T, str], Awaitable[RunItem] | RunItem],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     approval_items_by_call_id: Mapping[str, ToolApprovalItem],
     agent: Agent[Any],
     pending_interruption_adder: Callable[[ToolApprovalItem], None],
@@ -451,7 +451,7 @@ def _apply_manual_mcp_approvals(
     *,
     agent: Agent[Any],
     requests: Sequence[ToolRunMCPApprovalRequest],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     approval_items_by_call_id: Mapping[str, ToolApprovalItem],
     pending_interruption_adder: Callable[[ToolApprovalItem], None],
 ) -> tuple[list[RunItem], list[ToolApprovalItem]]:
@@ -472,7 +472,7 @@ async def _append_mcp_callback_results(
     *,
     agent: Agent[Any],
     requests: Sequence[ToolRunMCPApprovalRequest],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     append_item: Callable[[RunItem], None],
 ) -> None:
     """Execute MCP approval callbacks and append results when present."""
@@ -491,7 +491,7 @@ async def _select_function_tool_runs_for_resume(
     runs: Sequence[ToolRunFunction],
     *,
     approval_items_by_call_id: Mapping[str, ToolApprovalItem],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     needs_approval_checker: Callable[[ToolRunFunction], Awaitable[bool]],
     output_exists_checker: Callable[[ToolRunFunction], bool],
     record_rejection: Callable[
@@ -543,7 +543,7 @@ async def _execute_tool_plan(
     plan: ToolExecutionPlan,
     bindings: AgentBindings[Any],
     hooks,
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     run_config,
     parallel: bool = True,
 ) -> tuple[

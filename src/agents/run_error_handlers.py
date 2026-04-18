@@ -28,7 +28,7 @@ class RunErrorData:
 @dataclass
 class RunErrorHandlerInput(Generic[TContext]):
     error: MaxTurnsExceeded
-    context: RunContextWrapper[TContext]
+    context: RunContextWrapper
     run_data: RunErrorData
 
 

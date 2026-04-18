@@ -33,7 +33,7 @@ _MISSING = object()
 
 
 @dataclass
-class ToolContext(RunContextWrapper[TContext]):
+class ToolContext(RunContextWrapper):
     """The context of a tool call."""
 
     tool_name: str = field(default_factory=_assert_must_pass_tool_name)
@@ -59,7 +59,7 @@ class ToolContext(RunContextWrapper[TContext]):
 
     def __init__(
         self,
-        context: TContext,
+        context: Any,
         usage: Usage | object = _MISSING,
         tool_name: str | object = _MISSING,
         tool_call_id: str | object = _MISSING,
@@ -112,7 +112,7 @@ class ToolContext(RunContextWrapper[TContext]):
     @classmethod
     def from_agent_context(
         cls,
-        context: RunContextWrapper[TContext],
+        context: RunContextWrapper,
         tool_call_id: str,
         tool_call: ResponseFunctionToolCall | None = None,
         agent: AgentBase[Any] | None = None,

@@ -7,8 +7,9 @@ from agents.agent import Agent
 from agents.items import ItemHelpers, ModelResponse, TResponseInputItem
 from agents.lifecycle import AgentHooks
 from agents.run import Runner
-from agents.run_context import AgentHookContext, RunContextWrapper, TContext
+from agents.run_context import AgentHookContext, HandoffContext, LLMContext, RunContextWrapper, TContext
 from agents.tool import Tool
+from agents.tool_context import ToolContext
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -24,48 +25,40 @@ class AgentHooksForTests(AgentHooks):
     def reset(self):
         self.events.clear()
 
-    async def on_start(self, context: AgentHookContext[TContext], agent: Agent[TContext]) -> None:
+    async def on_start(self, context: AgentHookContext) -> None:
         self.events["on_start"] += 1
 
     async def on_end(
-        self, context: RunContextWrapper[TContext], agent: Agent[TContext], output: Any
+        self, context: AgentHookContext
     ) -> None:
         self.events["on_end"] += 1
 
     async def on_handoff(
-        self, context: RunContextWrapper[TContext], agent: Agent[TContext], source: Agent[TContext]
+        self, context: HandoffContext
     ) -> None:
         self.events["on_handoff"] += 1
 
     async def on_tool_start(
-        self, context: RunContextWrapper[TContext], agent: Agent[TContext], tool: Tool
+        self, context: ToolContext
     ) -> None:
         self.events["on_tool_start"] += 1
 
     async def on_tool_end(
         self,
-        context: RunContextWrapper[TContext],
-        agent: Agent[TContext],
-        tool: Tool,
-        result: str,
+        context: ToolContext,
     ) -> None:
         self.events["on_tool_end"] += 1
 
     # NEW: LLM hooks
     async def on_llm_start(
         self,
-        context: RunContextWrapper[TContext],
-        agent: Agent[TContext],
-        system_prompt: str | None,
-        input_items: list[TResponseInputItem],
+        context: LLMContext,
     ) -> None:
         self.events["on_llm_start"] += 1
 
     async def on_llm_end(
         self,
-        context: RunContextWrapper[TContext],
-        agent: Agent[TContext],
-        response: ModelResponse,
+        context: LLMContext,
     ) -> None:
         self.events["on_llm_end"] += 1
 

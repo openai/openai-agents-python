@@ -25,7 +25,7 @@ class RunErrorDetails:
     new_items: list[RunItem]
     raw_responses: list[ModelResponse]
     last_agent: Agent[Any]
-    context_wrapper: RunContextWrapper[Any]
+    context_wrapper: RunContextWrapper
     input_guardrail_results: list[InputGuardrailResult]
     output_guardrail_results: list[OutputGuardrailResult]
 

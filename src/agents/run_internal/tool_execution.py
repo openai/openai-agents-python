@@ -548,7 +548,7 @@ def maybe_reset_tool_choice(
 
 async def resolve_enabled_function_tools(
     agent: Agent[Any],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
 ) -> list[FunctionTool]:
     """Resolve enabled function tools without triggering MCP tool discovery."""
 
@@ -572,7 +572,7 @@ async def resolve_enabled_function_tools(
 async def initialize_computer_tools(
     *,
     tools: list[Tool],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
 ) -> None:
     """Resolve computer tools ahead of model invocation so each run gets its own instance."""
     computer_tools = [tool for tool in tools if isinstance(tool, ComputerTool)]
@@ -690,7 +690,7 @@ def extract_apply_patch_call_id(tool_call: Any) -> str:
 
 
 def coerce_apply_patch_operation(
-    tool_call: Any, *, context_wrapper: RunContextWrapper[Any]
+    tool_call: Any, *, context_wrapper: RunContextWrapper
 ) -> ApplyPatchOperation:
     """Normalize a single-operation tool payload for legacy callers."""
     operations = coerce_apply_patch_operations(tool_call, context_wrapper=context_wrapper)
@@ -704,7 +704,7 @@ def coerce_apply_patch_operation(
 def coerce_apply_patch_operations(
     tool_call: Any,
     *,
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
 ) -> list[ApplyPatchOperation]:
     """Normalize apply_patch payloads into one or more editor operations."""
     raw_operations = get_mapping_or_attr(tool_call, "operations")
@@ -727,7 +727,7 @@ def coerce_apply_patch_operations(
 
 
 def _coerce_apply_patch_operation_payload(
-    raw_operation: Any, *, context_wrapper: RunContextWrapper[Any]
+    raw_operation: Any, *, context_wrapper: RunContextWrapper
 ) -> ApplyPatchOperation:
     """Normalize the tool payload into an ApplyPatchOperation the editor can consume."""
     if raw_operation is None:
@@ -1039,7 +1039,7 @@ async def with_tool_function_span(
 def build_litellm_json_tool_call(output: ResponseFunctionToolCall) -> FunctionTool:
     """Wrap a JSON string result in a FunctionTool so LiteLLM can stream it."""
 
-    async def on_invoke_tool(_ctx: ToolContext[Any], value: Any) -> Any:
+    async def on_invoke_tool(_ctx: ToolContext, value: Any) -> Any:
         """Deserialize JSON strings so LiteLLM callers receive structured data."""
         if isinstance(value, str):
             return json.loads(value)
@@ -1062,11 +1062,11 @@ async def resolve_approval_status(
     call_id: str,
     raw_item: Any,
     agent: Agent[Any],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     tool_namespace: str | None = None,
     tool_lookup_key: FunctionToolLookupKey | None = None,
     tool_origin: ToolOrigin | None = None,
-    on_approval: Callable[[RunContextWrapper[Any], ToolApprovalItem], Any] | None = None,
+    on_approval: Callable[[RunContextWrapper, ToolApprovalItem], Any] | None = None,
 ) -> tuple[bool | None, ToolApprovalItem]:
     """Build approval item, run on_approval hook if needed, and return latest approval status."""
     approval_item = ToolApprovalItem(
@@ -1119,7 +1119,7 @@ def resolve_approval_interruption(
 
 async def resolve_approval_rejection_message(
     *,
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     run_config: RunConfig,
     tool_type: Literal["function", "computer", "shell", "apply_patch", "custom"],
     tool_name: str,
@@ -1175,7 +1175,7 @@ async def resolve_approval_rejection_message(
 
 async def function_needs_approval(
     function_tool: FunctionTool,
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     tool_call: ResponseFunctionToolCall,
 ) -> bool:
     """Evaluate a function tool's needs_approval setting with parsed args."""
@@ -1198,7 +1198,7 @@ def process_hosted_mcp_approvals(
     *,
     original_pre_step_items: Sequence[RunItem],
     mcp_approval_requests: Sequence[Any],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     agent: Agent[Any],
     append_item: Callable[[RunItem], None],
 ) -> tuple[list[ToolApprovalItem], set[str]]:
@@ -1261,7 +1261,7 @@ def collect_manual_mcp_approvals(
     *,
     agent: Agent[Any],
     requests: Sequence[Any],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     existing_pending_by_call_id: Mapping[str, ToolApprovalItem] | None = None,
 ) -> tuple[list[MCPApprovalResponseItem], list[ToolApprovalItem]]:
     """Bridge hosted MCP approval requests with manual approvals to keep state consistent."""
@@ -1356,8 +1356,8 @@ class _FunctionToolBatchExecutor:
         *,
         bindings: AgentBindings[Any],
         tool_runs: list[ToolRunFunction],
-        hooks: RunHooks[Any],
-        context_wrapper: RunContextWrapper[Any],
+        hooks: RunHooks,
+        context_wrapper: RunContextWrapper,
         config: RunConfig,
         isolate_parallel_failures: bool | None,
     ) -> None:
@@ -1666,7 +1666,7 @@ class _FunctionToolBatchExecutor:
         task_state: _FunctionToolTaskState,
         func_tool: FunctionTool,
         tool_call: ResponseFunctionToolCall,
-        tool_context: ToolContext[Any],
+        tool_context: ToolContext,
         agent_hooks: Any,
     ) -> Any:
         rejected_message = await _execute_tool_input_guardrails(
@@ -1679,9 +1679,9 @@ class _FunctionToolBatchExecutor:
             return rejected_message
 
         await asyncio.gather(
-            self.hooks.on_tool_start(tool_context, self.public_agent, func_tool),
+            self.hooks.on_tool_start(tool_context),
             (
-                agent_hooks.on_tool_start(tool_context, self.public_agent, func_tool)
+                agent_hooks.on_tool_start(tool_context)
                 if agent_hooks
                 else _coro.noop_coroutine()
             ),
@@ -1707,7 +1707,7 @@ class _FunctionToolBatchExecutor:
         task_state: _FunctionToolTaskState,
         func_tool: FunctionTool,
         tool_call: ResponseFunctionToolCall,
-        tool_context: ToolContext[Any],
+        tool_context: ToolContext,
         agent_hooks: Any,
     ) -> Any:
         try:
@@ -1747,9 +1747,9 @@ class _FunctionToolBatchExecutor:
         )
 
         await asyncio.gather(
-            self.hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result),
+            self.hooks.on_tool_end(tool_context),
             (
-                agent_hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result)
+                agent_hooks.on_tool_end(tool_context)
                 if agent_hooks
                 else _coro.noop_coroutine()
             ),
@@ -1874,8 +1874,8 @@ async def execute_function_tool_calls(
     *,
     bindings: AgentBindings[Any],
     tool_runs: list[ToolRunFunction],
-    hooks: RunHooks[Any],
-    context_wrapper: RunContextWrapper[Any],
+    hooks: RunHooks,
+    context_wrapper: RunContextWrapper,
     config: RunConfig,
     isolate_parallel_failures: bool | None = None,
 ) -> tuple[
@@ -1896,8 +1896,8 @@ async def execute_custom_tool_calls(
     *,
     public_agent: Agent[Any],
     calls: list[ToolRunCustom],
-    context_wrapper: RunContextWrapper[Any],
-    hooks: RunHooks[Any],
+    context_wrapper: RunContextWrapper,
+    hooks: RunHooks,
     config: RunConfig,
 ) -> list[RunItem]:
     """Run Responses custom tool calls serially and wrap outputs."""
@@ -1921,8 +1921,8 @@ async def execute_local_shell_calls(
     *,
     public_agent: Agent[Any],
     calls: list[ToolRunLocalShellCall],
-    context_wrapper: RunContextWrapper[Any],
-    hooks: RunHooks[Any],
+    context_wrapper: RunContextWrapper,
+    hooks: RunHooks,
     config: RunConfig,
 ) -> list[RunItem]:
     """Run local shell tool calls serially and wrap outputs."""
@@ -1946,8 +1946,8 @@ async def execute_shell_calls(
     *,
     public_agent: Agent[Any],
     calls: list[ToolRunShellCall],
-    context_wrapper: RunContextWrapper[Any],
-    hooks: RunHooks[Any],
+    context_wrapper: RunContextWrapper,
+    hooks: RunHooks,
     config: RunConfig,
 ) -> list[RunItem]:
     """Run shell tool calls serially and wrap outputs."""
@@ -1971,8 +1971,8 @@ async def execute_apply_patch_calls(
     *,
     public_agent: Agent[Any],
     calls: list[ToolRunApplyPatchCall],
-    context_wrapper: RunContextWrapper[Any],
-    hooks: RunHooks[Any],
+    context_wrapper: RunContextWrapper,
+    hooks: RunHooks,
     config: RunConfig,
 ) -> list[RunItem]:
     """Run apply_patch tool calls serially and normalize outputs."""
@@ -1996,8 +1996,8 @@ async def execute_computer_actions(
     *,
     public_agent: Agent[Any],
     actions: list[ToolRunComputerAction],
-    hooks: RunHooks[Any],
-    context_wrapper: RunContextWrapper[Any],
+    hooks: RunHooks,
+    context_wrapper: RunContextWrapper,
     config: RunConfig,
 ) -> list[RunItem]:
     """Run computer actions serially and emit screenshot outputs."""
@@ -2046,10 +2046,10 @@ async def execute_approved_tools(
     *,
     agent: Agent[Any],
     interruptions: list[Any],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     generated_items: list[RunItem],
     run_config: RunConfig,
-    hooks: RunHooks[Any],
+    hooks: RunHooks,
     all_tools: list[Tool] | None = None,
 ) -> None:
     """Execute tools that have been approved after an interruption (HITL resume path)."""
@@ -2237,7 +2237,7 @@ async def execute_approved_tools(
 async def _execute_tool_input_guardrails(
     *,
     func_tool: FunctionTool,
-    tool_context: ToolContext[Any],
+    tool_context: ToolContext,
     agent: Agent[Any],
     tool_input_guardrail_results: list[ToolInputGuardrailResult],
 ) -> str | None:
@@ -2271,7 +2271,7 @@ async def _execute_tool_input_guardrails(
 async def _execute_tool_output_guardrails(
     *,
     func_tool: FunctionTool,
-    tool_context: ToolContext[Any],
+    tool_context: ToolContext,
     agent: Agent[Any],
     real_result: Any,
     tool_output_guardrail_results: list[ToolOutputGuardrailResult],

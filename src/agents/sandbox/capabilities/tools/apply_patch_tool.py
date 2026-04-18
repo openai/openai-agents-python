@@ -192,7 +192,7 @@ class SandboxApplyPatchTool(CustomTool):
         return _parse_custom_tool_input(raw_input)
 
     async def _needs_custom_approval(
-        self, ctx_wrapper: RunContextWrapper[Any], raw_input: str, call_id: str
+        self, ctx_wrapper: RunContextWrapper, raw_input: str, call_id: str
     ) -> bool:
         try:
             operations = self.parse_custom_input(raw_input)
@@ -211,7 +211,7 @@ class SandboxApplyPatchTool(CustomTool):
                 return True
         return False
 
-    async def _on_invoke_tool(self, ctx: ToolContext[Any], raw_input: str) -> str:
+    async def _on_invoke_tool(self, ctx: ToolContext, raw_input: str) -> str:
         operation_outputs: list[str] = []
         for operation in self.parse_custom_input(raw_input):
             operation.ctx_wrapper = ctx

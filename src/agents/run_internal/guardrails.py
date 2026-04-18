@@ -31,7 +31,7 @@ async def run_single_input_guardrail(
     agent: Agent[Any],
     guardrail: InputGuardrail[TContext],
     input: str | list[TResponseInputItem],
-    context: RunContextWrapper[TContext],
+    context: RunContextWrapper,
 ) -> InputGuardrailResult:
     with guardrail_span(guardrail.get_name()) as span_guardrail:
         result = await guardrail.run(agent, input, context)
@@ -43,7 +43,7 @@ async def run_single_output_guardrail(
     guardrail: OutputGuardrail[TContext],
     agent: Agent[Any],
     agent_output: Any,
-    context: RunContextWrapper[TContext],
+    context: RunContextWrapper,
 ) -> OutputGuardrailResult:
     with guardrail_span(guardrail.get_name()) as span_guardrail:
         result = await guardrail.run(agent=agent, agent_output=agent_output, context=context)
@@ -55,7 +55,7 @@ async def run_input_guardrails_with_queue(
     agent: Agent[Any],
     guardrails: list[InputGuardrail[TContext]],
     input: str | list[TResponseInputItem],
-    context: RunContextWrapper[TContext],
+    context: RunContextWrapper,
     streamed_result: RunResultStreaming,
     parent_span: Span[Any] | None,
 ) -> None:
@@ -109,7 +109,7 @@ async def run_input_guardrails(
     agent: Agent[Any],
     guardrails: list[InputGuardrail[TContext]],
     input: str | list[TResponseInputItem],
-    context: RunContextWrapper[TContext],
+    context: RunContextWrapper,
 ) -> list[InputGuardrailResult]:
     """Run input guardrails concurrently and raise on tripwires."""
     if not guardrails:
@@ -144,7 +144,7 @@ async def run_output_guardrails(
     guardrails: list[OutputGuardrail[TContext]],
     agent: Agent[TContext],
     agent_output: Any,
-    context: RunContextWrapper[TContext],
+    context: RunContextWrapper,
 ) -> list[OutputGuardrailResult]:
     """Run output guardrails in parallel and raise on tripwires."""
     if not guardrails:

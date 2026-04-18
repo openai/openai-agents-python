@@ -67,7 +67,7 @@ from ..items import (
 from ..lifecycle import RunHooks
 from ..logger import logger
 from ..run_config import RunConfig
-from ..run_context import AgentHookContext, RunContextWrapper, TContext
+from ..run_context import AgentHookContext, HandoffContext, RunContextWrapper, TContext
 from ..run_state import RunState
 from ..stream_events import StreamEvent
 from ..tool import (
@@ -167,8 +167,8 @@ async def _maybe_finalize_from_tool_results(
     pre_step_items: list[RunItem],
     new_step_items: list[RunItem],
     function_results: list[FunctionToolResult],
-    hooks: RunHooks[TContext],
-    context_wrapper: RunContextWrapper[TContext],
+    hooks: RunHooks,
+    context_wrapper: RunContextWrapper,
     tool_input_guardrail_results: list[ToolInputGuardrailResult],
     tool_output_guardrail_results: list[ToolOutputGuardrailResult],
 ) -> SingleStepResult | None:
@@ -203,20 +203,19 @@ async def _maybe_finalize_from_tool_results(
 
 async def run_final_output_hooks(
     agent: Agent[TContext],
-    hooks: RunHooks[TContext],
-    context_wrapper: RunContextWrapper[TContext],
+    hooks: RunHooks,
+    context_wrapper: RunContextWrapper,
     final_output: Any,
 ) -> None:
-    agent_hook_context = AgentHookContext(
-        context=context_wrapper.context,
-        usage=context_wrapper.usage,
-        _approvals=context_wrapper._approvals,
-        turn_input=context_wrapper.turn_input,
+    agent_hook_context = AgentHookContext.from_run_context(
+        context_wrapper,
+        agent=agent,
+        output=final_output,
     )
 
     await asyncio.gather(
-        hooks.on_agent_end(agent_hook_context, agent, final_output),
-        agent.hooks.on_end(agent_hook_context, agent, final_output)
+        hooks.on_agent_end(agent_hook_context),
+        agent.hooks.on_end(agent_hook_context)
         if agent.hooks
         else _coro.noop_coroutine(),
     )
@@ -230,12 +229,12 @@ async def execute_final_output_step(
     pre_step_items: list[RunItem],
     new_step_items: list[RunItem],
     final_output: Any,
-    hooks: RunHooks[Any],
-    context_wrapper: RunContextWrapper[Any],
+    hooks: RunHooks,
+    context_wrapper: RunContextWrapper,
     tool_input_guardrail_results: list[ToolInputGuardrailResult],
     tool_output_guardrail_results: list[ToolOutputGuardrailResult],
     run_final_output_hooks_fn: Callable[
-        [Agent[Any], RunHooks[Any], RunContextWrapper[Any], Any], Awaitable[None]
+        [Agent[Any], RunHooks, RunContextWrapper, Any], Awaitable[None]
     ]
     | None = None,
 ) -> SingleStepResult:
@@ -263,12 +262,12 @@ async def execute_final_output(
     pre_step_items: list[RunItem],
     new_step_items: list[RunItem],
     final_output: Any,
-    hooks: RunHooks[Any],
-    context_wrapper: RunContextWrapper[Any],
+    hooks: RunHooks,
+    context_wrapper: RunContextWrapper,
     tool_input_guardrail_results: list[ToolInputGuardrailResult],
     tool_output_guardrail_results: list[ToolOutputGuardrailResult],
     run_final_output_hooks_fn: Callable[
-        [Agent[Any], RunHooks[Any], RunContextWrapper[Any], Any], Awaitable[None]
+        [Agent[Any], RunHooks, RunContextWrapper, Any], Awaitable[None]
     ]
     | None = None,
 ) -> SingleStepResult:
@@ -328,8 +327,8 @@ async def execute_handoffs(
     new_step_items: list[RunItem],
     new_response: ModelResponse,
     run_handoffs: list[ToolRunHandoff],
-    hooks: RunHooks[TContext],
-    context_wrapper: RunContextWrapper[TContext],
+    hooks: RunHooks,
+    context_wrapper: RunContextWrapper,
     run_config: RunConfig,
     server_manages_conversation: bool = False,
     nest_handoff_history_fn: Callable[..., HandoffInputData] | None = None,
@@ -385,18 +384,14 @@ async def execute_handoffs(
             )
         )
 
+        handoff_context = HandoffContext.from_run_context(
+            context_wrapper, from_agent=public_agent, to_agent=new_agent
+        )
+
         await asyncio.gather(
-            hooks.on_handoff(
-                context=context_wrapper,
-                from_agent=public_agent,
-                to_agent=new_agent,
-            ),
+            hooks.on_handoff(context=handoff_context),
             (
-                public_agent.hooks.on_handoff(
-                    context_wrapper,
-                    agent=new_agent,
-                    source=public_agent,
-                )
+                public_agent.hooks.on_handoff(context=handoff_context)
                 if public_agent.hooks
                 else _coro.noop_coroutine()
             ),
@@ -512,7 +507,7 @@ async def execute_handoffs(
 async def check_for_final_output_from_tools(
     agent: Agent[TContext],
     tool_results: list[FunctionToolResult],
-    context_wrapper: RunContextWrapper[TContext],
+    context_wrapper: RunContextWrapper,
 ) -> ToolsToFinalOutputResult:
     """Determine if tool results should produce a final output."""
     if not tool_results:
@@ -552,8 +547,8 @@ async def execute_tools_and_side_effects(
     new_response: ModelResponse,
     processed_response: ProcessedResponse,
     output_schema: AgentOutputSchemaBase | None,
-    hooks: RunHooks[TContext],
-    context_wrapper: RunContextWrapper[TContext],
+    hooks: RunHooks,
+    context_wrapper: RunContextWrapper,
     run_config: RunConfig,
     server_manages_conversation: bool = False,
 ) -> SingleStepResult:
@@ -723,8 +718,8 @@ async def resolve_interrupted_turn(
     original_pre_step_items: list[RunItem],
     new_response: ModelResponse,
     processed_response: ProcessedResponse,
-    hooks: RunHooks[TContext],
-    context_wrapper: RunContextWrapper[TContext],
+    hooks: RunHooks,
+    context_wrapper: RunContextWrapper,
     run_config: RunConfig,
     server_manages_conversation: bool = False,
     run_state: RunState | None = None,
@@ -1867,8 +1862,8 @@ async def get_single_step_result_from_response(
     new_response: ModelResponse,
     output_schema: AgentOutputSchemaBase | None,
     handoffs: list[Handoff],
-    hooks: RunHooks[TContext],
-    context_wrapper: RunContextWrapper[TContext],
+    hooks: RunHooks,
+    context_wrapper: RunContextWrapper,
     run_config: RunConfig,
     tool_use_tracker,
     server_manages_conversation: bool = False,

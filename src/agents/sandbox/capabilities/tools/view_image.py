@@ -84,7 +84,7 @@ class ViewImageTool(FunctionTool):
         session: BaseSandboxSession,
         user: str | User | None = None,
         needs_approval: (
-            bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
+            bool | Callable[[RunContextWrapper, dict[str, Any], str], Awaitable[bool]]
         ) = False,
     ) -> None:
         self.session = session

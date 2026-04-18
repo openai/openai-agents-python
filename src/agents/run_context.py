@@ -40,7 +40,7 @@ class _ApprovalRecord:
 
 
 @dataclass(eq=False)
-class RunContextWrapper(Generic[TContext]):
+class RunContextWrapper:
     """This wraps the context object that you passed to `Runner.run()`. It also contains
     information about the usage of the agent run so far.
 
@@ -48,7 +48,7 @@ class RunContextWrapper(Generic[TContext]):
     you implement, like tool functions, callbacks, hooks, etc.
     """
 
-    context: TContext
+    context: Any
     """The context object (or None), passed by you to `Runner.run()`"""
 
     usage: Usage = field(default_factory=Usage)
@@ -454,7 +454,7 @@ class RunContextWrapper(Generic[TContext]):
                 record.sticky_rejection_message = sticky_rejection_message
             self._approvals[tool_name] = record
 
-    def _fork_with_tool_input(self, tool_input: Any) -> RunContextWrapper[TContext]:
+    def _fork_with_tool_input(self, tool_input: Any) -> RunContextWrapper:
         """Create a child context that shares approvals and usage with tool input set."""
         fork = RunContextWrapper(context=self.context)
         fork.usage = self.usage
@@ -463,7 +463,7 @@ class RunContextWrapper(Generic[TContext]):
         fork.tool_input = tool_input
         return fork
 
-    def _fork_without_tool_input(self) -> RunContextWrapper[TContext]:
+    def _fork_without_tool_input(self) -> RunContextWrapper:
         """Create a child context that shares approvals and usage without tool input."""
         fork = RunContextWrapper(context=self.context)
         fork.usage = self.usage
@@ -473,5 +473,100 @@ class RunContextWrapper(Generic[TContext]):
 
 
 @dataclass(eq=False)
-class AgentHookContext(RunContextWrapper[TContext]):
-    """Context passed to agent hooks (on_start, on_end)."""
+class AgentHookContext(RunContextWrapper):
+    """Context passed to agent hooks (on_agent_start, on_agent_end)."""
+
+    agent: AgentBase[Any] | None = None
+    """The active agent for this hook."""
+
+    output: Any | None = None
+    """The output of the agent, available in on_agent_end."""
+
+    @classmethod
+    def from_run_context(
+        cls,
+        context: RunContextWrapper,
+        *,
+        agent: AgentBase[Any] | None = None,
+        output: Any | None = None,
+    ) -> AgentHookContext:
+        """Create an AgentHookContext from a RunContextWrapper."""
+        return cls(
+            context=context.context,
+            usage=context.usage,
+            turn_input=context.turn_input,
+            _approvals=context._approvals,
+            tool_input=context.tool_input,
+            agent=agent,
+            output=output,
+        )
+
+
+@dataclass(eq=False)
+class LLMContext(RunContextWrapper):
+    """Context passed to LLM hooks (on_llm_start, on_llm_end)."""
+
+    agent: AgentBase[Any] | None = None
+    """The active agent for this LLM call."""
+
+    system_prompt: str | None = None
+    """The system prompt being sent to the LLM."""
+
+    input_items: list[TResponseInputItem] = field(default_factory=list)
+    """The input items being sent to the LLM."""
+
+    response: ModelResponse | None = None
+    """The response from the LLM, available in on_llm_end."""
+
+    @classmethod
+    def from_run_context(
+        cls,
+        context: RunContextWrapper,
+        *,
+        agent: AgentBase[Any] | None = None,
+        system_prompt: str | None = None,
+        input_items: list[TResponseInputItem] | None = None,
+        response: ModelResponse | None = None,
+    ) -> LLMContext:
+        """Create an LLMContext from a RunContextWrapper."""
+        return cls(
+            context=context.context,
+            usage=context.usage,
+            turn_input=context.turn_input,
+            _approvals=context._approvals,
+            tool_input=context.tool_input,
+            agent=agent,
+            system_prompt=system_prompt,
+            input_items=list(input_items or []),
+            response=response,
+        )
+
+
+@dataclass(eq=False)
+class HandoffContext(RunContextWrapper):
+    """Context passed to handoff hooks (on_handoff)."""
+
+    from_agent: AgentBase[Any] | None = None
+    """The agent handing off."""
+
+    to_agent: AgentBase[Any] | None = None
+    """The agent being handed off to."""
+
+    @classmethod
+    def from_run_context(
+        cls,
+        context: RunContextWrapper,
+        *,
+        from_agent: AgentBase[Any] | None = None,
+        to_agent: AgentBase[Any] | None = None,
+    ) -> HandoffContext:
+        """Create a HandoffContext from a RunContextWrapper."""
+        return cls(
+            context=context.context,
+            usage=context.usage,
+            turn_input=context.turn_input,
+            _approvals=context._approvals,
+            tool_input=context.tool_input,
+            from_agent=from_agent,
+            to_agent=to_agent,
+        )

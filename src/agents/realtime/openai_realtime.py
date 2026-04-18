@@ -371,7 +371,7 @@ def get_server_event_type_adapter() -> TypeAdapter[AllRealtimeServerEvents]:
 
 
 async def _collect_enabled_handoffs(
-    agent: RealtimeAgent[Any], context_wrapper: RunContextWrapper[Any]
+    agent: RealtimeAgent[Any], context_wrapper: RunContextWrapper
 ) -> list[Handoff[Any, RealtimeAgent[Any]]]:
     handoffs: list[Handoff[Any, RealtimeAgent[Any]]] = []
     for handoff_item in agent.handoffs:
@@ -396,7 +396,7 @@ async def _collect_enabled_handoffs(
 async def _build_model_settings_from_agent(
     *,
     agent: RealtimeAgent[Any],
-    context_wrapper: RunContextWrapper[Any],
+    context_wrapper: RunContextWrapper,
     base_settings: RealtimeSessionModelSettings,
     starting_settings: RealtimeSessionModelSettings | None,
     run_config: RealtimeRunConfig | None,

@@ -116,7 +116,7 @@ if TYPE_CHECKING:
 
 TContext = TypeVar("TContext", default=Any)
 TAgent = TypeVar("TAgent", bound="Agent[Any]", default="Agent[Any]")
-ContextOverride = Mapping[str, Any] | RunContextWrapper[Any]
+ContextOverride = Mapping[str, Any] | RunContextWrapper
 ContextSerializer = Callable[[Any], Mapping[str, Any]]
 ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 
@@ -210,7 +210,7 @@ class RunState(Generic[TContext, TAgent]):
     _model_responses: list[ModelResponse] = field(default_factory=list)
     """Responses from the model so far."""
 
-    _context: RunContextWrapper[TContext] | None = None
+    _context: RunContextWrapper | None = None
     """Run context tracking approvals, usage, and other metadata."""
 
     _generated_items: list[RunItem] = field(default_factory=list)
@@ -278,7 +278,7 @@ class RunState(Generic[TContext, TAgent]):
 
     def __init__(
         self,
-        context: RunContextWrapper[TContext],
+        context: RunContextWrapper,
         original_input: str | list[Any],
         starting_agent: TAgent,
         max_turns: int = 10,
@@ -1698,7 +1698,7 @@ async def _restore_pending_nested_agent_tool_runs(
 async def _deserialize_processed_response(
     processed_response_data: dict[str, Any],
     current_agent: Agent[Any],
-    context: RunContextWrapper[Any],
+    context: RunContextWrapper,
     agent_map: dict[str, Agent[Any]],
     *,
     agent_identity_map: Mapping[str, Agent[Any]] | None = None,
@@ -2245,7 +2245,7 @@ def _deserialize_input_guardrail_results(
         name, guardrail_output, _ = parsed
 
         def _input_guardrail_fn(
-            context: RunContextWrapper[Any],
+            context: RunContextWrapper,
             agent: Agent[Any],
             input: Any,
             *,
@@ -2284,7 +2284,7 @@ def _deserialize_output_guardrail_results(
             resolved_agent = fallback_agent
 
         def _output_guardrail_fn(
-            context: RunContextWrapper[Any],
+            context: RunContextWrapper,
             agent_param: Agent[Any],
             agent_output_param: Any,
             *,

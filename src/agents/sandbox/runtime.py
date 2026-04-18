@@ -182,7 +182,7 @@ class SandboxRuntime(Generic[TContext]):
         *,
         current_agent: Agent[TContext],
         current_input: str | list[TResponseInputItem],
-        context_wrapper: RunContextWrapper[TContext],
+        context_wrapper: RunContextWrapper,
         is_resumed_state: bool,
     ) -> _SandboxPreparedAgent[TContext]:
         self.assert_agent_supported(current_agent)

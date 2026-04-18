@@ -44,7 +44,7 @@ class RealtimeAgent(AgentBase, Generic[TContext]):
     instructions: (
         str
         | Callable[
-            [RunContextWrapper[TContext], RealtimeAgent[TContext]],
+            [RunContextWrapper, RealtimeAgent[TContext]],
             MaybeAwaitable[str],
         ]
         | None
@@ -87,7 +87,7 @@ class RealtimeAgent(AgentBase, Generic[TContext]):
         """
         return dataclasses.replace(self, **kwargs)
 
-    async def get_system_prompt(self, run_context: RunContextWrapper[TContext]) -> str | None:
+    async def get_system_prompt(self, run_context: RunContextWrapper) -> str | None:
         """Get the system prompt for the agent."""
         if isinstance(self.instructions, str):
             return self.instructions

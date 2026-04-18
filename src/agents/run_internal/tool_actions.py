@@ -102,8 +102,8 @@ class ComputerAction:
         *,
         agent: Agent[Any],
         action: ToolRunComputerAction,
-        hooks: RunHooks[Any],
-        context_wrapper: RunContextWrapper[Any],
+        hooks: RunHooks,
+        context_wrapper: RunContextWrapper,
         config: RunConfig,
         acknowledged_safety_checks: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None,
     ) -> RunItem:
@@ -120,10 +120,18 @@ class ComputerAction:
                 tool=action.computer_tool, run_context=context_wrapper
             )
             agent_hooks = agent.hooks
+            tool_context = ToolContext.from_agent_context(
+                context_wrapper,
+                action.tool_call.call_id,
+                tool_name=trace_tool_name,
+                agent=agent,
+                run_config=config,
+            )
+
             await asyncio.gather(
-                hooks.on_tool_start(context_wrapper, agent, action.computer_tool),
+                hooks.on_tool_start(tool_context),
                 (
-                    agent_hooks.on_tool_start(context_wrapper, agent, action.computer_tool)
+                    agent_hooks.on_tool_start(tool_context)
                     if agent_hooks
                     else _coro.noop_coroutine()
                 ),
@@ -151,9 +159,9 @@ class ComputerAction:
                 raise
 
             await asyncio.gather(
-                hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
+                hooks.on_tool_end(tool_context),
                 (
-                    agent_hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output)
+                    agent_hooks.on_tool_end(tool_context)
                     if agent_hooks
                     else _coro.noop_coroutine()
                 ),
@@ -368,16 +376,24 @@ class LocalShellAction:
         *,
         agent: Agent[Any],
         call: ToolRunLocalShellCall,
-        hooks: RunHooks[Any],
-        context_wrapper: RunContextWrapper[Any],
+        hooks: RunHooks,
+        context_wrapper: RunContextWrapper,
         config: RunConfig,
     ) -> RunItem:
         """Run a local shell tool call and wrap the result as a ToolCallOutputItem."""
         agent_hooks = agent.hooks
+        tool_context = ToolContext.from_agent_context(
+            context_wrapper,
+            call.tool_call.call_id,
+            tool_name=call.local_shell_tool.name,
+            agent=agent,
+            run_config=config,
+        )
+
         await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool),
+            hooks.on_tool_start(tool_context),
             (
-                agent_hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool)
+                agent_hooks.on_tool_start(tool_context)
                 if agent_hooks
                 else _coro.noop_coroutine()
             ),
@@ -391,9 +407,9 @@ class LocalShellAction:
         result = await output if inspect.isawaitable(output) else output
 
         await asyncio.gather(
-            hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result),
+            hooks.on_tool_end(tool_context),
             (
-                agent_hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result)
+                agent_hooks.on_tool_end(tool_context)
                 if agent_hooks
                 else _coro.noop_coroutine()
             ),
@@ -420,8 +436,8 @@ class ShellAction:
         *,
         agent: Agent[Any],
         call: ToolRunShellCall,
-        hooks: RunHooks[Any],
-        context_wrapper: RunContextWrapper[Any],
+        hooks: RunHooks,
+        context_wrapper: RunContextWrapper,
         config: RunConfig,
     ) -> RunItem:
         """Run a shell tool call and return a normalized ToolCallOutputItem."""
@@ -466,10 +482,18 @@ class ShellAction:
                 if approval_status is not True:
                     return approval_item
 
+            tool_context = ToolContext.from_agent_context(
+                context_wrapper,
+                shell_call.call_id,
+                tool_name=shell_tool.name,
+                agent=agent,
+                run_config=config,
+            )
+
             await asyncio.gather(
-                hooks.on_tool_start(context_wrapper, agent, shell_tool),
+                hooks.on_tool_start(tool_context),
                 (
-                    agent_hooks.on_tool_start(context_wrapper, agent, shell_tool)
+                    agent_hooks.on_tool_start(tool_context)
                     if agent_hooks
                     else _coro.noop_coroutine()
                 ),
@@ -541,9 +565,9 @@ class ShellAction:
                 logger.error("Shell executor failed: %s", exc, exc_info=True)
 
             await asyncio.gather(
-                hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text),
+                hooks.on_tool_end(tool_context),
                 (
-                    agent_hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text)
+                    agent_hooks.on_tool_end(tool_context)
                     if agent_hooks
                     else _coro.noop_coroutine()
                 ),
@@ -602,8 +626,8 @@ class CustomToolAction:
         *,
         agent: Agent[Any],
         call: ToolRunCustom,
-        hooks: RunHooks[Any],
-        context_wrapper: RunContextWrapper[Any],
+        hooks: RunHooks,
+        context_wrapper: RunContextWrapper,
         config: RunConfig,
     ) -> RunItem:
         custom_tool: CustomTool = call.custom_tool
@@ -656,9 +680,9 @@ class CustomToolAction:
                     return approval_item
 
             await asyncio.gather(
-                hooks.on_tool_start(tool_context, agent, custom_tool),
+                hooks.on_tool_start(tool_context),
                 (
-                    agent_hooks.on_tool_start(tool_context, agent, custom_tool)
+                    agent_hooks.on_tool_start(tool_context)
                     if agent_hooks
                     else _coro.noop_coroutine()
                 ),
@@ -687,9 +711,9 @@ class CustomToolAction:
                 logger.error("Custom tool failed: %s", exc, exc_info=True)
 
             await asyncio.gather(
-                hooks.on_tool_end(tool_context, agent, custom_tool, output_text),
+                hooks.on_tool_end(tool_context),
                 (
-                    agent_hooks.on_tool_end(tool_context, agent, custom_tool, output_text)
+                    agent_hooks.on_tool_end(tool_context)
                     if agent_hooks
                     else _coro.noop_coroutine()
                 ),
@@ -735,8 +759,8 @@ class ApplyPatchAction:
         *,
         agent: Agent[Any],
         call: ToolRunApplyPatchCall,
-        hooks: RunHooks[Any],
-        context_wrapper: RunContextWrapper[Any],
+        hooks: RunHooks,
+        context_wrapper: RunContextWrapper,
         config: RunConfig,
     ) -> RunItem:
         """Run an apply_patch call and serialize the editor result for the model."""
@@ -797,10 +821,18 @@ class ApplyPatchAction:
                 if approval_status is not True:
                     return approval_item
 
+            tool_context = ToolContext.from_agent_context(
+                context_wrapper,
+                call_id,
+                tool_name=apply_patch_tool.name,
+                agent=agent,
+                run_config=config,
+            )
+
             await asyncio.gather(
-                hooks.on_tool_start(context_wrapper, agent, apply_patch_tool),
+                hooks.on_tool_start(tool_context),
                 (
-                    agent_hooks.on_tool_start(context_wrapper, agent, apply_patch_tool)
+                    agent_hooks.on_tool_start(tool_context)
                     if agent_hooks
                     else _coro.noop_coroutine()
                 ),
@@ -852,9 +884,9 @@ class ApplyPatchAction:
                 logger.error("Apply patch editor failed: %s", exc, exc_info=True)
 
             await asyncio.gather(
-                hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text),
+                hooks.on_tool_end(tool_context),
                 (
-                    agent_hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text)
+                    agent_hooks.on_tool_end(tool_context)
                     if agent_hooks
                     else _coro.noop_coroutine()
                 ),

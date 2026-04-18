@@ -198,7 +198,7 @@ class Runner:
         *,
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
-        hooks: RunHooks[TContext] | None = None,
+        hooks: RunHooks | None = None,
         run_config: RunConfig | None = None,
         error_handlers: RunErrorHandlers[TContext] | None = None,
         previous_response_id: str | None = None,
@@ -278,7 +278,7 @@ class Runner:
         *,
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
-        hooks: RunHooks[TContext] | None = None,
+        hooks: RunHooks | None = None,
         run_config: RunConfig | None = None,
         error_handlers: RunErrorHandlers[TContext] | None = None,
         previous_response_id: str | None = None,
@@ -355,7 +355,7 @@ class Runner:
         input: str | list[TResponseInputItem] | RunState[TContext],
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
-        hooks: RunHooks[TContext] | None = None,
+        hooks: RunHooks | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
         auto_previous_response_id: bool = False,
@@ -438,7 +438,7 @@ class AgentRunner:
     ) -> RunResult:
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
-        hooks = cast(RunHooks[TContext], validate_run_hooks(kwargs.get("hooks")))
+        hooks = cast(RunHooks, validate_run_hooks(kwargs.get("hooks")))
         run_config = kwargs.get("run_config")
         error_handlers = kwargs.get("error_handlers")
         previous_response_id = kwargs.get("previous_response_id")
@@ -603,7 +603,7 @@ class AgentRunner:
                 session_items = list(run_state._session_items)
                 model_responses = run_state._model_responses
                 # Cast to the correct type since we know this is TContext
-                context_wrapper = cast(RunContextWrapper[TContext], run_state._context)
+                context_wrapper = cast(RunContextWrapper, run_state._context)
             else:
                 current_turn = 0
                 original_input = copy_input_items(original_input_for_state)
@@ -1632,7 +1632,7 @@ class AgentRunner:
     ) -> RunResultStreaming:
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
-        hooks = cast(RunHooks[TContext], validate_run_hooks(kwargs.get("hooks")))
+        hooks = cast(RunHooks, validate_run_hooks(kwargs.get("hooks")))
         run_config = kwargs.get("run_config")
         error_handlers = kwargs.get("error_handlers")
         previous_response_id = kwargs.get("previous_response_id")

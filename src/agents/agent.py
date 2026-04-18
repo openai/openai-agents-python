@@ -86,7 +86,7 @@ class ToolsToFinalOutputResult:
 
 
 ToolsToFinalOutputFunction: TypeAlias = Callable[
-    [RunContextWrapper[TContext], list[FunctionToolResult]],
+    [RunContextWrapper, list[FunctionToolResult]],
     MaybeAwaitable[ToolsToFinalOutputResult],
 ]
 """A function that takes a run context and a list of tool results, and returns a
@@ -182,7 +182,7 @@ class AgentBase(Generic[TContext]):
     mcp_config: MCPConfig = field(default_factory=lambda: MCPConfig())
     """Configuration for MCP servers."""
 
-    async def get_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
+    async def get_mcp_tools(self, run_context: RunContextWrapper) -> list[Tool]:
         """Fetches the available tools from the MCP servers."""
         convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
         failure_error_function = self.mcp_config.get(
@@ -196,7 +196,7 @@ class AgentBase(Generic[TContext]):
             failure_error_function=failure_error_function,
         )
 
-    async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
+    async def get_all_tools(self, run_context: RunContextWrapper) -> list[Tool]:
         """All agent tools, including MCP tools and function tools."""
         mcp_tools = await self.get_mcp_tools(run_context)
 
@@ -236,7 +236,7 @@ class Agent(AgentBase, Generic[TContext]):
     instructions: (
         str
         | Callable[
-            [RunContextWrapper[TContext], Agent[TContext]],
+            [RunContextWrapper, Agent[TContext]],
             MaybeAwaitable[str],
         ]
         | None
@@ -291,7 +291,7 @@ class Agent(AgentBase, Generic[TContext]):
        creation, subclass and pass an `AgentOutputSchemaBase` subclass.
     """
 
-    hooks: AgentHooks[TContext] | None = None
+    hooks: AgentHooks | None = None
     """A class that receives callbacks on various lifecycle events for this agent.
     """
 
@@ -477,17 +477,17 @@ class Agent(AgentBase, Generic[TContext]):
             Callable[[RunResult | RunResultStreaming], Awaitable[str]] | None
         ) = None,
         is_enabled: bool
-        | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
+        | Callable[[RunContextWrapper, AgentBase[Any]], MaybeAwaitable[bool]] = True,
         on_stream: Callable[[AgentToolStreamEvent], MaybeAwaitable[None]] | None = None,
         run_config: RunConfig | None = None,
         max_turns: int | None = None,
-        hooks: RunHooks[TContext] | None = None,
+        hooks: RunHooks | None = None,
         previous_response_id: str | None = None,
         conversation_id: str | None = None,
         session: Session | None = None,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
         needs_approval: bool
-        | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
+        | Callable[[RunContextWrapper, dict[str, Any], str], Awaitable[bool]] = False,
         parameters: type[Any] | None = None,
         input_builder: StructuredToolInputBuilder | None = None,
         include_input_schema: bool = False,
@@ -656,8 +656,8 @@ class Agent(AgentBase, Generic[TContext]):
                 return "approved"
 
             def _apply_nested_approvals(
-                nested_context: RunContextWrapper[Any],
-                parent_context: RunContextWrapper[Any],
+                nested_context: RunContextWrapper,
+                parent_context: RunContextWrapper,
                 interruptions: list[ToolApprovalItem],
             ) -> None:
                 def _find_mirrored_approval_record(
@@ -899,7 +899,7 @@ class Agent(AgentBase, Generic[TContext]):
 
         return run_agent_tool
 
-    async def get_system_prompt(self, run_context: RunContextWrapper[TContext]) -> str | None:
+    async def get_system_prompt(self, run_context: RunContextWrapper) -> str | None:
         if isinstance(self.instructions, str):
             return self.instructions
         elif callable(self.instructions):
@@ -929,7 +929,7 @@ class Agent(AgentBase, Generic[TContext]):
         return None
 
     async def get_prompt(
-        self, run_context: RunContextWrapper[TContext]
+        self, run_context: RunContextWrapper
     ) -> ResponsePromptParam | None:
         """Get the prompt for the agent."""
         from ._public_agent import get_public_agent

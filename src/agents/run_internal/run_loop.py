@@ -60,7 +60,7 @@ from ..logger import logger
 from ..memory import Session
 from ..result import RunResultStreaming
 from ..run_config import ReasoningItemIdPolicy, RunConfig
-from ..run_context import AgentHookContext, RunContextWrapper, TContext
+from ..run_context import AgentHookContext, LLMContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
 from ..run_state import RunState
 from ..sandbox.runtime import SandboxRuntime
@@ -359,7 +359,7 @@ async def _run_output_guardrails_for_stream(
     agent: Agent[TContext],
     run_config: RunConfig,
     output: Any,
-    context_wrapper: RunContextWrapper[TContext],
+    context_wrapper: RunContextWrapper,
     streamed_result: RunResultStreaming,
 ) -> list[Any]:
     streamed_result._output_guardrails_task = asyncio.create_task(
@@ -388,7 +388,7 @@ async def _finalize_streamed_final_output(
     agent: Agent[TContext],
     run_config: RunConfig,
     output: Any,
-    context_wrapper: RunContextWrapper[TContext],
+    context_wrapper: RunContextWrapper,
     save_items: Callable[[list[RunItem], str | None, bool | None], Awaitable[None]],
     items: list[RunItem],
     response_id: str | None,
@@ -436,8 +436,8 @@ async def start_streaming(
     streamed_result: RunResultStreaming,
     starting_agent: Agent[TContext],
     max_turns: int,
-    hooks: RunHooks[TContext],
-    context_wrapper: RunContextWrapper[TContext],
+    hooks: RunHooks,
+    context_wrapper: RunContextWrapper,
     run_config: RunConfig,
     error_handlers: RunErrorHandlers[TContext] | None,
     previous_response_id: str | None,
@@ -1234,8 +1234,8 @@ async def start_streaming(
 async def run_single_turn_streamed(
     streamed_result: RunResultStreaming,
     bindings: AgentBindings[TContext],
-    hooks: RunHooks[TContext],
-    context_wrapper: RunContextWrapper[TContext],
+    hooks: RunHooks,
+    context_wrapper: RunContextWrapper,
     run_config: RunConfig,
     should_run_agent_start_hooks: bool,
     tool_use_tracker: AgentToolUseTracker,
@@ -1313,9 +1313,9 @@ async def run_single_turn_streamed(
             turn_input=turn_input,
         )
         await asyncio.gather(
-            hooks.on_agent_start(agent_hook_context, public_agent),
+            hooks.on_agent_start(agent_hook_context),
             (
-                public_agent.hooks.on_start(agent_hook_context, public_agent)
+                public_agent.hooks.on_start(agent_hook_context)
                 if public_agent.hooks
                 else _coro.noop_coroutine()
             ),
@@ -1381,15 +1381,17 @@ async def run_single_turn_streamed(
     if not filtered.input and server_conversation_tracker is None:
         raise RuntimeError("Prepared model input is empty")
 
+    llm_context = LLMContext.from_run_context(
+        context_wrapper,
+        agent=public_agent,
+        system_prompt=filtered.instructions,
+        input_items=filtered.input,
+    )
+
     await asyncio.gather(
-        hooks.on_llm_start(context_wrapper, public_agent, filtered.instructions, filtered.input),
+        hooks.on_llm_start(llm_context),
         (
-            public_agent.hooks.on_llm_start(
-                context_wrapper,
-                public_agent,
-                filtered.instructions,
-                filtered.input,
-            )
+            public_agent.hooks.on_llm_start(llm_context)
             if public_agent.hooks
             else _coro.noop_coroutine()
         ),
@@ -1603,13 +1605,18 @@ async def run_single_turn_streamed(
 
     if final_response is not None:
         context_wrapper.usage.add(final_response.usage)
+        llm_context = LLMContext.from_run_context(
+            context_wrapper,
+            agent=public_agent,
+            response=final_response,
+        )
         await asyncio.gather(
             (
-                public_agent.hooks.on_llm_end(context_wrapper, public_agent, final_response)
+                public_agent.hooks.on_llm_end(llm_context)
                 if public_agent.hooks
                 else _coro.noop_coroutine()
             ),
-            hooks.on_llm_end(context_wrapper, public_agent, final_response),
+            hooks.on_llm_end(llm_context),
         )
 
     if not final_response:
@@ -1687,8 +1694,8 @@ async def run_single_turn(
     all_tools: list[Tool],
     original_input: str | list[TResponseInputItem],
     generated_items: list[RunItem],
-    hooks: RunHooks[TContext],
-    context_wrapper: RunContextWrapper[TContext],
+    hooks: RunHooks,
+    context_wrapper: RunContextWrapper,
     run_config: RunConfig,
     should_run_agent_start_hooks: bool,
     tool_use_tracker: AgentToolUseTracker,
@@ -1715,9 +1722,9 @@ async def run_single_turn(
             turn_input=turn_input,
         )
         await asyncio.gather(
-            hooks.on_agent_start(agent_hook_context, public_agent),
+            hooks.on_agent_start(agent_hook_context),
             (
-                public_agent.hooks.on_start(agent_hook_context, public_agent)
+                public_agent.hooks.on_start(agent_hook_context)
                 if public_agent.hooks
                 else _coro.noop_coroutine()
             ),
@@ -1776,8 +1783,8 @@ async def get_new_response(
     output_schema: AgentOutputSchemaBase | None,
     all_tools: list[Tool],
     handoffs: list[Handoff],
-    hooks: RunHooks[TContext],
-    context_wrapper: RunContextWrapper[TContext],
+    hooks: RunHooks,
+    context_wrapper: RunContextWrapper,
     run_config: RunConfig,
     tool_use_tracker: AgentToolUseTracker,
     server_conversation_tracker: OpenAIServerConversationTracker | None,
@@ -1806,15 +1813,17 @@ async def get_new_response(
     if server_conversation_tracker is not None:
         server_conversation_tracker.mark_input_as_sent(filtered.input)
 
+    llm_context = LLMContext.from_run_context(
+        context_wrapper,
+        agent=public_agent,
+        system_prompt=filtered.instructions,
+        input_items=filtered.input,
+    )
+
     await asyncio.gather(
-        hooks.on_llm_start(context_wrapper, public_agent, filtered.instructions, filtered.input),
+        hooks.on_llm_start(llm_context),
         (
-            public_agent.hooks.on_llm_start(
-                context_wrapper,
-                public_agent,
-                filtered.instructions,
-                filtered.input,
-            )
+            public_agent.hooks.on_llm_start(llm_context)
             if public_agent.hooks
             else _coro.noop_coroutine()
         ),
@@ -1882,13 +1891,19 @@ async def get_new_response(
 
     context_wrapper.usage.add(new_response.usage)
 
+    llm_context = LLMContext.from_run_context(
+        context_wrapper,
+        agent=public_agent,
+        response=new_response,
+    )
+
     await asyncio.gather(
         (
-            public_agent.hooks.on_llm_end(context_wrapper, public_agent, new_response)
+            public_agent.hooks.on_llm_end(llm_context)
             if public_agent.hooks
             else _coro.noop_coroutine()
         ),
-        hooks.on_llm_end(context_wrapper, public_agent, new_response),
+        hooks.on_llm_end(llm_context),
     )
 
     return new_response

@@ -65,7 +65,7 @@ RequireApprovalPolicy = Literal["always", "never"]
 RequireApprovalMapping = dict[str, RequireApprovalPolicy]
 if TYPE_CHECKING:
     LocalMCPApprovalCallable = Callable[
-        [RunContextWrapper[Any], "AgentBase", MCPTool],
+        [RunContextWrapper, "AgentBase", MCPTool],
         MaybeAwaitable[bool],
     ]
 else:
@@ -280,7 +280,7 @@ class MCPServer(abc.ABC):
     @abc.abstractmethod
     async def list_tools(
         self,
-        run_context: RunContextWrapper[Any] | None = None,
+        run_context: RunContextWrapper | None = None,
         agent: AgentBase | None = None,
     ) -> list[MCPTool]:
         """List the tools available on the server."""
@@ -384,7 +384,7 @@ class MCPServer(abc.ABC):
     ) -> (
         bool
         | dict[str, bool]
-        | Callable[[RunContextWrapper[Any], AgentBase, MCPTool], MaybeAwaitable[bool]]
+        | Callable[[RunContextWrapper, AgentBase, MCPTool], MaybeAwaitable[bool]]
     ):
         """Normalize approval inputs to booleans or a name->bool map."""
 
@@ -440,7 +440,7 @@ class MCPServer(abc.ABC):
         self,
         tool: MCPTool,
         agent: AgentBase | None,
-    ) -> bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]:
+    ) -> bool | Callable[[RunContextWrapper, dict[str, Any], str], Awaitable[bool]]:
         """Return a FunctionTool.needs_approval value for a given MCP tool.
 
         Legacy callers may omit ``agent`` when using ``MCPUtil.to_function_tool()`` directly.
@@ -455,7 +455,7 @@ class MCPServer(abc.ABC):
                 return True
 
             async def _needs_approval(
-                run_context: RunContextWrapper[Any], _args: dict[str, Any], _call_id: str
+                run_context: RunContextWrapper, _args: dict[str, Any], _call_id: str
             ) -> bool:
                 result = policy(run_context, agent, tool)
                 if inspect.isawaitable(result):
@@ -565,7 +565,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def _apply_tool_filter(
         self,
         tools: list[MCPTool],
-        run_context: RunContextWrapper[Any] | None = None,
+        run_context: RunContextWrapper | None = None,
         agent: AgentBase | None = None,
     ) -> list[MCPTool]:
         """Apply the tool filter to the list of tools."""
@@ -603,7 +603,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def _apply_dynamic_tool_filter(
         self,
         tools: list[MCPTool],
-        run_context: RunContextWrapper[Any],
+        run_context: RunContextWrapper,
         agent: AgentBase,
     ) -> list[MCPTool]:
         """Apply dynamic tool filtering using a callable filter function."""
@@ -772,7 +772,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     async def list_tools(
         self,
-        run_context: RunContextWrapper[Any] | None = None,
+        run_context: RunContextWrapper | None = None,
         agent: AgentBase | None = None,
     ) -> list[MCPTool]:
         """List the tools available on the server."""

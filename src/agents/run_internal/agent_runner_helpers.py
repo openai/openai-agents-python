@@ -239,8 +239,8 @@ def resolve_trace_settings(
 def resolve_resumed_context(
     *,
     run_state: RunState[TContext],
-    context: RunContextWrapper[TContext] | TContext | None,
-) -> RunContextWrapper[TContext]:
+    context: RunContextWrapper | TContext | None,
+) -> RunContextWrapper:
     """Return the context wrapper for a resumed run, overriding when provided."""
     if context is not None:
         context_wrapper = ensure_context_wrapper(context)
@@ -254,8 +254,8 @@ def resolve_resumed_context(
 
 
 def ensure_context_wrapper(
-    context: RunContextWrapper[TContext] | TContext | None,
-) -> RunContextWrapper[TContext]:
+    context: RunContextWrapper | TContext | None,
+) -> RunContextWrapper:
     """Normalize a context value into a RunContextWrapper."""
     if isinstance(context, RunContextWrapper):
         return context
@@ -344,7 +344,7 @@ def build_interruption_result(
     input_guardrail_results: list[InputGuardrailResult],
     tool_input_guardrail_results: list[ToolInputGuardrailResult],
     tool_output_guardrail_results: list[ToolOutputGuardrailResult],
-    context_wrapper: RunContextWrapper[TContext],
+    context_wrapper: RunContextWrapper,
     interruptions: list[ToolApprovalItem],
     processed_response: ProcessedResponse | None,
     tool_use_tracker: AgentToolUseTracker,

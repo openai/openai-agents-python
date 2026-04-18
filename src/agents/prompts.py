@@ -37,7 +37,7 @@ class Prompt(TypedDict):
 class GenerateDynamicPromptData:
     """Inputs to a function that allows you to dynamically generate a prompt."""
 
-    context: RunContextWrapper[Any]
+    context: RunContextWrapper
     """The run context."""
 
     agent: Agent[Any]
@@ -57,7 +57,7 @@ class PromptUtil:
     @staticmethod
     async def to_model_input(
         prompt: Prompt | DynamicPromptFunction | None,
-        context: RunContextWrapper[Any],
+        context: RunContextWrapper,
         agent: Agent[Any],
     ) -> ResponsePromptParam | None:
         if prompt is None:

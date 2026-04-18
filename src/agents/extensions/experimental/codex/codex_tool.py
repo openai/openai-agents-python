@@ -214,7 +214,7 @@ class CodexToolOptions:
     span_data_max_chars: int | None = 8192
     persist_session: bool = False
     on_stream: Callable[[CodexToolStreamEvent], MaybeAwaitable[None]] | None = None
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Any], MaybeAwaitable[bool]] = True
+    is_enabled: bool | Callable[[RunContextWrapper, Any], MaybeAwaitable[bool]] = True
     failure_error_function: ToolErrorFunction | None = default_tool_error_function
     use_run_context_thread_id: bool = False
     run_context_thread_id_key: str | None = None
@@ -250,7 +250,7 @@ def codex_tool(
     span_data_max_chars: int | None | _UnsetType = _UNSET,
     persist_session: bool | None = None,
     on_stream: Callable[[CodexToolStreamEvent], MaybeAwaitable[None]] | None = None,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Any], MaybeAwaitable[bool]] | None = None,
+    is_enabled: bool | Callable[[RunContextWrapper, Any], MaybeAwaitable[bool]] | None = None,
     failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
     use_run_context_thread_id: bool | None = None,
     run_context_thread_id_key: str | None = None,
@@ -332,7 +332,7 @@ def codex_tool(
 
     persisted_thread: Thread | None = None
 
-    async def _on_invoke_tool(ctx: ToolContext[Any], input_json: str) -> Any:
+    async def _on_invoke_tool(ctx: ToolContext, input_json: str) -> Any:
         nonlocal persisted_thread
         resolved_thread_id: str | None = None
         try:
@@ -818,7 +818,7 @@ def _normalize_thread_id(value: Any) -> str | None:
 
 def _resolve_call_thread_id(
     args: CodexToolCallArguments,
-    ctx: RunContextWrapper[Any],
+    ctx: RunContextWrapper,
     configured_thread_id: str | None,
     use_run_context_thread_id: bool,
     run_context_thread_id_key: str,
@@ -835,7 +835,7 @@ def _resolve_call_thread_id(
     return configured_thread_id
 
 
-def _read_thread_id_from_run_context(ctx: RunContextWrapper[Any], key: str) -> str | None:
+def _read_thread_id_from_run_context(ctx: RunContextWrapper, key: str) -> str | None:
     context = ctx.context
     if context is None:
         return None
@@ -857,7 +857,7 @@ def _read_thread_id_from_run_context(ctx: RunContextWrapper[Any], key: str) -> s
     return normalized
 
 
-def _validate_run_context_thread_id_context(ctx: RunContextWrapper[Any], key: str) -> None:
+def _validate_run_context_thread_id_context(ctx: RunContextWrapper, key: str) -> None:
     context = ctx.context
     if context is None:
         raise UserError(
@@ -909,7 +909,7 @@ def _validate_run_context_thread_id_context(ctx: RunContextWrapper[Any], key: st
 
 
 def _store_thread_id_in_run_context(
-    ctx: RunContextWrapper[Any], key: str, thread_id: str | None
+    ctx: RunContextWrapper, key: str, thread_id: str | None
 ) -> None:
     if thread_id is None:
         return
@@ -941,7 +941,7 @@ def _store_thread_id_in_run_context(
 
 def _try_store_thread_id_in_run_context_after_error(
     *,
-    ctx: RunContextWrapper[Any],
+    ctx: RunContextWrapper,
     key: str,
     thread_id: str | None,
     enabled: bool,
@@ -1017,7 +1017,7 @@ def _to_agent_usage(usage: Usage) -> AgentsUsage:
 async def _consume_events(
     events: AsyncGenerator[ThreadEvent | Mapping[str, Any], None],
     args: CodexToolCallArguments,
-    ctx: ToolContext[Any],
+    ctx: ToolContext,
     thread: Thread,
     on_stream: Callable[[CodexToolStreamEvent], MaybeAwaitable[None]] | None,
     span_data_max_chars: int | None,

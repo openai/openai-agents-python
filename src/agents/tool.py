@@ -70,20 +70,20 @@ if TYPE_CHECKING:
 ToolParams = ParamSpec("ToolParams")
 
 ToolFunctionWithoutContext = Callable[ToolParams, Any]
-ToolFunctionWithContext = Callable[Concatenate[RunContextWrapper[Any], ToolParams], Any]
+ToolFunctionWithContext = Callable[Concatenate[RunContextWrapper, ToolParams], Any]
 ToolFunctionWithToolContext = Callable[Concatenate[ToolContext, ToolParams], Any]
 
 ToolFunction = (
     ToolFunctionWithoutContext[ToolParams]
     | ToolFunctionWithContext[ToolParams]
-    | ToolFunctionWithToolContext[ToolParams]
+    | ToolFunctionWithToolContext
 )
 
 DEFAULT_APPROVAL_REJECTION_MESSAGE = "Tool execution was not approved."
 ToolTimeoutBehavior = Literal["error_as_result", "raise_exception"]
-ToolErrorFunction = Callable[[RunContextWrapper[Any], Exception], MaybeAwaitable[str]]
-CustomToolExecutor = Callable[[ToolContext[Any], str], MaybeAwaitable[Any]]
-CustomToolApprovalFunction = Callable[[RunContextWrapper[Any], str, str], MaybeAwaitable[bool]]
+ToolErrorFunction = Callable[[RunContextWrapper, Exception], MaybeAwaitable[str]]
+CustomToolExecutor = Callable[[ToolContext, str], MaybeAwaitable[Any]]
+CustomToolApprovalFunction = Callable[[RunContextWrapper, str, str], MaybeAwaitable[bool]]
 _SYNC_FUNCTION_TOOL_MARKER = "__agents_sync_function_tool__"
 _UNSET_FAILURE_ERROR_FUNCTION = object()
 
@@ -232,7 +232,7 @@ ComputerT_contra = TypeVar("ComputerT_contra", bound=ComputerLike, contravariant
 class ComputerCreate(Protocol[ComputerT_co]):
     """Initializes a computer for the current run context."""
 
-    def __call__(self, *, run_context: RunContextWrapper[Any]) -> MaybeAwaitable[ComputerT_co]: ...
+    def __call__(self, *, run_context: RunContextWrapper) -> MaybeAwaitable[ComputerT_co]: ...
 
 
 class ComputerDispose(Protocol[ComputerT_contra]):
@@ -241,7 +241,7 @@ class ComputerDispose(Protocol[ComputerT_contra]):
     def __call__(
         self,
         *,
-        run_context: RunContextWrapper[Any],
+        run_context: RunContextWrapper,
         computer: ComputerT_contra,
     ) -> MaybeAwaitable[None]: ...
 
@@ -293,7 +293,7 @@ class FunctionTool:
     params_json_schema: dict[str, Any]
     """The JSON schema for the tool's parameters."""
 
-    on_invoke_tool: Callable[[ToolContext[Any], str], Awaitable[Any]]
+    on_invoke_tool: Callable[[ToolContext, str], Awaitable[Any]]
     """A function that invokes the tool with the given context and parameters. The params passed
     are:
     1. The tool run context.
@@ -310,7 +310,7 @@ class FunctionTool:
     """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
     as it increases the likelihood of correct JSON input."""
 
-    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True
+    is_enabled: bool | Callable[[RunContextWrapper, AgentBase], MaybeAwaitable[bool]] = True
     """Whether the tool is enabled. Either a bool or a Callable that takes the run context and agent
     and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
     based on your context/state."""
@@ -325,7 +325,7 @@ class FunctionTool:
     """Optional list of output guardrails to run after invoking this tool."""
 
     needs_approval: (
-        bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
+        bool | Callable[[RunContextWrapper, dict[str, Any], str], Awaitable[bool]]
     ) = False
     """Whether the tool needs approval before execution. If True, the run will be interrupted
     and the tool call will need to be approved using RunState.approve() or rejected using
@@ -421,7 +421,7 @@ class _FailureHandlingFunctionToolInvoker:
 
     def __init__(
         self,
-        invoke_tool_impl: Callable[[ToolContext[Any], str], Awaitable[Any]],
+        invoke_tool_impl: Callable[[ToolContext, str], Awaitable[Any]],
         on_handled_error: Callable[[FunctionTool, Exception, str], None],
         *,
         function_tool: FunctionTool | None = None,
@@ -444,7 +444,7 @@ class _FailureHandlingFunctionToolInvoker:
             setattr(bound_invoker, _SYNC_FUNCTION_TOOL_MARKER, True)
         return bound_invoker
 
-    async def __call__(self, ctx: ToolContext[Any], input: str) -> Any:
+    async def __call__(self, ctx: ToolContext, input: str) -> Any:
         try:
             return await self._invoke_tool_impl(ctx, input)
         except Exception as e:
@@ -462,9 +462,9 @@ class _FailureHandlingFunctionToolInvoker:
 
 
 def with_function_tool_failure_error_handler(
-    invoke_tool_impl: Callable[[ToolContext[Any], str], Awaitable[Any]],
+    invoke_tool_impl: Callable[[ToolContext, str], Awaitable[Any]],
     on_handled_error: Callable[[FunctionTool, Exception, str], None],
-) -> Callable[[ToolContext[Any], str], Awaitable[Any]]:
+) -> Callable[[ToolContext, str], Awaitable[Any]]:
     """Wrap a tool invoker so copied FunctionTools resolve failure policy against themselves."""
     return _FailureHandlingFunctionToolInvoker(invoke_tool_impl, on_handled_error)
 
@@ -474,15 +474,15 @@ def _build_wrapped_function_tool(
     name: str,
     description: str,
     params_json_schema: dict[str, Any],
-    invoke_tool_impl: Callable[[ToolContext[Any], str], Awaitable[Any]],
+    invoke_tool_impl: Callable[[ToolContext, str], Awaitable[Any]],
     on_handled_error: Callable[[FunctionTool, Exception, str], None],
     failure_error_function: ToolErrorFunction | None | object = _UNSET_FAILURE_ERROR_FUNCTION,
     strict_json_schema: bool = True,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper, AgentBase], MaybeAwaitable[bool]] = True,
     tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
     tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
     needs_approval: (
-        bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
+        bool | Callable[[RunContextWrapper, dict[str, Any], str], Awaitable[bool]]
     ) = False,
     timeout_seconds: float | None = None,
     timeout_behavior: ToolTimeoutBehavior = "error_as_result",
@@ -616,18 +616,18 @@ class _ResolvedComputer:
 
 _computer_cache: weakref.WeakKeyDictionary[
     ComputerTool[Any],
-    weakref.WeakKeyDictionary[RunContextWrapper[Any], _ResolvedComputer],
+    weakref.WeakKeyDictionary[RunContextWrapper, _ResolvedComputer],
 ] = weakref.WeakKeyDictionary()
 _computer_initializer_map: weakref.WeakKeyDictionary[ComputerTool[Any], ComputerConfig] = (
     weakref.WeakKeyDictionary()
 )
 _computers_by_run_context: weakref.WeakKeyDictionary[
-    RunContextWrapper[Any], dict[ComputerTool[Any], _ResolvedComputer]
+    RunContextWrapper, dict[ComputerTool[Any], _ResolvedComputer]
 ] = weakref.WeakKeyDictionary()
 
 
 async def resolve_computer(
-    *, tool: ComputerTool[Any], run_context: RunContextWrapper[Any]
+    *, tool: ComputerTool[Any], run_context: RunContextWrapper
 ) -> ComputerLike:
     """Resolve a computer for a given run context, initializing it if needed."""
     per_context = _computer_cache.get(tool)
@@ -678,7 +678,7 @@ async def resolve_computer(
     return computer
 
 
-async def dispose_resolved_computers(*, run_context: RunContextWrapper[Any]) -> None:
+async def dispose_resolved_computers(*, run_context: RunContextWrapper) -> None:
     """Dispose any computer instances created for the provided run context."""
     resolved_by_tool = _computers_by_run_context.pop(run_context, None)
     if not resolved_by_tool:
@@ -711,7 +711,7 @@ async def dispose_resolved_computers(*, run_context: RunContextWrapper[Any]) -> 
 class ComputerToolSafetyCheckData:
     """Information about a computer tool safety check."""
 
-    ctx_wrapper: RunContextWrapper[Any]
+    ctx_wrapper: RunContextWrapper
     """The run context."""
 
     agent: Agent[Any]
@@ -728,7 +728,7 @@ class ComputerToolSafetyCheckData:
 class MCPToolApprovalRequest:
     """A request to approve a tool call."""
 
-    ctx_wrapper: RunContextWrapper[Any]
+    ctx_wrapper: RunContextWrapper
     """The run context."""
 
     data: McpApprovalRequest
@@ -752,7 +752,7 @@ MCPToolApprovalFunction = Callable[
 
 
 ShellApprovalFunction = Callable[
-    [RunContextWrapper[Any], "ShellActionRequest", str], MaybeAwaitable[bool]
+    [RunContextWrapper, "ShellActionRequest", str], MaybeAwaitable[bool]
 ]
 """A function that determines whether a shell action requires approval.
 Takes (run_context, action, call_id) and returns whether approval is needed.
@@ -770,7 +770,7 @@ class ShellOnApprovalFunctionResult(TypedDict):
 
 
 ShellOnApprovalFunction = Callable[
-    [RunContextWrapper[Any], "ToolApprovalItem"], MaybeAwaitable[ShellOnApprovalFunctionResult]
+    [RunContextWrapper, "ToolApprovalItem"], MaybeAwaitable[ShellOnApprovalFunctionResult]
 ]
 """A function that auto-approves or rejects a shell tool call when approval is needed.
 Takes (run_context, approval_item) and returns approval decision.
@@ -778,7 +778,7 @@ Takes (run_context, approval_item) and returns approval decision.
 
 
 ApplyPatchApprovalFunction = Callable[
-    [RunContextWrapper[Any], ApplyPatchOperation, str], MaybeAwaitable[bool]
+    [RunContextWrapper, ApplyPatchOperation, str], MaybeAwaitable[bool]
 ]
 """A function that determines whether an apply_patch operation requires approval.
 Takes (run_context, operation, call_id) and returns whether approval is needed.
@@ -796,7 +796,7 @@ class ApplyPatchOnApprovalFunctionResult(TypedDict):
 
 
 ApplyPatchOnApprovalFunction = Callable[
-    [RunContextWrapper[Any], "ToolApprovalItem"], MaybeAwaitable[ApplyPatchOnApprovalFunctionResult]
+    [RunContextWrapper, "ToolApprovalItem"], MaybeAwaitable[ApplyPatchOnApprovalFunctionResult]
 ]
 """A function that auto-approves or rejects an apply_patch tool call when approval is needed.
 Takes (run_context, approval_item) and returns approval decision.
@@ -814,7 +814,7 @@ class CustomToolOnApprovalFunctionResult(TypedDict):
 
 
 CustomToolOnApprovalFunction = Callable[
-    [RunContextWrapper[Any], "ToolApprovalItem"], MaybeAwaitable[CustomToolOnApprovalFunctionResult]
+    [RunContextWrapper, "ToolApprovalItem"], MaybeAwaitable[CustomToolOnApprovalFunctionResult]
 ]
 """A function that auto-approves or rejects a custom tool call when approval is needed.
 Takes (run_context, approval_item) and returns approval decision.
@@ -870,7 +870,7 @@ class ImageGenerationTool:
 class LocalShellCommandRequest:
     """A request to execute a command on a shell."""
 
-    ctx_wrapper: RunContextWrapper[Any]
+    ctx_wrapper: RunContextWrapper
     """The run context."""
 
     data: LocalShellCall
@@ -1054,7 +1054,7 @@ class ShellCallData:
 class ShellCommandRequest:
     """A request to execute a modern shell call."""
 
-    ctx_wrapper: RunContextWrapper[Any]
+    ctx_wrapper: RunContextWrapper
     data: ShellCallData
 
 
@@ -1434,7 +1434,7 @@ def _log_function_tool_invocation(*, tool_name: str, input_json: str) -> None:
         logger.debug(f"Invoking tool {tool_name} with input {input_json}")
 
 
-def default_tool_error_function(ctx: RunContextWrapper[Any], error: Exception) -> str:
+def default_tool_error_function(ctx: RunContextWrapper, error: Exception) -> str:
     """The default tool error function, which just returns a generic error message."""
     json_decode_error = _extract_tool_argument_json_error(error)
     if json_decode_error is not None:
@@ -1505,7 +1505,7 @@ def _coerce_tool_error_for_failure_error_function(error: BaseException) -> Excep
 async def maybe_invoke_function_tool_failure_error_function(
     *,
     function_tool: FunctionTool,
-    context: RunContextWrapper[Any],
+    context: RunContextWrapper,
     error: BaseException,
 ) -> str | None:
     """Invoke the configured failure formatter, if one exists."""
@@ -1599,8 +1599,8 @@ def _annotation_mentions_context_type(annotation: Any, *, context_type: type[Any
 
 def _get_function_tool_invoke_context(
     function_tool: FunctionTool,
-    context: ToolContext[Any],
-) -> ToolContext[Any] | RunContextWrapper[Any]:
+    context: ToolContext,
+) -> ToolContext | RunContextWrapper:
     """Choose the runtime context object to pass into a function tool wrapper.
 
     Third-party wrappers may declare a narrower `RunContextWrapper` contract and then serialize
@@ -1634,7 +1634,7 @@ def _get_function_tool_invoke_context(
 async def invoke_function_tool(
     *,
     function_tool: FunctionTool,
-    context: ToolContext[Any],
+    context: ToolContext,
     arguments: str,
 ) -> Any:
     """Invoke a function tool, enforcing timeout configuration when provided."""
@@ -1685,9 +1685,9 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper, AgentBase], MaybeAwaitable[bool]] = True,
     needs_approval: bool
-    | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
+    | Callable[[RunContextWrapper, dict[str, Any], str], Awaitable[bool]] = False,
     tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
     tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
     timeout: float | None = None,
@@ -1708,9 +1708,9 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper, AgentBase], MaybeAwaitable[bool]] = True,
     needs_approval: bool
-    | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
+    | Callable[[RunContextWrapper, dict[str, Any], str], Awaitable[bool]] = False,
     tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
     tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
     timeout: float | None = None,
@@ -1731,9 +1731,9 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None | object = _UNSET_FAILURE_ERROR_FUNCTION,
     strict_mode: bool = True,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper, AgentBase], MaybeAwaitable[bool]] = True,
     needs_approval: bool
-    | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
+    | Callable[[RunContextWrapper, dict[str, Any], str], Awaitable[bool]] = False,
     tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
     tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
     timeout: float | None = None,
@@ -1798,7 +1798,7 @@ def function_tool(
             strict_json_schema=strict_mode,
         )
 
-        async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
+        async def _on_invoke_tool_impl(ctx: ToolContext, input: str) -> Any:
             tool_name = ctx.tool_name
             json_data = _parse_function_tool_json_input(tool_name=tool_name, input_json=input)
             _log_function_tool_invocation(tool_name=tool_name, input_json=input)
@@ -1928,7 +1928,7 @@ def _get_computer_initializer(tool: ComputerTool[Any]) -> ComputerConfig | None:
 def _track_resolved_computer(
     *,
     tool: ComputerTool[Any],
-    run_context: RunContextWrapper[Any],
+    run_context: RunContextWrapper,
     resolved: _ResolvedComputer,
 ) -> None:
     resolved_by_run = _computers_by_run_context.get(run_context)

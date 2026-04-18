@@ -1089,7 +1089,7 @@ class RealtimeSession(RealtimeModelListener):
 
     @classmethod
     async def _get_handoffs(
-        cls, agent: RealtimeAgent[Any], context_wrapper: RunContextWrapper[Any]
+        cls, agent: RealtimeAgent[Any], context_wrapper: RunContextWrapper
     ) -> list[Handoff[Any, RealtimeAgent[Any]]]:
         handoffs: list[Handoff[Any, RealtimeAgent[Any]]] = []
         for handoff_item in agent.handoffs:

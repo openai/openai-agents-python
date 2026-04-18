@@ -25,7 +25,7 @@ class SandboxAgent(Agent[TContext]):
     base_instructions: (
         str
         | Callable[
-            [RunContextWrapper[TContext], Agent[TContext]], Awaitable[str | None] | str | None
+            [RunContextWrapper, Agent[TContext]], Awaitable[str | None] | str | None
         ]
         | None
     ) = None
