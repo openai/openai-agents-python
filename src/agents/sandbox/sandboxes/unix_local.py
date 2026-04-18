@@ -1,3 +1,13 @@
+import sys
+
+# This backend uses Unix-only APIs (pty, termios, fcntl). Raise a clear error when imported on
+# Windows rather than failing later with confusing ModuleNotFoundError exceptions.
+if sys.platform == "win32":  # pragma: no cover
+    raise ImportError(
+        "UnixLocalSandbox is not supported on Windows. "
+        "Use DockerSandboxClient (requires the optional 'docker' extra) or another sandbox backend."
+    )
+
 import asyncio
 import errno
 import fcntl
