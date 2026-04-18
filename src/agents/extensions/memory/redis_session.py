@@ -140,7 +140,12 @@ class RedisSession(SessionABC):
     # Session protocol implementation
     # ------------------------------------------------------------------
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: Any = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -179,7 +184,12 @@ class RedisSession(SessionABC):
 
             return items
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: Any = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:
@@ -221,7 +231,7 @@ class RedisSession(SessionABC):
                 self._session_key, self._messages_key, self._counter_key
             )
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(self, *, wrapper: Any = None) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
 
         Returns:

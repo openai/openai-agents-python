@@ -2152,7 +2152,12 @@ async def test_wait_for_session_cleanup_retries_after_get_items_error(
             super().__init__()
             self.get_items_calls = 0
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self,
+            limit: int | None = None,
+            *,
+            wrapper: object | None = None,
+        ) -> list[TResponseInputItem]:
             self.get_items_calls += 1
             if self.get_items_calls == 1:
                 raise RuntimeError("temporary failure")
@@ -2507,13 +2512,23 @@ async def test_save_result_to_session_counts_sanitized_openai_items() -> None:
         async def _get_session_id(self) -> str:
             return "conv_test"
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(
+            self,
+            items: list[TResponseInputItem],
+            *,
+            wrapper: object | None = None,
+        ) -> None:
             self.saved_items.extend(items)
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self,
+            limit: int | None = None,
+            *,
+            wrapper: object | None = None,
+        ) -> list[TResponseInputItem]:
             return []
 
-        async def pop_item(self) -> TResponseInputItem | None:
+        async def pop_item(self, *, wrapper: object | None = None) -> TResponseInputItem | None:
             return None
 
         async def clear_session(self) -> None:

@@ -23,6 +23,8 @@ from ..memory import (
     is_openai_responses_compaction_aware_session,
 )
 from ..memory.openai_conversations_session import OpenAIConversationsSession
+from ..memory.session import add_session_items, get_session_items, pop_session_item
+from ..run_context import RunContextWrapper
 from ..run_state import RunState
 from .items import (
     ReasoningItemIdPolicy,
@@ -57,6 +59,7 @@ async def prepare_input_with_session(
     session_input_callback: SessionInputCallback | None,
     session_settings: SessionSettings | None = None,
     *,
+    wrapper: RunContextWrapper[Any] | None = None,
     include_history_in_prepared_input: bool = True,
     preserve_dropped_new_items: bool = False,
 ) -> tuple[str | list[TResponseInputItem], list[TResponseInputItem]]:
@@ -83,9 +86,13 @@ async def prepare_input_with_session(
         resolved_settings = resolved_settings.resolve(session_settings)
 
     if resolved_settings.limit is not None:
-        history = await session.get_items(limit=resolved_settings.limit)
+        history = await get_session_items(
+            session,
+            limit=resolved_settings.limit,
+            wrapper=wrapper,
+        )
     else:
-        history = await session.get_items()
+        history = await get_session_items(session, wrapper=wrapper)
     converted_history = [
         strip_internal_input_item_metadata(ensure_input_item_format(item)) for item in history
     ]
@@ -234,6 +241,7 @@ async def save_result_to_session(
     new_items: list[RunItem],
     run_state: RunState | None = None,
     *,
+    wrapper: RunContextWrapper[Any] | None = None,
     response_id: str | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
@@ -249,6 +257,9 @@ async def save_result_to_session(
 
     if session is None:
         return 0
+
+    if wrapper is None and run_state is not None:
+        wrapper = cast(RunContextWrapper[Any], run_state._context)
 
     new_run_items: list[RunItem]
     if already_persisted >= len(new_items):
@@ -322,7 +333,7 @@ async def save_result_to_session(
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
         return saved_run_items_count
 
-    await session.add_items(items_to_save)
+    await add_session_items(session, items_to_save, wrapper=wrapper)
 
     if run_state:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
@@ -370,6 +381,7 @@ async def save_resumed_turn_items(
     session: Session | None,
     items: list[RunItem],
     persisted_count: int,
+    wrapper: RunContextWrapper[Any] | None = None,
     response_id: str | None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
@@ -382,6 +394,7 @@ async def save_resumed_turn_items(
         [],
         list(items),
         None,
+        wrapper=wrapper,
         response_id=response_id,
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
@@ -393,6 +406,8 @@ async def rewind_session_items(
     session: Session | None,
     items: Sequence[TResponseInputItem],
     server_tracker: OpenAIServerConversationTracker | None = None,
+    *,
+    wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """
     Best-effort helper to roll back items recently persisted to a session when a conversation
@@ -426,8 +441,8 @@ async def rewind_session_items(
     snapshot_serializations = target_serializations.copy()
     rewound = await _rewind_session_tail_suffix(
         session=session,
-        pop_item=pop_item,
         expected_serializations=target_serializations,
+        wrapper=wrapper,
         ignore_ids_for_matching=ignore_ids_for_matching,
         mismatch_warning=(
             "Skipping session rewind because the current tail does not match the retry-owned suffix"
@@ -440,6 +455,7 @@ async def rewind_session_items(
     await wait_for_session_cleanup(
         session,
         snapshot_serializations,
+        wrapper=wrapper,
         ignore_ids_for_matching=ignore_ids_for_matching,
     )
 
@@ -447,7 +463,7 @@ async def rewind_session_items(
         return
 
     try:
-        latest_items = await session.get_items(limit=1)
+        latest_items = await get_session_items(session, limit=1, wrapper=wrapper)
     except Exception as exc:
         logger.debug("Failed to peek session items while rewinding: %s", exc)
         return
@@ -460,7 +476,7 @@ async def rewind_session_items(
         return
 
     try:
-        session_items = await session.get_items()
+        session_items = await get_session_items(session, wrapper=wrapper)
     except Exception as exc:
         logger.debug("Failed to inspect session tail while stripping stray items: %s", exc)
         return
@@ -480,8 +496,8 @@ async def rewind_session_items(
     )
     await _rewind_session_tail_suffix(
         session=session,
-        pop_item=pop_item,
         expected_serializations=stray_serializations,
+        wrapper=wrapper,
         ignore_ids_for_matching=ignore_ids_for_matching,
         mismatch_warning=(
             "Skipping stray session cleanup because the current tail no longer matches "
@@ -496,6 +512,7 @@ async def wait_for_session_cleanup(
     serialized_targets: Sequence[str],
     *,
     max_attempts: int = 5,
+    wrapper: RunContextWrapper[Any] | None = None,
     ignore_ids_for_matching: bool = False,
 ) -> None:
     """
@@ -509,7 +526,7 @@ async def wait_for_session_cleanup(
 
     for attempt in range(max_attempts):
         try:
-            tail_items = await session.get_items(limit=window)
+            tail_items = await get_session_items(session, limit=window, wrapper=wrapper)
         except Exception as exc:
             logger.debug("Failed to verify session cleanup (attempt %d): %s", attempt + 1, exc)
             await asyncio.sleep(0.1 * (attempt + 1))
@@ -565,8 +582,8 @@ def _fingerprint_or_repr(item: TResponseInputItem, *, ignore_ids_for_matching: b
 async def _rewind_session_tail_suffix(
     *,
     session: Session,
-    pop_item: Any,
     expected_serializations: Sequence[str],
+    wrapper: RunContextWrapper[Any] | None = None,
     ignore_ids_for_matching: bool,
     mismatch_warning: str,
     pop_failure_warning: str,
@@ -576,7 +593,11 @@ async def _rewind_session_tail_suffix(
         return True
 
     try:
-        tail_items = await session.get_items(limit=len(expected_serializations))
+        tail_items = await get_session_items(
+            session,
+            limit=len(expected_serializations),
+            wrapper=wrapper,
+        )
     except Exception as exc:
         logger.warning(pop_failure_warning, exc)
         return False
@@ -600,16 +621,14 @@ async def _rewind_session_tail_suffix(
     popped_items: list[TResponseInputItem] = []
     for expected in reversed(expected_serializations):
         try:
-            result = pop_item()
-            if inspect.isawaitable(result):
-                result = await result
+            result = await pop_session_item(session, wrapper=wrapper)
         except Exception as exc:
-            await _restore_popped_session_items(session, popped_items)
+            await _restore_popped_session_items(session, popped_items, wrapper=wrapper)
             logger.warning(pop_failure_warning, exc)
             return False
 
         if result is None:
-            await _restore_popped_session_items(session, popped_items)
+            await _restore_popped_session_items(session, popped_items, wrapper=wrapper)
             logger.warning(mismatch_warning)
             return False
 
@@ -618,7 +637,7 @@ async def _rewind_session_tail_suffix(
             result, ignore_ids_for_matching=ignore_ids_for_matching
         )
         if popped_serialized != expected:
-            await _restore_popped_session_items(session, popped_items)
+            await _restore_popped_session_items(session, popped_items, wrapper=wrapper)
             logger.warning(mismatch_warning)
             return False
 
@@ -626,7 +645,10 @@ async def _rewind_session_tail_suffix(
 
 
 async def _restore_popped_session_items(
-    session: Session, popped_items: Sequence[TResponseInputItem]
+    session: Session,
+    popped_items: Sequence[TResponseInputItem],
+    *,
+    wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """Best-effort restoration for items popped during a failed rewind attempt."""
     if not popped_items:
@@ -637,9 +659,7 @@ async def _restore_popped_session_items(
         return
 
     try:
-        result = add_items(list(reversed(popped_items)))
-        if inspect.isawaitable(result):
-            await result
+        await add_session_items(session, list(reversed(popped_items)), wrapper=wrapper)
     except Exception as exc:
         logger.warning("Failed to restore session items after a rewind mismatch: %s", exc)
 
