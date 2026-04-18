@@ -37,7 +37,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from typing_extensions import TypedDict
 
 from ...items import TResponseInputItem
-from ...memory.session import SessionABC
+from ...memory.session import SessionABC, add_session_items, get_session_items, pop_session_item
 from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 
@@ -180,12 +180,21 @@ class EncryptedSession(SessionABC):
                 valid_items.append(item)
         return valid_items
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: Any = None,
+    ) -> list[TResponseInputItem]:
         effective_limit = resolve_session_limit(limit, self.session_settings)
         if effective_limit is not None and effective_limit > 0:
             window = effective_limit
             while True:
-                encrypted_items = await self.underlying_session.get_items(window)
+                encrypted_items = await get_session_items(
+                    self.underlying_session,
+                    window,
+                    wrapper=cast(Any, wrapper),
+                )
                 valid_items = self._unwrap_valid_items(encrypted_items)
                 if len(valid_items) >= effective_limit:
                     return valid_items[-effective_limit:]
@@ -193,16 +202,29 @@ class EncryptedSession(SessionABC):
                     return valid_items
                 window *= 2
 
-        encrypted_items = await self.underlying_session.get_items(limit)
+        encrypted_items = await get_session_items(
+            self.underlying_session,
+            limit,
+            wrapper=cast(Any, wrapper),
+        )
         return self._unwrap_valid_items(encrypted_items)
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: Any = None,
+    ) -> None:
         wrapped: list[EncryptedEnvelope] = [self._wrap(it) for it in items]
-        await self.underlying_session.add_items(cast(list[TResponseInputItem], wrapped))
+        await add_session_items(
+            self.underlying_session,
+            cast(list[TResponseInputItem], wrapped),
+            wrapper=cast(Any, wrapper),
+        )
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(self, *, wrapper: Any = None) -> TResponseInputItem | None:
         while True:
-            enc = await self.underlying_session.pop_item()
+            enc = await pop_session_item(self.underlying_session, wrapper=cast(Any, wrapper))
             if not enc:
                 return None
             item = self._unwrap(enc)

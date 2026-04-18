@@ -121,7 +121,12 @@ class AdvancedSQLiteSession(SQLiteSession):
 
             conn.commit()
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: Any = None,
+    ) -> None:
         """Add items to the session.
 
         Args:
@@ -160,6 +165,8 @@ class AdvancedSQLiteSession(SQLiteSession):
         self,
         limit: int | None = None,
         branch_id: str | None = None,
+        *,
+        wrapper: Any = None,
     ) -> list[TResponseInputItem]:
         """Get items from current or specified branch.
 

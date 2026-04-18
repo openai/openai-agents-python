@@ -274,7 +274,12 @@ class SQLAlchemySession(SessionABC):
         finally:
             self._init_lock.release()
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: Any = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -326,7 +331,12 @@ class SQLAlchemySession(SessionABC):
                     continue
             return items
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: Any = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:
@@ -376,7 +386,7 @@ class SQLAlchemySession(SessionABC):
 
         await self._run_sqlite_write_with_retry(_write_items)
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(self, *, wrapper: Any = None) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
 
         Returns:
