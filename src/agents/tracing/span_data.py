@@ -1,11 +1,34 @@
 from __future__ import annotations
 
 import abc
+import json
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from openai.types.responses import Response, ResponseInputItemParam
+
+# JavaScript's Number.MAX_SAFE_INTEGER (2^53 - 1). Integers beyond this threshold
+# lose precision when parsed by JS, causing the Traces dashboard to display wrong values.
+_JS_MAX_SAFE_INTEGER = 9007199254740991
+
+
+def _sanitize_bigint(value: Any) -> Any:
+    """Recursively convert integers that exceed JS Number.MAX_SAFE_INTEGER to strings.
+
+    This prevents precision loss when the OpenAI Traces dashboard (JavaScript) parses
+    large integer values that cannot be represented exactly as IEEE-754 doubles.
+    """
+    if isinstance(value, bool):
+        # bool is a subclass of int; must be checked first to avoid converting True/False
+        return value
+    if isinstance(value, int) and abs(value) > _JS_MAX_SAFE_INTEGER:
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _sanitize_bigint(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_bigint(item) for item in value]
+    return value
 
 
 class SpanData(abc.ABC):
@@ -157,10 +180,16 @@ class FunctionSpanData(SpanData):
         return "function"
 
     def export(self) -> dict[str, Any]:
+        sanitized_input: str | None = None
+        if self.input is not None:
+            try:
+                sanitized_input = json.dumps(_sanitize_bigint(json.loads(self.input)))
+            except (json.JSONDecodeError, TypeError):
+                sanitized_input = self.input
         return {
             "type": self.type,
             "name": self.name,
-            "input": self.input,
+            "input": sanitized_input,
             "output": str(self.output) if self.output else None,
             "mcp_data": self.mcp_data,
         }
