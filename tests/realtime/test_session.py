@@ -597,9 +597,7 @@ class TestEventHandling:
         session = RealtimeSession(mock_model, mock_agent, None)
 
         await session.on_event(
-            RealtimeModelTranscriptDeltaEvent(
-                item_id="item_1", delta="hello", response_id="resp_1"
-            )
+            RealtimeModelTranscriptDeltaEvent(item_id="item_1", delta="hello", response_id="resp_1")
         )
 
         await session._event_queue.get()  # raw event
