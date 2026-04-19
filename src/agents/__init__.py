@@ -112,6 +112,9 @@ from .run_error_handlers import (
     RunErrorHandlerInput,
     RunErrorHandlerResult,
     RunErrorHandlers,
+    ToolNotFoundAction,
+    ToolNotFoundErrorHandler,
+    ToolNotFoundErrorHandlerInput,
 )
 from .run_state import RunState
 from .stream_events import (
@@ -420,6 +423,9 @@ __all__ = [
     "RunErrorHandlerInput",
     "RunErrorHandlerResult",
     "RunErrorHandlers",
+    "ToolNotFoundAction",
+    "ToolNotFoundErrorHandler",
+    "ToolNotFoundErrorHandlerInput",
     "AgentToolInvocation",
     "RunResult",
     "RunResultStreaming",

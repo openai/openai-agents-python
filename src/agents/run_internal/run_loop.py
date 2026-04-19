@@ -1028,6 +1028,7 @@ async def start_streaming(
                         ),
                         reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                         prompt_cache_key_resolver=prompt_cache_key_resolver,
+                        error_handlers=error_handlers,
                     )
                 finally:
                     attach_usage_to_span(
@@ -1246,6 +1247,7 @@ async def run_single_turn_streamed(
     pending_server_items: list[RunItem] | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
+    error_handlers: RunErrorHandlers[TContext] | None = None,
 ) -> SingleStepResult:
     """Run a single streamed turn and emit events as results arrive."""
     public_agent = bindings.public_agent
@@ -1636,6 +1638,8 @@ async def run_single_turn_streamed(
         server_manages_conversation=server_conversation_tracker is not None,
         event_queue=streamed_result._event_queue,
         before_side_effects=raise_if_input_guardrail_tripwire_known,
+        error_handlers=error_handlers,
+        raw_responses_so_far=streamed_result.raw_responses,
     )
 
     items_to_filter = session_items_for_turn(single_step_result)
@@ -1697,6 +1701,8 @@ async def run_single_turn(
     session_items_to_rewind: list[TResponseInputItem] | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
+    error_handlers: RunErrorHandlers[TContext] | None = None,
+    model_responses_so_far: list[ModelResponse] | None = None,
 ) -> SingleStepResult:
     """Run a single non-streaming turn of the agent loop."""
     public_agent = bindings.public_agent
@@ -1766,6 +1772,8 @@ async def run_single_turn(
         run_config=run_config,
         tool_use_tracker=tool_use_tracker,
         server_manages_conversation=server_conversation_tracker is not None,
+        error_handlers=error_handlers,
+        raw_responses_so_far=model_responses_so_far,
     )
 
 

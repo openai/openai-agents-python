@@ -1194,6 +1194,8 @@ class AgentRunner:
                                     ),
                                     reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                                     prompt_cache_key_resolver=prompt_cache_key_resolver,
+                                    error_handlers=error_handlers,
+                                    model_responses_so_far=model_responses,
                                 )
                             )
 
@@ -1249,6 +1251,8 @@ class AgentRunner:
                                 ),
                                 reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                                 prompt_cache_key_resolver=prompt_cache_key_resolver,
+                                error_handlers=error_handlers,
+                                model_responses_so_far=model_responses,
                             )
                     finally:
                         attach_usage_to_span(

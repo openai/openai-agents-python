@@ -23,6 +23,8 @@ from ..run_error_handlers import (
     RunErrorHandlerInput,
     RunErrorHandlerResult,
     RunErrorHandlers,
+    ToolNotFoundAction,
+    ToolNotFoundErrorHandlerInput,
 )
 from .items import ReasoningItemIdPolicy, run_item_to_input_item
 from .turn_preparation import get_output_schema
@@ -161,3 +163,42 @@ async def resolve_run_error_handler_result(
                 raise UserError("Invalid run error handler result.") from exc
         return RunErrorHandlerResult(final_output=result)
     return RunErrorHandlerResult(final_output=result)
+
+
+async def resolve_tool_not_found_action(
+    *,
+    error_handlers: RunErrorHandlers[TContext] | None,
+    tool_name: str,
+    available_tools: list[str],
+    agent: Agent[Any],
+    context_wrapper: RunContextWrapper[TContext],
+    run_data: RunErrorData,
+) -> ToolNotFoundAction | None:
+    """Invoke the ``tool_not_found`` handler (if configured) and normalize its return value.
+
+    Returns a :class:`ToolNotFoundAction` when the handler asks the runner to recover, or
+    ``None`` when no handler is registered or the handler opts to re-raise.
+    """
+    if not error_handlers:
+        return None
+    handler = error_handlers.get("tool_not_found")
+    if handler is None:
+        return None
+    handler_input = ToolNotFoundErrorHandlerInput(
+        tool_name=tool_name,
+        available_tools=available_tools,
+        agent=agent,
+        context=context_wrapper,
+        run_data=run_data,
+    )
+    result: Any = handler(handler_input)
+    if inspect.isawaitable(result):
+        result = await result
+    if result is None:
+        return None
+    if isinstance(result, ToolNotFoundAction):
+        return result
+    raise UserError(
+        "tool_not_found handler must return ToolNotFoundAction or None, "
+        f"got {type(result).__name__}."
+    )

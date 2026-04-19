@@ -441,6 +441,31 @@ print(result.final_output)
 
 Set `include_in_history=False` when you do not want the fallback output appended to conversation history.
 
+### Recovering from hallucinated tool calls
+
+Models occasionally call a tool name that was never registered on the agent (issue [#325](https://github.com/openai/openai-agents-python/issues/325)). By default the SDK raises `ModelBehaviorError` and the run ends, discarding prior work. Register a `"tool_not_found"` handler to turn that crash into a recoverable nudge: the handler returns a [`ToolNotFoundAction`][agents.ToolNotFoundAction] with a model-visible error message, the runner injects it as a synthetic tool output, and the model self-corrects on the next turn. Returning `None` (or not registering a handler) preserves the existing raise behavior. Recovery is bounded by the run's `max_turns`, so a model that keeps hallucinating still terminates.
+
+```python
+from agents import Agent, Runner, ToolNotFoundAction, ToolNotFoundErrorHandlerInput
+
+
+def on_tool_not_found(data: ToolNotFoundErrorHandlerInput[None]) -> ToolNotFoundAction:
+    return ToolNotFoundAction(
+        error_message=(
+            f"Tool {data.tool_name!r} does not exist. Available: {data.available_tools}."
+        )
+    )
+
+
+result = Runner.run_sync(
+    agent,
+    "find me profiles related to Anthropic",
+    error_handlers={"tool_not_found": on_tool_not_found},
+)
+```
+
+See [`examples/basic/tool_not_found_handler.py`](https://github.com/openai/openai-agents-python/blob/main/examples/basic/tool_not_found_handler.py) for a full runnable example.
+
 ## Durable execution integrations and human-in-the-loop
 
 For tool approval pause/resume patterns, start with the dedicated [Human-in-the-loop guide](human_in_the_loop.md).

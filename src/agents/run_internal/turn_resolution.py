@@ -68,6 +68,7 @@ from ..lifecycle import RunHooks
 from ..logger import logger
 from ..run_config import RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
+from ..run_error_handlers import RunErrorHandlers, ToolNotFoundAction
 from ..run_state import RunState
 from ..stream_events import StreamEvent
 from ..tool import (
@@ -1417,6 +1418,79 @@ async def resolve_interrupted_turn(
     )
 
 
+def _build_custom_tool_not_found_output_item(
+    *,
+    agent: Agent[Any],
+    tool_call: ResponseCustomToolCall,
+    error_message: str,
+) -> ToolCallOutputItem:
+    """Synthesize a ``custom_tool_call_output`` item to feed the model after a not-found error."""
+    raw_item: dict[str, Any] = {
+        "type": "custom_tool_call_output",
+        "call_id": tool_call.call_id,
+        "output": error_message,
+    }
+    return ToolCallOutputItem(
+        agent=agent,
+        output=error_message,
+        raw_item=cast(Any, raw_item),
+    )
+
+
+def collect_tool_not_found_calls(
+    *,
+    all_tools: list[Tool],
+    response: ModelResponse,
+    handoffs: list[Handoff],
+    output_schema: AgentOutputSchemaBase | None = None,
+) -> list[tuple[str, str]]:
+    """Return ``(call_id, tool_name)`` pairs for every tool call in ``response`` whose
+    name is not registered on the agent.
+
+    The runner calls this helper to pre-scan model output before invoking an async
+    ``tool_not_found`` handler and then feeds the resolved actions back into
+    :func:`process_model_response`.
+
+    ``output_schema`` mirrors the parameter ``process_model_response`` receives so the
+    pre-scan matches the real lookup's escape hatches. In particular, when a structured
+    output is in use the LiteLLM path synthesizes a ``json_tool_call`` tool on the fly
+    rather than raising, so it must not be flagged as unknown here.
+    """
+    handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
+    function_map = build_function_tool_lookup_map(
+        [tool for tool in all_tools if isinstance(tool, FunctionTool)]
+    )
+    custom_tool_map = {tool.name: tool for tool in all_tools if isinstance(tool, CustomTool)}
+    apply_patch_tool = next((tool for tool in all_tools if isinstance(tool, ApplyPatchTool)), None)
+
+    missing: list[tuple[str, str]] = []
+    for output in response.output:
+        if isinstance(output, ResponseCustomToolCall):
+            if output.name in custom_tool_map:
+                continue
+            if is_apply_patch_name(output.name, apply_patch_tool):
+                continue
+            missing.append((output.call_id, output.name))
+            continue
+        if isinstance(output, ResponseFunctionToolCall):
+            if is_apply_patch_name(output.name, apply_patch_tool):
+                # apply_patch routing happens later; not a tool-not-found.
+                continue
+            qualified_name = get_tool_call_qualified_name(output) or output.name
+            if qualified_name == output.name and output.name in handoff_map:
+                continue
+            lookup_key = get_function_tool_lookup_key_for_call(output)
+            if lookup_key is not None and lookup_key in function_map:
+                continue
+            # LiteLLM structured-output escape hatch: `process_model_response` synthesizes a
+            # ``json_tool_call`` tool when an output schema is in use. Mirror that here so
+            # the pre-scan doesn't fire the handler on a legitimate pseudo-call.
+            if output_schema is not None and output.name == "json_tool_call":
+                continue
+            missing.append((output.call_id, qualified_name))
+    return missing
+
+
 def process_model_response(
     *,
     agent: Agent[Any],
@@ -1425,6 +1499,7 @@ def process_model_response(
     output_schema: AgentOutputSchemaBase | None,
     handoffs: list[Handoff],
     existing_items: Sequence[RunItem] | None = None,
+    tool_not_found_actions: Mapping[str, Any] | None = None,
 ) -> ProcessedResponse:
     items: list[RunItem] = []
 
@@ -1741,6 +1816,20 @@ def process_model_response(
                     )
             else:
                 items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))
+                recovery_action = (
+                    tool_not_found_actions.get(output.call_id) if tool_not_found_actions else None
+                )
+                if isinstance(recovery_action, ToolNotFoundAction):
+                    # Recovery path: the user handler is rescuing this turn, so don't
+                    # pollute the trace with a span error.
+                    items.append(
+                        _build_custom_tool_not_found_output_item(
+                            agent=agent,
+                            tool_call=output,
+                            error_message=recovery_action.error_message,
+                        )
+                    )
+                    continue
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Custom tool not found",
@@ -1816,6 +1905,28 @@ def process_model_response(
                         )
                     )
                     continue
+                recovery_action = (
+                    tool_not_found_actions.get(output.call_id) if tool_not_found_actions else None
+                )
+                if isinstance(recovery_action, ToolNotFoundAction):
+                    # Recovery path: the user handler is rescuing this turn, so don't
+                    # pollute the trace with a span error.
+                    items.append(
+                        ToolCallItem(
+                            raw_item=output,
+                            agent=agent,
+                        )
+                    )
+                    items.append(
+                        ToolCallOutputItem(
+                            output=recovery_action.error_message,
+                            raw_item=ItemHelpers.tool_call_output_item(
+                                output, recovery_action.error_message
+                            ),
+                            agent=agent,
+                        )
+                    )
+                    continue
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Tool not found",
@@ -1858,6 +1969,84 @@ def process_model_response(
     )
 
 
+async def _resolve_tool_not_found_actions(
+    *,
+    error_handlers: RunErrorHandlers[TContext] | None,
+    agent: Agent[Any],
+    all_tools: list[Tool],
+    handoffs: list[Handoff],
+    response: ModelResponse,
+    output_schema: AgentOutputSchemaBase | None,
+    original_input: str | list[TResponseInputItem],
+    pre_step_items: list[RunItem],
+    raw_responses_so_far: list[ModelResponse] | None,
+    context_wrapper: RunContextWrapper[TContext],
+) -> dict[str, ToolNotFoundAction] | None:
+    """Pre-scan the model response for unknown tool calls and invoke the user-supplied
+    ``tool_not_found`` handler. Returns the map ``{call_id: ToolNotFoundAction}`` that
+    :func:`process_model_response` consults at each raise site."""
+    if not error_handlers or error_handlers.get("tool_not_found") is None:
+        return None
+    missing = collect_tool_not_found_calls(
+        all_tools=all_tools,
+        response=response,
+        handoffs=handoffs,
+        output_schema=output_schema,
+    )
+    if not missing:
+        return None
+    # Lazy import to avoid a cycle: error_handlers imports from turn_preparation, which
+    # is loaded before turn_resolution's module init finishes.
+    from .error_handlers import build_run_error_data, resolve_tool_not_found_action
+
+    raw_responses = list(raw_responses_so_far or [])
+    raw_responses.append(response)
+    run_data = build_run_error_data(
+        input=original_input,
+        new_items=list(pre_step_items),
+        raw_responses=raw_responses,
+        last_agent=agent,
+    )
+    available_tools = _collect_available_tool_names(all_tools=all_tools, handoffs=handoffs)
+    resolved: dict[str, ToolNotFoundAction] = {}
+    for call_id, tool_name in missing:
+        action = await resolve_tool_not_found_action(
+            error_handlers=error_handlers,
+            tool_name=tool_name,
+            available_tools=list(available_tools),
+            agent=agent,
+            context_wrapper=context_wrapper,
+            run_data=run_data,
+        )
+        if action is not None:
+            resolved[call_id] = action
+    return resolved or None
+
+
+def _collect_available_tool_names(*, all_tools: list[Tool], handoffs: list[Handoff]) -> list[str]:
+    """Best-effort list of tool names the model could have used.
+
+    Includes function tools, custom tools, and handoffs. Other hosted/builtin tools
+    (shell, apply_patch, computer, MCP) are not addressable by arbitrary name and are
+    omitted — the handler only needs this to help the model self-correct.
+    """
+    names: list[str] = []
+    for tool in all_tools:
+        if isinstance(tool, FunctionTool | CustomTool):
+            names.append(tool.name)
+    for handoff in handoffs:
+        names.append(handoff.tool_name)
+    # Preserve order, drop duplicates.
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        deduped.append(name)
+    return deduped
+
+
 async def get_single_step_result_from_response(
     *,
     bindings: AgentBindings[TContext],
@@ -1874,8 +2063,24 @@ async def get_single_step_result_from_response(
     server_manages_conversation: bool = False,
     event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] | None = None,
     before_side_effects: Callable[[], Awaitable[None]] | None = None,
+    error_handlers: RunErrorHandlers[TContext] | None = None,
+    raw_responses_so_far: list[ModelResponse] | None = None,
 ) -> SingleStepResult:
     item_agent = bindings.public_agent
+
+    tool_not_found_actions = await _resolve_tool_not_found_actions(
+        error_handlers=error_handlers,
+        agent=item_agent,
+        all_tools=all_tools,
+        handoffs=handoffs,
+        response=new_response,
+        output_schema=output_schema,
+        original_input=original_input,
+        pre_step_items=pre_step_items,
+        raw_responses_so_far=raw_responses_so_far,
+        context_wrapper=context_wrapper,
+    )
+
     processed_response = process_model_response(
         agent=item_agent,
         all_tools=all_tools,
@@ -1883,6 +2088,7 @@ async def get_single_step_result_from_response(
         output_schema=output_schema,
         handoffs=handoffs,
         existing_items=pre_step_items,
+        tool_not_found_actions=tool_not_found_actions,
     )
 
     if before_side_effects is not None:

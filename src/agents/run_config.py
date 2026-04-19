@@ -284,7 +284,7 @@ class RunOptions(TypedDict, Generic[TContext]):
     """The session for the run."""
 
     error_handlers: NotRequired[RunErrorHandlers[TContext] | None]
-    """Error handlers keyed by error kind. Currently supports max_turns."""
+    """Error handlers keyed by error kind. Supports ``max_turns`` and ``tool_not_found``."""
 
 
 __all__ = [
