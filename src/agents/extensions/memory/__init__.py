@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         DaprSession,
     )
     from .encrypt_session import EncryptedSession
+    from .firestore_session import FirestoreSession
     from .mongodb_session import MongoDBSession
     from .redis_session import RedisSession
     from .sqlalchemy_session import SQLAlchemySession
@@ -30,6 +31,7 @@ __all__: list[str] = [
     "DAPR_CONSISTENCY_STRONG",
     "DaprSession",
     "EncryptedSession",
+    "FirestoreSession",
     "MongoDBSession",
     "RedisSession",
     "SQLAlchemySession",
@@ -128,6 +130,17 @@ def __getattr__(name: str) -> Any:
             raise ImportError(
                 "MongoDBSession requires the 'mongodb' extra. "
                 "Install it with: pip install openai-agents[mongodb]"
+            ) from e
+
+    if name == "FirestoreSession":
+        try:
+            from .firestore_session import FirestoreSession  # noqa: F401
+
+            return FirestoreSession
+        except ModuleNotFoundError as e:
+            raise ImportError(
+                "FirestoreSession requires the 'firestore' extra. "
+                "Install it with: pip install openai-agents[firestore]"
             ) from e
 
     raise AttributeError(f"module {__name__} has no attribute {name}")
