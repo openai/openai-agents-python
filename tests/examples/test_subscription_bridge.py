@@ -59,6 +59,55 @@ def test_http_server_uses_backend_default_model_when_request_omits_model(
     )
 
 
+def test_http_server_returns_502_for_backend_value_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fake_run_backend_structured(
+        *, backend: str, prompt: str, model: str | None, workdir: Path, schema: dict[str, Any]
+    ) -> dict[str, Any]:
+        raise ValueError("backend emitted malformed JSON")
+
+    monkeypatch.setattr(server, "run_backend_structured", fake_run_backend_structured)
+
+    httpd = server.make_server("127.0.0.1", 0, default_backend="codex", workdir=tmp_path)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    time.sleep(0.05)
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{httpd.server_address[1]}/v1/chat/completions",
+            data=json.dumps(
+                {
+                    "messages": [{"role": "user", "content": "Use the weather tool."}],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "description": "Get the weather for a city.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"city": {"type": "string"}},
+                                },
+                            },
+                        }
+                    ],
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=2)
+
+    assert exc_info.value.code == 502
+    payload = json.loads(exc_info.value.read().decode("utf-8"))
+    assert payload == {"error": {"message": "backend emitted malformed JSON"}}
+
+
 def test_build_chat_prompt_from_messages_preserves_roles() -> None:
     payload = {
         "messages": [

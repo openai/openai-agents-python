@@ -589,7 +589,10 @@ def run_backend_structured(
                 stderr = (result.stderr or result.stdout or "backend execution failed").strip()
                 raise RuntimeError(stderr)
             raw = output_path.read_text() if output_path.exists() else result.stdout
-            return _normalize_decision_payload(_load_json_output(raw))
+            try:
+                return _normalize_decision_payload(_load_json_output(raw))
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
 
     if backend == "claude":
         cmd = [
@@ -610,7 +613,10 @@ def run_backend_structured(
         if result.returncode != 0:
             stderr = (result.stderr or result.stdout or "backend execution failed").strip()
             raise RuntimeError(stderr)
-        return _normalize_decision_payload(_load_json_output(result.stdout))
+        try:
+            return _normalize_decision_payload(_load_json_output(result.stdout))
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
 
     raise ValueError(f"Unsupported backend: {backend}")
 
@@ -620,24 +626,27 @@ def _respond_for_chat_request(
 ) -> dict[str, Any]:
     prompt = build_chat_prompt(payload)
     if _normalize_tools(payload.get("tools")):
-        decision = run_backend_structured(
-            backend=backend,
-            prompt=_build_structured_decision_prompt(prompt, payload),
-            model=model,
-            workdir=workdir,
-            schema=DecisionSchema,
-        )
-        if decision.get("type") == "tool_calls":
+        try:
+            decision = run_backend_structured(
+                backend=backend,
+                prompt=_build_structured_decision_prompt(prompt, payload),
+                model=model,
+                workdir=workdir,
+                schema=DecisionSchema,
+            )
+            if decision.get("type") == "tool_calls":
+                return build_chat_completion_response(
+                    model=model,
+                    request_id=request_id,
+                    tool_calls=decision.get("tool_calls"),
+                )
             return build_chat_completion_response(
                 model=model,
                 request_id=request_id,
-                tool_calls=decision.get("tool_calls"),
+                content=str(decision.get("content") or ""),
             )
-        return build_chat_completion_response(
-            model=model,
-            request_id=request_id,
-            content=str(decision.get("content") or ""),
-        )
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
 
     text = run_backend(backend=backend, prompt=prompt, model=model, workdir=workdir)
     return build_chat_completion_response(model=model, request_id=request_id, content=text)
@@ -648,24 +657,27 @@ def _respond_for_responses_request(
 ) -> dict[str, Any]:
     prompt = build_responses_prompt(payload)
     if _normalize_tools(payload.get("tools")):
-        decision = run_backend_structured(
-            backend=backend,
-            prompt=_build_structured_decision_prompt(prompt, payload),
-            model=model,
-            workdir=workdir,
-            schema=DecisionSchema,
-        )
-        if decision.get("type") == "tool_calls":
+        try:
+            decision = run_backend_structured(
+                backend=backend,
+                prompt=_build_structured_decision_prompt(prompt, payload),
+                model=model,
+                workdir=workdir,
+                schema=DecisionSchema,
+            )
+            if decision.get("type") == "tool_calls":
+                return build_responses_api_response(
+                    model=model,
+                    request_id=request_id,
+                    tool_calls=decision.get("tool_calls"),
+                )
             return build_responses_api_response(
                 model=model,
                 request_id=request_id,
-                tool_calls=decision.get("tool_calls"),
+                content=str(decision.get("content") or ""),
             )
-        return build_responses_api_response(
-            model=model,
-            request_id=request_id,
-            content=str(decision.get("content") or ""),
-        )
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
 
     text = run_backend(backend=backend, prompt=prompt, model=model, workdir=workdir)
     return build_responses_api_response(model=model, request_id=request_id, content=text)
