@@ -35,6 +35,7 @@ from ....sandbox.errors import (
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
+    WorkspaceStartError,
     WorkspaceWriteTypeError,
 )
 from ....sandbox.manifest import Manifest
@@ -360,6 +361,33 @@ class DaytonaSandboxSession(BaseSandboxSession):
 
     def _runtime_helpers(self) -> tuple[RuntimeHelperScript, ...]:
         return (RESOLVE_WORKSPACE_PATH_HELPER,)
+
+    async def _prepare_workspace_root(self) -> None:
+        """Create the workspace root before SDK exec calls use it as cwd."""
+        root = Path(self.state.manifest.root)
+        try:
+            envs = await self._resolved_envs()
+            result = await self._sandbox.process.exec(
+                f"mkdir -p -- {shlex.quote(str(root))}",
+                env=envs or None,
+                timeout=self.state.timeouts.fast_op_s,
+            )
+        except Exception as e:
+            raise WorkspaceStartError(path=root, cause=e) from e
+
+        exit_code = int(getattr(result, "exit_code", 0) or 0)
+        if exit_code != 0:
+            raise WorkspaceStartError(
+                path=root,
+                context={
+                    "reason": "workspace_root_nonzero_exit",
+                    "exit_code": exit_code,
+                    "output": str(getattr(result, "result", "") or ""),
+                },
+            )
+
+    async def _prepare_backend_workspace(self) -> None:
+        await self._prepare_workspace_root()
 
     async def mkdir(
         self,
