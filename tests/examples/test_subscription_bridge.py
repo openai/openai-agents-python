@@ -230,6 +230,119 @@ def test_build_chat_completion_response_can_emit_tool_calls() -> None:
     assert json.loads(tool_call["function"]["arguments"]) == {"city": "Tokyo"}
 
 
+def test_build_chat_completion_response_rejects_non_object_tool_arguments() -> None:
+    with pytest.raises(ValueError, match="must decode to a JSON object"):
+        server.build_chat_completion_response(
+            model="codex/gpt-5.4",
+            request_id="req_bad",
+            tool_calls=[{"name": "get_weather", "arguments_json": '[]'}],
+        )
+
+
+def test_respond_for_chat_request_skips_structured_tool_mode_when_tool_choice_is_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    called: dict[str, bool] = {"structured": False, "plain": False}
+
+    def fake_run_backend_structured(**_: Any) -> dict[str, Any]:
+        called["structured"] = True
+        raise AssertionError("structured backend should not run when tool_choice is none")
+
+    def fake_run_backend(*, backend: str, prompt: str, model: str | None, workdir: Path) -> str:
+        called["plain"] = True
+        return "No tool call emitted."
+
+    monkeypatch.setattr(server, "run_backend_structured", fake_run_backend_structured)
+    monkeypatch.setattr(server, "run_backend", fake_run_backend)
+
+    response = server._respond_for_chat_request(
+        {
+            "messages": [{"role": "user", "content": "Just answer directly."}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get the weather for a city.",
+                        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+                    },
+                }
+            ],
+            "tool_choice": "none",
+        },
+        backend="codex",
+        model="codex/gpt-5.4",
+        workdir=tmp_path,
+        request_id="req_none",
+    )
+
+    assert called == {"structured": False, "plain": True}
+    assert response["choices"][0]["finish_reason"] == "stop"
+    assert response["choices"][0]["message"]["content"] == "No tool call emitted."
+
+
+def test_respond_for_chat_request_rejects_tool_calls_outside_required_tool_choice(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fake_run_backend_structured(**_: Any) -> dict[str, Any]:
+        return {"type": "tool_calls", "tool_calls": [{"name": "other_tool", "arguments": {}}]}
+
+    monkeypatch.setattr(server, "run_backend_structured", fake_run_backend_structured)
+
+    with pytest.raises(RuntimeError, match="required tool choice"):
+        server._respond_for_chat_request(
+            {
+                "messages": [{"role": "user", "content": "Use the weather tool."}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "description": "Get the weather for a city.",
+                            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+                        },
+                    }
+                ],
+                "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+            },
+            backend="codex",
+            model="codex/gpt-5.4",
+            workdir=tmp_path,
+            request_id="req_specific",
+        )
+
+
+def test_respond_for_chat_request_requires_tool_calls_when_tool_choice_is_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fake_run_backend_structured(**_: Any) -> dict[str, Any]:
+        return {"type": "final", "content": "Here is a direct answer."}
+
+    monkeypatch.setattr(server, "run_backend_structured", fake_run_backend_structured)
+
+    with pytest.raises(RuntimeError, match="requires a tool call"):
+        server._respond_for_chat_request(
+            {
+                "messages": [{"role": "user", "content": "Use a tool."}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "description": "Get the weather for a city.",
+                            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+                        },
+                    }
+                ],
+                "tool_choice": "required",
+            },
+            backend="codex",
+            model="codex/gpt-5.4",
+            workdir=tmp_path,
+            request_id="req_required",
+        )
+
+
 def test_build_responses_api_response_can_emit_function_calls() -> None:
     response = server.build_responses_api_response(
         model="codex/gpt-5.4",
@@ -328,6 +441,27 @@ def test_structured_decision_prompt_requires_plain_text_final_content() -> None:
 
     assert "content must be plain natural-language text only" in prompt
     assert "Do not wrap the final answer in JSON" in prompt
+
+
+def test_structured_decision_prompt_requires_tool_calls_when_tool_choice_is_required() -> None:
+    prompt = server._build_structured_decision_prompt(
+        "Conversation transcript:\n\n[user]\nUse a tool.",
+        {"tool_choice": "required", "parallel_tool_calls": False},
+    )
+
+    assert "You must return at least one tool call." in prompt
+
+
+def test_structured_decision_prompt_limits_specific_tool_choice() -> None:
+    prompt = server._build_structured_decision_prompt(
+        "Conversation transcript:\n\n[user]\nUse the weather tool.",
+        {
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+            "parallel_tool_calls": False,
+        },
+    )
+
+    assert "Every tool call name must be exactly get_weather." in prompt
 
 
 def test_normalize_decision_payload_unwraps_nested_final_json_content() -> None:

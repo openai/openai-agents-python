@@ -136,6 +136,58 @@ def _describe_tool_choice(tool_choice: Any) -> str:
     return "auto"
 
 
+def _required_tool_choice_name(tool_choice: Any) -> str | None:
+    if not isinstance(tool_choice, dict):
+        return None
+    if tool_choice.get("type") == "function":
+        function = tool_choice.get("function")
+        if isinstance(function, dict):
+            name = function.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+    name = tool_choice.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return None
+
+
+def _tool_choice_requires_tool_calls(tool_choice: Any) -> bool:
+    return tool_choice == "required" or _required_tool_choice_name(tool_choice) is not None
+
+
+def _tool_choice_allows_structured_tool_calls(tool_choice: Any) -> bool:
+    return tool_choice != "none"
+
+
+def _validate_tool_choice_decision(decision: dict[str, Any], payload: dict[str, Any]) -> None:
+    tool_choice = payload.get("tool_choice")
+    required_tool_name = _required_tool_choice_name(tool_choice)
+
+    if tool_choice == "none":
+        if decision.get("type") == "tool_calls":
+            raise RuntimeError("tool_choice='none' forbids tool calls")
+        return
+
+    if required_tool_name is not None:
+        if decision.get("type") != "tool_calls":
+            raise RuntimeError(
+                f"required tool choice {required_tool_name!r} requires a tool call"
+            )
+        invalid_names = [
+            tool_call.get("name")
+            for tool_call in decision.get("tool_calls", [])
+            if tool_call.get("name") != required_tool_name
+        ]
+        if invalid_names:
+            raise RuntimeError(
+                f"backend violated required tool choice {required_tool_name!r}"
+            )
+        return
+
+    if _tool_choice_requires_tool_calls(tool_choice) and decision.get("type") != "tool_calls":
+        raise RuntimeError("tool_choice='required' requires a tool call")
+
+
 def _chat_message_blocks(messages: Any) -> list[str]:
     if not isinstance(messages, list) or not messages:
         raise ValueError("chat.completions payload must include non-empty messages")
@@ -239,7 +291,9 @@ def build_responses_prompt(payload: dict[str, Any]) -> str:
 
 
 def _build_structured_decision_prompt(base_prompt: str, payload: dict[str, Any]) -> str:
-    tool_choice = _describe_tool_choice(payload.get("tool_choice"))
+    raw_tool_choice = payload.get("tool_choice")
+    tool_choice = _describe_tool_choice(raw_tool_choice)
+    required_tool_name = _required_tool_choice_name(raw_tool_choice)
     parallel_tool_calls = bool(payload.get("parallel_tool_calls"))
     instructions = [
         "Return JSON only.",
@@ -256,6 +310,11 @@ def _build_structured_decision_prompt(base_prompt: str, payload: dict[str, Any])
         "When you emit tool_calls, arguments_json must be a valid JSON string encoding an object that matches the tool schema.",
         "Do not invent tools.",
     ]
+    if raw_tool_choice == "required":
+        instructions.append("You must return at least one tool call.")
+    if required_tool_name is not None:
+        instructions.append("You must return at least one tool call.")
+        instructions.append(f"Every tool call name must be exactly {required_tool_name}.")
     return f"{base_prompt}\n\nDecision rules:\n- " + "\n- ".join(instructions)
 
 
@@ -285,8 +344,10 @@ def _coerce_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]
                 arguments = json.loads(arguments)
             except json.JSONDecodeError:
                 arguments = {"value": arguments}
-        if not isinstance(arguments, dict):
+        if arguments is None:
             arguments = {}
+        elif not isinstance(arguments, dict):
+            raise ValueError("tool call arguments must decode to a JSON object")
         normalized.append(
             {
                 "call_id": tool_call.get("call_id") or f"call_{uuid.uuid4().hex}",
@@ -625,7 +686,9 @@ def _respond_for_chat_request(
     payload: dict[str, Any], *, backend: str, model: str, workdir: Path, request_id: str
 ) -> dict[str, Any]:
     prompt = build_chat_prompt(payload)
-    if _normalize_tools(payload.get("tools")):
+    if _normalize_tools(payload.get("tools")) and _tool_choice_allows_structured_tool_calls(
+        payload.get("tool_choice")
+    ):
         try:
             decision = run_backend_structured(
                 backend=backend,
@@ -634,6 +697,7 @@ def _respond_for_chat_request(
                 workdir=workdir,
                 schema=DecisionSchema,
             )
+            _validate_tool_choice_decision(decision, payload)
             if decision.get("type") == "tool_calls":
                 return build_chat_completion_response(
                     model=model,
@@ -656,7 +720,9 @@ def _respond_for_responses_request(
     payload: dict[str, Any], *, backend: str, model: str, workdir: Path, request_id: str
 ) -> dict[str, Any]:
     prompt = build_responses_prompt(payload)
-    if _normalize_tools(payload.get("tools")):
+    if _normalize_tools(payload.get("tools")) and _tool_choice_allows_structured_tool_calls(
+        payload.get("tool_choice")
+    ):
         try:
             decision = run_backend_structured(
                 backend=backend,
@@ -665,6 +731,7 @@ def _respond_for_responses_request(
                 workdir=workdir,
                 schema=DecisionSchema,
             )
+            _validate_tool_choice_decision(decision, payload)
             if decision.get("type") == "tool_calls":
                 return build_responses_api_response(
                     model=model,
