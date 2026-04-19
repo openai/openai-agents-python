@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
+import urllib.request
 from pathlib import Path
 from typing import Any, cast
 
@@ -14,6 +17,46 @@ def test_resolve_backend_prefers_model_prefix() -> None:
     assert server.resolve_backend("codex/gpt-5.4", default_backend="claude") == "codex"
     assert server.resolve_backend("claude/sonnet", default_backend="codex") == "claude"
     assert server.resolve_backend("gpt-5.4", default_backend="codex") == "codex"
+
+
+def test_resolve_request_model_uses_backend_default_when_model_is_omitted() -> None:
+    assert server.resolve_request_model({}, default_backend="codex") == "codex/gpt-5.4"
+    assert server.resolve_request_model({}, default_backend="claude") == "claude/claude-sonnet-4-6"
+    assert (
+        server.resolve_request_model({"model": "claude/claude-sonnet-4-6"}, default_backend="codex")
+        == "claude/claude-sonnet-4-6"
+    )
+
+
+def test_http_server_uses_backend_default_model_when_request_omits_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fake_run_backend(*, backend: str, prompt: str, model: str | None, workdir: Path) -> str:
+        return f"backend={backend};model={model};workdir={workdir.name}"
+
+    monkeypatch.setattr(server, "run_backend", fake_run_backend)
+
+    httpd = server.make_server("127.0.0.1", 0, default_backend="claude", workdir=tmp_path)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    time.sleep(0.05)
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{httpd.server_address[1]}/v1/chat/completions",
+            data=json.dumps({"messages": [{"role": "user", "content": "Say hi."}]}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=2)
+
+    assert payload["model"] == "claude/claude-sonnet-4-6"
+    assert payload["choices"][0]["message"]["content"].startswith(
+        "backend=claude;model=claude/claude-sonnet-4-6"
+    )
 
 
 def test_build_chat_prompt_from_messages_preserves_roles() -> None:

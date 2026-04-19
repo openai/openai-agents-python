@@ -43,6 +43,19 @@ def resolve_backend(model: str | None, default_backend: str = "codex") -> str:
     return default_backend
 
 
+def default_model_for_backend(backend: str) -> str:
+    if backend == "claude":
+        return "claude/claude-sonnet-4-6"
+    return "codex/gpt-5.4"
+
+
+def resolve_request_model(payload: dict[str, Any], *, default_backend: str) -> str:
+    raw_model = payload.get("model")
+    if isinstance(raw_model, str) and raw_model.strip():
+        return raw_model.strip()
+    return default_model_for_backend(default_backend)
+
+
 def _model_flag_value(model: str | None) -> str | None:
     if not model:
         return None
@@ -686,8 +699,9 @@ class SubscriptionBridgeHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         try:
             payload = self._read_json()
-            model = str(payload.get("model") or "codex/gpt-5.4")
-            backend = resolve_backend(model, default_backend=self.server.default_backend)  # type: ignore[attr-defined]
+            default_backend = self.server.default_backend  # type: ignore[attr-defined]
+            model = resolve_request_model(payload, default_backend=default_backend)
+            backend = resolve_backend(model, default_backend=default_backend)
             workdir = Path(self.server.workdir)  # type: ignore[attr-defined]
             request_id = f"bridge_{uuid.uuid4().hex}"
 
