@@ -1,7 +1,7 @@
 import abc
 import asyncio
 from collections.abc import Iterator, Mapping
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_serializer, field_validator
@@ -11,7 +11,12 @@ from .entries import BaseEntry, Dir, Mount, resolve_workspace_path
 from .errors import InvalidManifestPathError
 from .manifest_render import render_manifest_description
 from .types import Group, User
-from .workspace_paths import SandboxPathGrant, coerce_posix_path, posix_path_as_path
+from .workspace_paths import (
+    SandboxPathGrant,
+    coerce_posix_path,
+    posix_path_as_path,
+    windows_absolute_path,
+)
 
 DEFAULT_REMOTE_MOUNT_COMMAND_ALLOWLIST = [
     "ls",
@@ -150,20 +155,27 @@ class Manifest(BaseModel):
         return skip
 
     @staticmethod
-    def _coerce_rel_path(path: str | Path) -> Path:
+    def _coerce_rel_path(path: str | PurePath) -> Path:
+        if (windows_path := windows_absolute_path(path)) is not None:
+            raise InvalidManifestPathError(rel=windows_path.as_posix(), reason="absolute")
         return posix_path_as_path(coerce_posix_path(path))
 
     @staticmethod
     def _validate_rel_path(rel: Path) -> None:
-        if rel.is_absolute():
-            raise InvalidManifestPathError(rel=rel, reason="absolute")
-        if ".." in rel.parts:
-            raise InvalidManifestPathError(rel=rel, reason="escape_root")
+        if (windows_path := windows_absolute_path(rel)) is not None:
+            raise InvalidManifestPathError(rel=windows_path.as_posix(), reason="absolute")
+        rel_path = coerce_posix_path(rel)
+        if rel_path.is_absolute():
+            raise InvalidManifestPathError(rel=rel_path.as_posix(), reason="absolute")
+        if ".." in rel_path.parts:
+            raise InvalidManifestPathError(rel=rel_path.as_posix(), reason="escape_root")
 
     @staticmethod
     def _normalize_rel_path_within_root(rel: Path, *, original: Path) -> Path:
         rel_path = coerce_posix_path(rel)
         original_path = coerce_posix_path(original)
+        if (windows_path := windows_absolute_path(original)) is not None:
+            raise InvalidManifestPathError(rel=windows_path.as_posix(), reason="absolute")
         if rel_path.is_absolute():
             raise InvalidManifestPathError(rel=original_path.as_posix(), reason="absolute")
 
@@ -185,6 +197,8 @@ class Manifest(BaseModel):
     @classmethod
     def _normalize_in_workspace_path(cls, root: Path, path: Path) -> Path | None:
         root_path = coerce_posix_path(root)
+        if (windows_path := windows_absolute_path(path)) is not None:
+            raise InvalidManifestPathError(rel=windows_path.as_posix(), reason="absolute")
         path_posix = coerce_posix_path(path)
         if not path_posix.is_absolute():
             normalized_rel = cls._normalize_rel_path_within_root(

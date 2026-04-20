@@ -73,6 +73,7 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
+from ....sandbox.workspace_paths import sandbox_path_str
 
 WorkspacePersistenceMode = Literal["tar", "snapshot"]
 E2BTimeoutAction = Literal["kill", "pause"]
@@ -729,7 +730,7 @@ class E2BSandboxSession(BaseSandboxSession):
         try:
             await _sandbox_make_dir(
                 self._sandbox,
-                str(path),
+                sandbox_path_str(path),
                 request_timeout=self.state.timeouts.fast_op_s,
             )
         except Exception as e:  # pragma: no cover - exercised via unit tests with fakes
@@ -1053,7 +1054,9 @@ class E2BSandboxSession(BaseSandboxSession):
         not_found_exc = e2b_exc.get("not_found")
 
         try:
-            content = await _sandbox_read_file(self._sandbox, str(workspace_path), format="bytes")
+            content = await _sandbox_read_file(
+                self._sandbox, sandbox_path_str(workspace_path), format="bytes"
+            )
             if isinstance(content, bytes | bytearray):
                 data = bytes(content)
             elif isinstance(content, str):
@@ -1087,7 +1090,7 @@ class E2BSandboxSession(BaseSandboxSession):
         try:
             await _sandbox_write_file(
                 self._sandbox,
-                str(workspace_path),
+                sandbox_path_str(workspace_path),
                 bytes(payload),
                 request_timeout=self.state.timeouts.file_upload_s,
             )

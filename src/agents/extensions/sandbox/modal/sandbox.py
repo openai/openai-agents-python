@@ -73,7 +73,7 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
-from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path
+from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 from .mounts import ModalCloudBucketMountStrategy
 
 _DEFAULT_TIMEOUT_S = 30.0
@@ -1017,7 +1017,7 @@ class ModalSandboxSession(BaseSandboxSession):
 
         # Read by `cat` so the payload is returned as bytes.
         workspace_path = await self._validate_path_access(path)
-        cmd = ["sh", "-lc", f"cat -- {shlex.quote(str(workspace_path))}"]
+        cmd = ["sh", "-lc", f"cat -- {shlex.quote(sandbox_path_str(workspace_path))}"]
         try:
             out = await self.exec(*cmd, shell=False)
         except ExecTimeoutError as e:
@@ -1056,12 +1056,12 @@ class ModalSandboxSession(BaseSandboxSession):
         async def _run_write() -> None:
             assert self._sandbox is not None
             # Ensure parent directory exists.
-            parent = str(workspace_path.parent)
+            parent = sandbox_path_str(workspace_path.parent)
             mkdir_proc = await self._sandbox.exec.aio("mkdir", "-p", "--", parent, text=False)
             await mkdir_proc.wait.aio()
 
             # Stream bytes into `cat > file` to avoid quoting/binary issues.
-            cmd = ["sh", "-lc", f"cat > {shlex.quote(str(workspace_path))}"]
+            cmd = ["sh", "-lc", f"cat > {shlex.quote(sandbox_path_str(workspace_path))}"]
             proc = await self._sandbox.exec.aio(*cmd, text=False)
             await _write_process_stdin(proc, payload)
             exit_code = await proc.wait.aio()

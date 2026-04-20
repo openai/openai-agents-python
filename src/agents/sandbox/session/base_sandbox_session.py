@@ -36,7 +36,13 @@ from ..materialization import MaterializationResult, MaterializedFile
 from ..snapshot import NoopSnapshot
 from ..types import ExecResult, ExposedPortEndpoint, User
 from ..util.parse_utils import parse_ls_la
-from ..workspace_paths import WorkspacePathPolicy, coerce_posix_path, posix_path_as_path
+from ..workspace_paths import (
+    WorkspacePathPolicy,
+    coerce_posix_path,
+    posix_path_as_path,
+    posix_path_for_error,
+    sandbox_path_str,
+)
 from .archive_extraction import (
     WorkspaceArchiveExtractor,
     safe_zip_member_rel_path,
@@ -704,10 +710,10 @@ class BaseSandboxSession(abc.ABC):
         target, while still rejecting paths whose resolved remote target escapes all allowed roots.
         """
 
-        original_path = coerce_posix_path(path)
         path_policy = self._workspace_path_policy()
         root = path_policy.sandbox_root()
-        workspace_path = path_policy.normalize_sandbox_path(original_path, for_write=for_write)
+        workspace_path = path_policy.normalize_sandbox_path(path, for_write=for_write)
+        original_path = coerce_posix_path(path)
         helper_path = await self._ensure_runtime_helper_installed(RESOLVE_WORKSPACE_PATH_HELPER)
         extra_grant_args = tuple(
             arg
@@ -727,7 +733,7 @@ class BaseSandboxSession(abc.ABC):
             if resolved:
                 # Preserve the requested workspace path so leaf symlinks keep their normal
                 # semantics while the remote realpath check still enforces path confinement.
-                return cast(Path, workspace_path)
+                return posix_path_as_path(workspace_path)
             raise ExecTransportError(
                 command=(
                     "resolve_workspace_path",
@@ -765,7 +771,9 @@ class BaseSandboxSession(abc.ABC):
                     context["grant_path"] = line.removeprefix("read-only extra path grant: ")
                 elif line.startswith("resolved path: "):
                     context["resolved_path"] = line.removeprefix("resolved path: ")
-            raise WorkspaceArchiveWriteError(path=Path(workspace_path.as_posix()), context=context)
+            raise WorkspaceArchiveWriteError(
+                path=posix_path_for_error(workspace_path), context=context
+            )
         raise ExecNonZeroError(
             result,
             command=(
@@ -804,30 +812,36 @@ class BaseSandboxSession(abc.ABC):
         :param user: Optional sandbox user to perform the write as.
         """
 
-    async def _check_read_with_exec(self, path: Path, *, user: str | User | None = None) -> Path:
+    async def _check_read_with_exec(
+        self, path: Path | str, *, user: str | User | None = None
+    ) -> Path:
         workspace_path = await self._validate_path_access(path)
-        cmd = ("sh", "-lc", '[ -r "$1" ]', "sh", str(workspace_path))
+        path_arg = sandbox_path_str(workspace_path)
+        cmd = ("sh", "-lc", '[ -r "$1" ]', "sh", path_arg)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise WorkspaceReadNotFoundError(
-                path=path,
+                path=posix_path_as_path(coerce_posix_path(path)),
                 context={
-                    "command": ["sh", "-lc", "<read_access_check>", str(workspace_path)],
+                    "command": ["sh", "-lc", "<read_access_check>", path_arg],
                     "stdout": result.stdout.decode("utf-8", errors="replace"),
                     "stderr": result.stderr.decode("utf-8", errors="replace"),
                 },
             )
         return workspace_path
 
-    async def _check_write_with_exec(self, path: Path, *, user: str | User | None = None) -> Path:
+    async def _check_write_with_exec(
+        self, path: Path | str, *, user: str | User | None = None
+    ) -> Path:
         workspace_path = await self._validate_path_access(path, for_write=True)
-        cmd = ("sh", "-lc", _WRITE_ACCESS_CHECK_SCRIPT, "sh", str(workspace_path))
+        path_arg = sandbox_path_str(workspace_path)
+        cmd = ("sh", "-lc", _WRITE_ACCESS_CHECK_SCRIPT, "sh", path_arg)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise WorkspaceArchiveWriteError(
                 path=workspace_path,
                 context={
-                    "command": ["sh", "-lc", "<write_access_check>", str(workspace_path)],
+                    "command": ["sh", "-lc", "<write_access_check>", path_arg],
                     "stdout": result.stdout.decode("utf-8", errors="replace"),
                     "stderr": result.stderr.decode("utf-8", errors="replace"),
                 },
@@ -843,7 +857,8 @@ class BaseSandboxSession(abc.ABC):
     ) -> Path:
         workspace_path = await self._validate_path_access(path, for_write=True)
         parents_flag = "1" if parents else "0"
-        cmd = ("sh", "-lc", _MKDIR_ACCESS_CHECK_SCRIPT, "sh", str(workspace_path), parents_flag)
+        path_arg = sandbox_path_str(workspace_path)
+        cmd = ("sh", "-lc", _MKDIR_ACCESS_CHECK_SCRIPT, "sh", path_arg, parents_flag)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise WorkspaceArchiveWriteError(
@@ -853,7 +868,7 @@ class BaseSandboxSession(abc.ABC):
                         "sh",
                         "-lc",
                         "<mkdir_access_check>",
-                        str(workspace_path),
+                        path_arg,
                         parents_flag,
                     ],
                     "stdout": result.stdout.decode("utf-8", errors="replace"),
@@ -871,7 +886,8 @@ class BaseSandboxSession(abc.ABC):
     ) -> Path:
         workspace_path = await self._validate_path_access(path, for_write=True)
         recursive_flag = "1" if recursive else "0"
-        cmd = ("sh", "-lc", _RM_ACCESS_CHECK_SCRIPT, "sh", str(workspace_path), recursive_flag)
+        path_arg = sandbox_path_str(workspace_path)
+        cmd = ("sh", "-lc", _RM_ACCESS_CHECK_SCRIPT, "sh", path_arg, recursive_flag)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise WorkspaceArchiveWriteError(
@@ -881,7 +897,7 @@ class BaseSandboxSession(abc.ABC):
                         "sh",
                         "-lc",
                         "<rm_access_check>",
-                        str(workspace_path),
+                        path_arg,
                         recursive_flag,
                     ],
                     "stdout": result.stdout.decode("utf-8", errors="replace"),
@@ -927,12 +943,13 @@ class BaseSandboxSession(abc.ABC):
         """
         path = await self._validate_path_access(path)
 
-        cmd = ("ls", "-la", "--", str(path))
+        path_arg = sandbox_path_str(path)
+        cmd = ("ls", "-la", "--", path_arg)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise ExecNonZeroError(result, command=cmd)
 
-        return parse_ls_la(result.stdout.decode("utf-8", errors="replace"), base=str(path))
+        return parse_ls_la(result.stdout.decode("utf-8", errors="replace"), base=path_arg)
 
     async def rm(
         self,
@@ -952,7 +969,7 @@ class BaseSandboxSession(abc.ABC):
         cmd: list[str] = ["rm"]
         if recursive:
             cmd.append("-rf")
-        cmd.extend(["--", str(path)])
+        cmd.extend(["--", sandbox_path_str(path)])
 
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
@@ -976,7 +993,7 @@ class BaseSandboxSession(abc.ABC):
         cmd: list[str] = ["mkdir"]
         if parents:
             cmd.append("-p")
-        cmd.append(str(path))
+        cmd.append(sandbox_path_str(path))
 
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
@@ -1254,7 +1271,7 @@ class BaseSandboxSession(abc.ABC):
                 "rm",
                 "-f",
                 "--",
-                str(self._snapshot_fingerprint_cache_path()),
+                self._snapshot_fingerprint_cache_path().as_posix(),
                 shell=False,
             )
         except Exception:

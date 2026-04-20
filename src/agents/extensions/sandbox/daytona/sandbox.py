@@ -63,7 +63,7 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
-from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path
+from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 
 DEFAULT_DAYTONA_WORKSPACE_ROOT = "/home/daytona/workspace"
 logger = logging.getLogger(__name__)
@@ -376,7 +376,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
         if path == Path("/"):
             return
         try:
-            await self._sandbox.fs.create_folder(str(path), "755")
+            await self._sandbox.fs.create_folder(sandbox_path_str(path), "755")
         except Exception as e:
             raise WorkspaceArchiveWriteError(
                 path=path,
@@ -402,7 +402,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
     ) -> ExecResult:
         cmd_str = shlex.join(str(c) for c in command)
         envs = await self._resolved_envs()
-        cwd = self.state.manifest.root
+        cwd = sandbox_path_str(self.state.manifest.root)
         env_args = (
             " ".join(shlex.quote(f"{key}={value}") for key, value in envs.items()) if envs else ""
         )
@@ -482,7 +482,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
         sanitized = self._prepare_exec_command(*command, shell=shell, user=user)
         cmd_str = shlex.join(str(part) for part in sanitized)
         envs = await self._resolved_envs()
-        cwd = self.state.manifest.root
+        cwd = sandbox_path_str(self.state.manifest.root)
         exec_timeout = self._coerce_exec_timeout(timeout)
         daytona_exc = _import_daytona_exceptions()
         timeout_exc = daytona_exc.get("timeout")
@@ -783,7 +783,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
             pass
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
-        path = posix_path_as_path(coerce_posix_path(path))
+        error_path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             workspace_path = await self._check_read_with_exec(path, user=user)
         else:
@@ -794,14 +794,14 @@ class DaytonaSandboxSession(BaseSandboxSession):
 
         try:
             data: bytes = await self._sandbox.fs.download_file(
-                str(workspace_path),
+                sandbox_path_str(workspace_path),
                 self.state.timeouts.file_download_s,
             )
             return io.BytesIO(data)
         except Exception as e:
             if not_found_exc is not None and isinstance(e, not_found_exc):
-                raise WorkspaceReadNotFoundError(path=path, cause=e) from e
-            raise WorkspaceArchiveReadError(path=path, cause=e) from e
+                raise WorkspaceReadNotFoundError(path=error_path, cause=e) from e
+            raise WorkspaceArchiveReadError(path=error_path, cause=e) from e
 
     async def write(
         self,
@@ -810,7 +810,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
         *,
         user: str | User | None = None,
     ) -> None:
-        path = posix_path_as_path(coerce_posix_path(path))
+        error_path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             await self._check_write_with_exec(path, user=user)
 
@@ -818,13 +818,13 @@ class DaytonaSandboxSession(BaseSandboxSession):
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         if not isinstance(payload, bytes | bytearray):
-            raise WorkspaceWriteTypeError(path=path, actual_type=type(payload).__name__)
+            raise WorkspaceWriteTypeError(path=error_path, actual_type=type(payload).__name__)
 
         workspace_path = await self._validate_path_access(path, for_write=True)
         try:
             await self._sandbox.fs.upload_file(
                 bytes(payload),
-                str(workspace_path),
+                sandbox_path_str(workspace_path),
                 timeout=self.state.timeouts.file_upload_s,
             )
         except Exception as e:

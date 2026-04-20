@@ -181,6 +181,19 @@ class TestSkillsValidation:
                 skills_path="/skills",
             )
 
+    def test_rejects_windows_drive_absolute_skills_path(self) -> None:
+        with pytest.raises(SkillsConfigError) as exc_info:
+            Skills(
+                skills=[Skill(name="my-skill", description="desc", content="literal")],
+                skills_path="C:\\skills",
+            )
+
+        assert exc_info.value.context == {
+            "field": "skills_path",
+            "path": "C:/skills",
+            "reason": "absolute",
+        }
+
     def test_rejects_escape_root_skills_path(self) -> None:
         with pytest.raises(SkillsConfigError):
             Skills(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, cast
 
 import pytest
@@ -11,9 +11,13 @@ from pydantic import ValidationError
 
 from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.errors import InvalidManifestPathError, WorkspaceArchiveWriteError
-from agents.sandbox.workspace_paths import WorkspacePathPolicy
+from agents.sandbox.workspace_paths import (
+    WorkspacePathPolicy,
+    coerce_posix_path,
+    posix_path_as_path,
+)
 
-PathInput = str | Path
+PathInput = str | PurePath
 PathPolicyMethod = Callable[[WorkspacePathPolicy, PathInput], Path]
 
 
@@ -277,6 +281,35 @@ def test_absolute_workspace_path_rejects_windows_rooted_escape_as_absolute() -> 
     assert exc_info.value.context == {"rel": "/tmp/secret.txt", "reason": "absolute"}
 
 
+def test_windows_drive_absolute_path_is_rejected_before_posix_coercion() -> None:
+    policy = WorkspacePathPolicy(root="/workspace")
+
+    with pytest.raises(InvalidManifestPathError) as exc_info:
+        policy.normalize_path(PureWindowsPath("C:/tmp/secret.txt"))
+
+    assert str(exc_info.value) == "manifest path must be relative: C:/tmp/secret.txt"
+    assert exc_info.value.context == {"rel": "C:/tmp/secret.txt", "reason": "absolute"}
+
+    with pytest.raises(InvalidManifestPathError) as exc_info:
+        policy.absolute_workspace_path("C:\\tmp\\secret.txt")
+
+    assert str(exc_info.value) == "manifest path must be relative: C:/tmp/secret.txt"
+    assert exc_info.value.context == {"rel": "C:/tmp/secret.txt", "reason": "absolute"}
+
+    with pytest.raises(InvalidManifestPathError) as exc_info:
+        policy.normalize_path(coerce_posix_path(PureWindowsPath("C:/tmp/secret.txt")))
+
+    assert str(exc_info.value) == "manifest path must be relative: C:/tmp/secret.txt"
+    assert exc_info.value.context == {"rel": "C:/tmp/secret.txt", "reason": "absolute"}
+
+
+def test_posix_path_as_path_returns_native_path() -> None:
+    path = posix_path_as_path(PurePosixPath("/workspace/file.txt"))
+
+    assert isinstance(path, Path)
+    assert path.as_posix() == "/workspace/file.txt"
+
+
 def test_sandbox_extra_path_grant_rules_use_posix_paths() -> None:
     policy = WorkspacePathPolicy(
         root="/workspace",
@@ -376,9 +409,10 @@ def test_host_io_rejects_write_under_resolved_read_only_extra_path_grant(
     allowed.mkdir()
     os.symlink(allowed, grant_alias, target_is_directory=True)
     target = allowed / "cache.db"
+    grant = SandboxPathGrant(path=str(grant_alias), read_only=True)
     policy = WorkspacePathPolicy(
         root=workspace,
-        extra_path_grants=(SandboxPathGrant(path=str(grant_alias), read_only=True),),
+        extra_path_grants=(grant,),
     )
 
     with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
@@ -388,7 +422,7 @@ def test_host_io_rejects_write_under_resolved_read_only_extra_path_grant(
     assert exc_info.value.context == {
         "path": str(target),
         "reason": "read_only_extra_path_grant",
-        "grant_path": str(grant_alias),
+        "grant_path": grant.path,
     }
 
 
@@ -457,6 +491,6 @@ def test_host_io_rejects_extra_path_grant_symlink_to_root(tmp_path: Path) -> Non
     )
 
     with pytest.raises(ValueError) as exc_info:
-        policy.normalize_path(Path("/etc/passwd"), resolve_symlinks=True)
+        policy.normalize_path(root_alias / "etc" / "passwd", resolve_symlinks=True)
 
     assert str(exc_info.value) == "sandbox path grant path must not resolve to filesystem root"

@@ -60,7 +60,7 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tarfile
-from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path
+from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 
 WorkspacePersistenceMode = Literal["tar", "snapshot"]
 
@@ -567,7 +567,7 @@ class VercelSandboxSession(BaseSandboxSession):
         normalized_path = await self._validate_path_access(path)
         sandbox = await self._ensure_sandbox()
         try:
-            payload = await sandbox.read_file(str(normalized_path))
+            payload = await sandbox.read_file(sandbox_path_str(normalized_path))
         except Exception as exc:
             raise WorkspaceArchiveReadError(path=normalized_path, cause=exc) from exc
         if payload is None:
@@ -595,7 +595,7 @@ class VercelSandboxSession(BaseSandboxSession):
             )
         try:
             await self._write_files_with_retry(
-                [{"path": str(normalized_path), "content": bytes(payload)}]
+                [{"path": sandbox_path_str(normalized_path), "content": bytes(payload)}]
             )
         except Exception as exc:
             raise WorkspaceArchiveWriteError(path=normalized_path, cause=exc) from exc

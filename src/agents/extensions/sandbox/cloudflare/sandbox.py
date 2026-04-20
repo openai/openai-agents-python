@@ -67,7 +67,7 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
-from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path
+from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 
 _DEFAULT_EXEC_TIMEOUT_S = 30.0
 _DEFAULT_REQUEST_TIMEOUT_S = 120.0
@@ -353,7 +353,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
         url = self._url("mount")
         payload = {
             "bucket": bucket,
-            "mountPath": str(workspace_path),
+            "mountPath": sandbox_path_str(workspace_path),
             "options": options,
         }
 
@@ -373,7 +373,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
                         message="cloudflare bucket mount failed",
                         context={
                             "bucket": bucket,
-                            "mount_path": str(workspace_path),
+                            "mount_path": sandbox_path_str(workspace_path),
                             "http_status": resp.status,
                             "reason": body.get("error", f"HTTP {resp.status}"),
                         },
@@ -385,7 +385,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
                 message="cloudflare bucket mount failed",
                 context={
                     "bucket": bucket,
-                    "mount_path": str(workspace_path),
+                    "mount_path": sandbox_path_str(workspace_path),
                     "cause_type": type(e).__name__,
                     "reason": str(e),
                 },
@@ -397,7 +397,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
         )
         http = self._session()
         url = self._url("unmount")
-        payload = {"mountPath": str(workspace_path)}
+        payload = {"mountPath": sandbox_path_str(workspace_path)}
 
         try:
             async with http.post(
@@ -414,7 +414,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
                     raise MountConfigError(
                         message="cloudflare bucket unmount failed",
                         context={
-                            "mount_path": str(workspace_path),
+                            "mount_path": sandbox_path_str(workspace_path),
                             "http_status": resp.status,
                             "reason": body.get("error", f"HTTP {resp.status}"),
                         },
@@ -425,7 +425,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             raise MountConfigError(
                 message="cloudflare bucket unmount failed",
                 context={
-                    "mount_path": str(workspace_path),
+                    "mount_path": sandbox_path_str(workspace_path),
                     "cause_type": type(e).__name__,
                     "reason": str(e),
                 },
@@ -970,13 +970,12 @@ class CloudflareSandboxSession(BaseSandboxSession):
             await self._terminate_pty_entry(entry)
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
-        path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             await self._check_read_with_exec(path, user=user)
 
         workspace_path = await self._validate_path_access(path)
         http = self._session()
-        url_path = quote(str(workspace_path).lstrip("/"), safe="/")
+        url_path = quote(sandbox_path_str(workspace_path).lstrip("/"), safe="/")
         url = self._url(f"file/{url_path}")
 
         try:
@@ -1034,7 +1033,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
         *,
         user: str | User | None = None,
     ) -> None:
-        path = posix_path_as_path(coerce_posix_path(path))
+        error_path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             await self._check_write_with_exec(path, user=user)
 
@@ -1042,13 +1041,13 @@ class CloudflareSandboxSession(BaseSandboxSession):
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         if not isinstance(payload, bytes | bytearray):
-            raise WorkspaceWriteTypeError(path=path, actual_type=type(payload).__name__)
+            raise WorkspaceWriteTypeError(path=error_path, actual_type=type(payload).__name__)
 
         payload_bytes = bytes(payload)
         workspace_path = await self._validate_path_access(path, for_write=True)
 
         http = self._session()
-        url_path = quote(str(workspace_path).lstrip("/"), safe="/")
+        url_path = quote(sandbox_path_str(workspace_path).lstrip("/"), safe="/")
         url = self._url(f"file/{url_path}")
 
         try:

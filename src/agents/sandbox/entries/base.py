@@ -5,7 +5,7 @@ import builtins
 import inspect
 import stat
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel, Field
@@ -13,18 +13,25 @@ from pydantic import BaseModel, Field
 from ..errors import InvalidManifestPathError
 from ..materialization import MaterializedFile
 from ..types import FileMode, Group, Permissions, User
-from ..workspace_paths import coerce_posix_path, posix_path_as_path
+from ..workspace_paths import (
+    coerce_posix_path,
+    posix_path_as_path,
+    sandbox_path_str,
+    windows_absolute_path,
+)
 
 if TYPE_CHECKING:
     from ..session.base_sandbox_session import BaseSandboxSession
 
 
 def resolve_workspace_path(
-    workspace_root: Path,
-    rel: str | Path,
+    workspace_root: str | PurePath,
+    rel: str | PurePath,
     *,
     allow_absolute_within_root: bool = False,
 ) -> Path:
+    if (windows_path := windows_absolute_path(rel)) is not None:
+        raise InvalidManifestPathError(rel=windows_path.as_posix(), reason="absolute")
     rel_path = coerce_posix_path(rel)
     root_path = coerce_posix_path(workspace_root)
 
@@ -135,11 +142,12 @@ class BaseEntry(BaseModel, abc.ABC):
         session: BaseSandboxSession,
         dest: Path,
     ) -> None:
+        dest_arg = sandbox_path_str(dest)
         if self.group is not None:
-            await session._exec_checked_nonzero("chgrp", self.group.name, str(dest))
+            await session._exec_checked_nonzero("chgrp", self.group.name, dest_arg)
 
         chmod_perms = f"{stat.S_IMODE(self.permissions.to_mode()):o}".zfill(4)
-        await session._exec_checked_nonzero("chmod", chmod_perms, str(dest))
+        await session._exec_checked_nonzero("chmod", chmod_perms, dest_arg)
 
     @abc.abstractmethod
     async def apply(

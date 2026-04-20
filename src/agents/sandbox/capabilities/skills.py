@@ -15,7 +15,7 @@ from ..errors import SkillsConfigError
 from ..manifest import Manifest
 from ..session.base_sandbox_session import BaseSandboxSession
 from ..types import User
-from ..workspace_paths import coerce_posix_path, posix_path_as_path
+from ..workspace_paths import coerce_posix_path, posix_path_as_path, windows_absolute_path
 from .capability import Capability
 
 _SKILLS_SECTION_INTRO = (
@@ -263,6 +263,16 @@ def _validate_relative_path(
     field_name: str,
     context: Mapping[str, object] | None = None,
 ) -> Path:
+    if (windows_path := windows_absolute_path(value)) is not None:
+        raise SkillsConfigError(
+            message=f"{field_name} must be a relative path",
+            context={
+                "field": field_name,
+                "path": windows_path.as_posix(),
+                "reason": "absolute",
+                **(context or {}),
+            },
+        )
     rel = posix_path_as_path(coerce_posix_path(value))
     if rel.is_absolute():
         raise SkillsConfigError(

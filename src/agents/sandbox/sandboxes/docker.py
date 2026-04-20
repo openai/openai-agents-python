@@ -71,7 +71,7 @@ from ..util.retry import (
     retry_async,
 )
 from ..util.tar_utils import UnsafeTarMemberError, strip_tar_member_prefix, validate_tarfile
-from ..workspace_paths import coerce_posix_path, posix_path_as_path
+from ..workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 
 _DOCKER_EXECUTOR: Final = ThreadPoolExecutor(
     max_workers=8,
@@ -374,7 +374,7 @@ class DockerSandboxSession(BaseSandboxSession):
 
     async def _rm_best_effort(self, path: Path) -> None:
         try:
-            await self.exec("rm", "-rf", "--", str(path), shell=False)
+            await self.exec("rm", "-rf", "--", sandbox_path_str(path), shell=False)
         except Exception:
             pass
 
@@ -632,7 +632,7 @@ class DockerSandboxSession(BaseSandboxSession):
         user: str | User | None = None,
     ) -> None:
         await self._stream_into_exec(
-            cmd=["sh", "-lc", 'cat > "$1"', "sh", str(staging_path)],
+            cmd=["sh", "-lc", 'cat > "$1"', "sh", sandbox_path_str(staging_path)],
             stream=stream,
             error_path=staging_path,
             user=user,
@@ -646,7 +646,7 @@ class DockerSandboxSession(BaseSandboxSession):
             "-lc",
             _PREPARE_USER_PTY_PID_SCRIPT,
             "sh",
-            str(path),
+            sandbox_path_str(path),
             user,
             error_cls=WorkspaceArchiveWriteError,
             error_path=path,
@@ -658,12 +658,13 @@ class DockerSandboxSession(BaseSandboxSession):
         # Read from inside the container instead of `get_archive()`: with Docker
         # volume-driver-backed mounts attached, daemon archive operations can re-run volume mount
         # setup and some plugins reject the duplicate `Mount` call for the same container id.
-        res = await self.exec("cat", "--", str(workspace_path), shell=False, user=user)
+        workspace_path_arg = sandbox_path_str(workspace_path)
+        res = await self.exec("cat", "--", workspace_path_arg, shell=False, user=user)
         if not res.ok():
             raise WorkspaceReadNotFoundError(
                 path=path,
                 context={
-                    "command": ["cat", "--", str(workspace_path)],
+                    "command": ["cat", "--", workspace_path_arg],
                     "stdout": res.stdout.decode("utf-8", errors="replace"),
                     "stderr": res.stderr.decode("utf-8", errors="replace"),
                 },
@@ -688,7 +689,7 @@ class DockerSandboxSession(BaseSandboxSession):
                     "-lc",
                     'mkdir -p "$(dirname "$1")" && cat > "$1"',
                     "sh",
-                    str(path),
+                    sandbox_path_str(path),
                 ],
                 stream=payload.stream,
                 error_path=path,
@@ -708,7 +709,7 @@ class DockerSandboxSession(BaseSandboxSession):
         await self._exec_checked(
             "mkdir",
             "-p",
-            str(self._ARCHIVE_STAGING_DIR),
+            sandbox_path_str(self._ARCHIVE_STAGING_DIR),
             error_cls=WorkspaceArchiveWriteError,
             error_path=self._ARCHIVE_STAGING_DIR,
         )
@@ -719,12 +720,14 @@ class DockerSandboxSession(BaseSandboxSession):
         )
 
         # Copy into place using a process inside the container, which can see mounts.
-        cp_res = await self.exec("cp", "--", str(staging_path), str(path), shell=False)
+        staging_path_arg = sandbox_path_str(staging_path)
+        path_arg = sandbox_path_str(path)
+        cp_res = await self.exec("cp", "--", staging_path_arg, path_arg, shell=False)
         if not cp_res.ok():
             raise WorkspaceArchiveWriteError(
                 path=parent,
                 context={
-                    "command": ["cp", "--", str(staging_path), str(path)],
+                    "command": ["cp", "--", staging_path_arg, path_arg],
                     "stdout": cp_res.stdout.decode("utf-8", errors="replace"),
                     "stderr": cp_res.stderr.decode("utf-8", errors="replace"),
                 },
@@ -811,8 +814,8 @@ class DockerSandboxSession(BaseSandboxSession):
                 "-lc",
                 'mkdir -p "$1" && printf "%s" "$$" > "$2" && shift 2 && exec "$@"',
                 "sh",
-                str(pty_pid_path.parent),
-                str(pty_pid_path),
+                sandbox_path_str(pty_pid_path.parent),
+                sandbox_path_str(pty_pid_path),
                 *cmd,
             ]
             resp = await asyncio.wait_for(
@@ -1275,13 +1278,13 @@ class DockerSandboxSession(BaseSandboxSession):
         container_client = getattr(self._container, "client", None)
         api = getattr(container_client, "api", None)
         if api is None:
-            bits, _ = self._container.get_archive(str(path))
+            bits, _ = self._container.get_archive(sandbox_path_str(path))
             return IteratorIO(it=cast(Iterator[bytes], bits), on_close=on_close)
 
         url = api._url("/containers/{0}/archive", self._container.id)
         response = api._get(
             url,
-            params={"path": str(path)},
+            params={"path": sandbox_path_str(path)},
             stream=True,
             headers={"Accept-Encoding": "identity"},
         )

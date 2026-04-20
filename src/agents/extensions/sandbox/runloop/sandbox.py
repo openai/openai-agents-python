@@ -54,7 +54,7 @@ from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxCli
 from ....sandbox.snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from ....sandbox.types import ExecResult, ExposedPortEndpoint, User
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
-from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path
+from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 
 if TYPE_CHECKING:
     from runloop_api_client.sdk.async_execution_result import (
@@ -871,31 +871,31 @@ class RunloopSandboxSession(BaseSandboxSession):
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         """Read a file via Runloop's binary file API."""
-        path = posix_path_as_path(coerce_posix_path(path))
+        error_path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             await self._check_read_with_exec(path, user=user)
 
         normalized_path = await self._validate_path_access(path)
         try:
             payload = await self._devbox.file.download(
-                path=str(normalized_path),
+                path=sandbox_path_str(normalized_path),
                 timeout=self.state.timeouts.file_download_s,
             )
             return io.BytesIO(bytes(payload))
         except Exception as e:
             if _is_runloop_not_found(e):
                 raise WorkspaceReadNotFoundError(
-                    path=path,
+                    path=error_path,
                     context=_runloop_error_context(e, backend_detail="file_download_failed"),
                     cause=e,
                 ) from e
             if _is_runloop_provider_error(e):
                 raise WorkspaceArchiveReadError(
-                    path=path,
+                    path=error_path,
                     context=_runloop_error_context(e, backend_detail="file_download_failed"),
                     cause=e,
                 ) from e
-            raise WorkspaceArchiveReadError(path=path, cause=e) from e
+            raise WorkspaceArchiveReadError(path=error_path, cause=e) from e
 
     async def write(
         self,
@@ -905,7 +905,7 @@ class RunloopSandboxSession(BaseSandboxSession):
         user: str | User | None = None,
     ) -> None:
         """Write a file through Runloop's upload API using manifest-root workspace paths."""
-        path = posix_path_as_path(coerce_posix_path(path))
+        error_path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             await self._check_write_with_exec(path, user=user)
 
@@ -913,13 +913,13 @@ class RunloopSandboxSession(BaseSandboxSession):
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         if not isinstance(payload, bytes | bytearray):
-            raise WorkspaceWriteTypeError(path=path, actual_type=type(payload).__name__)
+            raise WorkspaceWriteTypeError(path=error_path, actual_type=type(payload).__name__)
 
         workspace_path = await self._validate_path_access(path, for_write=True)
         await self.mkdir(workspace_path.parent, parents=True)
         try:
             await self._devbox.file.upload(
-                path=str(workspace_path),
+                path=sandbox_path_str(workspace_path),
                 file=bytes(payload),
                 timeout=self.state.timeouts.file_upload_s,
             )
@@ -962,7 +962,7 @@ class RunloopSandboxSession(BaseSandboxSession):
         cmd = ["mkdir"]
         if parents:
             cmd.append("-p")
-        cmd.extend(["--", str(path)])
+        cmd.extend(["--", sandbox_path_str(path)])
         result = await self._run_exec_command(
             shlex.join(cmd),
             command=tuple(cmd),
@@ -982,7 +982,7 @@ class RunloopSandboxSession(BaseSandboxSession):
         if not plain_skip:
             return None
 
-        root = self.state.manifest.root
+        root = sandbox_path_str(self.state.manifest.root)
         root_q = shlex.quote(root)
         checks = "\n".join(
             (
@@ -1061,7 +1061,7 @@ class RunloopSandboxSession(BaseSandboxSession):
             result = await self.exec(
                 "tar",
                 "-xf",
-                str(temp_path),
+                sandbox_path_str(temp_path),
                 "-C",
                 root.as_posix(),
                 shell=False,
@@ -1078,7 +1078,7 @@ class RunloopSandboxSession(BaseSandboxSession):
                 )
         finally:
             try:
-                await self.exec("rm", "-f", "--", str(temp_path), shell=False)
+                await self.exec("rm", "-f", "--", sandbox_path_str(temp_path), shell=False)
             except Exception:
                 pass
 

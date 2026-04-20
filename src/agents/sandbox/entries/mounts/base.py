@@ -10,10 +10,10 @@ from typing import TYPE_CHECKING, ClassVar, Literal
 
 from pydantic import BaseModel, Field, SerializeAsAny, field_validator
 
-from ...errors import MountConfigError
+from ...errors import InvalidManifestPathError, MountConfigError
 from ...materialization import MaterializedFile
 from ...types import FileMode, Permissions
-from ...workspace_paths import coerce_posix_path, posix_path_as_path
+from ...workspace_paths import coerce_posix_path, posix_path_as_path, windows_absolute_path
 from ..base import BaseEntry
 from .patterns import MountPattern, MountPatternBase, MountPatternConfig
 
@@ -495,8 +495,11 @@ class Mount(BaseEntry):
         """
 
         if self.mount_path is not None:
-            mount_path = posix_path_as_path(coerce_posix_path(self.mount_path))
-            if mount_path.is_absolute():
+            if (windows_path := windows_absolute_path(self.mount_path)) is not None:
+                raise InvalidManifestPathError(rel=windows_path.as_posix(), reason="absolute")
+            mount_posix = coerce_posix_path(self.mount_path)
+            mount_path = posix_path_as_path(mount_posix)
+            if mount_posix.is_absolute():
                 return mount_path
             # Relative explicit mount paths are interpreted inside the active workspace root so a
             # manifest can stay portable across backends with different concrete root prefixes.

@@ -65,7 +65,7 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
-from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path
+from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 
 DEFAULT_BLAXEL_WORKSPACE_ROOT = "/workspace"
 logger = logging.getLogger(__name__)
@@ -320,7 +320,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
         # Ensure workspace root exists before BaseSandboxSession.start() materializes
         # the manifest.  Blaxel base images run as root and do not ship a pre-created
         # workspace directory.
-        root = self.state.manifest.root
+        root = sandbox_path_str(self.state.manifest.root)
         try:
             await self._sandbox.process.exec(
                 {
@@ -369,7 +369,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
         if path == Path("/"):
             return
         try:
-            await self._sandbox.fs.mkdir(str(path))
+            await self._sandbox.fs.mkdir(sandbox_path_str(path))
         except Exception as e:
             raise WorkspaceArchiveWriteError(
                 path=path,
@@ -378,14 +378,14 @@ class BlaxelSandboxSession(BaseSandboxSession):
             ) from e
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
-        path = posix_path_as_path(coerce_posix_path(path))
+        error_path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             workspace_path = await self._check_read_with_exec(path, user=user)
         else:
             workspace_path = await self._validate_path_access(path)
 
         try:
-            data: Any = await self._sandbox.fs.read_binary(str(workspace_path))
+            data: Any = await self._sandbox.fs.read_binary(sandbox_path_str(workspace_path))
             if isinstance(data, str):
                 data = data.encode("utf-8")
             return io.BytesIO(bytes(data))
@@ -398,8 +398,8 @@ class BlaxelSandboxSession(BaseSandboxSession):
                     status = first_arg.get("status")
             error_str = str(e).lower()
             if status == 404 or "not found" in error_str or "no such file" in error_str:
-                raise WorkspaceReadNotFoundError(path=path, cause=e) from e
-            raise WorkspaceArchiveReadError(path=path, cause=e) from e
+                raise WorkspaceReadNotFoundError(path=error_path, cause=e) from e
+            raise WorkspaceArchiveReadError(path=error_path, cause=e) from e
 
     async def write(
         self,
@@ -408,7 +408,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
         *,
         user: str | User | None = None,
     ) -> None:
-        path = posix_path_as_path(coerce_posix_path(path))
+        error_path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             await self._check_write_with_exec(path, user=user)
 
@@ -416,11 +416,11 @@ class BlaxelSandboxSession(BaseSandboxSession):
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         if not isinstance(payload, bytes | bytearray):
-            raise WorkspaceWriteTypeError(path=path, actual_type=type(payload).__name__)
+            raise WorkspaceWriteTypeError(path=error_path, actual_type=type(payload).__name__)
 
         workspace_path = await self._validate_path_access(path, for_write=True)
         try:
-            await self._sandbox.fs.write_binary(str(workspace_path), bytes(payload))
+            await self._sandbox.fs.write_binary(sandbox_path_str(workspace_path), bytes(payload))
         except Exception as e:
             raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
 

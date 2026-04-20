@@ -34,10 +34,34 @@ def coerce_posix_path(path: str | PurePath) -> PurePosixPath:
     return PurePosixPath(path)
 
 
+def windows_absolute_path(path: str | PurePath) -> PureWindowsPath | None:
+    """Return a Windows absolute path when the input uses Windows absolute syntax."""
+
+    if isinstance(path, PureWindowsPath):
+        windows_path = path
+    else:
+        windows_path = PureWindowsPath(path.as_posix() if isinstance(path, PurePath) else path)
+    if windows_path.is_absolute() and not PurePosixPath(windows_path.as_posix()).is_absolute():
+        return windows_path
+    return None
+
+
 def posix_path_as_path(path: PurePosixPath) -> Path:
     """Return a POSIX path through the public Path-typed sandbox API surface."""
 
-    return cast(Path, path)
+    return Path(path.as_posix())
+
+
+def posix_path_for_error(path: str | PurePath) -> Path:
+    """Return a POSIX path object for sandbox error text and context."""
+
+    return cast(Path, coerce_posix_path(path))
+
+
+def sandbox_path_str(path: str | PurePath) -> str:
+    """Return a POSIX string for a sandbox filesystem path."""
+
+    return coerce_posix_path(path).as_posix()
 
 
 class SandboxPathGrant(BaseModel):
@@ -95,6 +119,8 @@ class WorkspacePathPolicy:
         - `absolute_workspace_path("/tmp/app.py")` raises `InvalidManifestPathError`.
         """
 
+        if (windows_path := windows_absolute_path(path)) is not None:
+            raise self._invalid_path_error(windows_path)
         normalized = self._absolute_workspace_posix_path(coerce_posix_path(path))
         return self._path_result(normalized)
 
@@ -107,6 +133,8 @@ class WorkspacePathPolicy:
         - `relative_path("/workspace")` returns `.`.
         """
 
+        if (windows_path := windows_absolute_path(path)) is not None:
+            raise self._invalid_path_error(windows_path)
         normalized = self._absolute_workspace_posix_path(coerce_posix_path(path))
         root = self._normalized_root()
         relative = normalized.relative_to(root)
@@ -131,6 +159,8 @@ class WorkspacePathPolicy:
             original = Path(path)
             result, grant = self._resolved_host_path_and_grant(original)
         else:
+            if (windows_path := windows_absolute_path(path)) is not None:
+                raise self._invalid_path_error(windows_path)
             sandbox_result, grant = self._sandbox_path_and_grant(coerce_posix_path(path))
             result = self._path_result(sandbox_result)
         if for_write:
@@ -145,10 +175,12 @@ class WorkspacePathPolicy:
     ) -> PurePosixPath:
         """Return a validated POSIX path for a Unix-like remote sandbox filesystem."""
 
+        if (windows_path := windows_absolute_path(path)) is not None:
+            raise self._invalid_path_error(windows_path)
         original = coerce_posix_path(path)
         result, grant = self._sandbox_path_and_grant(original)
         if for_write:
-            self._raise_if_read_only_grant(posix_path_as_path(result), grant)
+            self._raise_if_read_only_grant(posix_path_for_error(result), grant)
         return result
 
     def sandbox_root(self) -> PurePosixPath:
@@ -202,8 +234,9 @@ class WorkspacePathPolicy:
     ) -> None:
         if grant is None or not grant.read_only:
             return
+        error_path = path if self._root_is_existing_host_path else posix_path_for_error(path)
         raise WorkspaceArchiveWriteError(
-            path=path,
+            path=error_path,
             context={
                 "reason": "read_only_extra_path_grant",
                 "grant_path": grant.path,

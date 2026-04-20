@@ -3,14 +3,14 @@ from __future__ import annotations
 import io
 import os
 from collections.abc import Awaitable, Callable, Sequence
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
 import agents.sandbox.entries.artifacts as artifacts_module
 from agents.sandbox import SandboxConcurrencyLimits
-from agents.sandbox.entries import Dir, File, GitRepo, LocalDir, LocalFile
-from agents.sandbox.errors import ExecNonZeroError, LocalDirReadError
+from agents.sandbox.entries import Dir, File, GitRepo, LocalDir, LocalFile, resolve_workspace_path
+from agents.sandbox.errors import ExecNonZeroError, InvalidManifestPathError, LocalDirReadError
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
@@ -96,6 +96,18 @@ class _MetadataFailureSession(_RecordingSession):
         if cmd and cmd[0] in self.fail_commands:
             return ExecResult(stdout=b"", stderr=b"metadata failed", exit_code=1)
         return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+
+def test_resolve_workspace_path_rejects_windows_drive_absolute_path() -> None:
+    with pytest.raises(InvalidManifestPathError) as exc_info:
+        resolve_workspace_path(
+            Path("/workspace"),
+            PureWindowsPath("C:/tmp/secret.txt"),
+            allow_absolute_within_root=True,
+        )
+
+    assert str(exc_info.value) == "manifest path must be relative: C:/tmp/secret.txt"
+    assert exc_info.value.context == {"rel": "C:/tmp/secret.txt", "reason": "absolute"}
 
 
 @pytest.mark.asyncio

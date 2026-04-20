@@ -17,7 +17,12 @@ from ...errors import (
     MountToolMissingError,
     WorkspaceReadNotFoundError,
 )
-from ...workspace_paths import coerce_posix_path, posix_path_as_path
+from ...workspace_paths import (
+    coerce_posix_path,
+    posix_path_as_path,
+    sandbox_path_str,
+    windows_absolute_path,
+)
 
 if TYPE_CHECKING:
     from ...session.base_sandbox_session import BaseSandboxSession
@@ -98,7 +103,9 @@ async def _write_sensitive_config_file(
     """Write generated mount credentials/config with owner-only permissions."""
 
     await session.write(path, io.BytesIO(payload))
-    await session._exec_checked_nonzero("chmod", "0600", str(session.normalize_path(path)))
+    await session._exec_checked_nonzero(
+        "chmod", "0600", sandbox_path_str(session.normalize_path(path))
+    )
 
 
 class MountPatternBase(BaseModel, abc.ABC):
@@ -140,10 +147,16 @@ class FuseMountPattern(MountPatternBase):
     def model_post_init(self, __context: object, /) -> None:
         if self.cache_path is None:
             return
-        if self.cache_path.is_absolute() or ".." in self.cache_path.parts:
+        if (windows_path := windows_absolute_path(self.cache_path)) is not None:
             raise MountConfigError(
                 message="blobfuse cache_path must be relative to the workspace root",
-                context={"cache_path": str(self.cache_path)},
+                context={"cache_path": windows_path.as_posix()},
+            )
+        cache_path = coerce_posix_path(self.cache_path)
+        if cache_path.is_absolute() or ".." in cache_path.parts:
+            raise MountConfigError(
+                message="blobfuse cache_path must be relative to the workspace root",
+                context={"cache_path": cache_path.as_posix()},
             )
 
     @dataclass(frozen=True)
@@ -205,7 +218,7 @@ class FuseMountPattern(MountPatternBase):
                         "block_cache:",
                         f"  block-size-mb: {self.block_cache_block_size_mb}",
                         f"  mem-size-mb: {self.cache_size_mb}",
-                        f"  path: {self.cache_dir}",
+                        f"  path: {sandbox_path_str(self.cache_dir)}",
                         f"  disk-size-mb: {self.cache_size_mb}",
                         f"  disk-timeout-sec: {self.block_cache_disk_timeout_sec}",
                         "",
@@ -215,7 +228,7 @@ class FuseMountPattern(MountPatternBase):
                 lines.extend(
                     [
                         "file_cache:",
-                        f"  path: {self.cache_dir}",
+                        f"  path: {sandbox_path_str(self.cache_dir)}",
                         f"  timeout-sec: {self.file_cache_timeout_sec}",
                         f"  max-size-mb: {self.file_cache_max_size_mb}",
                         "",
@@ -296,8 +309,8 @@ class FuseMountPattern(MountPatternBase):
             raise MountConfigError(
                 message="blobfuse cache_path must be outside the mount path",
                 context={
-                    "mount_path": str(command_mount_path),
-                    "cache_path": str(command_cache_dir),
+                    "mount_path": sandbox_path_str(command_mount_path),
+                    "cache_path": sandbox_path_str(command_cache_dir),
                 },
             )
 
@@ -338,8 +351,8 @@ class FuseMountPattern(MountPatternBase):
         cmd: list[str] = ["blobfuse2", "mount"]
         if fuse_config.read_only:
             cmd.append("--read-only")
-        cmd.extend(["--config-file", command_config_path.as_posix()])
-        cmd.append(mount_path.as_posix())
+        cmd.extend(["--config-file", sandbox_path_str(command_config_path)])
+        cmd.append(sandbox_path_str(mount_path))
 
         result = await session.exec(*cmd, shell=False)
         if not result.ok():
@@ -360,7 +373,8 @@ class FuseMountPattern(MountPatternBase):
         await session.exec(
             "sh",
             "-lc",
-            f"fusermount3 -u {shlex.quote(str(path))} || umount {shlex.quote(str(path))}",
+            f"fusermount3 -u {shlex.quote(sandbox_path_str(path))} || "
+            f"umount {shlex.quote(sandbox_path_str(path))}",
             shell=False,
         )
 
@@ -409,7 +423,7 @@ class MountpointMountPattern(MountPatternBase):
             cmd.extend(["--upload-checksums", "off"])
         if mountpoint_config.prefix:
             cmd.extend(["--prefix", mountpoint_config.prefix])
-        cmd.extend([bucket, str(path)])
+        cmd.extend([bucket, sandbox_path_str(path)])
 
         env_parts: list[str] = []
         access_key_id = mountpoint_config.access_key_id
@@ -443,7 +457,8 @@ class MountpointMountPattern(MountPatternBase):
         await session.exec(
             "sh",
             "-lc",
-            f"fusermount3 -u {shlex.quote(str(path))} || umount {shlex.quote(str(path))}",
+            f"fusermount3 -u {shlex.quote(sandbox_path_str(path))} || "
+            f"umount {shlex.quote(sandbox_path_str(path))}",
             shell=False,
         )
 
@@ -497,7 +512,7 @@ class S3FilesMountPattern(MountPatternBase):
                 key if value is None else f"{key}={value}" for key, value in options.items()
             )
             cmd.extend(["-o", rendered_options])
-        cmd.extend([device, str(path)])
+        cmd.extend([device, sandbox_path_str(path)])
 
         result = await session.exec(*cmd, shell=False)
         if not result.ok():
@@ -517,7 +532,7 @@ class S3FilesMountPattern(MountPatternBase):
         await session.exec(
             "sh",
             "-lc",
-            f"umount {shlex.quote(str(path))} || true",
+            f"umount {shlex.quote(sandbox_path_str(path))} || true",
             shell=False,
         )
 
@@ -617,7 +632,7 @@ class RcloneMountPattern(MountPatternBase):
         except Exception as e:
             raise MountConfigError(
                 message="failed to read rclone config file",
-                context={"type": mount_type or "mount", "path": str(config_path)},
+                context={"type": mount_type or "mount", "path": sandbox_path_str(config_path)},
             ) from e
 
         try:
@@ -634,7 +649,7 @@ class RcloneMountPattern(MountPatternBase):
         if not config_text.strip():
             raise MountConfigError(
                 message="rclone config file is empty",
-                context={"type": mount_type or "mount", "path": str(config_path)},
+                context={"type": mount_type or "mount", "path": sandbox_path_str(config_path)},
             )
 
         section_pattern = rf"^\s*\[{re.escape(remote_name)}\]\s*$"
@@ -643,7 +658,7 @@ class RcloneMountPattern(MountPatternBase):
                 message="rclone config missing required remote section",
                 context={
                     "type": mount_type or "mount",
-                    "path": str(config_path),
+                    "path": sandbox_path_str(config_path),
                     "remote_name": remote_name,
                 },
             )
@@ -672,7 +687,7 @@ class RcloneMountPattern(MountPatternBase):
             )
         cmd: list[str] = ["rclone", "serve", "nfs", f"{config.remote_name}:{config.remote_path}"]
         cmd.extend(["--addr", nfs_addr])
-        cmd.extend(["--config", str(config_path)])
+        cmd.extend(["--config", sandbox_path_str(config_path)])
         if config.read_only:
             cmd.append("--read-only")
         if self.extra_args:
@@ -702,11 +717,11 @@ class RcloneMountPattern(MountPatternBase):
                 "rclone",
                 "mount",
                 f"{config.remote_name}:{config.remote_path}",
-                str(path),
+                sandbox_path_str(path),
             ]
             if config.read_only:
                 cmd.append("--read-only")
-            cmd.extend(["--config", str(config_path), "--daemon"])
+            cmd.extend(["--config", sandbox_path_str(config_path), "--daemon"])
             if self.extra_args:
                 cmd.extend(self.extra_args)
             result = await session.exec(*cmd, shell=False)
@@ -768,7 +783,7 @@ class RcloneMountPattern(MountPatternBase):
                 "-o",
                 shlex.quote(option_arg),
                 f"{shlex.quote(host)}:/",
-                shlex.quote(str(path)),
+                shlex.quote(sandbox_path_str(path)),
                 "&& exit 0; sleep 1; done; exit 1",
             ]
         )
@@ -870,14 +885,15 @@ class RcloneMountPattern(MountPatternBase):
             await session.exec(
                 "sh",
                 "-lc",
-                f"fusermount3 -u {shlex.quote(str(path))} || umount {shlex.quote(str(path))}",
+                f"fusermount3 -u {shlex.quote(sandbox_path_str(path))} || "
+                f"umount {shlex.quote(sandbox_path_str(path))}",
                 shell=False,
             )
         if self.mode == "nfs":
             await session.exec(
                 "sh",
                 "-lc",
-                f"umount {shlex.quote(str(path))} >/dev/null 2>&1 || true",
+                f"umount {shlex.quote(sandbox_path_str(path))} >/dev/null 2>&1 || true",
                 shell=False,
             )
 

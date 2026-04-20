@@ -31,6 +31,7 @@ from ....sandbox.errors import MountConfigError
 from ....sandbox.materialization import MaterializedFile
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.types import FileMode, Permissions
+from ....sandbox.workspace_paths import sandbox_path_str
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
     ) -> None:
         _assert_blaxel_session(session)
         _ = mount
-        await _unmount_bucket(session, str(path))
+        await _unmount_bucket(session, sandbox_path_str(path))
 
     async def restore_after_snapshot(
         self,
@@ -114,7 +115,7 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
         path: Path,
     ) -> None:
         _assert_blaxel_session(session)
-        config = _build_mount_config(mount, mount_path=str(path))
+        config = _build_mount_config(mount, mount_path=sandbox_path_str(path))
         await _mount_bucket(session, config)
 
     def build_docker_volume_driver_config(

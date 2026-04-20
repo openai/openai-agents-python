@@ -1704,6 +1704,31 @@ async def test_modal_normalize_path_uses_posix_commands_for_windows_paths(
 
 
 @pytest.mark.asyncio
+async def test_modal_normalize_path_rejects_windows_drive_absolute_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state)
+
+    async def _fake_exec(*args: object, **kwargs: object) -> ExecResult:
+        _ = (args, kwargs)
+        raise AssertionError("path validation should reject before remote helper execution")
+
+    monkeypatch.setattr(session, "exec", _fake_exec)
+
+    with pytest.raises(InvalidManifestPathError) as exc_info:
+        await session._validate_path_access(PureWindowsPath("C:/tmp/link.txt"))  # noqa: SLF001
+
+    assert str(exc_info.value) == "manifest path must be relative: C:/tmp/link.txt"
+    assert exc_info.value.context == {"rel": "C:/tmp/link.txt", "reason": "absolute"}
+
+
+@pytest.mark.asyncio
 async def test_modal_normalize_path_rejects_symlink_escape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
