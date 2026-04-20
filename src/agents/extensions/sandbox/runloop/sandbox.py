@@ -16,7 +16,7 @@ import base64
 import io
 import json
 import logging
-import os
+import posixpath
 import shlex
 import uuid
 from collections.abc import Sequence
@@ -54,6 +54,7 @@ from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxCli
 from ....sandbox.snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from ....sandbox.types import ExecResult, ExposedPortEndpoint, User
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
+from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 
 if TYPE_CHECKING:
     from runloop_api_client.sdk.async_execution_result import (
@@ -870,31 +871,31 @@ class RunloopSandboxSession(BaseSandboxSession):
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         """Read a file via Runloop's binary file API."""
-        path = Path(path)
+        error_path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             await self._check_read_with_exec(path, user=user)
 
         normalized_path = await self._validate_path_access(path)
         try:
             payload = await self._devbox.file.download(
-                path=str(normalized_path),
+                path=sandbox_path_str(normalized_path),
                 timeout=self.state.timeouts.file_download_s,
             )
             return io.BytesIO(bytes(payload))
         except Exception as e:
             if _is_runloop_not_found(e):
                 raise WorkspaceReadNotFoundError(
-                    path=path,
+                    path=error_path,
                     context=_runloop_error_context(e, backend_detail="file_download_failed"),
                     cause=e,
                 ) from e
             if _is_runloop_provider_error(e):
                 raise WorkspaceArchiveReadError(
-                    path=path,
+                    path=error_path,
                     context=_runloop_error_context(e, backend_detail="file_download_failed"),
                     cause=e,
                 ) from e
-            raise WorkspaceArchiveReadError(path=path, cause=e) from e
+            raise WorkspaceArchiveReadError(path=error_path, cause=e) from e
 
     async def write(
         self,
@@ -904,7 +905,7 @@ class RunloopSandboxSession(BaseSandboxSession):
         user: str | User | None = None,
     ) -> None:
         """Write a file through Runloop's upload API using manifest-root workspace paths."""
-        path = Path(path)
+        error_path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             await self._check_write_with_exec(path, user=user)
 
@@ -912,13 +913,13 @@ class RunloopSandboxSession(BaseSandboxSession):
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         if not isinstance(payload, bytes | bytearray):
-            raise WorkspaceWriteTypeError(path=path, actual_type=type(payload).__name__)
+            raise WorkspaceWriteTypeError(path=error_path, actual_type=type(payload).__name__)
 
         workspace_path = await self._validate_path_access(path, for_write=True)
         await self.mkdir(workspace_path.parent, parents=True)
         try:
             await self._devbox.file.upload(
-                path=str(workspace_path),
+                path=sandbox_path_str(workspace_path),
                 file=bytes(payload),
                 timeout=self.state.timeouts.file_upload_s,
             )
@@ -961,7 +962,7 @@ class RunloopSandboxSession(BaseSandboxSession):
         cmd = ["mkdir"]
         if parents:
             cmd.append("-p")
-        cmd.extend(["--", str(path)])
+        cmd.extend(["--", sandbox_path_str(path)])
         result = await self._run_exec_command(
             shlex.join(cmd),
             command=tuple(cmd),
@@ -981,7 +982,7 @@ class RunloopSandboxSession(BaseSandboxSession):
         if not plain_skip:
             return None
 
-        root = self.state.manifest.root
+        root = sandbox_path_str(self.state.manifest.root)
         root_q = shlex.quote(root)
         checks = "\n".join(
             (
@@ -1000,7 +1001,7 @@ class RunloopSandboxSession(BaseSandboxSession):
         result = await self.exec(command, shell=True, timeout=self.state.timeouts.snapshot_s)
         if not result.ok():
             raise WorkspaceArchiveReadError(
-                path=Path(root),
+                path=self._workspace_root_path(),
                 context={
                     "reason": "ephemeral_backup_failed",
                     "exit_code": result.exit_code,
@@ -1014,7 +1015,7 @@ class RunloopSandboxSession(BaseSandboxSession):
             return io.BytesIO(base64.b64decode(encoded.encode("utf-8"), validate=True)).read()
         except Exception as e:
             raise WorkspaceArchiveReadError(
-                path=Path(root),
+                path=self._workspace_root_path(),
                 context={"reason": "ephemeral_backup_invalid_base64"},
                 cause=e,
             ) from e
@@ -1022,8 +1023,8 @@ class RunloopSandboxSession(BaseSandboxSession):
     async def _remove_plain_skip_paths(self, plain_skip: set[Path]) -> None:
         if not plain_skip:
             return
-        root = Path(self.state.manifest.root)
-        command = ["rm", "-rf", "--"] + [str(root / rel) for rel in sorted(plain_skip)]
+        root = self._workspace_root_path()
+        command = ["rm", "-rf", "--"] + [(root / rel).as_posix() for rel in sorted(plain_skip)]
         result = await self.exec(*command, shell=False, timeout=self.state.timeouts.cleanup_s)
         if not result.ok():
             raise WorkspaceArchiveReadError(
@@ -1038,17 +1039,14 @@ class RunloopSandboxSession(BaseSandboxSession):
     async def _restore_plain_skip_paths(self, backup: bytes | None) -> None:
         if not backup:
             return
-        root = Path(self.state.manifest.root)
-        temp_path = (
-            Path(self.state.manifest.root)
-            / f".sandbox-runloop-restore-{self.state.session_id.hex}.tar"
-        )
+        root = self._workspace_root_path()
+        temp_path = root / f".sandbox-runloop-restore-{self.state.session_id.hex}.tar"
         await self.write(temp_path, io.BytesIO(backup))
         try:
             result = await self.exec(
                 "mkdir",
                 "-p",
-                str(root),
+                root.as_posix(),
                 shell=False,
                 timeout=self.state.timeouts.cleanup_s,
             )
@@ -1063,9 +1061,9 @@ class RunloopSandboxSession(BaseSandboxSession):
             result = await self.exec(
                 "tar",
                 "-xf",
-                str(temp_path),
+                sandbox_path_str(temp_path),
                 "-C",
-                str(root),
+                root.as_posix(),
                 shell=False,
                 timeout=self.state.timeouts.snapshot_s,
             )
@@ -1080,7 +1078,7 @@ class RunloopSandboxSession(BaseSandboxSession):
                 )
         finally:
             try:
-                await self.exec("rm", "-f", "--", str(temp_path), shell=False)
+                await self.exec("rm", "-f", "--", sandbox_path_str(temp_path), shell=False)
             except Exception:
                 pass
 
@@ -1091,7 +1089,7 @@ class RunloopSandboxSession(BaseSandboxSession):
         ephemeral mounts so the saved disk image contains only durable workspace state, then it
         restores those local-only artifacts afterward.
         """
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         skip = self._persist_workspace_skip_relpaths()
         mount_targets = self.state.manifest.ephemeral_mount_targets()
         mount_skip_rel_paths: set[Path] = set()
@@ -1202,7 +1200,7 @@ class RunloopSandboxSession(BaseSandboxSession):
         source blueprint, so restore does not reselect a blueprint. Non-native payloads fall back
         to tar hydration so cross-provider snapshots and file snapshots keep working.
         """
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         raw = data.read()
         if isinstance(raw, str):
             raw = raw.encode("utf-8")
@@ -1256,7 +1254,7 @@ class RunloopSandboxSession(BaseSandboxSession):
     async def _restore_snapshot_into_workspace_on_resume(self) -> None:
         """Restore snapshots on resume, preserving Runloop's native disk-snapshot fast path."""
 
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         workspace_archive = await self.state.snapshot.restore(dependencies=self.dependencies)
         try:
             raw = workspace_archive.read()
@@ -1280,7 +1278,7 @@ class RunloopSandboxSession(BaseSandboxSession):
                 pass
 
     async def _hydrate_workspace_via_tar(self, payload: bytes) -> None:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         archive_path = root / f".sandbox-runloop-hydrate-{self.state.session_id.hex}.tar"
 
         try:
@@ -1302,9 +1300,9 @@ class RunloopSandboxSession(BaseSandboxSession):
             result = await self.exec(
                 "tar",
                 "-C",
-                str(root),
+                root.as_posix(),
                 "-xf",
-                str(archive_path),
+                archive_path.as_posix(),
                 shell=False,
                 timeout=self.state.timeouts.snapshot_s,
             )
@@ -1327,7 +1325,7 @@ class RunloopSandboxSession(BaseSandboxSession):
                     "rm",
                     "-f",
                     "--",
-                    str(archive_path),
+                    archive_path.as_posix(),
                     shell=False,
                     timeout=self.state.timeouts.cleanup_s,
                 )
@@ -1433,7 +1431,7 @@ def _default_runloop_manifest_root(user_parameters: RunloopUserParameters | None
 def _validate_runloop_manifest_root(
     manifest: Manifest, *, user_parameters: RunloopUserParameters | None
 ) -> None:
-    root = PurePosixPath(os.path.normpath(manifest.root))
+    root = PurePosixPath(posixpath.normpath(manifest.root))
     runloop_home = _effective_runloop_home(user_parameters)
     try:
         root.relative_to(runloop_home)

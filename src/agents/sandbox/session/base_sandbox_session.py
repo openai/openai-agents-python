@@ -6,7 +6,7 @@ import shlex
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Literal, TypeVar, cast
 
 from typing_extensions import Self
@@ -36,7 +36,13 @@ from ..materialization import MaterializationResult, MaterializedFile
 from ..snapshot import NoopSnapshot
 from ..types import ExecResult, ExposedPortEndpoint, User
 from ..util.parse_utils import parse_ls_la
-from ..workspace_paths import WorkspacePathPolicy
+from ..workspace_paths import (
+    WorkspacePathPolicy,
+    coerce_posix_path,
+    posix_path_as_path,
+    posix_path_for_error,
+    sandbox_path_str,
+)
 from .archive_extraction import (
     WorkspaceArchiveExtractor,
     safe_zip_member_rel_path,
@@ -109,7 +115,7 @@ class BaseSandboxSession(abc.ABC):
     _runtime_persist_workspace_skip_relpaths: set[Path] | None = None
     _pre_stop_hooks: list[Callable[[], Awaitable[None]]] | None = None
     _pre_stop_hooks_ran: bool = False
-    _runtime_helpers_installed: set[Path] | None = None
+    _runtime_helpers_installed: set[PurePath] | None = None
     _runtime_helper_cache_key: object = _RUNTIME_HELPER_CACHE_KEY_UNSET
     _workspace_path_policy_cache: (
         tuple[str, tuple[tuple[str, bool], ...], WorkspacePathPolicy] | None
@@ -446,7 +452,7 @@ class BaseSandboxSession(abc.ABC):
         return lhs == rhs or lhs in rhs.parents or rhs in lhs.parents
 
     def _mount_relpaths_within_workspace(self) -> set[Path]:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         mount_relpaths: set[Path] = set()
         for _mount_entry, mount_path in self.state.manifest.mount_targets():
             try:
@@ -631,7 +637,7 @@ class BaseSandboxSession(abc.ABC):
             self._runtime_helpers_installed = None
             self._runtime_helper_cache_key = current_key
 
-    async def _ensure_runtime_helper_installed(self, helper: RuntimeHelperScript) -> Path:
+    async def _ensure_runtime_helper_installed(self, helper: RuntimeHelperScript) -> PurePath:
         self._sync_runtime_helper_install_cache()
         installed = self._runtime_helpers_installed
         if installed is None:
@@ -685,6 +691,9 @@ class BaseSandboxSession(abc.ABC):
         self._workspace_path_policy_cache = (root, grants_key, policy)
         return policy
 
+    def _workspace_root_path(self) -> Path:
+        return posix_path_as_path(self._workspace_path_policy().sandbox_root())
+
     async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
         return self.normalize_path(path, for_write=for_write)
 
@@ -701,20 +710,20 @@ class BaseSandboxSession(abc.ABC):
         target, while still rejecting paths whose resolved remote target escapes all allowed roots.
         """
 
-        original_path = Path(path)
-        root = Path(self.state.manifest.root)
         path_policy = self._workspace_path_policy()
-        workspace_path = path_policy.normalize_path(original_path, for_write=for_write)
+        root = path_policy.sandbox_root()
+        workspace_path = path_policy.normalize_sandbox_path(path, for_write=for_write)
+        original_path = coerce_posix_path(path)
         helper_path = await self._ensure_runtime_helper_installed(RESOLVE_WORKSPACE_PATH_HELPER)
         extra_grant_args = tuple(
             arg
             for root, read_only in path_policy.extra_path_grant_rules()
-            for arg in (str(root), "1" if read_only else "0")
+            for arg in (root.as_posix(), "1" if read_only else "0")
         )
         command = (
             str(helper_path),
-            str(root),
-            str(workspace_path),
+            root.as_posix(),
+            workspace_path.as_posix(),
             "1" if for_write else "0",
             *extra_grant_args,
         )
@@ -724,12 +733,12 @@ class BaseSandboxSession(abc.ABC):
             if resolved:
                 # Preserve the requested workspace path so leaf symlinks keep their normal
                 # semantics while the remote realpath check still enforces path confinement.
-                return workspace_path
+                return posix_path_as_path(workspace_path)
             raise ExecTransportError(
                 command=(
                     "resolve_workspace_path",
-                    str(root),
-                    str(workspace_path),
+                    root.as_posix(),
+                    workspace_path.as_posix(),
                     "1" if for_write else "0",
                     *extra_grant_args,
                 ),
@@ -746,7 +755,7 @@ class BaseSandboxSession(abc.ABC):
         )
         if result.exit_code == 111:
             raise InvalidManifestPathError(
-                rel=original_path,
+                rel=original_path.as_posix(),
                 reason=reason,
                 context={
                     "resolved_path": result.stderr.decode("utf-8", errors="replace").strip(),
@@ -762,13 +771,15 @@ class BaseSandboxSession(abc.ABC):
                     context["grant_path"] = line.removeprefix("read-only extra path grant: ")
                 elif line.startswith("resolved path: "):
                     context["resolved_path"] = line.removeprefix("resolved path: ")
-            raise WorkspaceArchiveWriteError(path=workspace_path, context=context)
+            raise WorkspaceArchiveWriteError(
+                path=posix_path_for_error(workspace_path), context=context
+            )
         raise ExecNonZeroError(
             result,
             command=(
                 "resolve_workspace_path",
-                str(root),
-                str(workspace_path),
+                root.as_posix(),
+                workspace_path.as_posix(),
                 "1" if for_write else "0",
                 *extra_grant_args,
             ),
@@ -801,30 +812,36 @@ class BaseSandboxSession(abc.ABC):
         :param user: Optional sandbox user to perform the write as.
         """
 
-    async def _check_read_with_exec(self, path: Path, *, user: str | User | None = None) -> Path:
+    async def _check_read_with_exec(
+        self, path: Path | str, *, user: str | User | None = None
+    ) -> Path:
         workspace_path = await self._validate_path_access(path)
-        cmd = ("sh", "-lc", '[ -r "$1" ]', "sh", str(workspace_path))
+        path_arg = sandbox_path_str(workspace_path)
+        cmd = ("sh", "-lc", '[ -r "$1" ]', "sh", path_arg)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise WorkspaceReadNotFoundError(
-                path=path,
+                path=posix_path_as_path(coerce_posix_path(path)),
                 context={
-                    "command": ["sh", "-lc", "<read_access_check>", str(workspace_path)],
+                    "command": ["sh", "-lc", "<read_access_check>", path_arg],
                     "stdout": result.stdout.decode("utf-8", errors="replace"),
                     "stderr": result.stderr.decode("utf-8", errors="replace"),
                 },
             )
         return workspace_path
 
-    async def _check_write_with_exec(self, path: Path, *, user: str | User | None = None) -> Path:
+    async def _check_write_with_exec(
+        self, path: Path | str, *, user: str | User | None = None
+    ) -> Path:
         workspace_path = await self._validate_path_access(path, for_write=True)
-        cmd = ("sh", "-lc", _WRITE_ACCESS_CHECK_SCRIPT, "sh", str(workspace_path))
+        path_arg = sandbox_path_str(workspace_path)
+        cmd = ("sh", "-lc", _WRITE_ACCESS_CHECK_SCRIPT, "sh", path_arg)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise WorkspaceArchiveWriteError(
                 path=workspace_path,
                 context={
-                    "command": ["sh", "-lc", "<write_access_check>", str(workspace_path)],
+                    "command": ["sh", "-lc", "<write_access_check>", path_arg],
                     "stdout": result.stdout.decode("utf-8", errors="replace"),
                     "stderr": result.stderr.decode("utf-8", errors="replace"),
                 },
@@ -840,7 +857,8 @@ class BaseSandboxSession(abc.ABC):
     ) -> Path:
         workspace_path = await self._validate_path_access(path, for_write=True)
         parents_flag = "1" if parents else "0"
-        cmd = ("sh", "-lc", _MKDIR_ACCESS_CHECK_SCRIPT, "sh", str(workspace_path), parents_flag)
+        path_arg = sandbox_path_str(workspace_path)
+        cmd = ("sh", "-lc", _MKDIR_ACCESS_CHECK_SCRIPT, "sh", path_arg, parents_flag)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise WorkspaceArchiveWriteError(
@@ -850,7 +868,7 @@ class BaseSandboxSession(abc.ABC):
                         "sh",
                         "-lc",
                         "<mkdir_access_check>",
-                        str(workspace_path),
+                        path_arg,
                         parents_flag,
                     ],
                     "stdout": result.stdout.decode("utf-8", errors="replace"),
@@ -868,7 +886,8 @@ class BaseSandboxSession(abc.ABC):
     ) -> Path:
         workspace_path = await self._validate_path_access(path, for_write=True)
         recursive_flag = "1" if recursive else "0"
-        cmd = ("sh", "-lc", _RM_ACCESS_CHECK_SCRIPT, "sh", str(workspace_path), recursive_flag)
+        path_arg = sandbox_path_str(workspace_path)
+        cmd = ("sh", "-lc", _RM_ACCESS_CHECK_SCRIPT, "sh", path_arg, recursive_flag)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise WorkspaceArchiveWriteError(
@@ -878,7 +897,7 @@ class BaseSandboxSession(abc.ABC):
                         "sh",
                         "-lc",
                         "<rm_access_check>",
-                        str(workspace_path),
+                        path_arg,
                         recursive_flag,
                     ],
                     "stdout": result.stdout.decode("utf-8", errors="replace"),
@@ -924,12 +943,13 @@ class BaseSandboxSession(abc.ABC):
         """
         path = await self._validate_path_access(path)
 
-        cmd = ("ls", "-la", "--", str(path))
+        path_arg = sandbox_path_str(path)
+        cmd = ("ls", "-la", "--", path_arg)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise ExecNonZeroError(result, command=cmd)
 
-        return parse_ls_la(result.stdout.decode("utf-8", errors="replace"), base=str(path))
+        return parse_ls_la(result.stdout.decode("utf-8", errors="replace"), base=path_arg)
 
     async def rm(
         self,
@@ -949,7 +969,7 @@ class BaseSandboxSession(abc.ABC):
         cmd: list[str] = ["rm"]
         if recursive:
             cmd.append("-rf")
-        cmd.extend(["--", str(path)])
+        cmd.extend(["--", sandbox_path_str(path)])
 
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
@@ -973,7 +993,7 @@ class BaseSandboxSession(abc.ABC):
         cmd: list[str] = ["mkdir"]
         if parents:
             cmd.append("-p")
-        cmd.append(str(path))
+        cmd.append(sandbox_path_str(path))
 
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
@@ -1173,11 +1193,12 @@ class BaseSandboxSession(abc.ABC):
     def _snapshot_fingerprint_cache_path(self) -> Path:
         """Return the runtime-owned path for this session's cached snapshot fingerprint."""
 
-        return (
-            Path("/tmp/openai-agents/session-state")
-            / self.state.session_id.hex
-            / "fingerprint.json"
+        cache_path = coerce_posix_path(
+            f"/tmp/openai-agents/session-state/{self.state.session_id.hex}/fingerprint.json"
         )
+        if self._workspace_path_policy().root_is_existing_host_path():
+            return Path(cache_path.as_posix())
+        return posix_path_as_path(cache_path)
 
     def _workspace_fingerprint_skip_relpaths(self) -> set[Path]:
         """Return workspace paths that should be omitted from snapshot fingerprinting."""
@@ -1192,9 +1213,9 @@ class BaseSandboxSession(abc.ABC):
         helper_path = await self._ensure_runtime_helper_installed(WORKSPACE_FINGERPRINT_HELPER)
         command = [
             str(helper_path),
-            str(self.state.manifest.root),
+            self._workspace_root_path().as_posix(),
             self._snapshot_fingerprint_version(),
-            str(self._snapshot_fingerprint_cache_path()),
+            self._snapshot_fingerprint_cache_path().as_posix(),
             self._resume_manifest_digest(),
         ]
         command.extend(
@@ -1215,13 +1236,13 @@ class BaseSandboxSession(abc.ABC):
         result = await self.exec(
             "cat",
             "--",
-            str(self._snapshot_fingerprint_cache_path()),
+            self._snapshot_fingerprint_cache_path().as_posix(),
             shell=False,
         )
         if not result.ok():
             raise ExecNonZeroError(
                 result,
-                command=("cat", str(self._snapshot_fingerprint_cache_path())),
+                command=("cat", self._snapshot_fingerprint_cache_path().as_posix()),
             )
         return self._parse_snapshot_fingerprint_record(result.stdout)
 
@@ -1250,7 +1271,7 @@ class BaseSandboxSession(abc.ABC):
                 "rm",
                 "-f",
                 "--",
-                str(self._snapshot_fingerprint_cache_path()),
+                self._snapshot_fingerprint_cache_path().as_posix(),
                 shell=False,
             )
         except Exception:
@@ -1313,12 +1334,12 @@ class BaseSandboxSession(abc.ABC):
             return
 
         await self._clear_workspace_dir_on_resume_pruned(
-            current_dir=Path(self.state.manifest.root),
+            current_dir=self._workspace_root_path(),
             skip_rel_paths=skip_rel_paths,
         )
 
     def _workspace_resume_mount_skip_relpaths(self) -> set[Path]:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         skip_rel_paths: set[Path] = set()
         for _mount, mount_path in self.state.manifest.ephemeral_mount_targets():
             try:
@@ -1333,7 +1354,7 @@ class BaseSandboxSession(abc.ABC):
         current_dir: Path,
         skip_rel_paths: set[Path],
     ) -> None:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         try:
             entries = await self.ls(current_dir)
         except ExecNonZeroError:

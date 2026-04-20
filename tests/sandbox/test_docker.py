@@ -336,7 +336,7 @@ class _HostBackedDockerSession(DockerSandboxSession):
                 pass
             else:
                 return ExecResult(
-                    stdout=str(self._container_path(candidate)).encode("utf-8"),
+                    stdout=self._container_path(candidate).as_posix().encode("utf-8"),
                     stderr=b"",
                     exit_code=0,
                 )
@@ -374,12 +374,12 @@ class _HostBackedDockerSession(DockerSandboxSession):
                         stdout=b"",
                         stderr=(
                             f"read-only extra path grant: {best_original}\n"
-                            f"resolved path: {self._container_path(candidate)}\n"
+                            f"resolved path: {self._container_path(candidate).as_posix()}\n"
                         ).encode(),
                         exit_code=114,
                     )
                 return ExecResult(
-                    stdout=str(self._container_path(candidate)).encode("utf-8"),
+                    stdout=self._container_path(candidate).as_posix().encode("utf-8"),
                     stderr=b"",
                     exit_code=0,
                 )
@@ -436,7 +436,7 @@ class _HostBackedDockerSession(DockerSandboxSession):
                 kind = EntryKind.FILE
             entries.append(
                 FileEntry(
-                    path=str(container_path / child.name),
+                    path=(container_path / child.name).as_posix(),
                     permissions=Permissions.from_mode(child.stat().st_mode),
                     owner="root",
                     group="root",
@@ -525,7 +525,7 @@ class _RecordingMount(Mount):
                 mount_path = mount._resolve_mount_path(session, dest)
                 host_path = cast(_HostBackedDockerSession, session)._host_path(mount_path)
                 host_path.mkdir(parents=True, exist_ok=True)
-                mount._events.append(("mount", str(mount_path)))
+                mount._events.append(("mount", mount_path.as_posix()))
                 if mount.remount_marker is not None:
                     (host_path / mount.remount_marker).write_text("remounted", encoding="utf-8")
                 return []
@@ -549,7 +549,7 @@ class _RecordingMount(Mount):
             ) -> None:
                 _ = strategy
                 host_path = cast(_HostBackedDockerSession, session)._host_path(path)
-                mount._events.append(("unmount", str(path)))
+                mount._events.append(("unmount", path.as_posix()))
                 if not mount.remove_on_unmount:
                     return
                 shutil.rmtree(host_path, ignore_errors=True)
@@ -563,7 +563,7 @@ class _RecordingMount(Mount):
                 _ = strategy
                 host_path = cast(_HostBackedDockerSession, session)._host_path(path)
                 host_path.mkdir(parents=True, exist_ok=True)
-                mount._events.append(("mount", str(path)))
+                mount._events.append(("mount", path.as_posix()))
                 if mount.remount_marker is not None:
                     (host_path / mount.remount_marker).write_text("remounted", encoding="utf-8")
 

@@ -16,6 +16,7 @@ from ...errors import ExecTimeoutError, ExecTransportError, PtySessionNotFoundEr
 from ...session.base_sandbox_session import BaseSandboxSession
 from ...types import User
 from ...util.token_truncation import formatted_truncate_text_with_token_count
+from ...workspace_paths import sandbox_path_str
 
 _DEFAULT_EXEC_YIELD_TIME_MS = 10_000
 _DEFAULT_WRITE_STDIN_YIELD_TIME_MS = 250
@@ -73,7 +74,7 @@ def _resolve_workdir_command(
         return command
 
     resolved_workdir = session.normalize_path(Path(workdir))
-    return f"cd {shlex.quote(str(resolved_workdir))} && {command}"
+    return f"cd {shlex.quote(sandbox_path_str(resolved_workdir))} && {command}"
 
 
 def _resolve_shell(shell: str | None, login: bool) -> bool | list[str]:

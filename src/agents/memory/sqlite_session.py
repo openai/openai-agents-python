@@ -52,6 +52,9 @@ class SQLiteSession(SessionABC):
         self.sessions_table = sessions_table
         self.messages_table = messages_table
         self._local = threading.local()
+        self._connections: set[sqlite3.Connection] = set()
+        self._connections_lock = threading.Lock()
+        self._closed = False
 
         # For in-memory databases, we need a shared connection to avoid thread isolation
         # For file databases, we use thread-local connections for better concurrency
@@ -115,17 +118,23 @@ class SQLiteSession(SessionABC):
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get a database connection."""
+        if self._closed:
+            raise RuntimeError("SQLiteSession is closed")
+
         if self._is_memory_db:
             # Use shared connection for in-memory database to avoid thread isolation
             return self._shared_connection
         else:
             # Use thread-local connections for file databases
             if not hasattr(self._local, "connection"):
-                self._local.connection = sqlite3.connect(
+                connection = sqlite3.connect(
                     str(self.db_path),
                     check_same_thread=False,
                 )
-                self._local.connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA journal_mode=WAL")
+                self._local.connection = connection
+                with self._connections_lock:
+                    self._connections.add(connection)
             assert isinstance(self._local.connection, sqlite3.Connection), (
                 f"Expected sqlite3.Connection, got {type(self._local.connection)}"
             )
@@ -320,12 +329,20 @@ class SQLiteSession(SessionABC):
 
     def close(self) -> None:
         """Close the database connection."""
-        if self._is_memory_db:
-            if hasattr(self, "_shared_connection"):
-                self._shared_connection.close()
-        else:
-            if hasattr(self._local, "connection"):
-                self._local.connection.close()
+        with self._lock:
+            if self._closed:
+                return
+
+            self._closed = True
+            if self._is_memory_db:
+                if hasattr(self, "_shared_connection"):
+                    self._shared_connection.close()
+            else:
+                with self._connections_lock:
+                    connections = list(self._connections)
+                    self._connections.clear()
+                for connection in connections:
+                    connection.close()
             if self._lock_path is not None and not self._lock_released:
                 self._release_file_lock(self._lock_path)
                 self._lock_released = True

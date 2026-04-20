@@ -67,6 +67,7 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
+from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 
 _DEFAULT_EXEC_TIMEOUT_S = 30.0
 _DEFAULT_REQUEST_TIMEOUT_S = 120.0
@@ -345,12 +346,14 @@ class CloudflareSandboxSession(BaseSandboxSession):
         mount_path: Path | str,
         options: dict[str, object],
     ) -> None:
-        workspace_path = await self._validate_path_access(mount_path, for_write=True)
+        workspace_path = await self._validate_path_access(
+            coerce_posix_path(mount_path).as_posix(), for_write=True
+        )
         http = self._session()
         url = self._url("mount")
         payload = {
             "bucket": bucket,
-            "mountPath": str(workspace_path),
+            "mountPath": sandbox_path_str(workspace_path),
             "options": options,
         }
 
@@ -370,7 +373,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
                         message="cloudflare bucket mount failed",
                         context={
                             "bucket": bucket,
-                            "mount_path": str(workspace_path),
+                            "mount_path": sandbox_path_str(workspace_path),
                             "http_status": resp.status,
                             "reason": body.get("error", f"HTTP {resp.status}"),
                         },
@@ -382,17 +385,19 @@ class CloudflareSandboxSession(BaseSandboxSession):
                 message="cloudflare bucket mount failed",
                 context={
                     "bucket": bucket,
-                    "mount_path": str(workspace_path),
+                    "mount_path": sandbox_path_str(workspace_path),
                     "cause_type": type(e).__name__,
                     "reason": str(e),
                 },
             ) from e
 
     async def unmount_bucket(self, mount_path: Path | str) -> None:
-        workspace_path = await self._validate_path_access(mount_path, for_write=True)
+        workspace_path = await self._validate_path_access(
+            coerce_posix_path(mount_path).as_posix(), for_write=True
+        )
         http = self._session()
         url = self._url("unmount")
-        payload = {"mountPath": str(workspace_path)}
+        payload = {"mountPath": sandbox_path_str(workspace_path)}
 
         try:
             async with http.post(
@@ -409,7 +414,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
                     raise MountConfigError(
                         message="cloudflare bucket unmount failed",
                         context={
-                            "mount_path": str(workspace_path),
+                            "mount_path": sandbox_path_str(workspace_path),
                             "http_status": resp.status,
                             "reason": body.get("error", f"HTTP {resp.status}"),
                         },
@@ -420,7 +425,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             raise MountConfigError(
                 message="cloudflare bucket unmount failed",
                 context={
-                    "mount_path": str(workspace_path),
+                    "mount_path": sandbox_path_str(workspace_path),
                     "cause_type": type(e).__name__,
                     "reason": str(e),
                 },
@@ -501,10 +506,10 @@ class CloudflareSandboxSession(BaseSandboxSession):
 
     async def _prepare_backend_workspace(self) -> None:
         try:
-            root = Path(self.state.manifest.root)
-            await self._exec_internal("mkdir", "-p", "--", str(root))
+            root = self._workspace_root_path()
+            await self._exec_internal("mkdir", "-p", "--", root.as_posix())
         except Exception as e:
-            raise WorkspaceStartError(path=Path(self.state.manifest.root), cause=e) from e
+            raise WorkspaceStartError(path=self._workspace_root_path(), cause=e) from e
 
     async def _can_reuse_restorable_snapshot_workspace(self) -> bool:
         if not self._workspace_state_preserved_on_start():
@@ -518,7 +523,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
         return await self._can_skip_snapshot_restore_on_resume(is_running=is_running)
 
     async def _restore_snapshot_into_workspace_on_resume(self) -> None:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         detached_mounts: list[tuple[Any, Path]] = []
         if self._restore_workspace_was_running:
             for mount_entry, mount_path in self.state.manifest.ephemeral_mount_targets():
@@ -965,13 +970,12 @@ class CloudflareSandboxSession(BaseSandboxSession):
             await self._terminate_pty_entry(entry)
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
-        path = Path(path)
         if user is not None:
             await self._check_read_with_exec(path, user=user)
 
         workspace_path = await self._validate_path_access(path)
         http = self._session()
-        url_path = quote(str(workspace_path).lstrip("/"), safe="/")
+        url_path = quote(sandbox_path_str(workspace_path).lstrip("/"), safe="/")
         url = self._url(f"file/{url_path}")
 
         try:
@@ -1029,7 +1033,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
         *,
         user: str | User | None = None,
     ) -> None:
-        path = Path(path)
+        error_path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             await self._check_write_with_exec(path, user=user)
 
@@ -1037,13 +1041,13 @@ class CloudflareSandboxSession(BaseSandboxSession):
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         if not isinstance(payload, bytes | bytearray):
-            raise WorkspaceWriteTypeError(path=path, actual_type=type(payload).__name__)
+            raise WorkspaceWriteTypeError(path=error_path, actual_type=type(payload).__name__)
 
         payload_bytes = bytes(payload)
         workspace_path = await self._validate_path_access(path, for_write=True)
 
         http = self._session()
-        url_path = quote(str(workspace_path).lstrip("/"), safe="/")
+        url_path = quote(sandbox_path_str(workspace_path).lstrip("/"), safe="/")
         url = self._url(f"file/{url_path}")
 
         try:
@@ -1106,7 +1110,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
         or _is_transient_workspace_error(exc)
     )
     async def _persist_workspace_via_http(self) -> io.IOBase:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         skip = self._persist_workspace_skip_relpaths()
         excludes_param = ",".join(
             rel.as_posix().removeprefix("./")
@@ -1148,7 +1152,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
         or _is_transient_workspace_error(exc)
     )
     async def _hydrate_workspace_via_http(self, data: io.IOBase) -> None:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         raw = data.read()
         if isinstance(raw, str):
             raw = raw.encode("utf-8")
@@ -1199,7 +1203,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveWriteError(path=root, cause=e) from e
 
     async def persist_workspace(self) -> io.IOBase:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         unmounted_mounts: list[tuple[Any, Path]] = []
         unmount_error: WorkspaceArchiveReadError | None = None
         for mount_entry, mount_path in self.state.manifest.ephemeral_mount_targets():
@@ -1245,7 +1249,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
         return persisted
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         unmounted_mounts: list[tuple[Any, Path]] = []
         unmount_error: WorkspaceArchiveWriteError | None = None
         for mount_entry, mount_path in self.state.manifest.ephemeral_mount_targets():

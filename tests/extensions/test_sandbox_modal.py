@@ -9,7 +9,7 @@ import sys
 import tarfile
 import types
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, NoReturn, cast
 
 import pytest
@@ -125,7 +125,7 @@ class _RecordingMount(Mount):
                 _ = (strategy, session)
                 if mount._teardown_error is not None:
                     raise RuntimeError(mount._teardown_error)
-                mount._events.append(("unmount", str(path)))
+                mount._events.append(("unmount", path.as_posix()))
 
             async def restore_after_snapshot(
                 self,
@@ -134,7 +134,7 @@ class _RecordingMount(Mount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("mount", str(path)))
+                mount._events.append(("mount", path.as_posix()))
 
         return _Adapter(self)
 
@@ -1659,7 +1659,73 @@ async def test_modal_normalize_path_preserves_safe_leaf_symlink_path(
 
     normalized = await session._validate_path_access("link.txt")  # noqa: SLF001
 
-    assert normalized == Path("/workspace/link.txt")
+    assert normalized.as_posix() == "/workspace/link.txt"
+
+
+@pytest.mark.asyncio
+async def test_modal_normalize_path_uses_posix_commands_for_windows_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state)
+    commands: list[list[str]] = []
+
+    async def _fake_exec(
+        *command: object,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: object | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        rendered = [str(part) for part in command]
+        commands.append(rendered)
+        if (
+            rendered[:2] == ["sh", "-c"]
+            and RESOLVE_WORKSPACE_PATH_HELPER.install_marker in rendered[2]
+        ):
+            return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+        if rendered and rendered[0] == str(RESOLVE_WORKSPACE_PATH_HELPER.install_path):
+            return ExecResult(stdout=b"/workspace/link.txt", stderr=b"", exit_code=0)
+        raise AssertionError(f"unexpected command: {rendered!r}")
+
+    monkeypatch.setattr(session, "exec", _fake_exec)
+
+    normalized = await session._validate_path_access(PureWindowsPath("/workspace/link.txt"))  # noqa: SLF001
+
+    helper_path = str(RESOLVE_WORKSPACE_PATH_HELPER.install_path)
+    assert normalized.as_posix() == "/workspace/link.txt"
+    assert commands[-1] == [helper_path, "/workspace", "/workspace/link.txt", "0"]
+    assert all("\\" not in arg for arg in commands[-1])
+
+
+@pytest.mark.asyncio
+async def test_modal_normalize_path_rejects_windows_drive_absolute_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state)
+
+    async def _fake_exec(*args: object, **kwargs: object) -> ExecResult:
+        _ = (args, kwargs)
+        raise AssertionError("path validation should reject before remote helper execution")
+
+    monkeypatch.setattr(session, "exec", _fake_exec)
+
+    with pytest.raises(InvalidManifestPathError) as exc_info:
+        await session._validate_path_access(PureWindowsPath("C:/tmp/link.txt"))  # noqa: SLF001
+
+    assert str(exc_info.value) == "manifest path must be relative: C:/tmp/link.txt"
+    assert exc_info.value.context == {"rel": "C:/tmp/link.txt", "reason": "absolute"}
 
 
 @pytest.mark.asyncio
@@ -1735,16 +1801,16 @@ async def test_modal_normalize_path_reinstalls_helper_after_runtime_replacement(
 
     monkeypatch.setattr(session, "exec", _fake_exec)
 
-    assert await session._validate_path_access("link.txt") == Path("/workspace/link.txt")
+    assert (await session._validate_path_access("link.txt")).as_posix() == "/workspace/link.txt"
     first_run_commands = list(commands)
     commands.clear()
 
     state.sandbox_id = None
-    assert await session._validate_path_access("link.txt") == Path("/workspace/link.txt")
+    assert (await session._validate_path_access("link.txt")).as_posix() == "/workspace/link.txt"
     second_run_commands = list(commands)
     commands.clear()
 
-    assert await session._validate_path_access("link.txt") == Path("/workspace/link.txt")
+    assert (await session._validate_path_access("link.txt")).as_posix() == "/workspace/link.txt"
 
     helper_path = str(RESOLVE_WORKSPACE_PATH_HELPER.install_path)
     assert any(

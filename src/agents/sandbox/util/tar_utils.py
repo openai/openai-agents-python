@@ -171,7 +171,9 @@ def _ensure_no_symlink_parents(*, root: Path, dest: Path, check_leaf: bool = Tru
     path_to_resolve = dest if check_leaf else dest.parent
     dest_resolved = path_to_resolve.resolve()
     if not (dest_resolved == root_resolved or dest_resolved.is_relative_to(root_resolved)):
-        raise UnsafeTarMemberError(member=str(dest), reason="path escapes root after resolution")
+        raise UnsafeTarMemberError(
+            member=dest.as_posix(), reason="path escapes root after resolution"
+        )
 
     rel = dest.relative_to(root)
     cur = root
