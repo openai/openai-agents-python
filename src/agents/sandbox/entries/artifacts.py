@@ -23,7 +23,6 @@ from ..errors import (
 )
 from ..materialization import MaterializedFile, gather_in_order
 from ..types import ExecResult, User
-from ..util.checksums import sha256_file
 from .base import BaseEntry
 
 if TYPE_CHECKING:
@@ -115,11 +114,6 @@ class LocalFile(BaseEntry):
         rel_child = Path(self.src.name)
         fd: int | None = None
         try:
-            checksum = sha256_file(src)
-        except OSError as e:
-            raise LocalChecksumError(src=src, cause=e) from e
-        await session.mkdir(Path(dest).parent, parents=True)
-        try:
             src_root = local_dir._resolve_local_dir_src_root(base_dir)
             fd = local_dir._open_local_dir_file_for_copy(
                 base_dir=base_dir,
@@ -128,6 +122,12 @@ class LocalFile(BaseEntry):
             )
             with os.fdopen(fd, "rb") as f:
                 fd = None
+                try:
+                    checksum = _sha256_handle(f)
+                    f.seek(0)
+                except OSError as e:
+                    raise LocalChecksumError(src=src, cause=e) from e
+                await session.mkdir(Path(dest).parent, parents=True)
                 await session.write(dest, f)
         except LocalDirReadError as e:
             context = dict(e.context)
