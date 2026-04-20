@@ -88,7 +88,11 @@ class SandboxPathGrant(BaseModel):
     @field_validator("path")
     @classmethod
     def _validate_path(cls, value: str) -> str:
-        if windows_absolute_path(value) is not None:
+        if (windows_path := windows_absolute_path(value)) is not None:
+            native_path = _native_path_from_windows_absolute(windows_path)
+            if native_path is not None:
+                _raise_if_filesystem_root(native_path)
+                return str(native_path)
             raise ValueError("sandbox path grant path must be POSIX absolute")
 
         path = PurePosixPath(posixpath.normpath(value))
@@ -268,6 +272,8 @@ class WorkspacePathPolicy:
 
         rules: list[tuple[PurePosixPath, bool]] = []
         for grant in self._extra_path_grants:
+            if windows_absolute_path(grant.path) is not None:
+                raise ValueError("sandbox path grant path must be POSIX absolute")
             root = coerce_posix_path(grant.path)
             _raise_if_filesystem_root(root)
             rules.append((root, grant.read_only))

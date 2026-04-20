@@ -364,7 +364,10 @@ def test_sandbox_extra_path_grant_rules_use_posix_paths() -> None:
     )
 
 
-def test_extra_path_grant_rejects_windows_drive_absolute_path() -> None:
+def test_extra_path_grant_rejects_non_native_windows_drive_absolute_path() -> None:
+    if Path(PureWindowsPath("C:/tmp")).is_absolute():
+        pytest.skip("Windows drive paths are native absolute paths on this host")
+
     for path in (
         PureWindowsPath("C:/tmp"),
         "C:\\tmp",
@@ -385,6 +388,31 @@ def test_extra_path_grant_rejects_windows_drive_absolute_path() -> None:
             "input": path,
             "ctx": {"error": "sandbox path grant path must be POSIX absolute"},
         }
+
+
+def test_extra_path_grant_accepts_native_windows_drive_absolute_path(
+    tmp_path: Path,
+) -> None:
+    if not Path(PureWindowsPath("C:/tmp")).is_absolute():
+        pytest.skip("Windows drive paths are not native absolute paths on this host")
+
+    grant = SandboxPathGrant(path=str(tmp_path))
+
+    assert Path(grant.path).is_absolute()
+
+
+def test_extra_path_grant_rules_reject_windows_drive_absolute_path() -> None:
+    grant = SandboxPathGrant.model_construct(
+        path="C:/tmp",
+        read_only=False,
+        description=None,
+    )
+    policy = WorkspacePathPolicy(root="/workspace", extra_path_grants=(grant,))
+
+    with pytest.raises(ValueError) as exc_info:
+        policy.extra_path_grant_rules()
+
+    assert str(exc_info.value) == "sandbox path grant path must be POSIX absolute"
 
 
 def test_manifest_serializes_extra_path_grants() -> None:
