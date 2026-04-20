@@ -480,7 +480,7 @@ class TestBlaxelSandboxSession:
     async def test_normalize_path_relative(self, fake_sandbox: _FakeSandboxInstance) -> None:
         session = _make_session(fake_sandbox)
         result = session.normalize_path("subdir/file.txt")
-        assert str(result) == "/workspace/subdir/file.txt"
+        assert result.as_posix() == "/workspace/subdir/file.txt"
 
     @pytest.mark.asyncio
     async def test_normalize_path_escape_blocked(self, fake_sandbox: _FakeSandboxInstance) -> None:

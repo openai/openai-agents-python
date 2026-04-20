@@ -8,6 +8,7 @@ from ..entries import BaseEntry, Dir, Mount, resolve_workspace_path
 from ..manifest import Manifest
 from ..materialization import MaterializationResult, MaterializedFile, gather_in_order
 from ..types import ExecResult, User
+from ..workspace_paths import coerce_posix_path, posix_path_as_path
 
 
 class ManifestApplier:
@@ -34,9 +35,10 @@ class ManifestApplier:
         provision_accounts: bool = True,
         base_dir: Path | None = None,
     ) -> MaterializationResult:
-        base_dir = Path("/") if base_dir is None else base_dir
+        base_dir = posix_path_as_path(coerce_posix_path("/")) if base_dir is None else base_dir
+        root = posix_path_as_path(coerce_posix_path(manifest.root))
 
-        await self._mkdir(Path(manifest.root))
+        await self._mkdir(root)
 
         if provision_accounts and not only_ephemeral:
             await self.provision_accounts(manifest)
@@ -44,12 +46,12 @@ class ManifestApplier:
         entries_to_apply: list[tuple[Path, BaseEntry]] = []
         if only_ephemeral:
             for rel_dest, artifact in self._ephemeral_entries(manifest):
-                dest = resolve_workspace_path(Path(manifest.root), rel_dest)
+                dest = resolve_workspace_path(root, rel_dest)
                 entries_to_apply.append((dest, artifact))
         else:
             for raw_rel_dest, artifact in manifest.validated_entries().items():
                 dest = resolve_workspace_path(
-                    Path(manifest.root),
+                    root,
                     Manifest._coerce_rel_path(raw_rel_dest),
                 )
                 entries_to_apply.append((dest, artifact))

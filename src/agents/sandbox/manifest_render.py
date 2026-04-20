@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ..logger import logger
 from .entries import BaseEntry, Dir, Mount
+from .workspace_paths import coerce_posix_path, posix_path_as_path
 
 MAX_MANIFEST_DESCRIPTION_CHARS = 5000
 MANIFEST_DESCRIPTION_TRUNCATION_MARKER_TEMPLATE = "... (truncated {omitted_chars} chars)"
@@ -50,12 +51,16 @@ def render_manifest_description(
         raise ValueError("max_chars must be a non-zero positive integer or None")
 
     root = root.rstrip("/") or "/"
-    root_path = Path(root)
+    root_path = posix_path_as_path(coerce_posix_path(root))
 
     def _mount_full_path(entry: str | Path, artifact: Mount) -> Path:
         if artifact.mount_path is not None:
-            mount_path = Path(artifact.mount_path)
-            return mount_path if mount_path.is_absolute() else root_path / mount_path
+            mount_path = coerce_posix_path(artifact.mount_path)
+            return posix_path_as_path(
+                mount_path
+                if mount_path.is_absolute()
+                else coerce_posix_path(root_path) / mount_path
+            )
         return root_path / coerce_rel_path(entry)
 
     class _Node:
@@ -66,7 +71,7 @@ def render_manifest_description(
             self.full_path: Path | None = None
 
     def _path_parts(path: Path) -> tuple[str, ...]:
-        parts = [part for part in path.parts if part not in {"", "."}]
+        parts = [part for part in coerce_posix_path(path).parts if part not in {"", "."}]
         return tuple(parts)
 
     root_node = _Node()
@@ -148,9 +153,12 @@ def render_manifest_description(
                 child_is_dir = child.is_dir or bool(child.children)
                 display_name = f"{name}/" if child_is_dir else name
                 if child.full_path is not None:
-                    full_path = str(child.full_path)
+                    full_path = child.full_path.as_posix()
                 else:
-                    full_path = str(root_path / Path(*current_rel_parts))
+                    full_path = (
+                        coerce_posix_path(root_path)
+                        / coerce_posix_path("/".join(current_rel_parts))
+                    ).as_posix()
                 lines.append((current_prefix, display_name, full_path, child.description))
                 continue
 

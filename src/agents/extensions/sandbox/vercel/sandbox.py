@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
-import os
+import posixpath
 import tarfile
 import uuid
 from collections.abc import Awaitable, Callable
@@ -60,6 +60,7 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tarfile
+from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 
 WorkspacePersistenceMode = Literal["tar", "snapshot"]
 
@@ -294,16 +295,16 @@ class VercelSandboxSession(BaseSandboxSession):
             raise ValueError("invalid tar stream") from exc
 
     async def _prepare_backend_workspace(self) -> None:
-        root = PurePosixPath(os.path.normpath(self.state.manifest.root))
+        root = PurePosixPath(posixpath.normpath(self.state.manifest.root))
         try:
             sandbox = await self._ensure_sandbox()
             finished = await sandbox.run_command("mkdir", ["-p", "--", root.as_posix()])
         except Exception as exc:
-            raise WorkspaceStartError(path=Path(str(root)), cause=exc) from exc
+            raise WorkspaceStartError(path=posix_path_as_path(root), cause=exc) from exc
 
         if finished.exit_code != 0:
             raise WorkspaceStartError(
-                path=Path(str(root)),
+                path=posix_path_as_path(root),
                 context={
                     "exit_code": finished.exit_code,
                     "stdout": await finished.stdout(),
@@ -407,7 +408,7 @@ class VercelSandboxSession(BaseSandboxSession):
         self,
         operation: Callable[[], Awaitable[io.IOBase]],
     ) -> io.IOBase:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         unmounted_mounts: list[tuple[Any, Path]] = []
         unmount_error: WorkspaceArchiveReadError | None = None
         for mount_entry, mount_path in self.state.manifest.ephemeral_mount_targets():
@@ -456,7 +457,7 @@ class VercelSandboxSession(BaseSandboxSession):
         self,
         operation: Callable[[], Awaitable[None]],
     ) -> None:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         unmounted_mounts: list[tuple[Any, Path]] = []
         unmount_error: WorkspaceArchiveWriteError | None = None
         for mount_entry, mount_path in self.state.manifest.ephemeral_mount_targets():
@@ -566,7 +567,7 @@ class VercelSandboxSession(BaseSandboxSession):
         normalized_path = await self._validate_path_access(path)
         sandbox = await self._ensure_sandbox()
         try:
-            payload = await sandbox.read_file(str(normalized_path))
+            payload = await sandbox.read_file(sandbox_path_str(normalized_path))
         except Exception as exc:
             raise WorkspaceArchiveReadError(path=normalized_path, cause=exc) from exc
         if payload is None:
@@ -594,7 +595,7 @@ class VercelSandboxSession(BaseSandboxSession):
             )
         try:
             await self._write_files_with_retry(
-                [{"path": str(normalized_path), "content": bytes(payload)}]
+                [{"path": sandbox_path_str(normalized_path), "content": bytes(payload)}]
             )
         except Exception as exc:
             raise WorkspaceArchiveWriteError(path=normalized_path, cause=exc) from exc
@@ -604,7 +605,7 @@ class VercelSandboxSession(BaseSandboxSession):
 
     async def _persist_workspace_internal(self) -> io.IOBase:
         if self.state.workspace_persistence == _WORKSPACE_PERSISTENCE_SNAPSHOT:
-            root = Path(self.state.manifest.root)
+            root = self._workspace_root_path()
             sandbox = await self._ensure_sandbox()
             try:
                 snapshot = await sandbox.snapshot(expiration=self.state.snapshot_expiration_ms)
@@ -612,9 +613,11 @@ class VercelSandboxSession(BaseSandboxSession):
                 raise WorkspaceArchiveReadError(path=root, cause=exc) from exc
             return io.BytesIO(_encode_snapshot_ref(snapshot_id=snapshot.snapshot_id))
 
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         sandbox = await self._ensure_sandbox()
-        archive_path = Path("/tmp") / f"openai-agents-{self.state.session_id.hex}.tar"
+        archive_path = posix_path_as_path(
+            coerce_posix_path(f"/tmp/openai-agents-{self.state.session_id.hex}.tar")
+        )
         excludes = [
             f"--exclude=./{rel_path.as_posix()}"
             for rel_path in sorted(
@@ -622,7 +625,7 @@ class VercelSandboxSession(BaseSandboxSession):
                 key=lambda item: item.as_posix(),
             )
         ]
-        tar_command = ("tar", "cf", str(archive_path), *excludes, ".")
+        tar_command = ("tar", "cf", archive_path.as_posix(), *excludes, ".")
         try:
             result = await self.exec(*tar_command, shell=False)
             if not result.ok():
@@ -634,7 +637,7 @@ class VercelSandboxSession(BaseSandboxSession):
                         context={"backend": "vercel", "sandbox_id": self.state.sandbox_id},
                     ),
                 )
-            archive = await sandbox.read_file(str(archive_path))
+            archive = await sandbox.read_file(archive_path.as_posix())
             if archive is None:
                 raise WorkspaceReadNotFoundError(path=archive_path)
             return io.BytesIO(archive)
@@ -646,7 +649,9 @@ class VercelSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveReadError(path=root, cause=exc) from exc
         finally:
             try:
-                await sandbox.run_command("rm", [str(archive_path)], cwd=self.state.manifest.root)
+                await sandbox.run_command(
+                    "rm", [archive_path.as_posix()], cwd=self.state.manifest.root
+                )
             except Exception:
                 pass
 
@@ -656,7 +661,7 @@ class VercelSandboxSession(BaseSandboxSession):
             raw = raw.encode("utf-8")
         if not isinstance(raw, bytes | bytearray):
             raise WorkspaceWriteTypeError(
-                path=Path(self.state.manifest.root),
+                path=self._workspace_root_path(),
                 actual_type=type(raw).__name__,
             )
 
@@ -675,19 +680,21 @@ class VercelSandboxSession(BaseSandboxSession):
                 await self._replace_sandbox_from_snapshot(snapshot_id)
             except Exception as exc:
                 raise WorkspaceArchiveWriteError(
-                    path=Path(self.state.manifest.root),
+                    path=self._workspace_root_path(),
                     cause=exc,
                 ) from exc
             return
 
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         sandbox = await self._ensure_sandbox()
-        archive_path = Path("/tmp") / f"openai-agents-{self.state.session_id.hex}.tar"
-        tar_command = ("tar", "xf", str(archive_path), "-C", str(root))
+        archive_path = posix_path_as_path(
+            coerce_posix_path(f"/tmp/openai-agents-{self.state.session_id.hex}.tar")
+        )
+        tar_command = ("tar", "xf", archive_path.as_posix(), "-C", root.as_posix())
         try:
             self._validate_tar_bytes(raw)
             await self.mkdir(root, parents=True)
-            await self._write_files_with_retry([{"path": str(archive_path), "content": raw}])
+            await self._write_files_with_retry([{"path": archive_path.as_posix(), "content": raw}])
             result = await self.exec(*tar_command, shell=False)
             if not result.ok():
                 raise WorkspaceArchiveWriteError(
@@ -704,7 +711,9 @@ class VercelSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveWriteError(path=root, cause=exc) from exc
         finally:
             try:
-                await sandbox.run_command("rm", [str(archive_path)], cwd=self.state.manifest.root)
+                await sandbox.run_command(
+                    "rm", [archive_path.as_posix()], cwd=self.state.manifest.root
+                )
             except Exception:
                 pass
 

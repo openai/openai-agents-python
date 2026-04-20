@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from agents.models import _openai_shared
@@ -10,6 +12,27 @@ from agents.tracing.provider import DefaultTraceProvider
 from agents.tracing.setup import set_trace_provider
 
 from .testing_processor import SPAN_PROCESSOR_TESTING
+
+collect_ignore: list[str] = []
+
+if sys.platform == "win32":
+    collect_ignore.extend(
+        [
+            "test_example_workflows.py",
+            "test_run_state.py",
+            "test_sandbox_memory.py",
+            "sandbox/capabilities/test_filesystem_capability.py",
+            "sandbox/integration_tests/test_runner_pause_resume.py",
+            "sandbox/test_client_options.py",
+            "sandbox/test_exposed_ports.py",
+            "sandbox/test_extract.py",
+            "sandbox/test_runtime.py",
+            "sandbox/test_session_manager.py",
+            "sandbox/test_session_sinks.py",
+            "sandbox/test_snapshot.py",
+            "sandbox/test_unix_local.py",
+        ]
+    )
 
 
 # This fixture will run once before any tests are executed

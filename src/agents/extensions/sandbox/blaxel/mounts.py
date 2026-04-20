@@ -31,6 +31,7 @@ from ....sandbox.errors import MountConfigError
 from ....sandbox.materialization import MaterializedFile
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.types import FileMode, Permissions
+from ....sandbox.workspace_paths import sandbox_path_str
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
         _assert_blaxel_session(session)
         _ = base_dir
         mount_path = mount._resolve_mount_path(session, dest)
-        config = _build_mount_config(mount, mount_path=str(mount_path))
+        config = _build_mount_config(mount, mount_path=mount_path.as_posix())
         await _mount_bucket(session, config)
         return []
 
@@ -95,7 +96,7 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
         _assert_blaxel_session(session)
         _ = base_dir
         mount_path = mount._resolve_mount_path(session, dest)
-        await _unmount_bucket(session, str(mount_path))
+        await _unmount_bucket(session, mount_path.as_posix())
 
     async def teardown_for_snapshot(
         self,
@@ -105,7 +106,7 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
     ) -> None:
         _assert_blaxel_session(session)
         _ = mount
-        await _unmount_bucket(session, str(path))
+        await _unmount_bucket(session, sandbox_path_str(path))
 
     async def restore_after_snapshot(
         self,
@@ -114,7 +115,7 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
         path: Path,
     ) -> None:
         _assert_blaxel_session(session)
-        config = _build_mount_config(mount, mount_path=str(path))
+        config = _build_mount_config(mount, mount_path=sandbox_path_str(path))
         await _mount_bucket(session, config)
 
     def build_docker_volume_driver_config(
@@ -606,7 +607,9 @@ class BlaxelDriveMountStrategy(MountStrategyBase):
                 message="BlaxelDriveMountStrategy requires a BlaxelDriveMount entry",
                 context={"mount_type": mount.type},
             )
-        mount_path = mount.drive_mount_path or str(mount._resolve_mount_path(session, dest))
+        mount_path = mount.drive_mount_path or sandbox_path_str(
+            mount._resolve_mount_path(session, dest)
+        )
         return BlaxelDriveMountConfig(
             drive_name=mount.drive_name,
             mount_path=mount_path,
@@ -619,7 +622,7 @@ class BlaxelDriveMountStrategy(MountStrategyBase):
         """Return the actual mount path, preferring ``drive_mount_path`` over the manifest path."""
         if isinstance(mount, BlaxelDriveMount) and mount.drive_mount_path:
             return mount.drive_mount_path
-        return str(fallback)
+        return sandbox_path_str(fallback)
 
     @staticmethod
     def _resolve_config_from_source(mount: Mount, mount_path: str) -> BlaxelDriveMountConfig:
