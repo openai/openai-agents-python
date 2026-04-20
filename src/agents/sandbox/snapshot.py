@@ -121,7 +121,7 @@ class LocalSnapshot(SnapshotBase):
 
     async def restorable(self, *, dependencies: Dependencies | None = None) -> bool:
         _ = dependencies
-        return self._path().exists()
+        return self._path().is_file()
 
     def _path(self) -> Path:
         return self.base_path / self._filename()
