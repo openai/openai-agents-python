@@ -34,7 +34,7 @@ class SandboxPathGrant(BaseModel):
     @field_validator("path", mode="before")
     @classmethod
     def _coerce_path(cls, value: object) -> str:
-        if isinstance(value, Path):
+        if isinstance(value, PurePath):
             return value.as_posix()
         if isinstance(value, str):
             return value
@@ -56,10 +56,11 @@ class WorkspacePathPolicy:
     def __init__(
         self,
         *,
-        root: str | Path,
+        root: str | PurePath,
         extra_path_grants: tuple[SandboxPathGrant, ...] = (),
     ) -> None:
         self._root = Path(root)
+        self._sandbox_root = self._coerce_posix_path(root)
         self._extra_path_grants = extra_path_grants
 
     def absolute_workspace_path(self, path: str | Path) -> Path:
@@ -105,10 +106,30 @@ class WorkspacePathPolicy:
         if resolve_symlinks:
             result, grant = self._resolved_host_path_and_grant(original)
         else:
-            result, grant = self._sandbox_path_and_grant(original)
+            sandbox_result, grant = self._sandbox_path_and_grant(self._coerce_posix_path(original))
+            result = Path(sandbox_result.as_posix())
         if for_write:
             self._raise_if_read_only_grant(result, grant)
         return result
+
+    def normalize_sandbox_path(
+        self,
+        path: str | PurePath,
+        *,
+        for_write: bool = False,
+    ) -> PurePosixPath:
+        """Return a validated POSIX path for a Unix-like remote sandbox filesystem."""
+
+        original = self._coerce_posix_path(path)
+        result, grant = self._sandbox_path_and_grant(original)
+        if for_write:
+            self._raise_if_read_only_grant(Path(result.as_posix()), grant)
+        return result
+
+    def sandbox_root(self) -> PurePosixPath:
+        """Return the workspace root as a POSIX path for remote sandbox commands."""
+
+        return self._normalized_root()
 
     def _resolved_host_path_and_grant(
         self,
@@ -130,18 +151,18 @@ class WorkspacePathPolicy:
 
     def _sandbox_path_and_grant(
         self,
-        original: Path,
-    ) -> tuple[Path, SandboxPathGrant | None]:
+        original: PurePath,
+    ) -> tuple[PurePosixPath, SandboxPathGrant | None]:
         normalized = (
             self._absolute_posix_path(original)
             if original.is_absolute()
             else self._absolute_workspace_posix_path(original)
         )
         if self._is_under(normalized, self._normalized_root()):
-            return Path(str(normalized)), None
+            return normalized, None
         grant = self._matching_grant(normalized)
         if original.is_absolute() and grant is not None:
-            return Path(str(normalized)), grant
+            return normalized, grant
         raise self._invalid_path_error(original)
 
     def _raise_if_read_only_grant(
@@ -159,17 +180,17 @@ class WorkspacePathPolicy:
             },
         )
 
-    def extra_path_grant_rules(self) -> tuple[tuple[Path, bool], ...]:
+    def extra_path_grant_rules(self) -> tuple[tuple[PurePosixPath, bool], ...]:
         """Return normalized extra grant roots and access modes for remote realpath checks."""
 
-        rules: list[tuple[Path, bool]] = []
+        rules: list[tuple[PurePosixPath, bool]] = []
         for grant in self._extra_path_grants:
-            root = Path(grant.path)
+            root = self._coerce_posix_path(grant.path)
             _raise_if_filesystem_root(root)
             rules.append((root, grant.read_only))
         return tuple(rules)
 
-    def _absolute_workspace_posix_path(self, path: Path) -> PurePosixPath:
+    def _absolute_workspace_posix_path(self, path: PurePath) -> PurePosixPath:
         normalized = self._absolute_posix_path(path)
         root = self._normalized_root()
         try:
@@ -178,13 +199,13 @@ class WorkspacePathPolicy:
             raise self._invalid_path_error(path, cause=exc) from exc
         return normalized
 
-    def _absolute_posix_path(self, path: Path) -> PurePosixPath:
+    def _absolute_posix_path(self, path: PurePath) -> PurePosixPath:
         root = self._normalized_root()
         raw_candidate = path.as_posix() if path.is_absolute() else str(root / path.as_posix())
         return PurePosixPath(posixpath.normpath(str(raw_candidate)))
 
     def _normalized_root(self) -> PurePosixPath:
-        return PurePosixPath(posixpath.normpath(self._root.as_posix()))
+        return PurePosixPath(posixpath.normpath(self._sandbox_root.as_posix()))
 
     def _matching_grant(
         self,
@@ -212,11 +233,17 @@ class WorkspacePathPolicy:
 
     def _invalid_path_error(
         self,
-        path: Path,
+        path: PurePath,
         *,
         cause: BaseException | None = None,
     ) -> InvalidManifestPathError:
         reason: Literal["absolute", "escape_root"] = (
             "absolute" if path.is_absolute() else "escape_root"
         )
-        return InvalidManifestPathError(rel=path, reason=reason, cause=cause)
+        return InvalidManifestPathError(rel=path.as_posix(), reason=reason, cause=cause)
+
+    @staticmethod
+    def _coerce_posix_path(path: str | PurePath) -> PurePosixPath:
+        if isinstance(path, PurePath):
+            path = path.as_posix()
+        return PurePosixPath(posixpath.normpath(path))

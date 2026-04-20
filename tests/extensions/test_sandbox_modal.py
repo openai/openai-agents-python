@@ -9,7 +9,7 @@ import sys
 import tarfile
 import types
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, NoReturn, cast
 
 import pytest
@@ -1659,7 +1659,48 @@ async def test_modal_normalize_path_preserves_safe_leaf_symlink_path(
 
     normalized = await session._validate_path_access("link.txt")  # noqa: SLF001
 
-    assert normalized == Path("/workspace/link.txt")
+    assert str(normalized) == "/workspace/link.txt"
+
+
+@pytest.mark.asyncio
+async def test_modal_normalize_path_uses_posix_commands_for_windows_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state)
+    commands: list[list[str]] = []
+
+    async def _fake_exec(
+        *command: object,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: object | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        rendered = [str(part) for part in command]
+        commands.append(rendered)
+        if (
+            rendered[:2] == ["sh", "-c"]
+            and RESOLVE_WORKSPACE_PATH_HELPER.install_marker in rendered[2]
+        ):
+            return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+        if rendered and rendered[0] == str(RESOLVE_WORKSPACE_PATH_HELPER.install_path):
+            return ExecResult(stdout=b"/workspace/link.txt", stderr=b"", exit_code=0)
+        raise AssertionError(f"unexpected command: {rendered!r}")
+
+    monkeypatch.setattr(session, "exec", _fake_exec)
+
+    normalized = await session._validate_path_access(PureWindowsPath("/workspace/link.txt"))  # noqa: SLF001
+
+    helper_path = str(RESOLVE_WORKSPACE_PATH_HELPER.install_path)
+    assert str(normalized) == "/workspace/link.txt"
+    assert commands[-1] == [helper_path, "/workspace", "/workspace/link.txt", "0"]
+    assert all("\\" not in arg for arg in commands[-1])
 
 
 @pytest.mark.asyncio
@@ -1735,16 +1776,16 @@ async def test_modal_normalize_path_reinstalls_helper_after_runtime_replacement(
 
     monkeypatch.setattr(session, "exec", _fake_exec)
 
-    assert await session._validate_path_access("link.txt") == Path("/workspace/link.txt")
+    assert str(await session._validate_path_access("link.txt")) == "/workspace/link.txt"
     first_run_commands = list(commands)
     commands.clear()
 
     state.sandbox_id = None
-    assert await session._validate_path_access("link.txt") == Path("/workspace/link.txt")
+    assert str(await session._validate_path_access("link.txt")) == "/workspace/link.txt"
     second_run_commands = list(commands)
     commands.clear()
 
-    assert await session._validate_path_access("link.txt") == Path("/workspace/link.txt")
+    assert str(await session._validate_path_access("link.txt")) == "/workspace/link.txt"
 
     helper_path = str(RESOLVE_WORKSPACE_PATH_HELPER.install_path)
     assert any(

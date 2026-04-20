@@ -418,7 +418,8 @@ class ModalSandboxSession(BaseSandboxSession):
 
     async def _prepare_backend_workspace(self) -> None:
         # Ensure workspace root exists before the base workspace flow needs it.
-        await self.exec("mkdir", "-p", "--", str(Path(self.state.manifest.root)), shell=False)
+        root = self._workspace_path_policy().sandbox_root().as_posix()
+        await self.exec("mkdir", "-p", "--", root, shell=False)
 
     async def _after_start(self) -> None:
         self._running = True

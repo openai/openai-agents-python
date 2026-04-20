@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import PurePath, PurePosixPath
 from typing import Final
 
-_HELPER_INSTALL_ROOT: Final[Path] = Path("/tmp/openai-agents/bin")
+_HELPER_INSTALL_ROOT: Final[PurePosixPath] = PurePosixPath("/tmp/openai-agents/bin")
 _INSTALL_MARKER: Final[str] = "INSTALL_RUNTIME_HELPER_V1"
 
 _RESOLVE_WORKSPACE_PATH_SCRIPT: Final[str] = """
@@ -249,7 +249,7 @@ printf '%s' "$payload"
 class RuntimeHelperScript:
     name: str
     content: str
-    install_path: Path
+    install_path: PurePath
     install_marker: str = _INSTALL_MARKER
 
     @classmethod

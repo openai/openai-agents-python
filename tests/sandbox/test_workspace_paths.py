@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, cast
 
 import pytest
@@ -226,6 +226,30 @@ def test_normalize_path_with_symlink_resolution(tmp_path: Path) -> None:
             test_case=test_case,
             root=alias,
         )
+
+
+def test_normalize_sandbox_path_uses_posix_paths_for_windows_inputs() -> None:
+    policy = WorkspacePathPolicy(root="/workspace")
+
+    assert policy.sandbox_root() == PurePosixPath("/workspace")
+    assert policy.normalize_sandbox_path(PureWindowsPath("/workspace/pkg/file.py")) == (
+        PurePosixPath("/workspace/pkg/file.py")
+    )
+    assert policy.normalize_sandbox_path(PureWindowsPath("pkg/file.py")) == (
+        PurePosixPath("/workspace/pkg/file.py")
+    )
+
+
+def test_sandbox_extra_path_grant_rules_use_posix_paths() -> None:
+    policy = WorkspacePathPolicy(
+        root="/workspace",
+        extra_path_grants=(SandboxPathGrant(path="/tmp"),),
+    )
+
+    assert policy.extra_path_grant_rules() == ((PurePosixPath("/tmp"), False),)
+    assert policy.normalize_sandbox_path(PureWindowsPath("/tmp/result.txt")) == (
+        PurePosixPath("/tmp/result.txt")
+    )
 
 
 def test_manifest_serializes_extra_path_grants() -> None:

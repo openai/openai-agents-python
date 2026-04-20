@@ -6,7 +6,7 @@ import shlex
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 from typing import Literal, TypeVar, cast
 
 from typing_extensions import Self
@@ -109,7 +109,7 @@ class BaseSandboxSession(abc.ABC):
     _runtime_persist_workspace_skip_relpaths: set[Path] | None = None
     _pre_stop_hooks: list[Callable[[], Awaitable[None]]] | None = None
     _pre_stop_hooks_ran: bool = False
-    _runtime_helpers_installed: set[Path] | None = None
+    _runtime_helpers_installed: set[PurePath] | None = None
     _runtime_helper_cache_key: object = _RUNTIME_HELPER_CACHE_KEY_UNSET
     _workspace_path_policy_cache: (
         tuple[str, tuple[tuple[str, bool], ...], WorkspacePathPolicy] | None
@@ -631,7 +631,7 @@ class BaseSandboxSession(abc.ABC):
             self._runtime_helpers_installed = None
             self._runtime_helper_cache_key = current_key
 
-    async def _ensure_runtime_helper_installed(self, helper: RuntimeHelperScript) -> Path:
+    async def _ensure_runtime_helper_installed(self, helper: RuntimeHelperScript) -> PurePath:
         self._sync_runtime_helper_install_cache()
         installed = self._runtime_helpers_installed
         if installed is None:
@@ -701,20 +701,20 @@ class BaseSandboxSession(abc.ABC):
         target, while still rejecting paths whose resolved remote target escapes all allowed roots.
         """
 
-        original_path = Path(path)
-        root = Path(self.state.manifest.root)
+        original_path = PurePosixPath(path.as_posix() if isinstance(path, PurePath) else path)
         path_policy = self._workspace_path_policy()
-        workspace_path = path_policy.normalize_path(original_path, for_write=for_write)
+        root = path_policy.sandbox_root()
+        workspace_path = path_policy.normalize_sandbox_path(original_path, for_write=for_write)
         helper_path = await self._ensure_runtime_helper_installed(RESOLVE_WORKSPACE_PATH_HELPER)
         extra_grant_args = tuple(
             arg
             for root, read_only in path_policy.extra_path_grant_rules()
-            for arg in (str(root), "1" if read_only else "0")
+            for arg in (root.as_posix(), "1" if read_only else "0")
         )
         command = (
             str(helper_path),
-            str(root),
-            str(workspace_path),
+            root.as_posix(),
+            workspace_path.as_posix(),
             "1" if for_write else "0",
             *extra_grant_args,
         )
@@ -724,12 +724,12 @@ class BaseSandboxSession(abc.ABC):
             if resolved:
                 # Preserve the requested workspace path so leaf symlinks keep their normal
                 # semantics while the remote realpath check still enforces path confinement.
-                return workspace_path
+                return cast(Path, workspace_path)
             raise ExecTransportError(
                 command=(
                     "resolve_workspace_path",
-                    str(root),
-                    str(workspace_path),
+                    root.as_posix(),
+                    workspace_path.as_posix(),
                     "1" if for_write else "0",
                     *extra_grant_args,
                 ),
@@ -746,7 +746,7 @@ class BaseSandboxSession(abc.ABC):
         )
         if result.exit_code == 111:
             raise InvalidManifestPathError(
-                rel=original_path,
+                rel=original_path.as_posix(),
                 reason=reason,
                 context={
                     "resolved_path": result.stderr.decode("utf-8", errors="replace").strip(),
@@ -762,13 +762,13 @@ class BaseSandboxSession(abc.ABC):
                     context["grant_path"] = line.removeprefix("read-only extra path grant: ")
                 elif line.startswith("resolved path: "):
                     context["resolved_path"] = line.removeprefix("resolved path: ")
-            raise WorkspaceArchiveWriteError(path=workspace_path, context=context)
+            raise WorkspaceArchiveWriteError(path=Path(workspace_path.as_posix()), context=context)
         raise ExecNonZeroError(
             result,
             command=(
                 "resolve_workspace_path",
-                str(root),
-                str(workspace_path),
+                root.as_posix(),
+                workspace_path.as_posix(),
                 "1" if for_write else "0",
                 *extra_grant_args,
             ),
