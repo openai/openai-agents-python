@@ -298,7 +298,7 @@ class DockerSandboxSession(BaseSandboxSession):
                 await self._exec_checked(
                     "mkdir",
                     "-p",
-                    str(dst_child),
+                    sandbox_path_str(dst_child),
                     error_cls=WorkspaceArchiveReadError,
                     error_path=src_child,
                 )
@@ -314,8 +314,8 @@ class DockerSandboxSession(BaseSandboxSession):
                 "cp",
                 "-R",
                 "--",
-                str(src_child),
-                str(dst_child),
+                sandbox_path_str(src_child),
+                sandbox_path_str(dst_child),
                 error_cls=WorkspaceArchiveReadError,
                 error_path=src_child,
             )
@@ -337,7 +337,7 @@ class DockerSandboxSession(BaseSandboxSession):
         await self._exec_checked(
             "mkdir",
             "-p",
-            str(staging_parent),
+            sandbox_path_str(staging_parent),
             error_cls=WorkspaceArchiveReadError,
             error_path=root,
         )
@@ -347,7 +347,7 @@ class DockerSandboxSession(BaseSandboxSession):
             await self._exec_checked(
                 "mkdir",
                 "-p",
-                str(staging_workspace),
+                sandbox_path_str(staging_workspace),
                 error_cls=WorkspaceArchiveReadError,
                 error_path=root,
             )
@@ -355,7 +355,7 @@ class DockerSandboxSession(BaseSandboxSession):
             await self._exec_checked(
                 "mkdir",
                 "-p",
-                str(staging_workspace),
+                sandbox_path_str(staging_workspace),
                 error_cls=WorkspaceArchiveReadError,
                 error_path=root,
             )
@@ -371,7 +371,7 @@ class DockerSandboxSession(BaseSandboxSession):
                 "-R",
                 "--",
                 root.as_posix(),
-                str(staging_workspace),
+                sandbox_path_str(staging_workspace),
                 error_cls=WorkspaceArchiveReadError,
                 error_path=root,
             )

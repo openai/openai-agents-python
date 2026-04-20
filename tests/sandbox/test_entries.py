@@ -293,7 +293,51 @@ async def test_local_dir_apply_rejects_source_root_swapped_to_symlink_after_vali
         dir_fd: int | None = None,
     ) -> int:
         nonlocal swapped
-        if (path == "src" or Path(path) == src_root) and not swapped:
+        if (path == "src" or Path(path) in {src_root, src_root / "safe.txt"}) and not swapped:
+            src_root.rename(tmp_path / "src-original")
+            (tmp_path / "src").symlink_to(secret_dir, target_is_directory=True)
+            swapped = True
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.open", swap_root_then_open)
+
+    with pytest.raises(LocalDirReadError) as excinfo:
+        await local_dir.apply(session, Path("/workspace/copied"), tmp_path)
+
+    assert excinfo.value.context["reason"] == "symlink_not_supported"
+    assert excinfo.value.context["child"] == "src"
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_dir_apply_fallback_rejects_source_root_swapped_to_symlink_after_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    src_root = tmp_path / "src"
+    src_root.mkdir()
+    (src_root / "safe.txt").write_text("safe", encoding="utf-8")
+    secret_dir = tmp_path / "secret-dir"
+    secret_dir.mkdir()
+    session = _RecordingSession()
+    local_dir = LocalDir(src=Path("src"))
+    original_open = os.open
+    swapped = False
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts._OPEN_SUPPORTS_DIR_FD", False)
+    monkeypatch.setattr("agents.sandbox.entries.artifacts._HAS_O_DIRECTORY", False)
+
+    def swap_root_then_open(
+        path: str | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if Path(path) == src_root / "safe.txt" and not swapped:
             src_root.rename(tmp_path / "src-original")
             (tmp_path / "src").symlink_to(secret_dir, target_is_directory=True)
             swapped = True
