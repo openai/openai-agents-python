@@ -109,6 +109,19 @@ try:
 except Exception:  # pragma: no cover
     _HAS_VERCEL = False
 
+try:
+    from .boxlite import (
+        DEFAULT_BOXLITE_WORKSPACE_ROOT as DEFAULT_BOXLITE_WORKSPACE_ROOT,
+        BoxliteSandboxClient as BoxliteSandboxClient,
+        BoxliteSandboxClientOptions as BoxliteSandboxClientOptions,
+        BoxliteSandboxSession as BoxliteSandboxSession,
+        BoxliteSandboxSessionState as BoxliteSandboxSessionState,
+    )
+
+    _HAS_BOXLITE = True
+except Exception:  # pragma: no cover
+    _HAS_BOXLITE = False
+
 __all__: list[str] = []
 
 if _HAS_E2B:
@@ -184,6 +197,17 @@ if _HAS_VERCEL:
             "VercelSandboxClientOptions",
             "VercelSandboxSession",
             "VercelSandboxSessionState",
+        ]
+    )
+
+if _HAS_BOXLITE:
+    __all__.extend(
+        [
+            "DEFAULT_BOXLITE_WORKSPACE_ROOT",
+            "BoxliteSandboxClient",
+            "BoxliteSandboxClientOptions",
+            "BoxliteSandboxSession",
+            "BoxliteSandboxSessionState",
         ]
     )
 

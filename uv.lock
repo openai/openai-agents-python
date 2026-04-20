@@ -386,6 +386,31 @@ wheels = [
 ]
 
 [[package]]
+name = "boxlite"
+version = "0.8.2"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dc/2a/ce1d378a9c59cba841163ef5e27985eb0b0fab8948a9e05edc47addf6418/boxlite-0.8.2-cp310-cp310-macosx_14_0_arm64.whl", hash = "sha256:c71441955f36685b4dda595afb69aab6291c0916f5f457f287d4e5c1bb4723be", size = 34296300, upload-time = "2026-04-02T11:01:37.677Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/82/234b948a0c77fdf3065492fd880c947616b6a18500b2462a6ccadcf74b7d/boxlite-0.8.2-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:d98860dfe382f01d4f4bf5337969a880e3d8d2d9520aa342cb13344175ad4381", size = 36286129, upload-time = "2026-04-02T11:01:40.976Z" },
+    { url = "https://files.pythonhosted.org/packages/7c/5d/6f17f651784110b0581ca3223cdb9646e73337761be1c13e971e33227c8b/boxlite-0.8.2-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:4e40ee214f0451ca993f6524cf9313b53fb5a95a30df4059621bca03b7903ee5", size = 32379685, upload-time = "2026-04-02T11:01:43.766Z" },
+    { url = "https://files.pythonhosted.org/packages/24/b0/9f856436299e01a52104cac7cf43f7a5ad0418032b01417c7745396e3d86/boxlite-0.8.2-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:7f91cbc9675ae41a8858c3ac1056141100741f4eeb3838ec76e3a5af1b88f5a3", size = 34296886, upload-time = "2026-04-02T11:01:46.451Z" },
+    { url = "https://files.pythonhosted.org/packages/12/f4/4c68a0334746a14b226f9949be903a48be4d1a79b243dbf1dd37d27a4b48/boxlite-0.8.2-cp311-cp311-manylinux_2_28_aarch64.whl", hash = "sha256:7b88ade99ae005fc68f84b265dba88f142ff9cdf6f50563e60328863728db6f1", size = 36285542, upload-time = "2026-04-02T11:01:49.019Z" },
+    { url = "https://files.pythonhosted.org/packages/7c/04/c844fd5b58a1a6ddcf20961f185ce39ecd6382c3694295454e986cebda6d/boxlite-0.8.2-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:42925f57532c4fed1ec47acba4649703eb63a86de7457af81be433547d1415f0", size = 32379257, upload-time = "2026-04-02T11:01:51.816Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/d0/c8036da6041e159b1b286fa1c5cc1548263be2f3bd2119beb248493d8be8/boxlite-0.8.2-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:95c50dacb01755650021a84b6d88089970524a26e35170202fc602af8010d627", size = 34294066, upload-time = "2026-04-02T11:01:54.531Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/3b/ea99ae3c6dcd6175888420604c2f316273f4706e9a8035a6b563bb3d97ed/boxlite-0.8.2-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:b94914de6c714b5eebab193f82a3b20162c49992a938b55bb03c3575fe8d8e6b", size = 36274983, upload-time = "2026-04-02T11:01:57.434Z" },
+    { url = "https://files.pythonhosted.org/packages/f7/9a/363b8f185bf887ece70abc69ae4e294e45cd385aabbe9ff3703beba0e6c9/boxlite-0.8.2-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:827b7d7d65dddd10c475afe5edb94db0eb34ec0067cd899a5d9107b8b804d546", size = 32376800, upload-time = "2026-04-02T11:02:00.322Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/3a/5ba99e68957bf1acb43b8f12ceb5111fed90a67639034252cd6ddfa9c003/boxlite-0.8.2-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:65a6d3f7f1eaa4bd8fb4703d6dbf3403167478b1dd5be9d1e589466e83c3e730", size = 34294278, upload-time = "2026-04-02T11:02:02.757Z" },
+    { url = "https://files.pythonhosted.org/packages/68/36/6f2919d8cf79a8260938b9d0fac9afab586e6d28ae5f0a52cf3ceb68a75b/boxlite-0.8.2-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:9b29c2b91a1b1e869df50702cc19d101578a97e7ac823ec73f8242b77937fa2d", size = 36274095, upload-time = "2026-04-02T11:02:05.502Z" },
+    { url = "https://files.pythonhosted.org/packages/02/36/0e56a5ecf89a82923b2d78faa2117503a5318a1050ce5bba1a6a60b6582d/boxlite-0.8.2-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:56e15e724e8491ce8529e57bd691d5afc5e855af2569bc2303c40849cc6bce44", size = 32375933, upload-time = "2026-04-02T11:02:08.48Z" },
+    { url = "https://files.pythonhosted.org/packages/74/7c/085b6a7dd032b1c9c33a195c91668fc59dd14f18287e0dabcfe455da3537/boxlite-0.8.2-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:13066929107776dd0bf41beda48be8f5a8de5c76fb91bad37a42fc4b4c3e0988", size = 34294166, upload-time = "2026-04-02T11:02:11.073Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/86/ef91d47845160933c7f79134d5aed0d4d17f0edba1240ecdfb9cde5e4580/boxlite-0.8.2-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:29a51c979632d9a7d09f696d77305774b60b975bfd91aca79af941b516e041ed", size = 36275704, upload-time = "2026-04-02T11:02:13.672Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/e4/99cd86a9eb90724adf356649284bacff80d8bb48ed1ed02654bf70ba4625/boxlite-0.8.2-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:af88caa5fb6f6166cb0f55ec45c8de5331e13455aa542046efa2809a969b6ae6", size = 32372787, upload-time = "2026-04-02T11:02:16.079Z" },
+    { url = "https://files.pythonhosted.org/packages/1f/a1/761430becf22917f910062509d50755652e7634c2ac096bfd4f486f9739c/boxlite-0.8.2-cp314-cp314t-macosx_14_0_arm64.whl", hash = "sha256:5c0999a0e47d9ede99598aa6888e0314076a52fb4366bc923c5e39408ed73e92", size = 34293175, upload-time = "2026-04-02T11:02:19.181Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/2f/8295cbf15e5f6fa013760d7bc1128b7106ee40aa4da4076a42fe1690e8f4/boxlite-0.8.2-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:d631a8a0ae60e16aa626d8f0562adb0fae4779847be1f9aebcc14076e19813b2", size = 36276827, upload-time = "2026-04-02T11:02:22.316Z" },
+    { url = "https://files.pythonhosted.org/packages/51/c5/bc327b2a3ea18e173cd81eafb5e9db84c40a558e4e5513b7f4b946a16f5f/boxlite-0.8.2-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:16249ec7471652326118a38862c550170cba0c5f9a896f5a06958f7cc9a6022a", size = 32371802, upload-time = "2026-04-02T11:02:25.141Z" },
+]
+
+[[package]]
 name = "bracex"
 version = "2.6"
 source = { registry = "https://pypi.org/simple" }
@@ -2449,6 +2474,9 @@ blaxel = [
     { name = "aiohttp" },
     { name = "blaxel" },
 ]
+boxlite = [
+    { name = "boxlite" },
+]
 cloudflare = [
     { name = "aiohttp" },
 ]
@@ -2552,6 +2580,7 @@ requires-dist = [
     { name = "asyncpg", marker = "extra == 'sqlalchemy'", specifier = ">=0.29.0" },
     { name = "blaxel", marker = "extra == 'blaxel'", specifier = ">=0.2.50" },
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34" },
+    { name = "boxlite", marker = "extra == 'boxlite'", specifier = ">=0.8.2" },
     { name = "cryptography", marker = "extra == 'encrypt'", specifier = ">=45.0,<46" },
     { name = "dapr", marker = "extra == 'dapr'", specifier = ">=1.16.0" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = ">=0.155.0" },
@@ -2581,7 +2610,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<16" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<16" },
 ]
-provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "docker", "blaxel", "daytona", "cloudflare", "e2b", "modal", "runloop", "vercel", "s3", "temporal"]
+provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "docker", "blaxel", "daytona", "cloudflare", "e2b", "modal", "runloop", "vercel", "boxlite", "s3", "temporal"]
 
 [package.metadata.requires-dev]
 dev = [
