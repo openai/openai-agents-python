@@ -109,17 +109,35 @@ class LocalFile(BaseEntry):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
-        src = (base_dir / self.src).resolve()
+        src = base_dir / self.src
+        src = src if src.is_absolute() else src.absolute()
+        local_dir = LocalDir(src=self.src.parent)
+        rel_child = Path(self.src.name)
+        fd: int | None = None
         try:
             checksum = sha256_file(src)
         except OSError as e:
             raise LocalChecksumError(src=src, cause=e) from e
         await session.mkdir(Path(dest).parent, parents=True)
         try:
-            with src.open("rb") as f:
+            src_root = local_dir._resolve_local_dir_src_root(base_dir)
+            fd = local_dir._open_local_dir_file_for_copy(
+                base_dir=base_dir,
+                src_root=src_root,
+                rel_child=rel_child,
+            )
+            with os.fdopen(fd, "rb") as f:
+                fd = None
                 await session.write(dest, f)
+        except LocalDirReadError as e:
+            context = dict(e.context)
+            context.pop("src", None)
+            raise LocalFileReadError(src=src, context=context, cause=e.cause) from e
         except OSError as e:
             raise LocalFileReadError(src=src, cause=e) from e
+        finally:
+            if fd is not None:
+                os.close(fd)
         await self._apply_metadata(session, dest)
         return [MaterializedFile(path=dest, sha256=checksum)]
 
