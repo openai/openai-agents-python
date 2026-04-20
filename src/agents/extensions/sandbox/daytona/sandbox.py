@@ -64,7 +64,12 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
-from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
+from ....sandbox.workspace_paths import (
+    coerce_posix_path,
+    posix_path_as_path,
+    posix_path_for_error,
+    sandbox_path_str,
+)
 
 DEFAULT_DAYTONA_WORKSPACE_ROOT = "/home/daytona/workspace"
 logger = logging.getLogger(__name__)
@@ -365,21 +370,22 @@ class DaytonaSandboxSession(BaseSandboxSession):
 
     async def _prepare_workspace_root(self) -> None:
         """Create the workspace root before SDK exec calls use it as cwd."""
-        root = Path(self.state.manifest.root)
+        root = sandbox_path_str(self.state.manifest.root)
+        error_root = posix_path_for_error(root)
         try:
             envs = await self._resolved_envs()
             result = await self._sandbox.process.exec(
-                f"mkdir -p -- {shlex.quote(str(root))}",
+                f"mkdir -p -- {shlex.quote(root)}",
                 env=envs or None,
                 timeout=self.state.timeouts.fast_op_s,
             )
         except Exception as e:
-            raise WorkspaceStartError(path=root, cause=e) from e
+            raise WorkspaceStartError(path=error_root, cause=e) from e
 
         exit_code = int(getattr(result, "exit_code", 0) or 0)
         if exit_code != 0:
             raise WorkspaceStartError(
-                path=root,
+                path=error_root,
                 context={
                     "reason": "workspace_root_nonzero_exit",
                     "exit_code": exit_code,
