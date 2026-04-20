@@ -303,6 +303,29 @@ def test_windows_drive_absolute_path_is_rejected_before_posix_coercion() -> None
     assert exc_info.value.context == {"rel": "C:/tmp/secret.txt", "reason": "absolute"}
 
 
+def test_existing_host_root_rejects_windows_drive_absolute_paths(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    policy = WorkspacePathPolicy(root=workspace)
+    methods: tuple[PathPolicyMethod, ...] = (
+        lambda policy, path: policy.absolute_workspace_path(path),
+        lambda policy, path: policy.normalize_path(path),
+        lambda policy, path: policy.normalize_path(path, resolve_symlinks=True),
+    )
+
+    for method in methods:
+        for path in (
+            PureWindowsPath("C:/tmp/secret.txt"),
+            "C:\\tmp\\secret.txt",
+            coerce_posix_path(PureWindowsPath("C:/tmp/secret.txt")),
+        ):
+            with pytest.raises(InvalidManifestPathError) as exc_info:
+                method(policy, path)
+
+            assert str(exc_info.value) == "manifest path must be relative: C:/tmp/secret.txt"
+            assert exc_info.value.context == {"rel": "C:/tmp/secret.txt", "reason": "absolute"}
+
+
 def test_relative_path_rejects_windows_drive_absolute_path_for_host_root(
     tmp_path: Path,
 ) -> None:
@@ -339,6 +362,29 @@ def test_sandbox_extra_path_grant_rules_use_posix_paths() -> None:
     assert policy.normalize_sandbox_path(PureWindowsPath("/tmp/result.txt")) == (
         PurePosixPath("/tmp/result.txt")
     )
+
+
+def test_extra_path_grant_rejects_windows_drive_absolute_path() -> None:
+    for path in (
+        PureWindowsPath("C:/tmp"),
+        "C:\\tmp",
+        coerce_posix_path(PureWindowsPath("C:/tmp")),
+    ):
+        with pytest.raises(ValidationError) as exc_info:
+            SandboxPathGrant(path=cast(Any, path))
+
+        errors = exc_info.value.errors(include_url=False)
+        assert len(errors) == 1
+        error = dict(errors[0])
+        ctx = cast(dict[str, Any], error["ctx"])
+        error["ctx"] = {"error": str(ctx["error"])}
+        assert error == {
+            "type": "value_error",
+            "loc": ("path",),
+            "msg": "Value error, sandbox path grant path must be POSIX absolute",
+            "input": path,
+            "ctx": {"error": "sandbox path grant path must be POSIX absolute"},
+        }
 
 
 def test_manifest_serializes_extra_path_grants() -> None:

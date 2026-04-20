@@ -41,6 +41,16 @@ def resolve_workspace_path(
             raise InvalidManifestPathError(rel=rel_path.as_posix(), reason="absolute")
         rel_path = PurePosixPath(posixpath.normpath(rel_path.as_posix()))
         root_path = PurePosixPath(posixpath.normpath(root_path.as_posix()))
+        host_root = Path(root_path.as_posix())
+        if _path_exists(host_root):
+            try:
+                Path(rel_path.as_posix()).resolve(strict=False).relative_to(
+                    host_root.resolve(strict=False)
+                )
+            except ValueError as exc:
+                raise InvalidManifestPathError(
+                    rel=rel_path.as_posix(), reason="absolute", cause=exc
+                ) from exc
         try:
             rel_path.relative_to(root_path)
         except ValueError as exc:
@@ -61,6 +71,13 @@ def resolve_workspace_path(
                 rel=rel_path.as_posix(), reason="escape_root", cause=exc
             ) from exc
     return posix_path_as_path(resolved)
+
+
+def _path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
 
 
 class BaseEntry(BaseModel, abc.ABC):

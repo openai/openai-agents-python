@@ -64,6 +64,11 @@ def sandbox_path_str(path: str | PurePath) -> str:
     return coerce_posix_path(path).as_posix()
 
 
+def _native_path_from_windows_absolute(path: PureWindowsPath) -> Path | None:
+    native_path = Path(path)
+    return native_path if native_path.is_absolute() else None
+
+
 class SandboxPathGrant(BaseModel):
     """Extra absolute path access outside the sandbox workspace."""
 
@@ -83,15 +88,13 @@ class SandboxPathGrant(BaseModel):
     @field_validator("path")
     @classmethod
     def _validate_path(cls, value: str) -> str:
+        if windows_absolute_path(value) is not None:
+            raise ValueError("sandbox path grant path must be POSIX absolute")
+
         path = PurePosixPath(posixpath.normpath(value))
         if path.is_absolute():
             _raise_if_filesystem_root(path)
             return path.as_posix()
-
-        windows_path = PureWindowsPath(value)
-        if windows_path.is_absolute():
-            _raise_if_filesystem_root(windows_path)
-            return windows_path.as_posix()
 
         raise ValueError("sandbox path grant path must be absolute")
 
@@ -120,8 +123,9 @@ class WorkspacePathPolicy:
         """
 
         if (windows_path := windows_absolute_path(path)) is not None:
-            if self._root_is_existing_host_path:
-                result, _grant = self._resolved_host_path_and_grant(Path(windows_path))
+            native_path = _native_path_from_windows_absolute(windows_path)
+            if self._root_is_existing_host_path and native_path is not None:
+                result, _grant = self._resolved_host_path_and_grant(native_path)
                 return result
             raise self._invalid_path_error(windows_path)
         normalized = self._absolute_workspace_posix_path(coerce_posix_path(path))
@@ -161,12 +165,18 @@ class WorkspacePathPolicy:
         """
 
         if resolve_symlinks:
-            original = Path(path)
+            if (windows_path := windows_absolute_path(path)) is not None:
+                original = _native_path_from_windows_absolute(windows_path)
+                if original is None:
+                    raise self._invalid_path_error(windows_path)
+            else:
+                original = Path(path)
             result, grant = self._resolved_host_path_and_grant(original)
         else:
             if (windows_path := windows_absolute_path(path)) is not None:
-                if self._root_is_existing_host_path:
-                    result, grant = self._resolved_host_path_and_grant(Path(windows_path))
+                native_path = _native_path_from_windows_absolute(windows_path)
+                if self._root_is_existing_host_path and native_path is not None:
+                    result, grant = self._resolved_host_path_and_grant(native_path)
                     if for_write:
                         self._raise_if_read_only_grant(result, grant)
                     return result

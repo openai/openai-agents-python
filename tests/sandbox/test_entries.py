@@ -122,6 +122,32 @@ def test_resolve_workspace_path_rejects_absolute_escape_after_normalization() ->
     assert exc_info.value.context == {"rel": "/etc/passwd", "reason": "absolute"}
 
 
+def test_resolve_workspace_path_rejects_absolute_symlink_escape_for_host_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    link = root / "link"
+    try:
+        os.symlink(outside, link, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    escaped = link / "secret.txt"
+
+    with pytest.raises(InvalidManifestPathError) as exc_info:
+        resolve_workspace_path(
+            root,
+            escaped,
+            allow_absolute_within_root=True,
+        )
+
+    assert str(exc_info.value) == f"manifest path must be relative: {escaped.as_posix()}"
+    assert exc_info.value.context == {"rel": escaped.as_posix(), "reason": "absolute"}
+
+
 @pytest.mark.asyncio
 async def test_base_sandbox_session_uses_current_working_directory_for_local_file_sources(
     monkeypatch: pytest.MonkeyPatch,
