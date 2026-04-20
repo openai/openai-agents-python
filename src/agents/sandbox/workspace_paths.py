@@ -83,7 +83,7 @@ class WorkspacePathPolicy:
     ) -> None:
         self._root = Path(root)
         self._sandbox_root = coerce_posix_path(root)
-        self._root_is_existing_host_path = self._root.exists()
+        self._root_is_existing_host_path = self._path_exists(self._root)
         self._extra_path_grants = extra_path_grants
 
     def absolute_workspace_path(self, path: str | PurePath) -> Path:
@@ -236,6 +236,13 @@ class WorkspacePathPolicy:
 
     def _normalized_root(self) -> PurePosixPath:
         return PurePosixPath(posixpath.normpath(self._sandbox_root.as_posix()))
+
+    @staticmethod
+    def _path_exists(path: Path) -> bool:
+        try:
+            return path.exists()
+        except OSError:
+            return False
 
     def _path_result(self, path: PurePosixPath) -> Path:
         if self._root_is_existing_host_path:

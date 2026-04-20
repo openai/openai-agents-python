@@ -251,6 +251,22 @@ def test_normalize_path_uses_posix_paths_for_windows_inputs() -> None:
     )
 
 
+def test_inaccessible_root_is_treated_as_remote_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    root = PurePosixPath("/root/project")
+
+    def raise_for_root(path: Path) -> bool:
+        if path.as_posix() == root.as_posix():
+            raise PermissionError("permission denied")
+        return False
+
+    monkeypatch.setattr(Path, "exists", raise_for_root)
+
+    policy = WorkspacePathPolicy(root=root)
+
+    assert policy.root_is_existing_host_path() is False
+    assert policy.normalize_path("pkg/file.py").as_posix() == "/root/project/pkg/file.py"
+
+
 def test_absolute_workspace_path_rejects_windows_rooted_escape_as_absolute() -> None:
     policy = WorkspacePathPolicy(root="/workspace")
 
