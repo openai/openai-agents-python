@@ -120,7 +120,7 @@ jobs:
         uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57
         with:
           enable-cache: true
-          python-version: "3.14"
+          python-version: "3.13"
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: uv sync --all-extras --all-packages --group dev
