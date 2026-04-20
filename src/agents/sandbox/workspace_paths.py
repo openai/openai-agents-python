@@ -137,10 +137,6 @@ class WorkspacePathPolicy:
         """
 
         if (windows_path := windows_absolute_path(path)) is not None:
-            if self._root_is_existing_host_path:
-                result, _grant = self._resolved_host_path_and_grant(Path(windows_path))
-                host_relative = result.relative_to(self._root.resolve(strict=False))
-                return host_relative if host_relative.parts else Path(".")
             raise self._invalid_path_error(windows_path)
         normalized = self._absolute_workspace_posix_path(coerce_posix_path(path))
         root = self._normalized_root()

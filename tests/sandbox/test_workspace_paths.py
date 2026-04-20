@@ -303,6 +303,25 @@ def test_windows_drive_absolute_path_is_rejected_before_posix_coercion() -> None
     assert exc_info.value.context == {"rel": "C:/tmp/secret.txt", "reason": "absolute"}
 
 
+def test_relative_path_rejects_windows_drive_absolute_path_for_host_root(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    policy = WorkspacePathPolicy(root=workspace)
+
+    for path in (
+        PureWindowsPath("C:/tmp/secret.txt"),
+        "C:\\tmp\\secret.txt",
+        coerce_posix_path(PureWindowsPath("C:/tmp/secret.txt")),
+    ):
+        with pytest.raises(InvalidManifestPathError) as exc_info:
+            policy.relative_path(path)
+
+        assert str(exc_info.value) == "manifest path must be relative: C:/tmp/secret.txt"
+        assert exc_info.value.context == {"rel": "C:/tmp/secret.txt", "reason": "absolute"}
+
+
 def test_posix_path_as_path_returns_native_path() -> None:
     path = posix_path_as_path(PurePosixPath("/workspace/file.txt"))
 
