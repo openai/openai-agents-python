@@ -81,7 +81,7 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
         _assert_blaxel_session(session)
         _ = base_dir
         mount_path = mount._resolve_mount_path(session, dest)
-        config = _build_mount_config(mount, mount_path=str(mount_path))
+        config = _build_mount_config(mount, mount_path=mount_path.as_posix())
         await _mount_bucket(session, config)
         return []
 
@@ -95,7 +95,7 @@ class BlaxelCloudBucketMountStrategy(MountStrategyBase):
         _assert_blaxel_session(session)
         _ = base_dir
         mount_path = mount._resolve_mount_path(session, dest)
-        await _unmount_bucket(session, str(mount_path))
+        await _unmount_bucket(session, mount_path.as_posix())
 
     async def teardown_for_snapshot(
         self,

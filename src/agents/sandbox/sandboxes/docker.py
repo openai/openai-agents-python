@@ -71,6 +71,7 @@ from ..util.retry import (
     retry_async,
 )
 from ..util.tar_utils import UnsafeTarMemberError, strip_tar_member_prefix, validate_tarfile
+from ..workspace_paths import coerce_posix_path, posix_path_as_path
 
 _DOCKER_EXECUTOR: Final = ThreadPoolExecutor(
     max_workers=8,
@@ -160,7 +161,9 @@ class DockerSandboxSession(BaseSandboxSession):
     _reserved_pty_process_ids: set[int]
 
     state: DockerSandboxSessionState
-    _ARCHIVE_STAGING_DIR: Path = Path("/tmp/sandbox-docker-archive")
+    _ARCHIVE_STAGING_DIR: Path = posix_path_as_path(
+        coerce_posix_path("/tmp/sandbox-docker-archive")
+    )
 
     def __init__(
         self,
@@ -317,7 +320,7 @@ class DockerSandboxSession(BaseSandboxSession):
         *,
         skip_rel_paths: set[Path],
     ) -> tuple[Path, Path]:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         root_name = root.name or "workspace"
         staging_parent = self._archive_stage_path(name_hint="workspace")
         staging_workspace = staging_parent / root_name
@@ -362,7 +365,7 @@ class DockerSandboxSession(BaseSandboxSession):
                 "cp",
                 "-R",
                 "--",
-                str(root),
+                root.as_posix(),
                 str(staging_workspace),
                 error_cls=WorkspaceArchiveReadError,
                 error_path=root,
@@ -1196,7 +1199,7 @@ class DockerSandboxSession(BaseSandboxSession):
     )
     async def persist_workspace(self) -> io.IOBase:
         skip = self._persist_workspace_skip_relpaths()
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         try:
             staging_parent, staging_workspace = await self._stage_workspace_copy(
                 skip_rel_paths=skip
@@ -1212,7 +1215,7 @@ class DockerSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveReadError(path=root, cause=e) from e
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         with tempfile.TemporaryFile() as archive:
             while True:
                 chunk = data.read(io.DEFAULT_BUFFER_SIZE)
@@ -1243,13 +1246,13 @@ class DockerSandboxSession(BaseSandboxSession):
             await self._exec_checked(
                 "mkdir",
                 "-p",
-                str(root),
+                root.as_posix(),
                 error_cls=WorkspaceArchiveWriteError,
                 error_path=root,
             )
             archive.seek(0)
             await self._stream_into_exec(
-                cmd=["tar", "-x", "-C", str(root)],
+                cmd=["tar", "-x", "-C", root.as_posix()],
                 stream=archive,
                 error_path=root,
             )
@@ -1525,7 +1528,7 @@ def _build_docker_volume_mounts(
         driver_name, driver_options, read_only = driver_config
         mounts.append(
             DockerSDKMount(
-                target=str(mount_path),
+                target=mount_path.as_posix(),
                 source=_docker_volume_name(session_id=session_id, mount_path=mount_path),
                 type="volume",
                 read_only=read_only,
@@ -1549,7 +1552,7 @@ def _docker_volume_names_for_manifest(
 
 def _docker_volume_mounts_for_manifest(manifest: Manifest) -> list[tuple[Mount, Path]]:
     mounts: list[tuple[Mount, Path]] = []
-    root = Path(manifest.root)
+    root = posix_path_as_path(coerce_posix_path(manifest.root))
     for rel_path, artifact in manifest.iter_entries():
         if not isinstance(artifact, Mount):
             continue
@@ -1571,6 +1574,7 @@ def _docker_volume_name(*, session_id: uuid.UUID | None, mount_path: Path) -> st
     # Keep the readable path suffix, but include a path hash so distinct mount
     # targets like `/workspace/a_b` and `/workspace/a/b` cannot alias after
     # slash replacement.
-    path_hash = hashlib.sha256(str(mount_path).encode("utf-8")).hexdigest()[:12]
-    sanitized = re.sub(r"[^A-Za-z0-9_.-]", "_", str(mount_path).strip("/")) or "workspace"
+    mount_path_posix = mount_path.as_posix()
+    path_hash = hashlib.sha256(mount_path_posix.encode("utf-8")).hexdigest()[:12]
+    sanitized = re.sub(r"[^A-Za-z0-9_.-]", "_", mount_path_posix.strip("/")) or "workspace"
     return f"sandbox_{session_prefix}{path_hash}_{sanitized}"

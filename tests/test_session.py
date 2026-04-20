@@ -1,6 +1,7 @@
 """Tests for session memory functionality."""
 
 import asyncio
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -212,6 +213,25 @@ async def test_sqlite_session_memory_direct():
         assert len(retrieved_after_clear) == 0
 
         session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_close_closes_worker_thread_connections():
+    """Test that close cleans up connections opened by async worker threads."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_worker_thread_close.db"
+        session = SQLiteSession("worker_thread_close", db_path)
+
+        await session.add_items([{"role": "user", "content": "Hello"}])
+        connections = list(session._connections)
+
+        assert connections
+
+        session.close()
+
+        assert session._connections == set()
+        with pytest.raises(sqlite3.ProgrammingError):
+            connections[0].execute("SELECT 1")
 
 
 @pytest.mark.asyncio

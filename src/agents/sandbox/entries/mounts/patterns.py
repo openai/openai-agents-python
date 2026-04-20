@@ -17,6 +17,7 @@ from ...errors import (
     MountToolMissingError,
     WorkspaceReadNotFoundError,
 )
+from ...workspace_paths import coerce_posix_path, posix_path_as_path
 
 if TYPE_CHECKING:
     from ...session.base_sandbox_session import BaseSandboxSession
@@ -274,13 +275,17 @@ class FuseMountPattern(MountPatternBase):
 
         mount_path = path
         cache_dir = (
-            Path(self.cache_path)
+            posix_path_as_path(coerce_posix_path(self.cache_path))
             if self.cache_path is not None
             # Keep mount scratch state inside the workspace so session helpers can create/write it
             # through the normal workspace-scoped API.
-            else Path(f".sandbox-blobfuse-cache/{session_id.hex}") / account / container
+            else posix_path_as_path(
+                coerce_posix_path(f".sandbox-blobfuse-cache/{session_id.hex}/{account}/{container}")
+            )
         )
-        config_dir = Path(f".sandbox-blobfuse-config/{session_id.hex}")
+        config_dir = posix_path_as_path(
+            coerce_posix_path(f".sandbox-blobfuse-config/{session_id.hex}")
+        )
         config_name = f"{account}_{container}".replace("/", "_")
         config_path = config_dir / f"{config_name}.yaml"
         command_mount_path = session.normalize_path(mount_path)
@@ -333,8 +338,8 @@ class FuseMountPattern(MountPatternBase):
         cmd: list[str] = ["blobfuse2", "mount"]
         if fuse_config.read_only:
             cmd.append("--read-only")
-        cmd.extend(["--config-file", str(command_config_path)])
-        cmd.append(str(mount_path))
+        cmd.extend(["--config-file", command_config_path.as_posix()])
+        cmd.append(mount_path.as_posix())
 
         result = await session.exec(*cmd, shell=False)
         if not result.ok():
@@ -581,7 +586,9 @@ class RcloneMountPattern(MountPatternBase):
         session: BaseSandboxSession,
         config_path: Path,
     ) -> Path:
-        manifest_root = Path(getattr(session.state.manifest, "root", "/"))
+        manifest_root = posix_path_as_path(
+            coerce_posix_path(getattr(session.state.manifest, "root", "/"))
+        )
         if config_path.is_absolute():
             return config_path
         # Relative config paths are resolved inside the sandbox workspace, not relative to the
@@ -812,7 +819,9 @@ class RcloneMountPattern(MountPatternBase):
         session_id_str = session_id.hex
         # Keep generated rclone config under the workspace root so `session.mkdir()` /
         # `session.write()` can handle it without special-casing absolute paths.
-        config_dir = Path(f".sandbox-rclone-config/{session_id_str}")
+        config_dir = posix_path_as_path(
+            coerce_posix_path(f".sandbox-rclone-config/{session_id_str}")
+        )
         config_path = config_dir / f"{rclone_config.remote_name}.conf"
         await session.mkdir(path, parents=True)
         await session.mkdir(config_dir, parents=True)

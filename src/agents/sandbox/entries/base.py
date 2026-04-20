@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from ..errors import InvalidManifestPathError
 from ..materialization import MaterializedFile
 from ..types import FileMode, Group, Permissions, User
+from ..workspace_paths import coerce_posix_path, posix_path_as_path
 
 if TYPE_CHECKING:
     from ..session.base_sandbox_session import BaseSandboxSession
@@ -24,30 +25,32 @@ def resolve_workspace_path(
     *,
     allow_absolute_within_root: bool = False,
 ) -> Path:
-    rel = Path(rel)
-    workspace_root = Path(workspace_root)
+    rel_path = coerce_posix_path(rel)
+    root_path = coerce_posix_path(workspace_root)
 
-    if rel.is_absolute():
+    if rel_path.is_absolute():
         if not allow_absolute_within_root:
-            raise InvalidManifestPathError(rel=rel, reason="absolute")
-        resolved_workspace_root = workspace_root.resolve(strict=False)
-        resolved_rel = rel.resolve(strict=False)
+            raise InvalidManifestPathError(rel=rel_path.as_posix(), reason="absolute")
         try:
-            resolved_rel.relative_to(resolved_workspace_root)
+            rel_path.relative_to(root_path)
         except ValueError as exc:
-            raise InvalidManifestPathError(rel=rel, reason="absolute", cause=exc) from exc
-        return resolved_rel
+            raise InvalidManifestPathError(
+                rel=rel_path.as_posix(), reason="absolute", cause=exc
+            ) from exc
+        return posix_path_as_path(rel_path)
 
-    if ".." in rel.parts:
-        raise InvalidManifestPathError(rel=rel, reason="escape_root")
+    if ".." in rel_path.parts:
+        raise InvalidManifestPathError(rel=rel_path.as_posix(), reason="escape_root")
 
-    resolved = workspace_root / rel if rel.parts else workspace_root
+    resolved = root_path / rel_path if rel_path.parts else root_path
     if allow_absolute_within_root and resolved.is_absolute():
         try:
-            resolved.relative_to(workspace_root)
+            resolved.relative_to(root_path)
         except ValueError as exc:
-            raise InvalidManifestPathError(rel=rel, reason="escape_root", cause=exc) from exc
-    return resolved
+            raise InvalidManifestPathError(
+                rel=rel_path.as_posix(), reason="escape_root", cause=exc
+            ) from exc
+    return posix_path_as_path(resolved)
 
 
 class BaseEntry(BaseModel, abc.ABC):

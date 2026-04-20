@@ -63,6 +63,7 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
+from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path
 
 DEFAULT_DAYTONA_WORKSPACE_ROOT = "/home/daytona/workspace"
 logger = logging.getLogger(__name__)
@@ -782,7 +783,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
             pass
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
-        path = Path(path)
+        path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             workspace_path = await self._check_read_with_exec(path, user=user)
         else:
@@ -809,7 +810,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
         *,
         user: str | User | None = None,
     ) -> None:
-        path = Path(path)
+        path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             await self._check_write_with_exec(path, user=user)
 
@@ -859,7 +860,6 @@ class DaytonaSandboxSession(BaseSandboxSession):
         )
     )
     async def _run_persist_workspace_command(self, tar_cmd: str, tar_path: str) -> bytes:
-        root = self.state.manifest.root
         try:
             envs = await self._resolved_envs()
             result = await self._sandbox.process.exec(
@@ -869,7 +869,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
             )
             if result.exit_code != 0:
                 raise WorkspaceArchiveReadError(
-                    path=Path(root),
+                    path=self._workspace_root_path(),
                     context={"reason": "tar_failed", "output": result.result or ""},
                 )
             return cast(
@@ -882,7 +882,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
         except WorkspaceArchiveReadError:
             raise
         except Exception as e:
-            raise WorkspaceArchiveReadError(path=Path(root), cause=e) from e
+            raise WorkspaceArchiveReadError(path=self._workspace_root_path(), cause=e) from e
 
     async def persist_workspace(self) -> io.IOBase:
         def _error_context_summary(error: WorkspaceArchiveReadError) -> dict[str, str]:
@@ -892,11 +892,11 @@ class DaytonaSandboxSession(BaseSandboxSession):
                 summary["cause"] = str(error.cause)
             return summary
 
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         tar_path = f"/tmp/sandbox-persist-{self.state.session_id.hex}.tar"
         excludes = " ".join(self._tar_exclude_args())
         tar_cmd = (
-            f"tar {excludes} -C {shlex.quote(str(root))} -cf {shlex.quote(tar_path)} ."
+            f"tar {excludes} -C {shlex.quote(root.as_posix())} -cf {shlex.quote(tar_path)} ."
         ).strip()
 
         unmounted_mounts: list[tuple[Mount, Path]] = []
@@ -964,7 +964,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
         return io.BytesIO(raw)
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
-        root = self.state.manifest.root
+        root = self._workspace_root_path()
         tar_path = f"/tmp/sandbox-hydrate-{self.state.session_id.hex}.tar"
         payload = data.read()
         if isinstance(payload, str):
@@ -976,7 +976,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
             validate_tar_bytes(bytes(payload))
         except UnsafeTarMemberError as e:
             raise WorkspaceArchiveWriteError(
-                path=Path(root),
+                path=root,
                 context={
                     "reason": "unsafe_or_invalid_tar",
                     "member": e.member,
@@ -994,19 +994,19 @@ class DaytonaSandboxSession(BaseSandboxSession):
                 timeout=self.state.timeouts.file_upload_s,
             )
             result = await self._sandbox.process.exec(
-                f"tar -C {shlex.quote(root)} -xf {shlex.quote(tar_path)}",
+                f"tar -C {shlex.quote(root.as_posix())} -xf {shlex.quote(tar_path)}",
                 env=envs or None,
                 timeout=self.state.timeouts.workspace_tar_s,
             )
             if result.exit_code != 0:
                 raise WorkspaceArchiveWriteError(
-                    path=Path(root),
+                    path=root,
                     context={"reason": "tar_extract_failed", "output": result.result or ""},
                 )
         except WorkspaceArchiveWriteError:
             raise
         except Exception as e:
-            raise WorkspaceArchiveWriteError(path=Path(root), cause=e) from e
+            raise WorkspaceArchiveWriteError(path=root, cause=e) from e
         finally:
             try:
                 envs = await self._resolved_envs()

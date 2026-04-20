@@ -65,6 +65,7 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
+from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path
 
 DEFAULT_BLAXEL_WORKSPACE_ROOT = "/workspace"
 logger = logging.getLogger(__name__)
@@ -377,7 +378,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             ) from e
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
-        path = Path(path)
+        path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             workspace_path = await self._check_read_with_exec(path, user=user)
         else:
@@ -407,7 +408,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
         *,
         user: str | User | None = None,
     ) -> None:
-        path = Path(path)
+        path = posix_path_as_path(coerce_posix_path(path))
         if user is not None:
             await self._check_write_with_exec(path, user=user)
 
@@ -525,11 +526,11 @@ class BlaxelSandboxSession(BaseSandboxSession):
         )
     )
     async def persist_workspace(self) -> io.IOBase:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         tar_path = f"/tmp/bl-persist-{self.state.session_id.hex}.tar"
         excludes = " ".join(self._tar_exclude_args())
         tar_cmd = (
-            f"tar {excludes} -C {shlex.quote(str(root))} -cf {shlex.quote(tar_path)} ."
+            f"tar {excludes} -C {shlex.quote(root.as_posix())} -cf {shlex.quote(tar_path)} ."
         ).strip()
 
         unmounted_mounts: list[tuple[Mount, Path]] = []
@@ -596,7 +597,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
         return io.BytesIO(raw)
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
-        root = self.state.manifest.root
+        root = self._workspace_root_path()
         tar_path = f"/tmp/bl-hydrate-{self.state.session_id.hex}.tar"
         payload = data.read()
         if isinstance(payload, str):
@@ -608,7 +609,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             validate_tar_bytes(bytes(payload))
         except UnsafeTarMemberError as e:
             raise WorkspaceArchiveWriteError(
-                path=Path(root),
+                path=root,
                 context={
                     "reason": "unsafe_or_invalid_tar",
                     "member": e.member,
@@ -623,12 +624,12 @@ class BlaxelSandboxSession(BaseSandboxSession):
             result = await self._exec_internal(
                 "sh",
                 "-c",
-                f"tar -C {shlex.quote(root)} -xf {shlex.quote(tar_path)}",
+                f"tar -C {shlex.quote(root.as_posix())} -xf {shlex.quote(tar_path)}",
                 timeout=self.state.timeouts.workspace_tar_s,
             )
             if result.exit_code != 0:
                 raise WorkspaceArchiveWriteError(
-                    path=Path(root),
+                    path=root,
                     context={
                         "reason": "tar_extract_failed",
                         "output": result.stderr.decode("utf-8", errors="replace"),
@@ -637,7 +638,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
         except WorkspaceArchiveWriteError:
             raise
         except Exception as e:
-            raise WorkspaceArchiveWriteError(path=Path(root), cause=e) from e
+            raise WorkspaceArchiveWriteError(path=root, cause=e) from e
         finally:
             try:
                 await self._exec_internal(

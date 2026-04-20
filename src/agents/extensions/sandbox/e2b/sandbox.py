@@ -724,7 +724,7 @@ class E2BSandboxSession(BaseSandboxSession):
 
     async def _ensure_dir(self, path: Path, *, reason: str) -> None:
         """Create a directory using the E2B Files API."""
-        if path == Path("/"):
+        if path.as_posix() == "/":
             return
         try:
             await _sandbox_make_dir(
@@ -737,11 +737,11 @@ class E2BSandboxSession(BaseSandboxSession):
 
     async def _ensure_workspace_root(self) -> None:
         """Ensure the workspace root exists before materialization starts."""
-        await self._ensure_dir(Path(self.state.manifest.root), reason="root_make_failed")
+        await self._ensure_dir(self._workspace_root_path(), reason="root_make_failed")
 
     async def _prepare_workspace_root_for_exec(self) -> None:
         """Create the workspace root through the command API before using it as `cwd`."""
-        root = str(Path(self.state.manifest.root))
+        root = self._workspace_root_path().as_posix()
         envs = await self._resolved_envs()
         result = await _sandbox_run_command(
             self._sandbox,
@@ -753,7 +753,7 @@ class E2BSandboxSession(BaseSandboxSession):
         exit_code = int(getattr(result, "exit_code", 0) or 0)
         if exit_code != 0:
             raise WorkspaceStartError(
-                path=Path(self.state.manifest.root),
+                path=self._workspace_root_path(),
                 context={
                     "reason": "workspace_root_nonzero_exit",
                     "exit_code": exit_code,
@@ -781,7 +781,7 @@ class E2BSandboxSession(BaseSandboxSession):
         except WorkspaceStartError:
             raise
         except Exception as e:
-            raise WorkspaceStartError(path=Path(self.state.manifest.root), cause=e) from e
+            raise WorkspaceStartError(path=self._workspace_root_path(), cause=e) from e
 
     async def _after_start(self) -> None:
         # Native E2B snapshot hydration can replace the sandbox and sandbox id; reinstall runtime
@@ -1251,7 +1251,7 @@ class E2BSandboxSession(BaseSandboxSession):
             exit_code = int(getattr(result, "exit_code", 0) or 0)
             if exit_code != 0:
                 raise WorkspaceArchiveReadError(
-                    path=Path(self.state.manifest.root),
+                    path=self._workspace_root_path(),
                     context={
                         "reason": "snapshot_nonzero_exit",
                         "exit_code": exit_code,
@@ -1262,7 +1262,7 @@ class E2BSandboxSession(BaseSandboxSession):
         except WorkspaceArchiveReadError:
             raise
         except Exception as e:  # pragma: no cover - exercised via unit tests with fakes
-            raise WorkspaceArchiveReadError(path=Path(self.state.manifest.root), cause=e) from e
+            raise WorkspaceArchiveReadError(path=self._workspace_root_path(), cause=e) from e
 
     async def persist_workspace(self) -> io.IOBase:
         if self.state.workspace_persistence == _WORKSPACE_PERSISTENCE_SNAPSHOT:
@@ -1277,7 +1277,7 @@ class E2BSandboxSession(BaseSandboxSession):
         capture the whole sandbox and the E2B API does not provide path-level excludes.
         """
 
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         if not hasattr(self._sandbox, "create_snapshot"):
             return await self._persist_workspace_via_tar()
         if self._native_snapshot_requires_tar_fallback():
@@ -1375,9 +1375,9 @@ class E2BSandboxSession(BaseSandboxSession):
                 summary["cause"] = str(error.cause)
             return summary
 
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         excludes = " ".join(self._tar_exclude_args())
-        tar_cmd = f"tar {excludes} -C {shlex.quote(str(root))} -cf - . | base64 -w0"
+        tar_cmd = f"tar {excludes} -C {shlex.quote(root.as_posix())} -cf - . | base64 -w0"
         unmounted_mounts: list[tuple[Mount, Path]] = []
         unmount_error: WorkspaceArchiveReadError | None = None
         for mount_entry, mount_path in self.state.manifest.ephemeral_mount_targets():
@@ -1442,7 +1442,7 @@ class E2BSandboxSession(BaseSandboxSession):
         return io.BytesIO(raw)
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         tar_path = f"/tmp/sandbox-hydrate-{self.state.session_id.hex}.tar"
 
         raw = data.read()
@@ -1518,7 +1518,7 @@ class E2BSandboxSession(BaseSandboxSession):
             )
             result = await _sandbox_run_command(
                 self._sandbox,
-                f"tar -C {shlex.quote(str(root))} -xf {shlex.quote(tar_path)}",
+                f"tar -C {shlex.quote(root.as_posix())} -xf {shlex.quote(tar_path)}",
                 timeout=self.state.timeouts.snapshot_tar_s,
                 cwd="/",
                 envs=envs,

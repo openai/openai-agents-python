@@ -240,6 +240,27 @@ def test_normalize_sandbox_path_uses_posix_paths_for_windows_inputs() -> None:
     )
 
 
+def test_normalize_path_uses_posix_paths_for_windows_inputs() -> None:
+    policy = WorkspacePathPolicy(root="/workspace")
+
+    assert policy.normalize_path(PureWindowsPath("/workspace/pkg/file.py")).as_posix() == (
+        "/workspace/pkg/file.py"
+    )
+    assert policy.absolute_workspace_path(PureWindowsPath("pkg/file.py")).as_posix() == (
+        "/workspace/pkg/file.py"
+    )
+
+
+def test_absolute_workspace_path_rejects_windows_rooted_escape_as_absolute() -> None:
+    policy = WorkspacePathPolicy(root="/workspace")
+
+    with pytest.raises(InvalidManifestPathError) as exc_info:
+        policy.absolute_workspace_path(PureWindowsPath("/tmp/secret.txt"))
+
+    assert str(exc_info.value) == "manifest path must be relative: /tmp/secret.txt"
+    assert exc_info.value.context == {"rel": "/tmp/secret.txt", "reason": "absolute"}
+
+
 def test_sandbox_extra_path_grant_rules_use_posix_paths() -> None:
     policy = WorkspacePathPolicy(
         root="/workspace",

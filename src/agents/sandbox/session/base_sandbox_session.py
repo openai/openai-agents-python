@@ -6,7 +6,7 @@ import shlex
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from pathlib import Path, PurePath, PurePosixPath
+from pathlib import Path, PurePath
 from typing import Literal, TypeVar, cast
 
 from typing_extensions import Self
@@ -36,7 +36,7 @@ from ..materialization import MaterializationResult, MaterializedFile
 from ..snapshot import NoopSnapshot
 from ..types import ExecResult, ExposedPortEndpoint, User
 from ..util.parse_utils import parse_ls_la
-from ..workspace_paths import WorkspacePathPolicy
+from ..workspace_paths import WorkspacePathPolicy, coerce_posix_path, posix_path_as_path
 from .archive_extraction import (
     WorkspaceArchiveExtractor,
     safe_zip_member_rel_path,
@@ -446,7 +446,7 @@ class BaseSandboxSession(abc.ABC):
         return lhs == rhs or lhs in rhs.parents or rhs in lhs.parents
 
     def _mount_relpaths_within_workspace(self) -> set[Path]:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         mount_relpaths: set[Path] = set()
         for _mount_entry, mount_path in self.state.manifest.mount_targets():
             try:
@@ -685,6 +685,9 @@ class BaseSandboxSession(abc.ABC):
         self._workspace_path_policy_cache = (root, grants_key, policy)
         return policy
 
+    def _workspace_root_path(self) -> Path:
+        return posix_path_as_path(self._workspace_path_policy().sandbox_root())
+
     async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
         return self.normalize_path(path, for_write=for_write)
 
@@ -701,7 +704,7 @@ class BaseSandboxSession(abc.ABC):
         target, while still rejecting paths whose resolved remote target escapes all allowed roots.
         """
 
-        original_path = PurePosixPath(path.as_posix() if isinstance(path, PurePath) else path)
+        original_path = coerce_posix_path(path)
         path_policy = self._workspace_path_policy()
         root = path_policy.sandbox_root()
         workspace_path = path_policy.normalize_sandbox_path(original_path, for_write=for_write)
@@ -1173,11 +1176,12 @@ class BaseSandboxSession(abc.ABC):
     def _snapshot_fingerprint_cache_path(self) -> Path:
         """Return the runtime-owned path for this session's cached snapshot fingerprint."""
 
-        return (
-            Path("/tmp/openai-agents/session-state")
-            / self.state.session_id.hex
-            / "fingerprint.json"
+        cache_path = coerce_posix_path(
+            f"/tmp/openai-agents/session-state/{self.state.session_id.hex}/fingerprint.json"
         )
+        if self._workspace_path_policy().root_is_existing_host_path():
+            return Path(cache_path.as_posix())
+        return posix_path_as_path(cache_path)
 
     def _workspace_fingerprint_skip_relpaths(self) -> set[Path]:
         """Return workspace paths that should be omitted from snapshot fingerprinting."""
@@ -1192,9 +1196,9 @@ class BaseSandboxSession(abc.ABC):
         helper_path = await self._ensure_runtime_helper_installed(WORKSPACE_FINGERPRINT_HELPER)
         command = [
             str(helper_path),
-            str(self.state.manifest.root),
+            self._workspace_root_path().as_posix(),
             self._snapshot_fingerprint_version(),
-            str(self._snapshot_fingerprint_cache_path()),
+            self._snapshot_fingerprint_cache_path().as_posix(),
             self._resume_manifest_digest(),
         ]
         command.extend(
@@ -1215,13 +1219,13 @@ class BaseSandboxSession(abc.ABC):
         result = await self.exec(
             "cat",
             "--",
-            str(self._snapshot_fingerprint_cache_path()),
+            self._snapshot_fingerprint_cache_path().as_posix(),
             shell=False,
         )
         if not result.ok():
             raise ExecNonZeroError(
                 result,
-                command=("cat", str(self._snapshot_fingerprint_cache_path())),
+                command=("cat", self._snapshot_fingerprint_cache_path().as_posix()),
             )
         return self._parse_snapshot_fingerprint_record(result.stdout)
 
@@ -1313,12 +1317,12 @@ class BaseSandboxSession(abc.ABC):
             return
 
         await self._clear_workspace_dir_on_resume_pruned(
-            current_dir=Path(self.state.manifest.root),
+            current_dir=self._workspace_root_path(),
             skip_rel_paths=skip_rel_paths,
         )
 
     def _workspace_resume_mount_skip_relpaths(self) -> set[Path]:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         skip_rel_paths: set[Path] = set()
         for _mount, mount_path in self.state.manifest.ephemeral_mount_targets():
             try:
@@ -1333,7 +1337,7 @@ class BaseSandboxSession(abc.ABC):
         current_dir: Path,
         skip_rel_paths: set[Path],
     ) -> None:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         try:
             entries = await self.ls(current_dir)
         except ExecNonZeroError:
