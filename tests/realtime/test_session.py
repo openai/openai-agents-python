@@ -565,11 +565,13 @@ class TestEventHandling:
 
     @pytest.mark.asyncio
     async def test_ignored_events_only_generate_raw_events(self, mock_model, mock_agent):
-        """Test that ignored events (transcript_delta, connection_status, other) only generate raw
-        events"""
+        """Test that connection_status and other events only generate raw events.
+
+        transcript_delta now also emits RealtimeHistoryUpdated after updating history.
+        """
         session = RealtimeSession(mock_model, mock_agent, None)
 
-        # Test transcript delta (should be ignored per TODO comment)
+        # transcript_delta updates history and emits RealtimeHistoryUpdated
         transcript_event = RealtimeModelTranscriptDeltaEvent(
             item_id="item_1", delta="hello", response_id="resp_1"
         )
@@ -583,10 +585,20 @@ class TestEventHandling:
         other_event = RealtimeModelOtherEvent(data={"custom": "data"})
         await session.on_event(other_event)
 
-        # Should only have 3 raw events (no transformed events)
-        assert session._event_queue.qsize() == 3
+        # transcript_delta emits: 1 raw + 1 RealtimeHistoryUpdated
+        # connection_status and other each emit: 1 raw
+        assert session._event_queue.qsize() == 4
 
-        for _ in range(3):
+        # raw event for transcript_delta
+        event = await session._event_queue.get()
+        assert isinstance(event, RealtimeRawModelEvent)
+
+        # history updated from transcript_delta
+        event = await session._event_queue.get()
+        assert isinstance(event, RealtimeHistoryUpdated)
+
+        # raw events for connection_status and other
+        for _ in range(2):
             event = await session._event_queue.get()
             assert isinstance(event, RealtimeRawModelEvent)
 
