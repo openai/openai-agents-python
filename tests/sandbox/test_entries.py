@@ -10,7 +10,12 @@ import pytest
 import agents.sandbox.entries.artifacts as artifacts_module
 from agents.sandbox import SandboxConcurrencyLimits
 from agents.sandbox.entries import Dir, File, GitRepo, LocalDir, LocalFile, resolve_workspace_path
-from agents.sandbox.errors import ExecNonZeroError, InvalidManifestPathError, LocalDirReadError
+from agents.sandbox.errors import (
+    ExecNonZeroError,
+    InvalidManifestPathError,
+    LocalDirReadError,
+    LocalFileReadError,
+)
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
@@ -148,6 +153,15 @@ def test_resolve_workspace_path_rejects_absolute_symlink_escape_for_host_root(
     assert exc_info.value.context == {"rel": escaped.as_posix(), "reason": "absolute"}
 
 
+def _symlink_or_skip(path: Path, target: Path, *, target_is_directory: bool = False) -> None:
+    try:
+        path.symlink_to(target, target_is_directory=target_is_directory)
+    except OSError as e:
+        if os.name == "nt" and getattr(e, "winerror", None) == 1314:
+            pytest.skip("symlink creation requires elevated privileges on Windows")
+        raise
+
+
 @pytest.mark.asyncio
 async def test_base_sandbox_session_uses_current_working_directory_for_local_file_sources(
     monkeypatch: pytest.MonkeyPatch,
@@ -166,6 +180,47 @@ async def test_base_sandbox_session_uses_current_working_directory_for_local_fil
 
     assert result.files[0].path == Path("/workspace/copied.txt")
     assert session.writes[Path("/workspace/copied.txt")] == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_local_file_rejects_symlinked_source_ancestors(tmp_path: Path) -> None:
+    target_dir = tmp_path / "secret-dir"
+    target_dir.mkdir()
+    nested_dir = target_dir / "sub"
+    nested_dir.mkdir()
+    (nested_dir / "secret.txt").write_text("secret", encoding="utf-8")
+    _symlink_or_skip(tmp_path / "link", target_dir, target_is_directory=True)
+    session = _RecordingSession()
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=Path("link/sub/secret.txt")).apply(
+            session,
+            Path("/workspace/copied.txt"),
+            tmp_path,
+        )
+
+    assert excinfo.value.context["reason"] == "symlink_not_supported"
+    assert excinfo.value.context["child"] == "link"
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_file_rejects_symlinked_source_leaf(tmp_path: Path) -> None:
+    secret = tmp_path / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    _symlink_or_skip(tmp_path / "link.txt", secret)
+    session = _RecordingSession()
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=Path("link.txt")).apply(
+            session,
+            Path("/workspace/copied.txt"),
+            tmp_path,
+        )
+
+    assert excinfo.value.context["reason"] == "symlink_not_supported"
+    assert excinfo.value.context["child"] == "link.txt"
+    assert session.writes == {}
 
 
 @pytest.mark.asyncio
