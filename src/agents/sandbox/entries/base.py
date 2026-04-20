@@ -3,9 +3,10 @@ from __future__ import annotations
 import abc
 import builtins
 import inspect
+import posixpath
 import stat
 from collections.abc import Mapping
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PurePosixPath
 from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel, Field
@@ -38,6 +39,8 @@ def resolve_workspace_path(
     if rel_path.is_absolute():
         if not allow_absolute_within_root:
             raise InvalidManifestPathError(rel=rel_path.as_posix(), reason="absolute")
+        rel_path = PurePosixPath(posixpath.normpath(rel_path.as_posix()))
+        root_path = PurePosixPath(posixpath.normpath(root_path.as_posix()))
         try:
             rel_path.relative_to(root_path)
         except ValueError as exc:

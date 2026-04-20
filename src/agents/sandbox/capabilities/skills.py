@@ -273,33 +273,38 @@ def _validate_relative_path(
                 **(context or {}),
             },
         )
-    rel = posix_path_as_path(coerce_posix_path(value))
-    if rel.is_absolute():
+    rel_posix = coerce_posix_path(value)
+    if rel_posix.is_absolute():
         raise SkillsConfigError(
             message=f"{field_name} must be a relative path",
             context={
                 "field": field_name,
-                "path": str(rel),
+                "path": rel_posix.as_posix(),
                 "reason": "absolute",
                 **(context or {}),
             },
         )
-    if ".." in rel.parts:
+    if ".." in rel_posix.parts:
         raise SkillsConfigError(
             message=f"{field_name} must not escape the skills root",
             context={
                 "field": field_name,
-                "path": str(rel),
+                "path": rel_posix.as_posix(),
                 "reason": "escape_root",
                 **(context or {}),
             },
         )
-    if rel.parts in [(), (".",)]:
+    if rel_posix.parts in [(), (".",)]:
         raise SkillsConfigError(
             message=f"{field_name} must be non-empty",
-            context={"field": field_name, "path": str(rel), "reason": "empty", **(context or {})},
+            context={
+                "field": field_name,
+                "path": rel_posix.as_posix(),
+                "reason": "empty",
+                **(context or {}),
+            },
         )
-    return rel
+    return posix_path_as_path(rel_posix)
 
 
 def _manifest_entry_paths(manifest: Manifest) -> set[Path]:

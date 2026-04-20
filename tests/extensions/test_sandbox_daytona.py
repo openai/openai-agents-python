@@ -389,7 +389,7 @@ class _RecordingMount(Mount):
             ) -> list[MaterializedFile]:
                 _ = (strategy, session, base_dir)
                 path = mount._resolve_mount_path(session, dest)
-                mount._events.append(("mount", str(path)))
+                mount._events.append(("mount", path.as_posix()))
                 mount._mounted_paths.append(path)
                 return []
 
@@ -402,7 +402,7 @@ class _RecordingMount(Mount):
             ) -> None:
                 _ = (strategy, session, base_dir)
                 path = mount._resolve_mount_path(session, dest)
-                mount._events.append(("unmount", str(path)))
+                mount._events.append(("unmount", path.as_posix()))
                 mount._unmounted_paths.append(path)
 
             async def teardown_for_snapshot(
@@ -412,7 +412,7 @@ class _RecordingMount(Mount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("unmount", str(path)))
+                mount._events.append(("unmount", path.as_posix()))
                 mount._unmounted_paths.append(path)
 
             async def restore_after_snapshot(
@@ -422,19 +422,19 @@ class _RecordingMount(Mount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("mount", str(path)))
+                mount._events.append(("mount", path.as_posix()))
                 mount._mounted_paths.append(path)
 
         return _Adapter(self)
 
     async def mount(self, session: object, path: Path) -> None:
         _ = session
-        self._events.append(("mount", str(path)))
+        self._events.append(("mount", path.as_posix()))
         self._mounted_paths.append(path)
 
     async def unmount_path(self, session: object, path: Path) -> None:
         _ = session
-        self._events.append(("unmount", str(path)))
+        self._events.append(("unmount", path.as_posix()))
         self._unmounted_paths.append(path)
 
 
@@ -467,7 +467,7 @@ class _FailingUnmountMount(_RecordingMount):
             ) -> None:
                 _ = (strategy, session, base_dir)
                 path = mount._resolve_mount_path(session, dest)
-                mount._events.append(("unmount_fail", str(path)))
+                mount._events.append(("unmount_fail", path.as_posix()))
                 raise RuntimeError("boom while unmounting second mount")
 
             async def teardown_for_snapshot(
@@ -477,7 +477,7 @@ class _FailingUnmountMount(_RecordingMount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("unmount_fail", str(path)))
+                mount._events.append(("unmount_fail", path.as_posix()))
                 raise RuntimeError("boom while unmounting second mount")
 
             async def restore_after_snapshot(
@@ -492,7 +492,7 @@ class _FailingUnmountMount(_RecordingMount):
 
     async def unmount_path(self, session: object, path: Path) -> None:
         _ = session
-        self._events.append(("unmount_fail", str(path)))
+        self._events.append(("unmount_fail", path.as_posix()))
         raise RuntimeError("boom while unmounting second mount")
 
 

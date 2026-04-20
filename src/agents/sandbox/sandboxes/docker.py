@@ -71,7 +71,12 @@ from ..util.retry import (
     retry_async,
 )
 from ..util.tar_utils import UnsafeTarMemberError, strip_tar_member_prefix, validate_tarfile
-from ..workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
+from ..workspace_paths import (
+    coerce_posix_path,
+    posix_path_as_path,
+    posix_path_for_error,
+    sandbox_path_str,
+)
 
 _DOCKER_EXECUTOR: Final = ThreadPoolExecutor(
     max_workers=8,
@@ -1180,7 +1185,7 @@ class DockerSandboxSession(BaseSandboxSession):
                             "fi"
                         ),
                         "sh",
-                        str(pid_path),
+                        sandbox_path_str(pid_path),
                     ],
                     demux=True,
                 ),
@@ -1203,6 +1208,7 @@ class DockerSandboxSession(BaseSandboxSession):
     async def persist_workspace(self) -> io.IOBase:
         skip = self._persist_workspace_skip_relpaths()
         root = self._workspace_root_path()
+        error_root = posix_path_for_error(root)
         try:
             staging_parent, staging_workspace = await self._stage_workspace_copy(
                 skip_rel_paths=skip
@@ -1213,12 +1219,13 @@ class DockerSandboxSession(BaseSandboxSession):
             )
             return strip_tar_member_prefix(root_prefixed_archive, prefix=staging_workspace.name)
         except docker.errors.NotFound as e:
-            raise WorkspaceArchiveReadError(path=root, cause=e) from e
+            raise WorkspaceArchiveReadError(path=error_root, cause=e) from e
         except docker.errors.APIError as e:
-            raise WorkspaceArchiveReadError(path=root, cause=e) from e
+            raise WorkspaceArchiveReadError(path=error_root, cause=e) from e
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
         root = self._workspace_root_path()
+        error_root = posix_path_for_error(root)
         with tempfile.TemporaryFile() as archive:
             while True:
                 chunk = data.read(io.DEFAULT_BUFFER_SIZE)
@@ -1228,7 +1235,7 @@ class DockerSandboxSession(BaseSandboxSession):
                     chunk = chunk.encode("utf-8")
                 if not isinstance(chunk, bytes | bytearray):
                     raise WorkspaceArchiveWriteError(
-                        path=root,
+                        path=error_root,
                         context={"reason": "non_bytes_tar_payload"},
                     )
                 archive.write(chunk)
@@ -1239,25 +1246,25 @@ class DockerSandboxSession(BaseSandboxSession):
                     validate_tarfile(tar)
             except UnsafeTarMemberError as e:
                 raise WorkspaceArchiveWriteError(
-                    path=root,
+                    path=error_root,
                     context={"reason": e.reason, "member": e.member},
                     cause=e,
                 ) from e
             except (tarfile.TarError, OSError) as e:
-                raise WorkspaceArchiveWriteError(path=root, cause=e) from e
+                raise WorkspaceArchiveWriteError(path=error_root, cause=e) from e
 
             await self._exec_checked(
                 "mkdir",
                 "-p",
                 root.as_posix(),
                 error_cls=WorkspaceArchiveWriteError,
-                error_path=root,
+                error_path=error_root,
             )
             archive.seek(0)
             await self._stream_into_exec(
                 cmd=["tar", "-x", "-C", root.as_posix()],
                 stream=archive,
-                error_path=root,
+                error_path=error_root,
             )
 
     def _schedule_rm_best_effort(self, path: Path) -> None:

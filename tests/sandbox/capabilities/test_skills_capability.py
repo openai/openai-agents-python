@@ -15,13 +15,14 @@ from agents.sandbox.files import EntryKind, FileEntry
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, Permissions, User
+from agents.sandbox.workspace_paths import coerce_posix_path
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
 from tests.utils.factories import TestSessionState
 
 
 def _children_keys(entry: Dir) -> set[str]:
-    return {str(key if isinstance(key, Path) else Path(key)) for key in entry.children}
+    return {coerce_posix_path(key).as_posix() for key in entry.children}
 
 
 def _user_name(user: object) -> str | None:

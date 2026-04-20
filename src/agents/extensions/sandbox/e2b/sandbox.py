@@ -73,7 +73,7 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
-from ....sandbox.workspace_paths import sandbox_path_str
+from ....sandbox.workspace_paths import posix_path_for_error, sandbox_path_str
 
 WorkspacePersistenceMode = Literal["tar", "snapshot"]
 E2BTimeoutAction = Literal["kill", "pause"]
@@ -1242,6 +1242,7 @@ class E2BSandboxSession(BaseSandboxSession):
         )
     )
     async def _run_persist_workspace_command(self, tar_cmd: str) -> str:
+        error_root = posix_path_for_error(self._workspace_root_path())
         try:
             envs = await self._resolved_envs()
             result = await _sandbox_run_command(
@@ -1254,7 +1255,7 @@ class E2BSandboxSession(BaseSandboxSession):
             exit_code = int(getattr(result, "exit_code", 0) or 0)
             if exit_code != 0:
                 raise WorkspaceArchiveReadError(
-                    path=self._workspace_root_path(),
+                    path=error_root,
                     context={
                         "reason": "snapshot_nonzero_exit",
                         "exit_code": exit_code,
@@ -1265,7 +1266,7 @@ class E2BSandboxSession(BaseSandboxSession):
         except WorkspaceArchiveReadError:
             raise
         except Exception as e:  # pragma: no cover - exercised via unit tests with fakes
-            raise WorkspaceArchiveReadError(path=self._workspace_root_path(), cause=e) from e
+            raise WorkspaceArchiveReadError(path=error_root, cause=e) from e
 
     async def persist_workspace(self) -> io.IOBase:
         if self.state.workspace_persistence == _WORKSPACE_PERSISTENCE_SNAPSHOT:
@@ -1281,6 +1282,7 @@ class E2BSandboxSession(BaseSandboxSession):
         """
 
         root = self._workspace_root_path()
+        error_root = posix_path_for_error(root)
         if not hasattr(self._sandbox, "create_snapshot"):
             return await self._persist_workspace_via_tar()
         if self._native_snapshot_requires_tar_fallback():
@@ -1305,7 +1307,7 @@ class E2BSandboxSession(BaseSandboxSession):
                     mount_entry, self, mount_path
                 )
             except Exception as e:
-                unmount_error = WorkspaceArchiveReadError(path=root, cause=e)
+                unmount_error = WorkspaceArchiveReadError(path=error_root, cause=e)
                 break
             unmounted_mounts.append((mount_entry, mount_path))
 
@@ -1320,7 +1322,7 @@ class E2BSandboxSession(BaseSandboxSession):
                 snapshot_id = getattr(snap, "snapshot_id", None)
                 if not isinstance(snapshot_id, str) or not snapshot_id:
                     raise WorkspaceArchiveReadError(
-                        path=root,
+                        path=error_root,
                         context={
                             "reason": "native_snapshot_unexpected_return",
                             "type": type(snap).__name__,
@@ -1330,7 +1332,7 @@ class E2BSandboxSession(BaseSandboxSession):
                 snapshot_error = e
             except Exception as e:
                 snapshot_error = WorkspaceArchiveReadError(
-                    path=root, context={"reason": "native_snapshot_failed"}, cause=e
+                    path=error_root, context={"reason": "native_snapshot_failed"}, cause=e
                 )
 
         remount_error: WorkspaceArchiveReadError | None = None
@@ -1340,7 +1342,7 @@ class E2BSandboxSession(BaseSandboxSession):
                     mount_entry, self, mount_path
                 )
             except Exception as e:
-                current_error = WorkspaceArchiveReadError(path=root, cause=e)
+                current_error = WorkspaceArchiveReadError(path=error_root, cause=e)
                 if remount_error is None:
                     remount_error = current_error
                 else:
@@ -1379,6 +1381,7 @@ class E2BSandboxSession(BaseSandboxSession):
             return summary
 
         root = self._workspace_root_path()
+        error_root = posix_path_for_error(root)
         excludes = " ".join(self._tar_exclude_args())
         tar_cmd = f"tar {excludes} -C {shlex.quote(root.as_posix())} -cf - . | base64 -w0"
         unmounted_mounts: list[tuple[Mount, Path]] = []
@@ -1389,7 +1392,7 @@ class E2BSandboxSession(BaseSandboxSession):
                     mount_entry, self, mount_path
                 )
             except Exception as e:
-                unmount_error = WorkspaceArchiveReadError(path=root, cause=e)
+                unmount_error = WorkspaceArchiveReadError(path=error_root, cause=e)
                 break
             unmounted_mounts.append((mount_entry, mount_path))
 
@@ -1402,7 +1405,7 @@ class E2BSandboxSession(BaseSandboxSession):
                     raw = base64.b64decode(encoded.encode("utf-8"), validate=True)
                 except (binascii.Error, ValueError) as e:
                     raise WorkspaceArchiveReadError(
-                        path=root,
+                        path=error_root,
                         context={"reason": "snapshot_invalid_base64"},
                         cause=e,
                     ) from e
@@ -1416,7 +1419,7 @@ class E2BSandboxSession(BaseSandboxSession):
                     mount_entry, self, mount_path
                 )
             except Exception as e:
-                current_error = WorkspaceArchiveReadError(path=root, cause=e)
+                current_error = WorkspaceArchiveReadError(path=error_root, cause=e)
                 if remount_error is None:
                     remount_error = current_error
                     if unmount_error is not None:
@@ -1446,6 +1449,7 @@ class E2BSandboxSession(BaseSandboxSession):
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
         root = self._workspace_root_path()
+        error_root = posix_path_for_error(root)
         tar_path = f"/tmp/sandbox-hydrate-{self.state.session_id.hex}.tar"
 
         raw = data.read()
@@ -1489,7 +1493,7 @@ class E2BSandboxSession(BaseSandboxSession):
                 return
             except Exception as e:
                 raise WorkspaceArchiveWriteError(
-                    path=root,
+                    path=error_root,
                     context={
                         "reason": "native_snapshot_restore_failed",
                         "snapshot_id": snapshot_id,
@@ -1501,7 +1505,7 @@ class E2BSandboxSession(BaseSandboxSession):
             validate_tar_bytes(bytes(raw))
         except UnsafeTarMemberError as e:
             raise WorkspaceArchiveWriteError(
-                path=root,
+                path=error_root,
                 context={
                     "reason": "unsafe_or_invalid_tar",
                     "member": e.member,
@@ -1529,7 +1533,7 @@ class E2BSandboxSession(BaseSandboxSession):
             exit_code = int(getattr(result, "exit_code", 0) or 0)
             if exit_code != 0:
                 raise WorkspaceArchiveWriteError(
-                    path=root,
+                    path=error_root,
                     context={
                         "reason": "hydrate_nonzero_exit",
                         "exit_code": exit_code,
@@ -1540,7 +1544,7 @@ class E2BSandboxSession(BaseSandboxSession):
         except WorkspaceArchiveWriteError:
             raise
         except Exception as e:  # pragma: no cover - exercised via unit tests with fakes
-            raise WorkspaceArchiveWriteError(path=root, cause=e) from e
+            raise WorkspaceArchiveWriteError(path=error_root, cause=e) from e
         finally:
             try:
                 envs = await self._resolved_envs()

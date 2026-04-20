@@ -125,7 +125,7 @@ class _RecordingMount(Mount):
                 _ = (strategy, session)
                 if mount._teardown_error is not None:
                     raise RuntimeError(mount._teardown_error)
-                mount._events.append(("unmount", str(path)))
+                mount._events.append(("unmount", path.as_posix()))
 
             async def restore_after_snapshot(
                 self,
@@ -134,7 +134,7 @@ class _RecordingMount(Mount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("mount", str(path)))
+                mount._events.append(("mount", path.as_posix()))
 
         return _Adapter(self)
 
@@ -1659,7 +1659,7 @@ async def test_modal_normalize_path_preserves_safe_leaf_symlink_path(
 
     normalized = await session._validate_path_access("link.txt")  # noqa: SLF001
 
-    assert str(normalized) == "/workspace/link.txt"
+    assert normalized.as_posix() == "/workspace/link.txt"
 
 
 @pytest.mark.asyncio
@@ -1698,7 +1698,7 @@ async def test_modal_normalize_path_uses_posix_commands_for_windows_paths(
     normalized = await session._validate_path_access(PureWindowsPath("/workspace/link.txt"))  # noqa: SLF001
 
     helper_path = str(RESOLVE_WORKSPACE_PATH_HELPER.install_path)
-    assert str(normalized) == "/workspace/link.txt"
+    assert normalized.as_posix() == "/workspace/link.txt"
     assert commands[-1] == [helper_path, "/workspace", "/workspace/link.txt", "0"]
     assert all("\\" not in arg for arg in commands[-1])
 
@@ -1801,16 +1801,16 @@ async def test_modal_normalize_path_reinstalls_helper_after_runtime_replacement(
 
     monkeypatch.setattr(session, "exec", _fake_exec)
 
-    assert str(await session._validate_path_access("link.txt")) == "/workspace/link.txt"
+    assert (await session._validate_path_access("link.txt")).as_posix() == "/workspace/link.txt"
     first_run_commands = list(commands)
     commands.clear()
 
     state.sandbox_id = None
-    assert str(await session._validate_path_access("link.txt")) == "/workspace/link.txt"
+    assert (await session._validate_path_access("link.txt")).as_posix() == "/workspace/link.txt"
     second_run_commands = list(commands)
     commands.clear()
 
-    assert str(await session._validate_path_access("link.txt")) == "/workspace/link.txt"
+    assert (await session._validate_path_access("link.txt")).as_posix() == "/workspace/link.txt"
 
     helper_path = str(RESOLVE_WORKSPACE_PATH_HELPER.install_path)
     assert any(

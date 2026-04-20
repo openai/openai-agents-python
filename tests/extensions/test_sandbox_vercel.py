@@ -337,7 +337,7 @@ class _RecordingMount(Mount):
                 path: Path,
             ) -> None:
                 _ = strategy
-                mount._events.append(("unmount", str(path)))
+                mount._events.append(("unmount", path.as_posix()))
                 sandbox = cast(Any, session)._sandbox
                 if sandbox is not None:
                     sandbox.files.pop(f"{path}/mounted.txt", None)
@@ -349,7 +349,7 @@ class _RecordingMount(Mount):
                 path: Path,
             ) -> None:
                 _ = strategy
-                mount._events.append(("mount", str(path)))
+                mount._events.append(("mount", path.as_posix()))
                 sandbox = cast(Any, session)._sandbox
                 if sandbox is not None:
                     sandbox.files[f"{path}/mounted.txt"] = b"mounted-content"

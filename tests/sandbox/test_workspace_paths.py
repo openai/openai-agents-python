@@ -219,8 +219,8 @@ def test_normalize_path_with_symlink_resolution(tmp_path: Path) -> None:
         WorkspacePathCase(
             name="absolute path outside root is rejected",
             path=outside / "secret.txt",
-            error_message=f"manifest path must be relative: {outside / 'secret.txt'}",
-            error_context={"rel": str(outside / "secret.txt"), "reason": "absolute"},
+            error_message=f"manifest path must be relative: {(outside / 'secret.txt').as_posix()}",
+            error_context={"rel": (outside / "secret.txt").as_posix(), "reason": "absolute"},
         ),
     ]
 

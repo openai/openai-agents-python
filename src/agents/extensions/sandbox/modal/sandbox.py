@@ -73,7 +73,12 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
-from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
+from ....sandbox.workspace_paths import (
+    coerce_posix_path,
+    posix_path_as_path,
+    posix_path_for_error,
+    sandbox_path_str,
+)
 from .mounts import ModalCloudBucketMountStrategy
 
 _DEFAULT_TIMEOUT_S = 30.0
@@ -1124,6 +1129,7 @@ class ModalSandboxSession(BaseSandboxSession):
         if self._native_snapshot_requires_tar_fallback():
             return await self._persist_workspace_via_tar()
         root = self._workspace_root_path()
+        error_root = posix_path_for_error(root)
         plain_skip = self._modal_snapshot_plain_skip_relpaths(root)
         skip_abs = [root / rel for rel in sorted(plain_skip, key=lambda p: p.as_posix())]
         self._modal_snapshot_ephemeral_backup = None
@@ -1144,7 +1150,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 if exit_code != 0:
                     stderr = await proc.stderr.read.aio()
                     return WorkspaceArchiveReadError(
-                        path=root,
+                        path=error_root,
                         context={
                             "reason": "snapshot_filesystem_ephemeral_restore_failed",
                             "exit_code": exit_code,
@@ -1155,7 +1161,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 if isinstance(exc, WorkspaceArchiveReadError):
                     return exc
                 return WorkspaceArchiveReadError(
-                    path=root,
+                    path=error_root,
                     context={"reason": "snapshot_filesystem_ephemeral_restore_failed"},
                     cause=exc,
                 )
@@ -1180,7 +1186,7 @@ class ModalSandboxSession(BaseSandboxSession):
                         cleanup_restore_error,
                     )
                 raise WorkspaceArchiveReadError(
-                    path=root,
+                    path=error_root,
                     context={
                         "reason": "snapshot_filesystem_ephemeral_remove_failed",
                         "exit_code": rm_out.exit_code,
@@ -1205,7 +1211,7 @@ class ModalSandboxSession(BaseSandboxSession):
                     restore_error,
                 )
             raise WorkspaceArchiveReadError(
-                path=root, context={"reason": "snapshot_filesystem_failed"}, cause=e
+                path=error_root, context={"reason": "snapshot_filesystem_failed"}, cause=e
             ) from e
 
         snapshot_id, snapshot_error = self._extract_modal_snapshot_id(
@@ -1228,6 +1234,7 @@ class ModalSandboxSession(BaseSandboxSession):
         """
 
         root = self._workspace_root_path()
+        error_root = posix_path_for_error(root)
         await self._ensure_sandbox()
         assert self._sandbox is not None
         if not hasattr(self._sandbox, "snapshot_directory"):
@@ -1257,7 +1264,7 @@ class ModalSandboxSession(BaseSandboxSession):
             out = await self.exec("sh", "-lc", restore_cmd, shell=False)
             if not out.ok():
                 return WorkspaceArchiveReadError(
-                    path=root,
+                    path=error_root,
                     context={
                         "reason": "snapshot_directory_ephemeral_restore_failed",
                         "exit_code": out.exit_code,
@@ -1276,7 +1283,7 @@ class ModalSandboxSession(BaseSandboxSession):
                         mount_path,
                     )
                 except Exception as e:
-                    current_error = WorkspaceArchiveReadError(path=root, cause=e)
+                    current_error = WorkspaceArchiveReadError(path=error_root, cause=e)
                     if remount_error is None:
                         remount_error = current_error
                     else:
@@ -1318,7 +1325,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 backup_out = await self.exec("sh", "-lc", backup_cmd, shell=False)
                 if not backup_out.ok():
                     raise WorkspaceArchiveReadError(
-                        path=root,
+                        path=error_root,
                         context={
                             "reason": "snapshot_directory_ephemeral_backup_failed",
                             "exit_code": backup_out.exit_code,
@@ -1327,11 +1334,11 @@ class ModalSandboxSession(BaseSandboxSession):
                     )
                 self._modal_snapshot_ephemeral_backup_path = backup_path
 
-                rm_cmd = ["rm", "-rf", "--", *[str(p) for p in skip_abs]]
+                rm_cmd = ["rm", "-rf", "--", *[sandbox_path_str(p) for p in skip_abs]]
                 rm_out = await self.exec(*rm_cmd, shell=False)
                 if not rm_out.ok():
                     raise WorkspaceArchiveReadError(
-                        path=root,
+                        path=error_root,
                         context={
                             "reason": "snapshot_directory_ephemeral_remove_failed",
                             "exit_code": rm_out.exit_code,
@@ -1362,7 +1369,7 @@ class ModalSandboxSession(BaseSandboxSession):
             snapshot_error = e
         except Exception as e:
             snapshot_error = WorkspaceArchiveReadError(
-                path=root, context={"reason": "snapshot_directory_failed"}, cause=e
+                path=error_root, context={"reason": "snapshot_directory_failed"}, cause=e
             )
         finally:
             remount_error = await restore_detached_mounts()
@@ -1410,7 +1417,7 @@ class ModalSandboxSession(BaseSandboxSession):
     ) -> tuple[str | None, WorkspaceArchiveReadError | None]:
         if isinstance(snap, bytes | bytearray):
             return None, WorkspaceArchiveReadError(
-                path=root,
+                path=posix_path_for_error(root),
                 context={
                     "reason": f"{snapshot_kind}_unexpected_bytes",
                     "type": type(snap).__name__,
@@ -1418,7 +1425,7 @@ class ModalSandboxSession(BaseSandboxSession):
             )
         if not hasattr(snap, "object_id") and not isinstance(snap, str):
             return None, WorkspaceArchiveReadError(
-                path=root,
+                path=posix_path_for_error(root),
                 context={
                     "reason": f"{snapshot_kind}_unexpected_return",
                     "type": type(snap).__name__,
@@ -1431,7 +1438,7 @@ class ModalSandboxSession(BaseSandboxSession):
             snapshot_id = None
         if not snapshot_id:
             return None, WorkspaceArchiveReadError(
-                path=root,
+                path=posix_path_for_error(root),
                 context={
                     "reason": f"{snapshot_kind}_unexpected_return",
                     "type": type(snap).__name__,
@@ -1499,6 +1506,7 @@ class ModalSandboxSession(BaseSandboxSession):
     async def _persist_workspace_via_tar(self) -> io.IOBase:
         # Existing tar implementation extracted so snapshot_filesystem mode can fall back cleanly.
         root = self._workspace_root_path()
+        error_root = posix_path_for_error(root)
         skip = self._modal_tar_skip_relpaths(root)
 
         excludes: list[str] = []
@@ -1519,7 +1527,7 @@ class ModalSandboxSession(BaseSandboxSession):
             out = await self.exec(*cmd, shell=False)
             if not out.ok():
                 raise WorkspaceArchiveReadError(
-                    path=root,
+                    path=error_root,
                     context={
                         "reason": "tar_nonzero_exit",
                         "exit_code": out.exit_code,
@@ -1530,7 +1538,7 @@ class ModalSandboxSession(BaseSandboxSession):
         except WorkspaceArchiveReadError:
             raise
         except Exception as e:
-            raise WorkspaceArchiveReadError(path=root, cause=e) from e
+            raise WorkspaceArchiveReadError(path=error_root, cause=e) from e
 
     async def _hydrate_workspace_via_snapshot_filesystem(self, data: io.IOBase) -> None:
         """

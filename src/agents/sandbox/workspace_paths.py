@@ -120,6 +120,9 @@ class WorkspacePathPolicy:
         """
 
         if (windows_path := windows_absolute_path(path)) is not None:
+            if self._root_is_existing_host_path:
+                result, _grant = self._resolved_host_path_and_grant(Path(windows_path))
+                return result
             raise self._invalid_path_error(windows_path)
         normalized = self._absolute_workspace_posix_path(coerce_posix_path(path))
         return self._path_result(normalized)
@@ -134,12 +137,18 @@ class WorkspacePathPolicy:
         """
 
         if (windows_path := windows_absolute_path(path)) is not None:
+            if self._root_is_existing_host_path:
+                result, _grant = self._resolved_host_path_and_grant(Path(windows_path))
+                host_relative = result.relative_to(self._root.resolve(strict=False))
+                return host_relative if host_relative.parts else Path(".")
             raise self._invalid_path_error(windows_path)
         normalized = self._absolute_workspace_posix_path(coerce_posix_path(path))
         root = self._normalized_root()
-        relative = normalized.relative_to(root)
+        posix_relative = normalized.relative_to(root)
         return (
-            self._path_result(relative) if relative.parts else self._path_result(PurePosixPath("."))
+            self._path_result(posix_relative)
+            if posix_relative.parts
+            else self._path_result(PurePosixPath("."))
         )
 
     def normalize_path(
@@ -160,6 +169,11 @@ class WorkspacePathPolicy:
             result, grant = self._resolved_host_path_and_grant(original)
         else:
             if (windows_path := windows_absolute_path(path)) is not None:
+                if self._root_is_existing_host_path:
+                    result, grant = self._resolved_host_path_and_grant(Path(windows_path))
+                    if for_write:
+                        self._raise_if_read_only_grant(result, grant)
+                    return result
                 raise self._invalid_path_error(windows_path)
             sandbox_result, grant = self._sandbox_path_and_grant(coerce_posix_path(path))
             result = self._path_result(sandbox_result)

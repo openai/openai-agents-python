@@ -607,7 +607,9 @@ class BlaxelDriveMountStrategy(MountStrategyBase):
                 message="BlaxelDriveMountStrategy requires a BlaxelDriveMount entry",
                 context={"mount_type": mount.type},
             )
-        mount_path = mount.drive_mount_path or str(mount._resolve_mount_path(session, dest))
+        mount_path = mount.drive_mount_path or sandbox_path_str(
+            mount._resolve_mount_path(session, dest)
+        )
         return BlaxelDriveMountConfig(
             drive_name=mount.drive_name,
             mount_path=mount_path,
@@ -620,7 +622,7 @@ class BlaxelDriveMountStrategy(MountStrategyBase):
         """Return the actual mount path, preferring ``drive_mount_path`` over the manifest path."""
         if isinstance(mount, BlaxelDriveMount) and mount.drive_mount_path:
             return mount.drive_mount_path
-        return str(fallback)
+        return sandbox_path_str(fallback)
 
     @staticmethod
     def _resolve_config_from_source(mount: Mount, mount_path: str) -> BlaxelDriveMountConfig:

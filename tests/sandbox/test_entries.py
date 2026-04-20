@@ -110,6 +110,18 @@ def test_resolve_workspace_path_rejects_windows_drive_absolute_path() -> None:
     assert exc_info.value.context == {"rel": "C:/tmp/secret.txt", "reason": "absolute"}
 
 
+def test_resolve_workspace_path_rejects_absolute_escape_after_normalization() -> None:
+    with pytest.raises(InvalidManifestPathError) as exc_info:
+        resolve_workspace_path(
+            Path("/workspace"),
+            "/workspace/../etc/passwd",
+            allow_absolute_within_root=True,
+        )
+
+    assert str(exc_info.value) == "manifest path must be relative: /etc/passwd"
+    assert exc_info.value.context == {"rel": "/etc/passwd", "reason": "absolute"}
+
+
 @pytest.mark.asyncio
 async def test_base_sandbox_session_uses_current_working_directory_for_local_file_sources(
     monkeypatch: pytest.MonkeyPatch,
@@ -181,7 +193,7 @@ async def test_local_dir_copy_revalidates_swapped_paths_during_open(
         dir_fd: int | None = None,
     ) -> int:
         nonlocal swapped
-        if path == "safe.txt" and not swapped:
+        if (path == "safe.txt" or Path(path) == src_file) and not swapped:
             src_file.unlink()
             src_file.symlink_to(secret)
             swapped = True
@@ -281,7 +293,7 @@ async def test_local_dir_apply_rejects_source_root_swapped_to_symlink_after_vali
         dir_fd: int | None = None,
     ) -> int:
         nonlocal swapped
-        if path == "src" and dir_fd is not None and not swapped:
+        if (path == "src" or Path(path) == src_root) and not swapped:
             src_root.rename(tmp_path / "src-original")
             (tmp_path / "src").symlink_to(secret_dir, target_is_directory=True)
             swapped = True
