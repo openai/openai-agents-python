@@ -71,6 +71,12 @@ from ..util.retry import (
     retry_async,
 )
 from ..util.tar_utils import UnsafeTarMemberError, strip_tar_member_prefix, validate_tarfile
+from ..workspace_paths import (
+    coerce_posix_path,
+    posix_path_as_path,
+    posix_path_for_error,
+    sandbox_path_str,
+)
 
 _DOCKER_EXECUTOR: Final = ThreadPoolExecutor(
     max_workers=8,
@@ -160,7 +166,9 @@ class DockerSandboxSession(BaseSandboxSession):
     _reserved_pty_process_ids: set[int]
 
     state: DockerSandboxSessionState
-    _ARCHIVE_STAGING_DIR: Path = Path("/tmp/sandbox-docker-archive")
+    _ARCHIVE_STAGING_DIR: Path = posix_path_as_path(
+        coerce_posix_path("/tmp/sandbox-docker-archive")
+    )
 
     def __init__(
         self,
@@ -290,7 +298,7 @@ class DockerSandboxSession(BaseSandboxSession):
                 await self._exec_checked(
                     "mkdir",
                     "-p",
-                    str(dst_child),
+                    sandbox_path_str(dst_child),
                     error_cls=WorkspaceArchiveReadError,
                     error_path=src_child,
                 )
@@ -306,8 +314,8 @@ class DockerSandboxSession(BaseSandboxSession):
                 "cp",
                 "-R",
                 "--",
-                str(src_child),
-                str(dst_child),
+                sandbox_path_str(src_child),
+                sandbox_path_str(dst_child),
                 error_cls=WorkspaceArchiveReadError,
                 error_path=src_child,
             )
@@ -317,7 +325,7 @@ class DockerSandboxSession(BaseSandboxSession):
         *,
         skip_rel_paths: set[Path],
     ) -> tuple[Path, Path]:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         root_name = root.name or "workspace"
         staging_parent = self._archive_stage_path(name_hint="workspace")
         staging_workspace = staging_parent / root_name
@@ -329,7 +337,7 @@ class DockerSandboxSession(BaseSandboxSession):
         await self._exec_checked(
             "mkdir",
             "-p",
-            str(staging_parent),
+            sandbox_path_str(staging_parent),
             error_cls=WorkspaceArchiveReadError,
             error_path=root,
         )
@@ -339,7 +347,7 @@ class DockerSandboxSession(BaseSandboxSession):
             await self._exec_checked(
                 "mkdir",
                 "-p",
-                str(staging_workspace),
+                sandbox_path_str(staging_workspace),
                 error_cls=WorkspaceArchiveReadError,
                 error_path=root,
             )
@@ -347,7 +355,7 @@ class DockerSandboxSession(BaseSandboxSession):
             await self._exec_checked(
                 "mkdir",
                 "-p",
-                str(staging_workspace),
+                sandbox_path_str(staging_workspace),
                 error_cls=WorkspaceArchiveReadError,
                 error_path=root,
             )
@@ -362,8 +370,8 @@ class DockerSandboxSession(BaseSandboxSession):
                 "cp",
                 "-R",
                 "--",
-                str(root),
-                str(staging_workspace),
+                root.as_posix(),
+                sandbox_path_str(staging_workspace),
                 error_cls=WorkspaceArchiveReadError,
                 error_path=root,
             )
@@ -371,7 +379,7 @@ class DockerSandboxSession(BaseSandboxSession):
 
     async def _rm_best_effort(self, path: Path) -> None:
         try:
-            await self.exec("rm", "-rf", "--", str(path), shell=False)
+            await self.exec("rm", "-rf", "--", sandbox_path_str(path), shell=False)
         except Exception:
             pass
 
@@ -629,7 +637,7 @@ class DockerSandboxSession(BaseSandboxSession):
         user: str | User | None = None,
     ) -> None:
         await self._stream_into_exec(
-            cmd=["sh", "-lc", 'cat > "$1"', "sh", str(staging_path)],
+            cmd=["sh", "-lc", 'cat > "$1"', "sh", sandbox_path_str(staging_path)],
             stream=stream,
             error_path=staging_path,
             user=user,
@@ -643,7 +651,7 @@ class DockerSandboxSession(BaseSandboxSession):
             "-lc",
             _PREPARE_USER_PTY_PID_SCRIPT,
             "sh",
-            str(path),
+            sandbox_path_str(path),
             user,
             error_cls=WorkspaceArchiveWriteError,
             error_path=path,
@@ -655,12 +663,13 @@ class DockerSandboxSession(BaseSandboxSession):
         # Read from inside the container instead of `get_archive()`: with Docker
         # volume-driver-backed mounts attached, daemon archive operations can re-run volume mount
         # setup and some plugins reject the duplicate `Mount` call for the same container id.
-        res = await self.exec("cat", "--", str(workspace_path), shell=False, user=user)
+        workspace_path_arg = sandbox_path_str(workspace_path)
+        res = await self.exec("cat", "--", workspace_path_arg, shell=False, user=user)
         if not res.ok():
             raise WorkspaceReadNotFoundError(
                 path=path,
                 context={
-                    "command": ["cat", "--", str(workspace_path)],
+                    "command": ["cat", "--", workspace_path_arg],
                     "stdout": res.stdout.decode("utf-8", errors="replace"),
                     "stderr": res.stderr.decode("utf-8", errors="replace"),
                 },
@@ -685,7 +694,7 @@ class DockerSandboxSession(BaseSandboxSession):
                     "-lc",
                     'mkdir -p "$(dirname "$1")" && cat > "$1"',
                     "sh",
-                    str(path),
+                    sandbox_path_str(path),
                 ],
                 stream=payload.stream,
                 error_path=path,
@@ -705,7 +714,7 @@ class DockerSandboxSession(BaseSandboxSession):
         await self._exec_checked(
             "mkdir",
             "-p",
-            str(self._ARCHIVE_STAGING_DIR),
+            sandbox_path_str(self._ARCHIVE_STAGING_DIR),
             error_cls=WorkspaceArchiveWriteError,
             error_path=self._ARCHIVE_STAGING_DIR,
         )
@@ -716,12 +725,14 @@ class DockerSandboxSession(BaseSandboxSession):
         )
 
         # Copy into place using a process inside the container, which can see mounts.
-        cp_res = await self.exec("cp", "--", str(staging_path), str(path), shell=False)
+        staging_path_arg = sandbox_path_str(staging_path)
+        path_arg = sandbox_path_str(path)
+        cp_res = await self.exec("cp", "--", staging_path_arg, path_arg, shell=False)
         if not cp_res.ok():
             raise WorkspaceArchiveWriteError(
                 path=parent,
                 context={
-                    "command": ["cp", "--", str(staging_path), str(path)],
+                    "command": ["cp", "--", staging_path_arg, path_arg],
                     "stdout": cp_res.stdout.decode("utf-8", errors="replace"),
                     "stderr": cp_res.stderr.decode("utf-8", errors="replace"),
                 },
@@ -808,8 +819,8 @@ class DockerSandboxSession(BaseSandboxSession):
                 "-lc",
                 'mkdir -p "$1" && printf "%s" "$$" > "$2" && shift 2 && exec "$@"',
                 "sh",
-                str(pty_pid_path.parent),
-                str(pty_pid_path),
+                sandbox_path_str(pty_pid_path.parent),
+                sandbox_path_str(pty_pid_path),
                 *cmd,
             ]
             resp = await asyncio.wait_for(
@@ -1174,7 +1185,7 @@ class DockerSandboxSession(BaseSandboxSession):
                             "fi"
                         ),
                         "sh",
-                        str(pid_path),
+                        sandbox_path_str(pid_path),
                     ],
                     demux=True,
                 ),
@@ -1196,7 +1207,8 @@ class DockerSandboxSession(BaseSandboxSession):
     )
     async def persist_workspace(self) -> io.IOBase:
         skip = self._persist_workspace_skip_relpaths()
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
+        error_root = posix_path_for_error(root)
         try:
             staging_parent, staging_workspace = await self._stage_workspace_copy(
                 skip_rel_paths=skip
@@ -1207,12 +1219,13 @@ class DockerSandboxSession(BaseSandboxSession):
             )
             return strip_tar_member_prefix(root_prefixed_archive, prefix=staging_workspace.name)
         except docker.errors.NotFound as e:
-            raise WorkspaceArchiveReadError(path=root, cause=e) from e
+            raise WorkspaceArchiveReadError(path=error_root, cause=e) from e
         except docker.errors.APIError as e:
-            raise WorkspaceArchiveReadError(path=root, cause=e) from e
+            raise WorkspaceArchiveReadError(path=error_root, cause=e) from e
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
+        error_root = posix_path_for_error(root)
         with tempfile.TemporaryFile() as archive:
             while True:
                 chunk = data.read(io.DEFAULT_BUFFER_SIZE)
@@ -1222,7 +1235,7 @@ class DockerSandboxSession(BaseSandboxSession):
                     chunk = chunk.encode("utf-8")
                 if not isinstance(chunk, bytes | bytearray):
                     raise WorkspaceArchiveWriteError(
-                        path=root,
+                        path=error_root,
                         context={"reason": "non_bytes_tar_payload"},
                     )
                 archive.write(chunk)
@@ -1233,25 +1246,25 @@ class DockerSandboxSession(BaseSandboxSession):
                     validate_tarfile(tar)
             except UnsafeTarMemberError as e:
                 raise WorkspaceArchiveWriteError(
-                    path=root,
+                    path=error_root,
                     context={"reason": e.reason, "member": e.member},
                     cause=e,
                 ) from e
             except (tarfile.TarError, OSError) as e:
-                raise WorkspaceArchiveWriteError(path=root, cause=e) from e
+                raise WorkspaceArchiveWriteError(path=error_root, cause=e) from e
 
             await self._exec_checked(
                 "mkdir",
                 "-p",
-                str(root),
+                root.as_posix(),
                 error_cls=WorkspaceArchiveWriteError,
-                error_path=root,
+                error_path=error_root,
             )
             archive.seek(0)
             await self._stream_into_exec(
-                cmd=["tar", "-x", "-C", str(root)],
+                cmd=["tar", "-x", "-C", root.as_posix()],
                 stream=archive,
-                error_path=root,
+                error_path=error_root,
             )
 
     def _schedule_rm_best_effort(self, path: Path) -> None:
@@ -1272,13 +1285,13 @@ class DockerSandboxSession(BaseSandboxSession):
         container_client = getattr(self._container, "client", None)
         api = getattr(container_client, "api", None)
         if api is None:
-            bits, _ = self._container.get_archive(str(path))
+            bits, _ = self._container.get_archive(sandbox_path_str(path))
             return IteratorIO(it=cast(Iterator[bytes], bits), on_close=on_close)
 
         url = api._url("/containers/{0}/archive", self._container.id)
         response = api._get(
             url,
-            params={"path": str(path)},
+            params={"path": sandbox_path_str(path)},
             stream=True,
             headers={"Accept-Encoding": "identity"},
         )
@@ -1525,7 +1538,7 @@ def _build_docker_volume_mounts(
         driver_name, driver_options, read_only = driver_config
         mounts.append(
             DockerSDKMount(
-                target=str(mount_path),
+                target=mount_path.as_posix(),
                 source=_docker_volume_name(session_id=session_id, mount_path=mount_path),
                 type="volume",
                 read_only=read_only,
@@ -1549,7 +1562,7 @@ def _docker_volume_names_for_manifest(
 
 def _docker_volume_mounts_for_manifest(manifest: Manifest) -> list[tuple[Mount, Path]]:
     mounts: list[tuple[Mount, Path]] = []
-    root = Path(manifest.root)
+    root = posix_path_as_path(coerce_posix_path(manifest.root))
     for rel_path, artifact in manifest.iter_entries():
         if not isinstance(artifact, Mount):
             continue
@@ -1571,6 +1584,7 @@ def _docker_volume_name(*, session_id: uuid.UUID | None, mount_path: Path) -> st
     # Keep the readable path suffix, but include a path hash so distinct mount
     # targets like `/workspace/a_b` and `/workspace/a/b` cannot alias after
     # slash replacement.
-    path_hash = hashlib.sha256(str(mount_path).encode("utf-8")).hexdigest()[:12]
-    sanitized = re.sub(r"[^A-Za-z0-9_.-]", "_", str(mount_path).strip("/")) or "workspace"
+    mount_path_posix = mount_path.as_posix()
+    path_hash = hashlib.sha256(mount_path_posix.encode("utf-8")).hexdigest()[:12]
+    sanitized = re.sub(r"[^A-Za-z0-9_.-]", "_", mount_path_posix.strip("/")) or "workspace"
     return f"sandbox_{session_prefix}{path_hash}_{sanitized}"

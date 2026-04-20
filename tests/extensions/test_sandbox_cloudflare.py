@@ -707,7 +707,7 @@ async def test_cloudflare_mount_and_unmount_validate_path_access_for_write() -> 
     calls: list[tuple[str, bool]] = []
 
     async def _tracking_normalize(path: Path | str, *, for_write: bool = False) -> Path:
-        calls.append((str(path), for_write))
+        calls.append((Path(path).as_posix(), for_write))
         return sess.normalize_path(path, for_write=for_write)
 
     sess._validate_path_access = _tracking_normalize  # type: ignore[method-assign]
@@ -1273,7 +1273,7 @@ async def test_cloudflare_read_validates_path_access() -> None:
     calls: list[tuple[str, bool]] = []
 
     async def _tracking_normalize(path: Path | str, *, for_write: bool = False) -> Path:
-        calls.append((str(path), for_write))
+        calls.append((Path(path).as_posix(), for_write))
         # Fall back to synchronous normalize_path to avoid needing a real remote.
         return sess.normalize_path(path, for_write=for_write)
 
@@ -1292,7 +1292,7 @@ async def test_cloudflare_write_validates_path_access_for_write() -> None:
     calls: list[tuple[str, bool]] = []
 
     async def _tracking_normalize(path: Path | str, *, for_write: bool = False) -> Path:
-        calls.append((str(path), for_write))
+        calls.append((Path(path).as_posix(), for_write))
         return sess.normalize_path(path, for_write=for_write)
 
     sess._validate_path_access = _tracking_normalize  # type: ignore[method-assign]

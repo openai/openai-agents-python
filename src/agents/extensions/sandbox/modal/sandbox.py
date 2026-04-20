@@ -73,6 +73,12 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
+from ....sandbox.workspace_paths import (
+    coerce_posix_path,
+    posix_path_as_path,
+    posix_path_for_error,
+    sandbox_path_str,
+)
 from .mounts import ModalCloudBucketMountStrategy
 
 _DEFAULT_TIMEOUT_S = 30.0
@@ -418,7 +424,8 @@ class ModalSandboxSession(BaseSandboxSession):
 
     async def _prepare_backend_workspace(self) -> None:
         # Ensure workspace root exists before the base workspace flow needs it.
-        await self.exec("mkdir", "-p", "--", str(Path(self.state.manifest.root)), shell=False)
+        root = self._workspace_path_policy().sandbox_root().as_posix()
+        await self.exec("mkdir", "-p", "--", root, shell=False)
 
     async def _after_start(self) -> None:
         self._running = True
@@ -429,7 +436,7 @@ class ModalSandboxSession(BaseSandboxSession):
     def _wrap_start_error(self, error: Exception) -> Exception:
         if isinstance(error, WorkspaceStartError):
             return error
-        return WorkspaceStartError(path=Path(self.state.manifest.root), cause=error)
+        return WorkspaceStartError(path=self._workspace_root_path(), cause=error)
 
     async def _resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
         await self._ensure_sandbox()
@@ -469,7 +476,7 @@ class ModalSandboxSession(BaseSandboxSession):
     def _wrap_stop_error(self, error: Exception) -> Exception:
         if isinstance(error, WorkspaceStopError):
             return error
-        return WorkspaceStopError(path=Path(self.state.manifest.root), cause=error)
+        return WorkspaceStopError(path=self._workspace_root_path(), cause=error)
 
     async def _shutdown_backend(self) -> None:
         try:
@@ -1015,7 +1022,7 @@ class ModalSandboxSession(BaseSandboxSession):
 
         # Read by `cat` so the payload is returned as bytes.
         workspace_path = await self._validate_path_access(path)
-        cmd = ["sh", "-lc", f"cat -- {shlex.quote(str(workspace_path))}"]
+        cmd = ["sh", "-lc", f"cat -- {shlex.quote(sandbox_path_str(workspace_path))}"]
         try:
             out = await self.exec(*cmd, shell=False)
         except ExecTimeoutError as e:
@@ -1054,12 +1061,12 @@ class ModalSandboxSession(BaseSandboxSession):
         async def _run_write() -> None:
             assert self._sandbox is not None
             # Ensure parent directory exists.
-            parent = str(workspace_path.parent)
+            parent = sandbox_path_str(workspace_path.parent)
             mkdir_proc = await self._sandbox.exec.aio("mkdir", "-p", "--", parent, text=False)
             await mkdir_proc.wait.aio()
 
             # Stream bytes into `cat > file` to avoid quoting/binary issues.
-            cmd = ["sh", "-lc", f"cat > {shlex.quote(str(workspace_path))}"]
+            cmd = ["sh", "-lc", f"cat > {shlex.quote(sandbox_path_str(workspace_path))}"]
             proc = await self._sandbox.exec.aio(*cmd, text=False)
             await _write_process_stdin(proc, payload)
             exit_code = await proc.wait.aio()
@@ -1121,7 +1128,8 @@ class ModalSandboxSession(BaseSandboxSession):
             return await self._persist_workspace_via_tar()
         if self._native_snapshot_requires_tar_fallback():
             return await self._persist_workspace_via_tar()
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
+        error_root = posix_path_for_error(root)
         plain_skip = self._modal_snapshot_plain_skip_relpaths(root)
         skip_abs = [root / rel for rel in sorted(plain_skip, key=lambda p: p.as_posix())]
         self._modal_snapshot_ephemeral_backup = None
@@ -1134,13 +1142,15 @@ class ModalSandboxSession(BaseSandboxSession):
 
             try:
                 assert self._sandbox is not None
-                proc = await self._sandbox.exec.aio("tar", "xf", "-", "-C", str(root), text=False)
+                proc = await self._sandbox.exec.aio(
+                    "tar", "xf", "-", "-C", root.as_posix(), text=False
+                )
                 await _write_process_stdin(proc, bytes(backup))
                 exit_code = await proc.wait.aio()
                 if exit_code != 0:
                     stderr = await proc.stderr.read.aio()
                     return WorkspaceArchiveReadError(
-                        path=root,
+                        path=error_root,
                         context={
                             "reason": "snapshot_filesystem_ephemeral_restore_failed",
                             "exit_code": exit_code,
@@ -1151,7 +1161,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 if isinstance(exc, WorkspaceArchiveReadError):
                     return exc
                 return WorkspaceArchiveReadError(
-                    path=root,
+                    path=error_root,
                     context={"reason": "snapshot_filesystem_ephemeral_restore_failed"},
                     cause=exc,
                 )
@@ -1159,11 +1169,14 @@ class ModalSandboxSession(BaseSandboxSession):
 
         if skip_abs:
             rel_args = " ".join(shlex.quote(p.relative_to(root).as_posix()) for p in skip_abs)
-            cmd = f"cd -- {shlex.quote(str(root))} && (tar cf - -- {rel_args} 2>/dev/null || true)"
+            cmd = (
+                f"cd -- {shlex.quote(root.as_posix())} && "
+                f"(tar cf - -- {rel_args} 2>/dev/null || true)"
+            )
             out = await self.exec("sh", "-lc", cmd, shell=False)
             self._modal_snapshot_ephemeral_backup = out.stdout or b""
 
-            rm_cmd = ["rm", "-rf", "--", *[str(p) for p in skip_abs]]
+            rm_cmd = ["rm", "-rf", "--", *[p.as_posix() for p in skip_abs]]
             rm_out = await self.exec(*rm_cmd, shell=False)
             if not rm_out.ok():
                 cleanup_restore_error = await restore_ephemeral_paths()
@@ -1173,7 +1186,7 @@ class ModalSandboxSession(BaseSandboxSession):
                         cleanup_restore_error,
                     )
                 raise WorkspaceArchiveReadError(
-                    path=root,
+                    path=error_root,
                     context={
                         "reason": "snapshot_filesystem_ephemeral_remove_failed",
                         "exit_code": rm_out.exit_code,
@@ -1198,7 +1211,7 @@ class ModalSandboxSession(BaseSandboxSession):
                     restore_error,
                 )
             raise WorkspaceArchiveReadError(
-                path=root, context={"reason": "snapshot_filesystem_failed"}, cause=e
+                path=error_root, context={"reason": "snapshot_filesystem_failed"}, cause=e
             ) from e
 
         snapshot_id, snapshot_error = self._extract_modal_snapshot_id(
@@ -1220,7 +1233,8 @@ class ModalSandboxSession(BaseSandboxSession):
         Persist the workspace using Modal's snapshot_directory API when available.
         """
 
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
+        error_root = posix_path_for_error(root)
         await self._ensure_sandbox()
         assert self._sandbox is not None
         if not hasattr(self._sandbox, "snapshot_directory"):
@@ -1239,17 +1253,18 @@ class ModalSandboxSession(BaseSandboxSession):
                 return None
 
             restore_cmd = (
-                f"if [ ! -f {shlex.quote(str(backup_path))} ]; then "
+                f"if [ ! -f {shlex.quote(backup_path.as_posix())} ]; then "
                 f"echo missing ephemeral backup archive >&2; "
                 f"exit 1; "
                 f"fi; "
-                f"tar xf {shlex.quote(str(backup_path))} -C {shlex.quote(str(root))} && "
-                f"rm -f -- {shlex.quote(str(backup_path))}"
+                f"tar xf {shlex.quote(backup_path.as_posix())} -C "
+                f"{shlex.quote(root.as_posix())} && "
+                f"rm -f -- {shlex.quote(backup_path.as_posix())}"
             )
             out = await self.exec("sh", "-lc", restore_cmd, shell=False)
             if not out.ok():
                 return WorkspaceArchiveReadError(
-                    path=root,
+                    path=error_root,
                     context={
                         "reason": "snapshot_directory_ephemeral_restore_failed",
                         "exit_code": out.exit_code,
@@ -1268,7 +1283,7 @@ class ModalSandboxSession(BaseSandboxSession):
                         mount_path,
                     )
                 except Exception as e:
-                    current_error = WorkspaceArchiveReadError(path=root, cause=e)
+                    current_error = WorkspaceArchiveReadError(path=error_root, cause=e)
                     if remount_error is None:
                         remount_error = current_error
                     else:
@@ -1289,27 +1304,28 @@ class ModalSandboxSession(BaseSandboxSession):
         snapshot_id: str | None = None
         try:
             if skip_abs:
-                backup_path = (
-                    Path("/tmp/openai-agents/session-state")
-                    / self.state.session_id.hex
-                    / "modal-snapshot-directory-ephemeral.tar"
+                backup_path = posix_path_as_path(
+                    coerce_posix_path(
+                        "/tmp/openai-agents/session-state"
+                        f"/{self.state.session_id.hex}/modal-snapshot-directory-ephemeral.tar"
+                    )
                 )
                 rel_args = " ".join(shlex.quote(p.relative_to(root).as_posix()) for p in skip_abs)
                 backup_cmd = (
-                    f"mkdir -p -- {shlex.quote(str(backup_path.parent))} && "
-                    f"cd -- {shlex.quote(str(root))} && "
+                    f"mkdir -p -- {shlex.quote(backup_path.parent.as_posix())} && "
+                    f"cd -- {shlex.quote(root.as_posix())} && "
                     "{ "
                     f"for rel in {rel_args}; do "
                     'if [ -e "$rel" ]; then printf \'%s\\n\' "$rel"; fi; '
                     "done; "
                     "} | "
-                    f"tar cf {shlex.quote(str(backup_path))} -T - 2>/dev/null && "
-                    f"test -f {shlex.quote(str(backup_path))}"
+                    f"tar cf {shlex.quote(backup_path.as_posix())} -T - 2>/dev/null && "
+                    f"test -f {shlex.quote(backup_path.as_posix())}"
                 )
                 backup_out = await self.exec("sh", "-lc", backup_cmd, shell=False)
                 if not backup_out.ok():
                     raise WorkspaceArchiveReadError(
-                        path=root,
+                        path=error_root,
                         context={
                             "reason": "snapshot_directory_ephemeral_backup_failed",
                             "exit_code": backup_out.exit_code,
@@ -1318,11 +1334,11 @@ class ModalSandboxSession(BaseSandboxSession):
                     )
                 self._modal_snapshot_ephemeral_backup_path = backup_path
 
-                rm_cmd = ["rm", "-rf", "--", *[str(p) for p in skip_abs]]
+                rm_cmd = ["rm", "-rf", "--", *[sandbox_path_str(p) for p in skip_abs]]
                 rm_out = await self.exec(*rm_cmd, shell=False)
                 if not rm_out.ok():
                     raise WorkspaceArchiveReadError(
-                        path=root,
+                        path=error_root,
                         context={
                             "reason": "snapshot_directory_ephemeral_remove_failed",
                             "exit_code": rm_out.exit_code,
@@ -1339,7 +1355,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 detached_mounts.append((mount_entry, mount_path))
 
             snapshot_sandbox = await self._refresh_sandbox_handle_for_snapshot()
-            snap_coro = snapshot_sandbox.snapshot_directory.aio(str(root))
+            snap_coro = snapshot_sandbox.snapshot_directory.aio(root.as_posix())
             if self.state.snapshot_filesystem_timeout_s is None:
                 snap = await snap_coro
             else:
@@ -1353,7 +1369,7 @@ class ModalSandboxSession(BaseSandboxSession):
             snapshot_error = e
         except Exception as e:
             snapshot_error = WorkspaceArchiveReadError(
-                path=root, context={"reason": "snapshot_directory_failed"}, cause=e
+                path=error_root, context={"reason": "snapshot_directory_failed"}, cause=e
             )
         finally:
             remount_error = await restore_detached_mounts()
@@ -1401,7 +1417,7 @@ class ModalSandboxSession(BaseSandboxSession):
     ) -> tuple[str | None, WorkspaceArchiveReadError | None]:
         if isinstance(snap, bytes | bytearray):
             return None, WorkspaceArchiveReadError(
-                path=root,
+                path=posix_path_for_error(root),
                 context={
                     "reason": f"{snapshot_kind}_unexpected_bytes",
                     "type": type(snap).__name__,
@@ -1409,7 +1425,7 @@ class ModalSandboxSession(BaseSandboxSession):
             )
         if not hasattr(snap, "object_id") and not isinstance(snap, str):
             return None, WorkspaceArchiveReadError(
-                path=root,
+                path=posix_path_for_error(root),
                 context={
                     "reason": f"{snapshot_kind}_unexpected_return",
                     "type": type(snap).__name__,
@@ -1422,7 +1438,7 @@ class ModalSandboxSession(BaseSandboxSession):
             snapshot_id = None
         if not snapshot_id:
             return None, WorkspaceArchiveReadError(
-                path=root,
+                path=posix_path_for_error(root),
                 context={
                     "reason": f"{snapshot_kind}_unexpected_return",
                     "type": type(snap).__name__,
@@ -1489,7 +1505,8 @@ class ModalSandboxSession(BaseSandboxSession):
     )
     async def _persist_workspace_via_tar(self) -> io.IOBase:
         # Existing tar implementation extracted so snapshot_filesystem mode can fall back cleanly.
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
+        error_root = posix_path_for_error(root)
         skip = self._modal_tar_skip_relpaths(root)
 
         excludes: list[str] = []
@@ -1502,7 +1519,7 @@ class ModalSandboxSession(BaseSandboxSession):
             "-",
             *excludes,
             "-C",
-            str(root),
+            root.as_posix(),
             ".",
         ]
 
@@ -1510,7 +1527,7 @@ class ModalSandboxSession(BaseSandboxSession):
             out = await self.exec(*cmd, shell=False)
             if not out.ok():
                 raise WorkspaceArchiveReadError(
-                    path=root,
+                    path=error_root,
                     context={
                         "reason": "tar_nonzero_exit",
                         "exit_code": out.exit_code,
@@ -1521,7 +1538,7 @@ class ModalSandboxSession(BaseSandboxSession):
         except WorkspaceArchiveReadError:
             raise
         except Exception as e:
-            raise WorkspaceArchiveReadError(path=root, cause=e) from e
+            raise WorkspaceArchiveReadError(path=error_root, cause=e) from e
 
     async def _hydrate_workspace_via_snapshot_filesystem(self, data: io.IOBase) -> None:
         """
@@ -1529,7 +1546,7 @@ class ModalSandboxSession(BaseSandboxSession):
         persisted payload is a snapshot ref. Otherwise, fall back to tar
         extraction (to support SDKs that return tar bytes).
         """
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         raw, snapshot_id = self._read_modal_snapshot_id_from_archive(
             data=data.read(),
             expected_persistence=_WORKSPACE_PERSISTENCE_SNAPSHOT_FILESYSTEM,
@@ -1545,7 +1562,7 @@ class ModalSandboxSession(BaseSandboxSession):
         persisted payload is a snapshot ref. Otherwise, fall back to tar extraction.
         """
 
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         raw, snapshot_id = self._read_modal_snapshot_id_from_archive(
             data=data.read(),
             expected_persistence=_WORKSPACE_PERSISTENCE_SNAPSHOT_DIRECTORY,
@@ -1562,7 +1579,7 @@ class ModalSandboxSession(BaseSandboxSession):
         expected_persistence: WorkspacePersistenceMode,
         invalid_reason: str,
     ) -> tuple[bytes, str | None]:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         raw = data
         if isinstance(raw, str):
             raw = raw.encode("utf-8")
@@ -1610,7 +1627,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 timeout=self.state.timeout,
             )
             try:
-                mkdir_proc = await sb.exec.aio("mkdir", "-p", "--", str(root), text=False)
+                mkdir_proc = await sb.exec.aio("mkdir", "-p", "--", root.as_posix(), text=False)
                 await mkdir_proc.wait.aio()
             except Exception:
                 pass
@@ -1642,7 +1659,7 @@ class ModalSandboxSession(BaseSandboxSession):
             image = modal.Image.from_id(snapshot_id)
             await self._call_modal(
                 sandbox.mount_image,
-                str(root),
+                root.as_posix(),
                 image,
                 call_timeout=self.state.snapshot_filesystem_restore_timeout_s,
             )
@@ -1682,7 +1699,7 @@ class ModalSandboxSession(BaseSandboxSession):
         return mount_targets
 
     async def _hydrate_workspace_via_tar(self, data: io.IOBase) -> None:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
 
         raw = data.read()
         if isinstance(raw, str):
@@ -1705,9 +1722,11 @@ class ModalSandboxSession(BaseSandboxSession):
 
         async def _run_extract() -> None:
             assert self._sandbox is not None
-            mkdir_proc = await self._sandbox.exec.aio("mkdir", "-p", "--", str(root), text=False)
+            mkdir_proc = await self._sandbox.exec.aio(
+                "mkdir", "-p", "--", root.as_posix(), text=False
+            )
             await mkdir_proc.wait.aio()
-            proc = await self._sandbox.exec.aio("tar", "xf", "-", "-C", str(root), text=False)
+            proc = await self._sandbox.exec.aio("tar", "xf", "-", "-C", root.as_posix(), text=False)
             await _write_process_stdin(proc, raw)
             exit_code = await proc.wait.aio()
             if exit_code != 0:
@@ -1783,7 +1802,7 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
         if workspace_persistence != _WORKSPACE_PERSISTENCE_SNAPSHOT_DIRECTORY:
             return
 
-        root = Path(manifest.root)
+        root = posix_path_as_path(coerce_posix_path(manifest.root))
         for mount_entry, mount_path in manifest.mount_targets():
             if not isinstance(mount_entry.mount_strategy, ModalCloudBucketMountStrategy):
                 continue
@@ -1794,8 +1813,8 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
                         "lives at or under the workspace root"
                     ),
                     context={
-                        "workspace_root": str(root),
-                        "mount_path": str(mount_path),
+                        "workspace_root": root.as_posix(),
+                        "mount_path": mount_path.as_posix(),
                         "workspace_persistence": workspace_persistence,
                     },
                 )

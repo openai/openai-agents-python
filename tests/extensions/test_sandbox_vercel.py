@@ -239,7 +239,10 @@ class _FakeAsyncSandbox:
                     if not path.startswith(cwd.rstrip("/") + "/"):
                         continue
                     rel_path = path[len(cwd.rstrip("/")) + 1 :]
-                    if rel_path in exclusions:
+                    if any(
+                        rel_path == exclusion or rel_path.startswith(f"{exclusion}/")
+                        for exclusion in exclusions
+                    ):
                         continue
                     info = tarfile.TarInfo(name=rel_path if include_root else path)
                     info.size = len(content)
@@ -337,10 +340,10 @@ class _RecordingMount(Mount):
                 path: Path,
             ) -> None:
                 _ = strategy
-                mount._events.append(("unmount", str(path)))
+                mount._events.append(("unmount", path.as_posix()))
                 sandbox = cast(Any, session)._sandbox
                 if sandbox is not None:
-                    sandbox.files.pop(f"{path}/mounted.txt", None)
+                    sandbox.files.pop(f"{path.as_posix()}/mounted.txt", None)
 
             async def restore_after_snapshot(
                 self,
@@ -349,10 +352,10 @@ class _RecordingMount(Mount):
                 path: Path,
             ) -> None:
                 _ = strategy
-                mount._events.append(("mount", str(path)))
+                mount._events.append(("mount", path.as_posix()))
                 sandbox = cast(Any, session)._sandbox
                 if sandbox is not None:
-                    sandbox.files[f"{path}/mounted.txt"] = b"mounted-content"
+                    sandbox.files[f"{path.as_posix()}/mounted.txt"] = b"mounted-content"
 
         return _Adapter(self)
 
