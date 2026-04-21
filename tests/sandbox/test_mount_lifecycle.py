@@ -110,13 +110,14 @@ async def test_with_ephemeral_mounts_removed_reports_restore_error_after_operati
     events: list[str] = []
     mount = _FakeMount(_FakeMountStrategy(events, name="mount", fail_restore=True))
     session = _FakeSession(_FakeManifest([(mount, Path("/workspace/mount"))]))
+    operation_error = WorkspaceArchiveReadError(
+        path=Path("/workspace"),
+        context={"reason": "persist_failed"},
+    )
 
     async def operation() -> bytes:
         events.append("operation")
-        raise WorkspaceArchiveReadError(
-            path=Path("/workspace"),
-            context={"reason": "persist_failed"},
-        )
+        raise operation_error
 
     with pytest.raises(WorkspaceArchiveReadError) as exc_info:
         await with_ephemeral_mounts_removed(
@@ -129,6 +130,6 @@ async def test_with_ephemeral_mounts_removed_reports_restore_error_after_operati
 
     assert events == ["teardown:mount", "operation", "restore:mount"]
     assert exc_info.value.context["snapshot_error_before_remount_corruption"] == {
-        "message": "failed to read archive for path: /workspace",
+        "message": operation_error.message,
     }
     assert isinstance(exc_info.value.cause, RuntimeError)
