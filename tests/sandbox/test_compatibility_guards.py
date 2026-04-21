@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import dataclasses
-import importlib
 import uuid
 from collections.abc import Iterable
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import pytest
 from pydantic import TypeAdapter
@@ -14,41 +13,6 @@ import agents.sandbox.capabilities as capabilities_package
 import agents.sandbox.entries as entries_package
 import agents.sandbox.session as session_package
 from agents import Agent
-from agents.extensions.sandbox.blaxel import (
-    BlaxelCloudBucketMountStrategy,
-    BlaxelDriveMountStrategy,
-    BlaxelSandboxClientOptions,
-    BlaxelSandboxSessionState,
-)
-from agents.extensions.sandbox.cloudflare import (
-    CloudflareBucketMountStrategy,
-    CloudflareSandboxClientOptions,
-    CloudflareSandboxSessionState,
-)
-from agents.extensions.sandbox.daytona import (
-    DaytonaCloudBucketMountStrategy,
-    DaytonaSandboxClientOptions,
-    DaytonaSandboxSessionState,
-)
-from agents.extensions.sandbox.e2b import (
-    E2BCloudBucketMountStrategy,
-    E2BSandboxClientOptions,
-    E2BSandboxSessionState,
-)
-from agents.extensions.sandbox.modal import (
-    ModalCloudBucketMountStrategy,
-    ModalSandboxClientOptions,
-    ModalSandboxSessionState,
-)
-from agents.extensions.sandbox.runloop import (
-    RunloopCloudBucketMountStrategy,
-    RunloopSandboxClientOptions,
-    RunloopSandboxSessionState,
-)
-from agents.extensions.sandbox.vercel import (
-    VercelSandboxClientOptions,
-    VercelSandboxSessionState,
-)
 from agents.run_config import SandboxConcurrencyLimits, SandboxRunConfig
 from agents.run_context import RunContextWrapper
 from agents.run_state import RunState
@@ -101,6 +65,32 @@ def _session_state_kwargs() -> dict[str, object]:
 
 def _make_session_state(cls: type[StateT], **overrides: object) -> StateT:
     return cls.model_validate({**_session_state_kwargs(), **overrides})
+
+
+def _import_optional_class(module_name: str, class_name: str) -> type[Any]:
+    module = pytest.importorskip(module_name)
+    value = getattr(module, class_name)
+    assert isinstance(value, type)
+    return cast(type[Any], value)
+
+
+def _instantiate_optional_class(
+    module_name: str,
+    class_name: str,
+    *args: object,
+    **kwargs: object,
+) -> Any:
+    cls = _import_optional_class(module_name, class_name)
+    return cls(*args, **kwargs)
+
+
+def _make_optional_session_state(
+    module_name: str,
+    class_name: str,
+    **overrides: object,
+) -> SandboxSessionState:
+    cls = _import_optional_class(module_name, class_name)
+    return cast(SandboxSessionState, cls.model_validate({**_session_state_kwargs(), **overrides}))
 
 
 def test_core_sandbox_public_export_surface_is_stable() -> None:
@@ -352,7 +342,7 @@ def test_extension_sandbox_package_export_surfaces_are_stable(
     module_name: str,
     expected_exports: set[str],
 ) -> None:
-    module = importlib.import_module(module_name)
+    module = pytest.importorskip(module_name)
 
     assert set(module.__all__) == expected_exports
     for name in expected_exports:
@@ -373,20 +363,38 @@ def test_sandbox_dataclass_constructor_field_order_is_stable() -> None:
         "snapshot",
         "concurrency_limits",
     )
-    assert _dataclass_field_names(BlaxelSandboxClientOptions) == (
-        "image",
-        "memory",
-        "region",
-        "ports",
-        "env_vars",
-        "labels",
-        "ttl",
-        "name",
-        "pause_on_exit",
-        "timeouts",
-        "exposed_port_public",
-        "exposed_port_url_ttl_s",
-    )
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name", "expected_fields"),
+    [
+        (
+            "agents.extensions.sandbox.blaxel",
+            "BlaxelSandboxClientOptions",
+            (
+                "image",
+                "memory",
+                "region",
+                "ports",
+                "env_vars",
+                "labels",
+                "ttl",
+                "name",
+                "pause_on_exit",
+                "timeouts",
+                "exposed_port_public",
+                "exposed_port_url_ttl_s",
+            ),
+        ),
+    ],
+)
+def test_optional_sandbox_dataclass_constructor_field_order_is_stable(
+    module_name: str,
+    class_name: str,
+    expected_fields: tuple[str, ...],
+) -> None:
+    cls = _import_optional_class(module_name, class_name)
+    assert _dataclass_field_names(cls) == expected_fields
 
 
 @pytest.mark.parametrize(
@@ -394,8 +402,21 @@ def test_sandbox_dataclass_constructor_field_order_is_stable() -> None:
     [
         (UnixLocalSandboxClientOptions, ("exposed_ports",)),
         (DockerSandboxClientOptions, ("image", "exposed_ports")),
+    ],
+)
+def test_sandbox_client_options_positional_field_order_is_stable(
+    options_cls: type[BaseSandboxClientOptions],
+    expected_fields: tuple[str, ...],
+) -> None:
+    assert _model_field_names(options_cls, exclude={"type"}) == expected_fields
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name", "expected_fields"),
+    [
         (
-            E2BSandboxClientOptions,
+            "agents.extensions.sandbox.e2b",
+            "E2BSandboxClientOptions",
             (
                 "sandbox_type",
                 "template",
@@ -414,7 +435,8 @@ def test_sandbox_dataclass_constructor_field_order_is_stable() -> None:
             ),
         ),
         (
-            ModalSandboxClientOptions,
+            "agents.extensions.sandbox.modal",
+            "ModalSandboxClientOptions",
             (
                 "app_name",
                 "sandbox_create_timeout_s",
@@ -429,11 +451,13 @@ def test_sandbox_dataclass_constructor_field_order_is_stable() -> None:
             ),
         ),
         (
-            CloudflareSandboxClientOptions,
+            "agents.extensions.sandbox.cloudflare",
+            "CloudflareSandboxClientOptions",
             ("worker_url", "api_key", "exposed_ports"),
         ),
         (
-            DaytonaSandboxClientOptions,
+            "agents.extensions.sandbox.daytona",
+            "DaytonaSandboxClientOptions",
             (
                 "sandbox_snapshot_name",
                 "image",
@@ -450,7 +474,8 @@ def test_sandbox_dataclass_constructor_field_order_is_stable() -> None:
             ),
         ),
         (
-            RunloopSandboxClientOptions,
+            "agents.extensions.sandbox.runloop",
+            "RunloopSandboxClientOptions",
             (
                 "blueprint_id",
                 "blueprint_name",
@@ -469,7 +494,8 @@ def test_sandbox_dataclass_constructor_field_order_is_stable() -> None:
             ),
         ),
         (
-            VercelSandboxClientOptions,
+            "agents.extensions.sandbox.vercel",
+            "VercelSandboxClientOptions",
             (
                 "project_id",
                 "team_id",
@@ -486,18 +512,21 @@ def test_sandbox_dataclass_constructor_field_order_is_stable() -> None:
         ),
     ],
 )
-def test_sandbox_client_options_positional_field_order_is_stable(
-    options_cls: type[BaseSandboxClientOptions],
+def test_optional_sandbox_client_options_positional_field_order_is_stable(
+    module_name: str,
+    class_name: str,
     expected_fields: tuple[str, ...],
 ) -> None:
+    options_cls = _import_optional_class(module_name, class_name)
     assert _model_field_names(options_cls, exclude={"type"}) == expected_fields
 
 
 @pytest.mark.parametrize(
-    ("state_cls", "expected_fields"),
+    ("state_cls_or_module", "class_name", "expected_fields"),
     [
         (
             SandboxSessionState,
+            None,
             (
                 "type",
                 "session_id",
@@ -511,6 +540,7 @@ def test_sandbox_client_options_positional_field_order_is_stable(
         ),
         (
             UnixLocalSandboxSessionState,
+            None,
             (
                 "type",
                 "session_id",
@@ -525,6 +555,7 @@ def test_sandbox_client_options_positional_field_order_is_stable(
         ),
         (
             DockerSandboxSessionState,
+            None,
             (
                 "type",
                 "session_id",
@@ -539,7 +570,8 @@ def test_sandbox_client_options_positional_field_order_is_stable(
             ),
         ),
         (
-            E2BSandboxSessionState,
+            "agents.extensions.sandbox.e2b",
+            "E2BSandboxSessionState",
             (
                 "type",
                 "session_id",
@@ -566,7 +598,8 @@ def test_sandbox_client_options_positional_field_order_is_stable(
             ),
         ),
         (
-            ModalSandboxSessionState,
+            "agents.extensions.sandbox.modal",
+            "ModalSandboxSessionState",
             (
                 "type",
                 "session_id",
@@ -591,7 +624,8 @@ def test_sandbox_client_options_positional_field_order_is_stable(
             ),
         ),
         (
-            CloudflareSandboxSessionState,
+            "agents.extensions.sandbox.cloudflare",
+            "CloudflareSandboxSessionState",
             (
                 "type",
                 "session_id",
@@ -606,7 +640,8 @@ def test_sandbox_client_options_positional_field_order_is_stable(
             ),
         ),
         (
-            DaytonaSandboxSessionState,
+            "agents.extensions.sandbox.daytona",
+            "DaytonaSandboxSessionState",
             (
                 "type",
                 "session_id",
@@ -631,7 +666,8 @@ def test_sandbox_client_options_positional_field_order_is_stable(
             ),
         ),
         (
-            BlaxelSandboxSessionState,
+            "agents.extensions.sandbox.blaxel",
+            "BlaxelSandboxSessionState",
             (
                 "type",
                 "session_id",
@@ -656,7 +692,8 @@ def test_sandbox_client_options_positional_field_order_is_stable(
             ),
         ),
         (
-            RunloopSandboxSessionState,
+            "agents.extensions.sandbox.runloop",
+            "RunloopSandboxSessionState",
             (
                 "type",
                 "session_id",
@@ -683,7 +720,8 @@ def test_sandbox_client_options_positional_field_order_is_stable(
             ),
         ),
         (
-            VercelSandboxSessionState,
+            "agents.extensions.sandbox.vercel",
+            "VercelSandboxSessionState",
             (
                 "type",
                 "session_id",
@@ -709,9 +747,15 @@ def test_sandbox_client_options_positional_field_order_is_stable(
     ],
 )
 def test_sandbox_session_state_field_order_is_stable(
-    state_cls: type[SandboxSessionState],
+    state_cls_or_module: type[SandboxSessionState] | str,
+    class_name: str | None,
     expected_fields: tuple[str, ...],
 ) -> None:
+    if isinstance(state_cls_or_module, str):
+        assert class_name is not None
+        state_cls = _import_optional_class(state_cls_or_module, class_name)
+    else:
+        state_cls = state_cls_or_module
     assert _model_field_names(state_cls) == expected_fields
 
 
@@ -720,12 +764,6 @@ def test_sandbox_session_state_field_order_is_stable(
     [
         (UnixLocalSandboxClientOptions(), "unix_local"),
         (DockerSandboxClientOptions("python:3.12"), "docker"),
-        (E2BSandboxClientOptions("base"), "e2b"),
-        (ModalSandboxClientOptions("agents-sdk"), "modal"),
-        (CloudflareSandboxClientOptions("https://worker.example"), "cloudflare"),
-        (DaytonaSandboxClientOptions(), "daytona"),
-        (RunloopSandboxClientOptions(), "runloop"),
-        (VercelSandboxClientOptions(), "vercel"),
     ],
 )
 def test_sandbox_client_options_json_round_trip_preserves_type(
@@ -737,7 +775,42 @@ def test_sandbox_client_options_json_round_trip_preserves_type(
     restored = BaseSandboxClientOptions.parse(payload)
 
     assert payload["type"] == expected_type
-    assert type(restored) is type(options)
+    assert _class_identity(restored) == _class_identity(options)
+    assert restored.model_dump(mode="json") == payload
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name", "args", "expected_type"),
+    [
+        ("agents.extensions.sandbox.e2b", "E2BSandboxClientOptions", ("base",), "e2b"),
+        ("agents.extensions.sandbox.modal", "ModalSandboxClientOptions", ("agents-sdk",), "modal"),
+        (
+            "agents.extensions.sandbox.cloudflare",
+            "CloudflareSandboxClientOptions",
+            ("https://worker.example",),
+            "cloudflare",
+        ),
+        ("agents.extensions.sandbox.daytona", "DaytonaSandboxClientOptions", (), "daytona"),
+        ("agents.extensions.sandbox.runloop", "RunloopSandboxClientOptions", (), "runloop"),
+        ("agents.extensions.sandbox.vercel", "VercelSandboxClientOptions", (), "vercel"),
+    ],
+)
+def test_optional_sandbox_client_options_json_round_trip_preserves_type(
+    module_name: str,
+    class_name: str,
+    args: tuple[object, ...],
+    expected_type: str,
+) -> None:
+    options = cast(
+        BaseSandboxClientOptions,
+        _instantiate_optional_class(module_name, class_name, *args),
+    )
+    payload = options.model_dump(mode="json")
+
+    restored = BaseSandboxClientOptions.parse(payload)
+
+    assert payload["type"] == expected_type
+    assert _class_identity(restored) == _class_identity(options)
     assert restored.model_dump(mode="json") == payload
 
 
@@ -753,36 +826,6 @@ def test_sandbox_client_options_json_round_trip_preserves_type(
             image="python:3.12",
             container_id="container-123",
         ),
-        _make_session_state(
-            E2BSandboxSessionState,
-            sandbox_id="sandbox-123",
-        ),
-        _make_session_state(
-            ModalSandboxSessionState,
-            app_name="agents-sdk",
-            sandbox_id="sandbox-123",
-        ),
-        _make_session_state(
-            CloudflareSandboxSessionState,
-            worker_url="https://worker.example",
-            sandbox_id="sandbox-123",
-        ),
-        _make_session_state(
-            DaytonaSandboxSessionState,
-            sandbox_id="sandbox-123",
-        ),
-        _make_session_state(
-            BlaxelSandboxSessionState,
-            sandbox_name="sandbox-123",
-        ),
-        _make_session_state(
-            RunloopSandboxSessionState,
-            devbox_id="devbox-123",
-        ),
-        _make_session_state(
-            VercelSandboxSessionState,
-            sandbox_id="sandbox-123",
-        ),
     ],
 )
 def test_sandbox_session_state_json_round_trip_preserves_type(
@@ -792,7 +835,57 @@ def test_sandbox_session_state_json_round_trip_preserves_type(
 
     restored = SandboxSessionState.parse(payload)
 
-    assert type(restored) is type(state)
+    assert _class_identity(restored) == _class_identity(state)
+    assert restored.model_dump(mode="json") == payload
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name", "overrides"),
+    [
+        ("agents.extensions.sandbox.e2b", "E2BSandboxSessionState", {"sandbox_id": "sandbox-123"}),
+        (
+            "agents.extensions.sandbox.modal",
+            "ModalSandboxSessionState",
+            {"app_name": "agents-sdk", "sandbox_id": "sandbox-123"},
+        ),
+        (
+            "agents.extensions.sandbox.cloudflare",
+            "CloudflareSandboxSessionState",
+            {"worker_url": "https://worker.example", "sandbox_id": "sandbox-123"},
+        ),
+        (
+            "agents.extensions.sandbox.daytona",
+            "DaytonaSandboxSessionState",
+            {"sandbox_id": "sandbox-123"},
+        ),
+        (
+            "agents.extensions.sandbox.blaxel",
+            "BlaxelSandboxSessionState",
+            {"sandbox_name": "sandbox-123"},
+        ),
+        (
+            "agents.extensions.sandbox.runloop",
+            "RunloopSandboxSessionState",
+            {"devbox_id": "devbox-123"},
+        ),
+        (
+            "agents.extensions.sandbox.vercel",
+            "VercelSandboxSessionState",
+            {"sandbox_id": "sandbox-123"},
+        ),
+    ],
+)
+def test_optional_sandbox_session_state_json_round_trip_preserves_type(
+    module_name: str,
+    class_name: str,
+    overrides: dict[str, object],
+) -> None:
+    state = _make_optional_session_state(module_name, class_name, **overrides)
+    payload = state.model_dump(mode="json")
+
+    restored = SandboxSessionState.parse(payload)
+
+    assert _class_identity(restored) == _class_identity(state)
     assert restored.model_dump(mode="json") == payload
 
 
@@ -832,13 +925,6 @@ def test_core_discriminator_type_strings_are_stable() -> None:
     [
         (InContainerMountStrategy(pattern=MountpointMountPattern()), "in_container"),
         (DockerVolumeMountStrategy(driver="rclone"), "docker_volume"),
-        (E2BCloudBucketMountStrategy(), "e2b_cloud_bucket"),
-        (ModalCloudBucketMountStrategy(), "modal_cloud_bucket"),
-        (DaytonaCloudBucketMountStrategy(), "daytona_cloud_bucket"),
-        (CloudflareBucketMountStrategy(), "cloudflare_bucket_mount"),
-        (BlaxelCloudBucketMountStrategy(), "blaxel_cloud_bucket"),
-        (BlaxelDriveMountStrategy(), "blaxel_drive"),
-        (RunloopCloudBucketMountStrategy(), "runloop_cloud_bucket"),
     ],
 )
 def test_mount_strategy_type_strings_round_trip_through_registry(
@@ -850,7 +936,53 @@ def test_mount_strategy_type_strings_round_trip_through_registry(
     restored = MountStrategyBase.parse(payload)
 
     assert payload["type"] == expected_type
-    assert type(restored) is type(strategy)
+    assert _class_identity(restored) == _class_identity(strategy)
+    assert restored.model_dump(mode="json") == payload
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name", "expected_type"),
+    [
+        ("agents.extensions.sandbox.e2b", "E2BCloudBucketMountStrategy", "e2b_cloud_bucket"),
+        ("agents.extensions.sandbox.modal", "ModalCloudBucketMountStrategy", "modal_cloud_bucket"),
+        (
+            "agents.extensions.sandbox.daytona",
+            "DaytonaCloudBucketMountStrategy",
+            "daytona_cloud_bucket",
+        ),
+        (
+            "agents.extensions.sandbox.cloudflare",
+            "CloudflareBucketMountStrategy",
+            "cloudflare_bucket_mount",
+        ),
+        (
+            "agents.extensions.sandbox.blaxel",
+            "BlaxelCloudBucketMountStrategy",
+            "blaxel_cloud_bucket",
+        ),
+        ("agents.extensions.sandbox.blaxel", "BlaxelDriveMountStrategy", "blaxel_drive"),
+        (
+            "agents.extensions.sandbox.runloop",
+            "RunloopCloudBucketMountStrategy",
+            "runloop_cloud_bucket",
+        ),
+    ],
+)
+def test_optional_mount_strategy_type_strings_round_trip_through_registry(
+    module_name: str,
+    class_name: str,
+    expected_type: str,
+) -> None:
+    strategy = cast(
+        MountStrategyBase,
+        _instantiate_optional_class(module_name, class_name),
+    )
+    payload = strategy.model_dump(mode="json")
+
+    restored = MountStrategyBase.parse(payload)
+
+    assert payload["type"] == expected_type
+    assert _class_identity(restored) == _class_identity(strategy)
     assert restored.model_dump(mode="json") == payload
 
 
@@ -940,3 +1072,8 @@ def _model_type_default(cls: type[Any]) -> str:
     type_field = cls.model_fields["type"]
     assert isinstance(type_field.default, str)
     return type_field.default
+
+
+def _class_identity(value: object) -> tuple[str, str]:
+    value_type = type(value)
+    return value_type.__module__, value_type.__qualname__
