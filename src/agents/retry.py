@@ -357,5 +357,33 @@ class _RetryPolicies:
             ),
         )
 
+    def rate_limit(self) -> RetryPolicy:
+        """Retry on HTTP 429 (Too Many Requests), honoring ``Retry-After`` headers.
+
+        When the server returns a ``Retry-After`` or ``Retry-After-Ms`` header the
+        policy returns that delay so the runner waits the prescribed cool-down period.
+        When no header is present the decision carries no explicit delay and the runner
+        falls back to the configured :attr:`ModelRetrySettings.backoff` schedule.
+
+        This is a ready-made convenience for the common rate-limit scenario.
+        Combine with :meth:`provider_suggested` via :meth:`any` for deeper provider
+        integration (e.g. ``retry_policies.any(retry_policies.rate_limit(),
+        retry_policies.provider_suggested())``).
+        """
+
+        def policy(context: RetryPolicyContext) -> bool | RetryDecision:
+            if context.normalized.status_code != 429:
+                return False
+            delay = context.normalized.retry_after
+            if delay is None and context.provider_advice is not None:
+                delay = context.provider_advice.retry_after
+            return RetryDecision(retry=True, delay=delay)
+
+        return _mark_retry_capabilities(
+            policy,
+            retries_safe_transport_errors=False,
+            retries_all_transient_errors=False,
+        )
+
 
 retry_policies = _RetryPolicies()

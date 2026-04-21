@@ -418,6 +418,7 @@ The SDK exports ready-made helpers on `retry_policies`:
 | `retry_policies.network_error()` | Matches transient transport and timeout failures. |
 | `retry_policies.http_status([...])` | Matches selected HTTP status codes. |
 | `retry_policies.retry_after()` | Retries only when a retry-after hint is available, using that delay. |
+| `retry_policies.rate_limit()` | Retries on HTTP 429, honoring `Retry-After` headers; falls back to the configured backoff when no header is present. |
 | `retry_policies.any(...)` | Retries when any nested policy opts in. |
 | `retry_policies.all(...)` | Retries only when every nested policy opts in. |
 

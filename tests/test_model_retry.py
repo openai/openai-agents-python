@@ -2357,3 +2357,223 @@ async def test_stream_response_with_retry_closes_current_stream_when_consumer_st
     await outer_stream.aclose()
 
     assert stream.close_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# retry_policies.rate_limit() unit tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_retry_policies_rate_limit_retries_on_429_no_header() -> None:
+    raw_decision = retry_policies.rate_limit()(
+        RetryPolicyContext(
+            error=_status_error_without_code(429, "rate_limit"),
+            attempt=1,
+            max_retries=3,
+            stream=False,
+            normalized=ModelRetryNormalizedError(status_code=429),
+            provider_advice=None,
+        )
+    )
+    decision = await raw_decision if asyncio.iscoroutine(raw_decision) else raw_decision
+
+    assert isinstance(decision, RetryDecision)
+    assert decision.retry is True
+    assert decision.delay is None
+
+
+@pytest.mark.asyncio
+async def test_retry_policies_rate_limit_uses_normalized_retry_after() -> None:
+    raw_decision = retry_policies.rate_limit()(
+        RetryPolicyContext(
+            error=_status_error_without_code(429, "rate_limit"),
+            attempt=1,
+            max_retries=3,
+            stream=False,
+            normalized=ModelRetryNormalizedError(status_code=429, retry_after=2.5),
+            provider_advice=None,
+        )
+    )
+    decision = await raw_decision if asyncio.iscoroutine(raw_decision) else raw_decision
+
+    assert isinstance(decision, RetryDecision)
+    assert decision.retry is True
+    assert decision.delay == 2.5
+
+
+@pytest.mark.asyncio
+async def test_retry_policies_rate_limit_falls_back_to_provider_advice_retry_after() -> None:
+    raw_decision = retry_policies.rate_limit()(
+        RetryPolicyContext(
+            error=_status_error_without_code(429, "rate_limit"),
+            attempt=1,
+            max_retries=3,
+            stream=False,
+            normalized=ModelRetryNormalizedError(status_code=429, retry_after=None),
+            provider_advice=ModelRetryAdvice(retry_after=1.5),
+        )
+    )
+    decision = await raw_decision if asyncio.iscoroutine(raw_decision) else raw_decision
+
+    assert isinstance(decision, RetryDecision)
+    assert decision.retry is True
+    assert decision.delay == 1.5
+
+
+@pytest.mark.asyncio
+async def test_retry_policies_rate_limit_prefers_normalized_over_provider_advice() -> None:
+    raw_decision = retry_policies.rate_limit()(
+        RetryPolicyContext(
+            error=_status_error_without_code(429, "rate_limit"),
+            attempt=1,
+            max_retries=3,
+            stream=False,
+            normalized=ModelRetryNormalizedError(status_code=429, retry_after=3.0),
+            provider_advice=ModelRetryAdvice(retry_after=9.0),
+        )
+    )
+    decision = await raw_decision if asyncio.iscoroutine(raw_decision) else raw_decision
+
+    assert isinstance(decision, RetryDecision)
+    assert decision.retry is True
+    assert decision.delay == 3.0
+
+
+@pytest.mark.asyncio
+async def test_retry_policies_rate_limit_does_not_retry_non_429_status() -> None:
+    raw_decision = retry_policies.rate_limit()(
+        RetryPolicyContext(
+            error=_status_error(500),
+            attempt=1,
+            max_retries=3,
+            stream=False,
+            normalized=ModelRetryNormalizedError(status_code=500),
+            provider_advice=None,
+        )
+    )
+    decision = await raw_decision if asyncio.iscoroutine(raw_decision) else raw_decision
+
+    assert not decision
+
+
+@pytest.mark.asyncio
+async def test_retry_policies_rate_limit_does_not_retry_network_errors() -> None:
+    raw_decision = retry_policies.rate_limit()(
+        RetryPolicyContext(
+            error=_connection_error(),
+            attempt=1,
+            max_retries=3,
+            stream=False,
+            normalized=ModelRetryNormalizedError(is_network_error=True),
+            provider_advice=None,
+        )
+    )
+    decision = await raw_decision if asyncio.iscoroutine(raw_decision) else raw_decision
+
+    assert not decision
+
+
+@pytest.mark.asyncio
+async def test_get_response_with_retry_rate_limit_honors_retry_after_header(
+    monkeypatch,
+) -> None:
+    calls = 0
+    rewinds = 0
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    async def rewind() -> None:
+        nonlocal rewinds
+        rewinds += 1
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            request = httpx.Request("POST", "https://example.com")
+            response = httpx.Response(
+                429,
+                request=request,
+                headers={"retry-after": "2"},
+                json={"error": {"code": "rate_limit_exceeded", "message": "rate limit"}},
+            )
+            raise APIStatusError(
+                "rate_limit_exceeded",
+                response=response,
+                body={"error": {"code": "rate_limit_exceeded", "message": "rate limit"}},
+            )
+        return ModelResponse(
+            output=[get_text_message("ok")],
+            usage=Usage(requests=1),
+            response_id="resp_rate_limit_header",
+        )
+
+    result = await get_response_with_retry(
+        get_response=get_response,
+        rewind=rewind,
+        retry_settings=ModelRetrySettings(
+            max_retries=1,
+            backoff=ModelRetryBackoffSettings(initial_delay=5.0, jitter=False),
+            policy=retry_policies.rate_limit(),
+        ),
+        get_retry_advice=lambda _request: None,
+        previous_response_id=None,
+        conversation_id=None,
+    )
+
+    assert calls == 2
+    assert rewinds == 1
+    assert sleeps == [2.0]
+    assert result.usage.requests == 2
+
+
+@pytest.mark.asyncio
+async def test_get_response_with_retry_rate_limit_falls_back_to_backoff_without_header(
+    monkeypatch,
+) -> None:
+    calls = 0
+    rewinds = 0
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    async def rewind() -> None:
+        nonlocal rewinds
+        rewinds += 1
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _status_error_without_code(429, "rate_limit")
+        return ModelResponse(
+            output=[get_text_message("ok")],
+            usage=Usage(requests=1),
+            response_id="resp_rate_limit_backoff",
+        )
+
+    result = await get_response_with_retry(
+        get_response=get_response,
+        rewind=rewind,
+        retry_settings=ModelRetrySettings(
+            max_retries=1,
+            backoff=ModelRetryBackoffSettings(initial_delay=0.5, jitter=False),
+            policy=retry_policies.rate_limit(),
+        ),
+        get_retry_advice=lambda _request: None,
+        previous_response_id=None,
+        conversation_id=None,
+    )
+
+    assert calls == 2
+    assert rewinds == 1
+    assert sleeps == [0.5]
+    assert result.usage.requests == 2
