@@ -510,12 +510,14 @@ class TestOpenAIResponsesCompactionSession:
                 self.add_calls = 0
                 self.clear_calls = 0
 
-            async def add_items(self, items: list[TResponseInputItem]) -> None:
+            async def add_items(
+                self, items: list[TResponseInputItem], *, wrapper: Any = None
+            ) -> None:
                 self.add_calls += 1
                 if self.add_calls == 1:
-                    await super().add_items(items[:1])
+                    await super().add_items(items[:1], wrapper=wrapper)
                     raise RuntimeError("replacement failed")
-                await super().add_items(items)
+                await super().add_items(items, wrapper=wrapper)
 
             async def clear_session(self) -> None:
                 self.clear_calls += 1
@@ -566,17 +568,21 @@ class TestOpenAIResponsesCompactionSession:
                 self.add_calls = 0
                 self.clear_calls = 0
 
-            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            async def get_items(
+                self, limit: int | None = None, *, wrapper: Any = None
+            ) -> list[TResponseInputItem]:
                 if limit is None and self.session_settings is not None:
                     limit = self.session_settings.limit
-                return await super().get_items(limit)
+                return await super().get_items(limit, wrapper=wrapper)
 
-            async def add_items(self, items: list[TResponseInputItem]) -> None:
+            async def add_items(
+                self, items: list[TResponseInputItem], *, wrapper: Any = None
+            ) -> None:
                 self.add_calls += 1
                 if self.add_calls == 1:
-                    await super().add_items(items[:1])
+                    await super().add_items(items[:1], wrapper=wrapper)
                     raise RuntimeError("replacement failed")
-                await super().add_items(items)
+                await super().add_items(items, wrapper=wrapper)
 
             async def clear_session(self) -> None:
                 self.clear_calls += 1
@@ -624,9 +630,11 @@ class TestOpenAIResponsesCompactionSession:
                 self.add_calls = 0
                 self.clear_calls = 0
 
-            async def add_items(self, items: list[TResponseInputItem]) -> None:
+            async def add_items(
+                self, items: list[TResponseInputItem], *, wrapper: Any = None
+            ) -> None:
                 self.add_calls += 1
-                await super().add_items(items)
+                await super().add_items(items, wrapper=wrapper)
 
             async def clear_session(self) -> None:
                 self.clear_calls += 1
@@ -674,9 +682,11 @@ class TestOpenAIResponsesCompactionSession:
                 self.add_calls = 0
                 self.clear_calls = 0
 
-            async def add_items(self, items: list[TResponseInputItem]) -> None:
+            async def add_items(
+                self, items: list[TResponseInputItem], *, wrapper: Any = None
+            ) -> None:
                 self.add_calls += 1
-                await super().add_items(items)
+                await super().add_items(items, wrapper=wrapper)
 
             async def clear_session(self) -> None:
                 self.clear_calls += 1
@@ -725,10 +735,12 @@ class TestOpenAIResponsesCompactionSession:
                 self.add_calls = 0
                 self.clear_calls = 0
 
-            async def add_items(self, items: list[TResponseInputItem]) -> None:
+            async def add_items(
+                self, items: list[TResponseInputItem], *, wrapper: Any = None
+            ) -> None:
                 self.add_calls += 1
                 if self.add_calls == 1:
-                    await super().add_items(items[:1])
+                    await super().add_items(items[:1], wrapper=wrapper)
                     raise RuntimeError("replacement failed")
                 raise RuntimeError("restore failed")
 

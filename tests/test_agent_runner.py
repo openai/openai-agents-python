@@ -2123,15 +2123,17 @@ async def test_prepare_input_with_openai_conversation_strips_assistant_history_i
         def __init__(self, history: list[TResponseInputItem]) -> None:
             self.history = history
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self, limit: int | None = None, *, wrapper: Any = None
+        ) -> list[TResponseInputItem]:
             if limit is None:
                 return list(self.history)
             return self.history[-limit:]
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(self, items: list[TResponseInputItem], *, wrapper: Any = None) -> None:
             self.history.extend(items)
 
-        async def pop_item(self) -> TResponseInputItem | None:
+        async def pop_item(self, *, wrapper: Any = None) -> TResponseInputItem | None:
             return self.history.pop() if self.history else None
 
         async def clear_session(self) -> None:
@@ -2227,15 +2229,17 @@ async def test_prepare_input_with_openai_conversation_callback_matches_assistant
         def __init__(self, history: list[TResponseInputItem]) -> None:
             self.history = history
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self, limit: int | None = None, *, wrapper: Any = None
+        ) -> list[TResponseInputItem]:
             if limit is None:
                 return list(self.history)
             return self.history[-limit:]
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(self, items: list[TResponseInputItem], *, wrapper: Any = None) -> None:
             self.history.extend(items)
 
-        async def pop_item(self) -> TResponseInputItem | None:
+        async def pop_item(self, *, wrapper: Any = None) -> TResponseInputItem | None:
             return self.history.pop() if self.history else None
 
         async def clear_session(self) -> None:
@@ -2280,15 +2284,17 @@ async def test_prepare_input_with_openai_conversation_callback_keeps_user_ids_di
         def __init__(self, history: list[TResponseInputItem]) -> None:
             self.history = history
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self, limit: int | None = None, *, wrapper: Any = None
+        ) -> list[TResponseInputItem]:
             if limit is None:
                 return list(self.history)
             return self.history[-limit:]
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(self, items: list[TResponseInputItem], *, wrapper: Any = None) -> None:
             self.history.extend(items)
 
-        async def pop_item(self) -> TResponseInputItem | None:
+        async def pop_item(self, *, wrapper: Any = None) -> TResponseInputItem | None:
             return self.history.pop() if self.history else None
 
         async def clear_session(self) -> None:
@@ -2822,13 +2828,15 @@ async def test_save_result_to_openai_conversation_preserves_reasoning_id_when_po
         async def _get_session_id(self) -> str:
             return "conv_test"
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(self, items: list[TResponseInputItem], *, wrapper: Any = None) -> None:
             self.saved_items.extend(items)
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self, limit: int | None = None, *, wrapper: Any = None
+        ) -> list[TResponseInputItem]:
             return []
 
-        async def pop_item(self) -> TResponseInputItem | None:
+        async def pop_item(self, *, wrapper: Any = None) -> TResponseInputItem | None:
             return None
 
         async def clear_session(self) -> None:
@@ -2877,13 +2885,15 @@ async def test_save_result_to_openai_conversation_drops_unpersistable_reasoning_
         async def _get_session_id(self) -> str:
             return "conv_test"
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(self, items: list[TResponseInputItem], *, wrapper: Any = None) -> None:
             self.saved_items.extend(items)
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self, limit: int | None = None, *, wrapper: Any = None
+        ) -> list[TResponseInputItem]:
             return []
 
-        async def pop_item(self) -> TResponseInputItem | None:
+        async def pop_item(self, *, wrapper: Any = None) -> TResponseInputItem | None:
             return None
 
         async def clear_session(self) -> None:
@@ -2923,13 +2933,15 @@ async def test_save_result_to_openai_conversation_keeps_reasoning_encrypted_cont
         async def _get_session_id(self) -> str:
             return "conv_test"
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(self, items: list[TResponseInputItem], *, wrapper: Any = None) -> None:
             self.saved_items.extend(items)
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self, limit: int | None = None, *, wrapper: Any = None
+        ) -> list[TResponseInputItem]:
             return []
 
-        async def pop_item(self) -> TResponseInputItem | None:
+        async def pop_item(self, *, wrapper: Any = None) -> TResponseInputItem | None:
             return None
 
         async def clear_session(self) -> None:
@@ -4418,17 +4430,18 @@ async def test_session_add_items_called_multiple_times_for_multi_turn_completion
                 },
             ]
 
-            expected_calls = [
-                # First call is the initial input
-                (([expected_items[0]],),),
-                # Second call is the first tool call and its result
-                (([expected_items[1], expected_items[2]],),),
-                # Third call is the second tool call and its result
-                (([expected_items[3], expected_items[4]],),),
-                # Fourth call is the final output
-                (([expected_items[5]],),),
+            expected_call_items = [
+                [expected_items[0]],
+                [expected_items[1], expected_items[2]],
+                [expected_items[3], expected_items[4]],
+                [expected_items[5]],
             ]
-            assert mock_add_items.call_args_list == expected_calls
+            assert len(mock_add_items.call_args_list) == len(expected_call_items)
+            for call, expected_items_batch in zip(
+                mock_add_items.call_args_list, expected_call_items, strict=True
+            ):
+                assert call.args == (expected_items_batch,)
+                assert call.kwargs["wrapper"] is not None
             assert result.final_output == "Summary: Echoed foo and bar"
             assert (await session.get_items()) == expected_items
 
