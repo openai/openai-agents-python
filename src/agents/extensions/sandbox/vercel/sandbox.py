@@ -17,7 +17,6 @@ import json
 import posixpath
 import tarfile
 import uuid
-from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
@@ -50,6 +49,7 @@ from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
+from ....sandbox.session.mount_lifecycle import with_ephemeral_mounts_removed
 from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
 from ....sandbox.snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
@@ -404,100 +404,6 @@ class VercelSandboxSession(BaseSandboxSession):
     async def shutdown(self) -> None:
         await self._stop_attached_sandbox()
 
-    async def _persist_with_ephemeral_mounts_removed(
-        self,
-        operation: Callable[[], Awaitable[io.IOBase]],
-    ) -> io.IOBase:
-        root = self._workspace_root_path()
-        unmounted_mounts: list[tuple[Any, Path]] = []
-        unmount_error: WorkspaceArchiveReadError | None = None
-        for mount_entry, mount_path in self.state.manifest.ephemeral_mount_targets():
-            try:
-                await mount_entry.mount_strategy.teardown_for_snapshot(
-                    mount_entry, self, mount_path
-                )
-            except Exception as exc:
-                unmount_error = WorkspaceArchiveReadError(path=root, cause=exc)
-                break
-            unmounted_mounts.append((mount_entry, mount_path))
-
-        persist_error: WorkspaceArchiveReadError | None = None
-        persisted: io.IOBase | None = None
-        if unmount_error is None:
-            try:
-                persisted = await operation()
-            except WorkspaceArchiveReadError as exc:
-                persist_error = exc
-
-        remount_error: WorkspaceArchiveReadError | None = None
-        for mount_entry, mount_path in reversed(unmounted_mounts):
-            try:
-                await mount_entry.mount_strategy.restore_after_snapshot(
-                    mount_entry, self, mount_path
-                )
-            except Exception as exc:
-                if remount_error is None:
-                    remount_error = WorkspaceArchiveReadError(path=root, cause=exc)
-
-        if remount_error is not None:
-            if persist_error is not None:
-                remount_error.context["snapshot_error_before_remount_corruption"] = {
-                    "message": persist_error.message
-                }
-            raise remount_error
-        if unmount_error is not None:
-            raise unmount_error
-        if persist_error is not None:
-            raise persist_error
-
-        assert persisted is not None
-        return persisted
-
-    async def _hydrate_with_ephemeral_mounts_removed(
-        self,
-        operation: Callable[[], Awaitable[None]],
-    ) -> None:
-        root = self._workspace_root_path()
-        unmounted_mounts: list[tuple[Any, Path]] = []
-        unmount_error: WorkspaceArchiveWriteError | None = None
-        for mount_entry, mount_path in self.state.manifest.ephemeral_mount_targets():
-            try:
-                await mount_entry.mount_strategy.teardown_for_snapshot(
-                    mount_entry, self, mount_path
-                )
-            except Exception as exc:
-                unmount_error = WorkspaceArchiveWriteError(path=root, cause=exc)
-                break
-            unmounted_mounts.append((mount_entry, mount_path))
-
-        hydrate_error: WorkspaceArchiveWriteError | None = None
-        if unmount_error is None:
-            try:
-                await operation()
-            except WorkspaceArchiveWriteError as exc:
-                hydrate_error = exc
-
-        remount_error: WorkspaceArchiveWriteError | None = None
-        for mount_entry, mount_path in reversed(unmounted_mounts):
-            try:
-                await mount_entry.mount_strategy.restore_after_snapshot(
-                    mount_entry, self, mount_path
-                )
-            except Exception as exc:
-                if remount_error is None:
-                    remount_error = WorkspaceArchiveWriteError(path=root, cause=exc)
-
-        if remount_error is not None:
-            if hydrate_error is not None:
-                remount_error.context["hydrate_error_before_remount_corruption"] = {
-                    "message": hydrate_error.message
-                }
-            raise remount_error
-        if unmount_error is not None:
-            raise unmount_error
-        if hydrate_error is not None:
-            raise hydrate_error
-
     async def _exec_internal(
         self,
         *command: str | Path,
@@ -601,7 +507,13 @@ class VercelSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveWriteError(path=normalized_path, cause=exc) from exc
 
     async def persist_workspace(self) -> io.IOBase:
-        return await self._persist_with_ephemeral_mounts_removed(self._persist_workspace_internal)
+        return await with_ephemeral_mounts_removed(
+            self,
+            self._persist_workspace_internal,
+            error_path=self._workspace_root_path(),
+            error_cls=WorkspaceArchiveReadError,
+            operation_error_context_key="snapshot_error_before_remount_corruption",
+        )
 
     async def _persist_workspace_internal(self) -> io.IOBase:
         if self.state.workspace_persistence == _WORKSPACE_PERSISTENCE_SNAPSHOT:
@@ -665,8 +577,12 @@ class VercelSandboxSession(BaseSandboxSession):
                 actual_type=type(raw).__name__,
             )
 
-        await self._hydrate_with_ephemeral_mounts_removed(
-            lambda: self._hydrate_workspace_internal(bytes(raw))
+        await with_ephemeral_mounts_removed(
+            self,
+            lambda: self._hydrate_workspace_internal(bytes(raw)),
+            error_path=self._workspace_root_path(),
+            error_cls=WorkspaceArchiveWriteError,
+            operation_error_context_key="hydrate_error_before_remount_corruption",
         )
 
     async def _hydrate_workspace_internal(self, raw: bytes) -> None:

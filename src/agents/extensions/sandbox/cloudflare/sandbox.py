@@ -47,6 +47,7 @@ from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
+from ....sandbox.session.mount_lifecycle import with_ephemeral_mounts_removed
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -1204,91 +1205,23 @@ class CloudflareSandboxSession(BaseSandboxSession):
 
     async def persist_workspace(self) -> io.IOBase:
         root = self._workspace_root_path()
-        unmounted_mounts: list[tuple[Any, Path]] = []
-        unmount_error: WorkspaceArchiveReadError | None = None
-        for mount_entry, mount_path in self.state.manifest.ephemeral_mount_targets():
-            try:
-                await mount_entry.mount_strategy.teardown_for_snapshot(
-                    mount_entry, self, mount_path
-                )
-            except Exception as e:
-                unmount_error = WorkspaceArchiveReadError(path=root, cause=e)
-                break
-            unmounted_mounts.append((mount_entry, mount_path))
-
-        snapshot_error: WorkspaceArchiveReadError | None = None
-        persisted: io.IOBase | None = None
-        if unmount_error is None:
-            try:
-                persisted = await self._persist_workspace_via_http()
-            except WorkspaceArchiveReadError as e:
-                snapshot_error = e
-
-        remount_error: WorkspaceArchiveReadError | None = None
-        for mount_entry, mount_path in reversed(unmounted_mounts):
-            try:
-                await mount_entry.mount_strategy.restore_after_snapshot(
-                    mount_entry, self, mount_path
-                )
-            except Exception as e:
-                if remount_error is None:
-                    remount_error = WorkspaceArchiveReadError(path=root, cause=e)
-
-        if remount_error is not None:
-            if snapshot_error is not None:
-                remount_error.context["snapshot_error_before_remount_corruption"] = {
-                    "message": snapshot_error.message,
-                }
-            raise remount_error
-        if unmount_error is not None:
-            raise unmount_error
-        if snapshot_error is not None:
-            raise snapshot_error
-
-        assert persisted is not None
-        return persisted
+        return await with_ephemeral_mounts_removed(
+            self,
+            self._persist_workspace_via_http,
+            error_path=root,
+            error_cls=WorkspaceArchiveReadError,
+            operation_error_context_key="snapshot_error_before_remount_corruption",
+        )
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
         root = self._workspace_root_path()
-        unmounted_mounts: list[tuple[Any, Path]] = []
-        unmount_error: WorkspaceArchiveWriteError | None = None
-        for mount_entry, mount_path in self.state.manifest.ephemeral_mount_targets():
-            try:
-                await mount_entry.mount_strategy.teardown_for_snapshot(
-                    mount_entry, self, mount_path
-                )
-            except Exception as e:
-                unmount_error = WorkspaceArchiveWriteError(path=root, cause=e)
-                break
-            unmounted_mounts.append((mount_entry, mount_path))
-
-        hydrate_error: WorkspaceArchiveWriteError | None = None
-        if unmount_error is None:
-            try:
-                await self._hydrate_workspace_via_http(data)
-            except WorkspaceArchiveWriteError as e:
-                hydrate_error = e
-
-        remount_error: WorkspaceArchiveWriteError | None = None
-        for mount_entry, mount_path in reversed(unmounted_mounts):
-            try:
-                await mount_entry.mount_strategy.restore_after_snapshot(
-                    mount_entry, self, mount_path
-                )
-            except Exception as e:
-                if remount_error is None:
-                    remount_error = WorkspaceArchiveWriteError(path=root, cause=e)
-
-        if remount_error is not None:
-            if hydrate_error is not None:
-                remount_error.context["hydrate_error_before_remount_corruption"] = {
-                    "message": hydrate_error.message,
-                }
-            raise remount_error
-        if unmount_error is not None:
-            raise unmount_error
-        if hydrate_error is not None:
-            raise hydrate_error
+        await with_ephemeral_mounts_removed(
+            self,
+            lambda: self._hydrate_workspace_via_http(data),
+            error_path=root,
+            error_cls=WorkspaceArchiveWriteError,
+            operation_error_context_key="hydrate_error_before_remount_corruption",
+        )
 
 
 class CloudflareSandboxClient(BaseSandboxClient[CloudflareSandboxClientOptions]):
