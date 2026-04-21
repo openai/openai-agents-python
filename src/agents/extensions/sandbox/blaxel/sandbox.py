@@ -56,6 +56,7 @@ from ....sandbox.session.pty_types import (
 )
 from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ....sandbox.session.sandbox_client import BaseSandboxClient
+from ....sandbox.session.tar_workspace import shell_tar_exclude_args
 from ....sandbox.snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from ....sandbox.types import ExecResult, ExposedPortEndpoint, User
 from ....sandbox.util.retry import (
@@ -510,14 +511,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
     # -- workspace persistence -----------------------------------------------
 
     def _tar_exclude_args(self) -> list[str]:
-        excludes: list[str] = []
-        for rel in sorted(self._persist_workspace_skip_relpaths(), key=lambda p: p.as_posix()):
-            rel_posix = rel.as_posix().lstrip("/")
-            if not rel_posix or rel_posix in {".", "/"}:
-                continue
-            excludes.append(f"--exclude={shlex.quote(rel_posix)}")
-            excludes.append(f"--exclude={shlex.quote(f'./{rel_posix}')}")
-        return excludes
+        return shell_tar_exclude_args(self._persist_workspace_skip_relpaths())
 
     @retry_async(
         retry_if=lambda exc, self: (
