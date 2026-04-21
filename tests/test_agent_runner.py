@@ -4057,17 +4057,18 @@ async def test_session_add_items_called_multiple_times_for_multi_turn_completion
                 },
             ]
 
-            expected_calls = [
-                # First call is the initial input
-                (([expected_items[0]],),),
-                # Second call is the first tool call and its result
-                (([expected_items[1], expected_items[2]],),),
-                # Third call is the second tool call and its result
-                (([expected_items[3], expected_items[4]],),),
-                # Fourth call is the final output
-                (([expected_items[5]],),),
+            expected_call_items = [
+                [expected_items[0]],
+                [expected_items[1], expected_items[2]],
+                [expected_items[3], expected_items[4]],
+                [expected_items[5]],
             ]
-            assert mock_add_items.call_args_list == expected_calls
+            assert len(mock_add_items.call_args_list) == len(expected_call_items)
+            for call, expected_items_batch in zip(
+                mock_add_items.call_args_list, expected_call_items, strict=True
+            ):
+                assert call.args == (expected_items_batch,)
+                assert call.kwargs["wrapper"] is not None
             assert result.final_output == "Summary: Echoed foo and bar"
             assert (await session.get_items()) == expected_items
 

@@ -58,11 +58,11 @@ from ..items import (
 from ..lifecycle import RunHooks
 from ..logger import logger
 from ..memory import Session
+from ..memory.session import get_session_items
 from ..models._response_terminal import (
     response_error_event_failure_error,
     response_terminal_failure_error,
 )
-from ..memory.session import get_session_items
 from ..result import RunResultStreaming
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
