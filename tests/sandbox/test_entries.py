@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 from collections.abc import Awaitable, Callable, Sequence
@@ -179,6 +180,7 @@ async def test_base_sandbox_session_uses_current_working_directory_for_local_fil
     result = await session.apply_manifest()
 
     assert result.files[0].path == Path("/workspace/copied.txt")
+    assert result.files[0].sha256 == hashlib.sha256(b"hello").hexdigest()
     assert session.writes[Path("/workspace/copied.txt")] == b"hello"
 
 
