@@ -15,6 +15,7 @@ from agents.exceptions import AgentsException
 from agents.items import (
     ReasoningItem,
     ToolCallItem,
+    ToolCallOutputItem,
     ToolSearchCallItem,
     ToolSearchOutputItem,
     TResponseInputItem,
@@ -487,6 +488,52 @@ def test_run_item_to_input_item_omits_tool_call_metadata() -> None:
     assert result_dict["type"] == "function_call"
     assert "description" not in result_dict
     assert "title" not in result_dict
+
+
+def test_tool_call_item_exposes_convenience_properties_for_typed_raw_items() -> None:
+    agent = Agent(name="A")
+    item = ToolCallItem(
+        agent=agent,
+        raw_item=ResponseFunctionToolCall(
+            id="fc_123",
+            call_id="call_123",
+            name="lookup_account",
+            arguments="{}",
+            type="function_call",
+            status="completed",
+        ),
+    )
+
+    assert item.tool_name == "lookup_account"
+    assert item.call_id == "call_123"
+
+
+def test_tool_call_item_exposes_convenience_properties_for_dict_raw_items() -> None:
+    agent = Agent(name="A")
+    item = ToolCallItem(
+        agent=agent,
+        raw_item={
+            "id": "fc_456",
+            "call_id": "call_456",
+            "name": "lookup_account",
+            "arguments": "{}",
+            "type": "function_call",
+        },
+    )
+
+    assert item.tool_name == "lookup_account"
+    assert item.call_id == "call_456"
+
+
+def test_tool_call_output_item_exposes_call_id_for_dict_raw_items() -> None:
+    agent = Agent(name="A")
+    item = ToolCallOutputItem(
+        agent=agent,
+        raw_item={"type": "function_call_output", "call_id": "call_456", "output": "ok"},
+        output="ok",
+    )
+
+    assert item.call_id == "call_456"
 
 
 def test_normalize_input_items_for_api_strips_internal_tool_call_metadata() -> None:

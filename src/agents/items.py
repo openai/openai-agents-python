@@ -362,6 +362,28 @@ class ToolCallItem(RunItemBase[Any]):
     tool_origin: ToolOrigin | None = None
     """Optional metadata describing the source of a function-tool-backed item."""
 
+    @property
+    def tool_name(self) -> str | None:
+        """Return the tool name from the raw item when available."""
+        if isinstance(self.raw_item, dict):
+            candidate = self.raw_item.get("name") or self.raw_item.get("tool_name")
+        else:
+            candidate = getattr(self.raw_item, "name", None) or getattr(
+                self.raw_item, "tool_name", None
+            )
+        return str(candidate) if candidate is not None else None
+
+    @property
+    def call_id(self) -> str | None:
+        """Return the call identifier from the raw item when available."""
+        if isinstance(self.raw_item, dict):
+            candidate = self.raw_item.get("call_id") or self.raw_item.get("id")
+        else:
+            candidate = getattr(self.raw_item, "call_id", None) or getattr(
+                self.raw_item, "id", None
+            )
+        return str(candidate) if candidate is not None else None
+
 
 ToolCallOutputTypes: TypeAlias = (
     FunctionCallOutput
@@ -388,6 +410,17 @@ class ToolCallOutputItem(RunItemBase[Any]):
 
     tool_origin: ToolOrigin | None = None
     """Optional metadata describing the source of a function-tool-backed item."""
+
+    @property
+    def call_id(self) -> str | None:
+        """Return the call identifier from the raw item when available."""
+        if isinstance(self.raw_item, dict):
+            candidate = self.raw_item.get("call_id") or self.raw_item.get("id")
+        else:
+            candidate = getattr(self.raw_item, "call_id", None) or getattr(
+                self.raw_item, "id", None
+            )
+        return str(candidate) if candidate is not None else None
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts the tool output into an input item for the next model turn.
