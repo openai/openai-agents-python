@@ -40,11 +40,6 @@ from agents.sandbox.entries.mounts.patterns import (
     RcloneMountPattern,
     S3FilesMountPattern,
 )
-from agents.sandbox.sandboxes.docker import DockerSandboxClientOptions, DockerSandboxSessionState
-from agents.sandbox.sandboxes.unix_local import (
-    UnixLocalSandboxClientOptions,
-    UnixLocalSandboxSessionState,
-)
 from agents.sandbox.session.sandbox_client import BaseSandboxClientOptions
 from agents.sandbox.session.sandbox_session_state import SandboxSessionState
 from agents.sandbox.snapshot import LocalSnapshot, NoopSnapshot, RemoteSnapshot, SnapshotBase
@@ -398,22 +393,18 @@ def test_optional_sandbox_dataclass_constructor_field_order_is_stable(
 
 
 @pytest.mark.parametrize(
-    ("options_cls", "expected_fields"),
-    [
-        (UnixLocalSandboxClientOptions, ("exposed_ports",)),
-        (DockerSandboxClientOptions, ("image", "exposed_ports")),
-    ],
-)
-def test_sandbox_client_options_positional_field_order_is_stable(
-    options_cls: type[BaseSandboxClientOptions],
-    expected_fields: tuple[str, ...],
-) -> None:
-    assert _model_field_names(options_cls, exclude={"type"}) == expected_fields
-
-
-@pytest.mark.parametrize(
     ("module_name", "class_name", "expected_fields"),
     [
+        (
+            "agents.sandbox.sandboxes.unix_local",
+            "UnixLocalSandboxClientOptions",
+            ("exposed_ports",),
+        ),
+        (
+            "agents.sandbox.sandboxes.docker",
+            "DockerSandboxClientOptions",
+            ("image", "exposed_ports"),
+        ),
         (
             "agents.extensions.sandbox.e2b",
             "E2BSandboxClientOptions",
@@ -539,8 +530,8 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
             ),
         ),
         (
-            UnixLocalSandboxSessionState,
-            None,
+            "agents.sandbox.sandboxes.unix_local",
+            "UnixLocalSandboxSessionState",
             (
                 "type",
                 "session_id",
@@ -554,8 +545,8 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
             ),
         ),
         (
-            DockerSandboxSessionState,
-            None,
+            "agents.sandbox.sandboxes.docker",
+            "DockerSandboxSessionState",
             (
                 "type",
                 "session_id",
@@ -760,28 +751,20 @@ def test_sandbox_session_state_field_order_is_stable(
 
 
 @pytest.mark.parametrize(
-    ("options", "expected_type"),
-    [
-        (UnixLocalSandboxClientOptions(), "unix_local"),
-        (DockerSandboxClientOptions("python:3.12"), "docker"),
-    ],
-)
-def test_sandbox_client_options_json_round_trip_preserves_type(
-    options: BaseSandboxClientOptions,
-    expected_type: str,
-) -> None:
-    payload = options.model_dump(mode="json")
-
-    restored = BaseSandboxClientOptions.parse(payload)
-
-    assert payload["type"] == expected_type
-    assert _class_identity(restored) == _class_identity(options)
-    assert restored.model_dump(mode="json") == payload
-
-
-@pytest.mark.parametrize(
     ("module_name", "class_name", "args", "expected_type"),
     [
+        (
+            "agents.sandbox.sandboxes.unix_local",
+            "UnixLocalSandboxClientOptions",
+            (),
+            "unix_local",
+        ),
+        (
+            "agents.sandbox.sandboxes.docker",
+            "DockerSandboxClientOptions",
+            ("python:3.12",),
+            "docker",
+        ),
         ("agents.extensions.sandbox.e2b", "E2BSandboxClientOptions", ("base",), "e2b"),
         ("agents.extensions.sandbox.modal", "ModalSandboxClientOptions", ("agents-sdk",), "modal"),
         (
@@ -815,33 +798,18 @@ def test_optional_sandbox_client_options_json_round_trip_preserves_type(
 
 
 @pytest.mark.parametrize(
-    "state",
-    [
-        _make_session_state(
-            UnixLocalSandboxSessionState,
-            workspace_root_owned=True,
-        ),
-        _make_session_state(
-            DockerSandboxSessionState,
-            image="python:3.12",
-            container_id="container-123",
-        ),
-    ],
-)
-def test_sandbox_session_state_json_round_trip_preserves_type(
-    state: SandboxSessionState,
-) -> None:
-    payload = state.model_dump(mode="json")
-
-    restored = SandboxSessionState.parse(payload)
-
-    assert _class_identity(restored) == _class_identity(state)
-    assert restored.model_dump(mode="json") == payload
-
-
-@pytest.mark.parametrize(
     ("module_name", "class_name", "overrides"),
     [
+        (
+            "agents.sandbox.sandboxes.unix_local",
+            "UnixLocalSandboxSessionState",
+            {"workspace_root_owned": True},
+        ),
+        (
+            "agents.sandbox.sandboxes.docker",
+            "DockerSandboxSessionState",
+            {"image": "python:3.12", "container_id": "container-123"},
+        ),
         ("agents.extensions.sandbox.e2b", "E2BSandboxSessionState", {"sandbox_id": "sandbox-123"}),
         (
             "agents.extensions.sandbox.modal",
@@ -910,14 +878,29 @@ def test_core_discriminator_type_strings_are_stable() -> None:
         S3FilesMountPattern: "s3files",
         InContainerMountStrategy: "in_container",
         DockerVolumeMountStrategy: "docker_volume",
-        UnixLocalSandboxClientOptions: "unix_local",
-        DockerSandboxClientOptions: "docker",
-        UnixLocalSandboxSessionState: "unix_local",
-        DockerSandboxSessionState: "docker",
     }
 
     for cls, expected_type in expected_types.items():
         assert _model_type_default(cls) == expected_type
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name", "expected_type"),
+    [
+        ("agents.sandbox.sandboxes.unix_local", "UnixLocalSandboxClientOptions", "unix_local"),
+        ("agents.sandbox.sandboxes.unix_local", "UnixLocalSandboxSessionState", "unix_local"),
+        ("agents.sandbox.sandboxes.docker", "DockerSandboxClientOptions", "docker"),
+        ("agents.sandbox.sandboxes.docker", "DockerSandboxSessionState", "docker"),
+    ],
+)
+def test_optional_sandbox_discriminator_type_strings_are_stable(
+    module_name: str,
+    class_name: str,
+    expected_type: str,
+) -> None:
+    cls = _import_optional_class(module_name, class_name)
+
+    assert _model_type_default(cls) == expected_type
 
 
 @pytest.mark.parametrize(
