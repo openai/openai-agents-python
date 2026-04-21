@@ -205,8 +205,17 @@ class LocalDirLazySkillSource(LazySkillSource):
         src_root = self._src_root(source_grants=source_grants)
         if src_root is None:
             raise SkillsConfigError(
-                message="lazy skill source directory is unavailable",
-                context={"skill_name": skill_name},
+                message=(
+                    "lazy skill source directory is unavailable; "
+                    "LocalDirLazySkillSource expects a host filesystem path, not a path "
+                    "inside the sandbox"
+                ),
+                context={
+                    "skill_name": skill_name,
+                    "configured_source_path": None
+                    if self.source.src is None
+                    else str(self.source.src),
+                },
             )
 
         matches = [
