@@ -378,6 +378,60 @@ async def test_local_dir_copy_pins_parent_directories_during_open(
 
 
 @pytest.mark.asyncio
+async def test_local_dir_copy_fallback_rejects_swapped_parent_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    src_root = tmp_path / "src"
+    src_root.mkdir()
+    nested_dir = src_root / "nested"
+    nested_dir.mkdir()
+    src_file = nested_dir / "safe.txt"
+    src_file.write_text("safe", encoding="utf-8")
+    secret_dir = tmp_path / "secret-dir"
+    secret_dir.mkdir()
+    (secret_dir / "safe.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+    local_dir = LocalDir(src=Path("src"))
+    original_open = os.open
+    swapped = False
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts._OPEN_SUPPORTS_DIR_FD", False)
+    monkeypatch.setattr("agents.sandbox.entries.artifacts._HAS_O_DIRECTORY", False)
+
+    def swap_parent_then_open(
+        path: str | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if Path(path) == src_file and not swapped:
+            nested_dir.rename(src_root / "nested-original")
+            _symlink_or_skip(src_root / "nested", secret_dir, target_is_directory=True)
+            swapped = True
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.open", swap_parent_then_open)
+
+    with pytest.raises(LocalDirReadError) as excinfo:
+        await local_dir._copy_local_dir_file(
+            base_dir=tmp_path,
+            session=session,
+            src_root=src_root,
+            src=src_file,
+            dest_root=Path("/workspace/copied"),
+        )
+
+    assert excinfo.value.context["reason"] == "symlink_not_supported"
+    assert excinfo.value.context["child"] == "src/nested"
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
 async def test_local_dir_apply_rejects_source_root_swapped_to_symlink_after_validation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

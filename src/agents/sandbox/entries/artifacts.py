@@ -561,7 +561,9 @@ class LocalDir(BaseEntry):
     def _open_local_dir_file_for_copy_fallback(
         self, *, base_dir: Path, src_root: Path, rel_child: Path
     ) -> int:
+        assert self.src is not None
         src = src_root / rel_child
+        validation_dir = LocalDir(src=self.src / rel_child.parent)
         try:
             src_stat = src.lstat()
         except FileNotFoundError:
@@ -586,7 +588,7 @@ class LocalDir(BaseEntry):
         try:
             leaf_fd = os.open(src, file_flags)
             try:
-                self._resolve_local_dir_src_root(base_dir)
+                validation_dir._resolve_local_dir_src_root(base_dir)
                 leaf_stat = os.fstat(leaf_fd)
                 if not stat.S_ISREG(leaf_stat.st_mode) or not os.path.samestat(src_stat, leaf_stat):
                     raise LocalDirReadError(
@@ -601,14 +603,14 @@ class LocalDir(BaseEntry):
                 os.close(leaf_fd)
                 raise
         except FileNotFoundError:
-            self._resolve_local_dir_src_root(base_dir)
+            validation_dir._resolve_local_dir_src_root(base_dir)
             raise LocalDirReadError(
                 src=src_root,
                 context={"reason": "path_changed_during_copy", "child": rel_child.as_posix()},
             ) from None
         except OSError as e:
             try:
-                self._resolve_local_dir_src_root(base_dir)
+                validation_dir._resolve_local_dir_src_root(base_dir)
             except LocalDirReadError as root_error:
                 raise root_error from e
             if e.errno == errno.ELOOP:
