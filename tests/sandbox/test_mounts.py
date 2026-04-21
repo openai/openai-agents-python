@@ -1125,6 +1125,14 @@ async def test_blobfuse_cache_path_must_be_relative_to_workspace() -> None:
     )
     assert escape_exc_info.value.context == {"cache_path": "../blobfuse-cache"}
 
+    with pytest.raises(MountConfigError) as windows_exc_info:
+        FuseMountPattern(cache_path=Path("C:\\blobfuse-cache"))
+
+    assert windows_exc_info.value.message == (
+        "blobfuse cache_path must be relative to the workspace root"
+    )
+    assert windows_exc_info.value.context == {"cache_path": "C:/blobfuse-cache"}
+
 
 @pytest.mark.asyncio
 async def test_blobfuse_cache_path_must_be_outside_mount_path() -> None:

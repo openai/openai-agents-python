@@ -301,7 +301,7 @@ class _FakeE2BCommands:
         if _is_helper_present_command(command):
             return _FakeE2BResult()
         if parts and parts[0] == str(RESOLVE_WORKSPACE_PATH_HELPER.install_path):
-            return _FakeE2BResult(stdout=parts[-1])
+            return _FakeE2BResult(stdout=parts[2])
         if parts and parts[0] == str(WORKSPACE_FINGERPRINT_HELPER.install_path):
             return _FakeE2BResult(
                 stdout='{"fingerprint":"fake-workspace-fingerprint","version":"workspace_tar_sha256_v1"}\n'
@@ -520,7 +520,7 @@ class _RecordingMount(Mount):
             ) -> list[MaterializedFile]:
                 _ = (strategy, session, base_dir)
                 path = mount._resolve_mount_path(session, dest)
-                mount._events.append(("mount", str(path)))
+                mount._events.append(("mount", path.as_posix()))
                 mount._mounted_paths.append(path)
                 return []
 
@@ -533,7 +533,7 @@ class _RecordingMount(Mount):
             ) -> None:
                 _ = (strategy, session, base_dir)
                 path = mount._resolve_mount_path(session, dest)
-                mount._events.append(("unmount", str(path)))
+                mount._events.append(("unmount", path.as_posix()))
                 mount._unmounted_paths.append(path)
 
             async def teardown_for_snapshot(
@@ -543,7 +543,7 @@ class _RecordingMount(Mount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("unmount", str(path)))
+                mount._events.append(("unmount", path.as_posix()))
                 mount._unmounted_paths.append(path)
 
             async def restore_after_snapshot(
@@ -553,7 +553,7 @@ class _RecordingMount(Mount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("mount", str(path)))
+                mount._events.append(("mount", path.as_posix()))
                 mount._mounted_paths.append(path)
 
         return _Adapter(self)
@@ -588,7 +588,7 @@ class _FailingUnmountMount(_RecordingMount):
             ) -> None:
                 _ = (strategy, session, base_dir)
                 path = mount._resolve_mount_path(session, dest)
-                mount._events.append(("unmount_fail", str(path)))
+                mount._events.append(("unmount_fail", path.as_posix()))
                 raise RuntimeError("boom while unmounting second mount")
 
             async def teardown_for_snapshot(
@@ -598,7 +598,7 @@ class _FailingUnmountMount(_RecordingMount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("unmount_fail", str(path)))
+                mount._events.append(("unmount_fail", path.as_posix()))
                 raise RuntimeError("boom while unmounting second mount")
 
             async def restore_after_snapshot(
@@ -632,7 +632,7 @@ class _FailingRemountMount(_RecordingMount):
             ) -> list[MaterializedFile]:
                 _ = (strategy, session, base_dir)
                 path = mount._resolve_mount_path(session, dest)
-                mount._events.append(("mount_fail", str(path)))
+                mount._events.append(("mount_fail", path.as_posix()))
                 raise RuntimeError("boom while remounting second mount")
 
             async def deactivate(
@@ -659,7 +659,7 @@ class _FailingRemountMount(_RecordingMount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("mount_fail", str(path)))
+                mount._events.append(("mount_fail", path.as_posix()))
                 raise RuntimeError("boom while remounting second mount")
 
         return _Adapter(self)
@@ -1411,7 +1411,7 @@ async def test_e2b_normalize_path_preserves_safe_leaf_symlink_path(
 
     monkeypatch.setattr(session, "exec", _fake_exec)
 
-    normalized = await session._normalize_path_for_io("link.txt")  # noqa: SLF001
+    normalized = await session._validate_path_access("link.txt")  # noqa: SLF001
 
     assert normalized == Path("/workspace/link.txt")
 
@@ -1442,7 +1442,7 @@ async def test_e2b_normalize_path_rejects_symlink_escape(
     monkeypatch.setattr(session, "exec", _fake_exec)
 
     with pytest.raises(InvalidManifestPathError, match="must not escape root"):
-        await session._normalize_path_for_io("link/secret.txt")  # noqa: SLF001
+        await session._validate_path_access("link/secret.txt")  # noqa: SLF001
 
 
 @pytest.mark.asyncio

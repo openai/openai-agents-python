@@ -4,6 +4,7 @@ import asyncio
 import builtins
 import importlib
 import io
+import shlex
 import sys
 import types
 import uuid
@@ -24,7 +25,7 @@ from agents.extensions.sandbox.daytona.mounts import (
     _has_command,
     _pkg_install,
 )
-from agents.sandbox import Manifest
+from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.entries import (
     Dir,
     InContainerMountStrategy,
@@ -38,10 +39,14 @@ from agents.sandbox.errors import ExecTimeoutError, ExecTransportError, MountCon
 from agents.sandbox.files import EntryKind
 from agents.sandbox.manifest import Environment
 from agents.sandbox.materialization import MaterializedFile
-from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.base_sandbox_session import (
+    _MKDIR_ACCESS_CHECK_SCRIPT,
+    BaseSandboxSession,
+)
 from agents.sandbox.session.dependencies import Dependencies
 from agents.sandbox.snapshot import NoopSnapshot, SnapshotBase
 from agents.sandbox.types import ExecResult, ExposedPortEndpoint, User
+from tests._fake_workspace_paths import resolve_fake_workspace_path
 from tests.utils.factories import TestSessionState
 
 
@@ -111,9 +116,15 @@ class _FakeProcess:
         self.session_command_exit_code: int | None = 0
         self._pty_handles: dict[str, _FakePtyHandle] = {}
         self.create_pty_session_error: BaseException | None = None
+        self.symlinks: dict[str, str] = {}
+        self.workspace_roots: set[str] = set()
+        self.require_workspace_root_for_cd = False
 
     async def exec(self, cmd: str, **kwargs: object) -> _FakeExecResult:
         self.exec_calls.append((cmd, dict(kwargs)))
+        parts = shlex.split(cmd)
+        if len(parts) >= 4 and parts[:3] == ["mkdir", "-p", "--"]:
+            self.workspace_roots.add(parts[3])
         if "sleep 0.5" in cmd:
             await asyncio.sleep(0.5)
         result = self.next_result
@@ -144,6 +155,33 @@ class _FakeProcess:
     ) -> object:
         self.execute_session_command_calls.append((session_id, request, dict(kwargs)))
         command = cast(str, getattr(request, "command", ""))
+        parts = shlex.split(command)
+        if (
+            self.require_workspace_root_for_cd
+            and len(parts) >= 3
+            and parts[0] == "cd"
+            and parts[2] == "&&"
+            and parts[1] not in self.workspace_roots
+        ):
+            return types.SimpleNamespace(
+                cmd_id="cmd-123",
+                exit_code=1,
+                stdout="",
+                stderr=f"cd: no such file or directory: {parts[1]}",
+                output=f"cd: no such file or directory: {parts[1]}",
+            )
+        resolved = resolve_fake_workspace_path(
+            command,
+            symlinks=self.symlinks,
+            home_dir="/home/daytona/workspace",
+        )
+        if resolved is not None:
+            return types.SimpleNamespace(
+                exit_code=resolved.exit_code,
+                stdout=resolved.stdout,
+                stderr=resolved.stderr,
+                output=resolved.stdout,
+            )
         if "sleep 0.5" in command:
             await asyncio.sleep(0.5)
         if getattr(request, "run_async", None):
@@ -181,17 +219,19 @@ class _FakeProcess:
 class _FakeFs:
     def __init__(self) -> None:
         self.create_folder_calls: list[tuple[str, str]] = []
+        self.download_file_calls: list[tuple[str, float | None]] = []
+        self.upload_file_calls: list[tuple[bytes, str, float | None]] = []
         self.download_value: bytes = b""
 
     async def create_folder(self, path: str, mode: str) -> None:
         self.create_folder_calls.append((path, mode))
 
     async def download_file(self, path: str, timeout: float | None = None) -> bytes:
-        _ = (path, timeout)
+        self.download_file_calls.append((path, timeout))
         return self.download_value
 
     async def upload_file(self, data: bytes, path: str, *, timeout: float | None = None) -> None:
-        _ = (data, path, timeout)
+        self.upload_file_calls.append((data, path, timeout))
 
 
 class _FakeDaytonaSandbox:
@@ -369,7 +409,7 @@ class _RecordingMount(Mount):
             ) -> list[MaterializedFile]:
                 _ = (strategy, session, base_dir)
                 path = mount._resolve_mount_path(session, dest)
-                mount._events.append(("mount", str(path)))
+                mount._events.append(("mount", path.as_posix()))
                 mount._mounted_paths.append(path)
                 return []
 
@@ -382,7 +422,7 @@ class _RecordingMount(Mount):
             ) -> None:
                 _ = (strategy, session, base_dir)
                 path = mount._resolve_mount_path(session, dest)
-                mount._events.append(("unmount", str(path)))
+                mount._events.append(("unmount", path.as_posix()))
                 mount._unmounted_paths.append(path)
 
             async def teardown_for_snapshot(
@@ -392,7 +432,7 @@ class _RecordingMount(Mount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("unmount", str(path)))
+                mount._events.append(("unmount", path.as_posix()))
                 mount._unmounted_paths.append(path)
 
             async def restore_after_snapshot(
@@ -402,19 +442,19 @@ class _RecordingMount(Mount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("mount", str(path)))
+                mount._events.append(("mount", path.as_posix()))
                 mount._mounted_paths.append(path)
 
         return _Adapter(self)
 
     async def mount(self, session: object, path: Path) -> None:
         _ = session
-        self._events.append(("mount", str(path)))
+        self._events.append(("mount", path.as_posix()))
         self._mounted_paths.append(path)
 
     async def unmount_path(self, session: object, path: Path) -> None:
         _ = session
-        self._events.append(("unmount", str(path)))
+        self._events.append(("unmount", path.as_posix()))
         self._unmounted_paths.append(path)
 
 
@@ -447,7 +487,7 @@ class _FailingUnmountMount(_RecordingMount):
             ) -> None:
                 _ = (strategy, session, base_dir)
                 path = mount._resolve_mount_path(session, dest)
-                mount._events.append(("unmount_fail", str(path)))
+                mount._events.append(("unmount_fail", path.as_posix()))
                 raise RuntimeError("boom while unmounting second mount")
 
             async def teardown_for_snapshot(
@@ -457,7 +497,7 @@ class _FailingUnmountMount(_RecordingMount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("unmount_fail", str(path)))
+                mount._events.append(("unmount_fail", path.as_posix()))
                 raise RuntimeError("boom while unmounting second mount")
 
             async def restore_after_snapshot(
@@ -472,7 +512,7 @@ class _FailingUnmountMount(_RecordingMount):
 
     async def unmount_path(self, session: object, path: Path) -> None:
         _ = session
-        self._events.append(("unmount_fail", str(path)))
+        self._events.append(("unmount_fail", path.as_posix()))
         raise RuntimeError("boom while unmounting second mount")
 
 
@@ -490,6 +530,58 @@ class TestDaytonaSandbox:
             session = await client.create(options=daytona_module.DaytonaSandboxClientOptions())
 
         assert session.state.manifest.root == daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT
+
+    @pytest.mark.asyncio
+    async def test_start_prepares_workspace_root_before_runtime_helpers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify Daytona creates the root before exec uses it as cwd."""
+
+        daytona_module = _load_daytona_module(monkeypatch)
+
+        async with daytona_module.DaytonaSandboxClient() as client:
+            session = await client.create(options=daytona_module.DaytonaSandboxClientOptions())
+            sandbox = _FakeAsyncDaytona.current_sandbox
+            assert sandbox is not None
+            sandbox.process.require_workspace_root_for_cd = True
+
+            await session.start()
+
+        root = daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT
+        assert root in sandbox.process.workspace_roots
+        assert sandbox.process.exec_calls[0][0] == f"mkdir -p -- {root}"
+        assert sandbox.process.execute_session_command_calls
+        _session_id, request, _kwargs = sandbox.process.execute_session_command_calls[0]
+        assert cast(str, cast(Any, request).command).startswith(f"cd {root} && ")
+        assert session.state.workspace_root_ready is True
+
+    @pytest.mark.asyncio
+    async def test_start_wraps_workspace_root_prepare_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify Daytona surfaces root preparation failures as start errors."""
+
+        daytona_module = _load_daytona_module(monkeypatch)
+
+        async with daytona_module.DaytonaSandboxClient() as client:
+            session = await client.create(options=daytona_module.DaytonaSandboxClientOptions())
+            sandbox = _FakeAsyncDaytona.current_sandbox
+            assert sandbox is not None
+            sandbox.process.next_result = _FakeExecResult(exit_code=2, result="mkdir failed")
+
+            with pytest.raises(daytona_module.WorkspaceStartError) as exc_info:
+                await session.start()
+
+        assert exc_info.value.context == {
+            "path": daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT,
+            "reason": "workspace_root_nonzero_exit",
+            "exit_code": 2,
+            "output": "mkdir failed",
+        }
+        assert sandbox.process.execute_session_command_calls == []
+        assert session.state.workspace_root_ready is False
 
     @pytest.mark.asyncio
     async def test_create_passes_only_option_env_vars_to_daytona(
@@ -852,6 +944,104 @@ class TestDaytonaSandbox:
                 await session.write("/etc/passwd", io.BytesIO(b"nope"))
 
     @pytest.mark.asyncio
+    async def test_read_rejects_workspace_symlink_to_ungranted_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        daytona_module = _load_daytona_module(monkeypatch)
+
+        async with daytona_module.DaytonaSandboxClient() as client:
+            session = await client.create(options=daytona_module.DaytonaSandboxClientOptions())
+            sandbox = _FakeAsyncDaytona.current_sandbox
+            assert sandbox is not None
+            sandbox.process.symlinks[f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/link"] = (
+                "/private"
+            )
+
+            with pytest.raises(daytona_module.InvalidManifestPathError) as exc_info:
+                await session.read("link/secret.txt")
+
+        assert sandbox.fs.download_file_calls == []
+        assert str(exc_info.value) == "manifest path must not escape root: link/secret.txt"
+        assert exc_info.value.context == {
+            "rel": "link/secret.txt",
+            "reason": "escape_root",
+            "resolved_path": "workspace escape: /private/secret.txt",
+        }
+
+    @pytest.mark.asyncio
+    async def test_write_rejects_workspace_symlink_to_read_only_extra_path_grant(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        daytona_module = _load_daytona_module(monkeypatch)
+
+        async with daytona_module.DaytonaSandboxClient() as client:
+            session = await client.create(
+                manifest=Manifest(
+                    root=daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT,
+                    extra_path_grants=(SandboxPathGrant(path="/tmp/protected", read_only=True),),
+                ),
+                options=daytona_module.DaytonaSandboxClientOptions(),
+            )
+            sandbox = _FakeAsyncDaytona.current_sandbox
+            assert sandbox is not None
+            sandbox.process.symlinks[f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/link"] = (
+                "/tmp/protected"
+            )
+
+            with pytest.raises(daytona_module.WorkspaceArchiveWriteError) as exc_info:
+                await session.write("link/out.txt", io.BytesIO(b"blocked"))
+
+        assert sandbox.fs.upload_file_calls == []
+        assert str(exc_info.value) == (
+            "failed to write archive for path: "
+            f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/link/out.txt"
+        )
+        assert exc_info.value.context == {
+            "path": f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/link/out.txt",
+            "reason": "read_only_extra_path_grant",
+            "grant_path": "/tmp/protected",
+            "resolved_path": "/tmp/protected/out.txt",
+        }
+
+    @pytest.mark.asyncio
+    async def test_mkdir_rejects_workspace_symlink_to_read_only_extra_path_grant(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        daytona_module = _load_daytona_module(monkeypatch)
+
+        async with daytona_module.DaytonaSandboxClient() as client:
+            session = await client.create(
+                manifest=Manifest(
+                    root=daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT,
+                    extra_path_grants=(SandboxPathGrant(path="/tmp/protected", read_only=True),),
+                ),
+                options=daytona_module.DaytonaSandboxClientOptions(),
+            )
+            sandbox = _FakeAsyncDaytona.current_sandbox
+            assert sandbox is not None
+            sandbox.process.symlinks[f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/link"] = (
+                "/tmp/protected"
+            )
+
+            with pytest.raises(daytona_module.WorkspaceArchiveWriteError) as exc_info:
+                await session.mkdir("link/newdir")
+
+        assert sandbox.fs.create_folder_calls == []
+        assert str(exc_info.value) == (
+            "failed to write archive for path: "
+            f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/link/newdir"
+        )
+        assert exc_info.value.context == {
+            "path": f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/link/newdir",
+            "reason": "read_only_extra_path_grant",
+            "grant_path": "/tmp/protected",
+            "resolved_path": "/tmp/protected/newdir",
+        }
+
+    @pytest.mark.asyncio
     async def test_mkdir_as_user_checks_permissions_then_uses_files_api(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -868,11 +1058,25 @@ class TestDaytonaSandbox:
         assert sandbox.fs.create_folder_calls == [
             (f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/nested", "755")
         ]
-        assert sandbox.process.execute_session_command_calls
-        _session_id, request, _kwargs = sandbox.process.execute_session_command_calls[0]
-        cmd = cast(str, cast(Any, request).command)
-        assert "sudo -u sandbox-user -- sh -lc" in cmd
-        assert "mkdir -p" not in cmd
+        commands = [
+            cast(str, cast(Any, request).command)
+            for _session_id, request, _kwargs in sandbox.process.execute_session_command_calls
+        ]
+        expected_cmd = f"cd {daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT} && " + shlex.join(
+            [
+                "sudo",
+                "-u",
+                "sandbox-user",
+                "--",
+                "sh",
+                "-lc",
+                _MKDIR_ACCESS_CHECK_SCRIPT,
+                "sh",
+                f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/nested",
+                "0",
+            ]
+        )
+        assert commands[-1] == expected_cmd
 
     @pytest.mark.asyncio
     async def test_persist_workspace_remounts_mounts_after_snapshot(

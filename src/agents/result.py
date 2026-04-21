@@ -619,6 +619,31 @@ class RunResultStreaming(RunResultBase):
 
         self.run_loop_task = asyncio.create_task(_await_run_and_cleanup())
 
+    @property
+    def run_loop_exception(self) -> BaseException | None:
+        """The exception raised by the background run loop, if any.
+
+        When the run loop fails before producing stream events (for example during early
+        sandbox initialisation), the exception may not be re-raised through
+        :meth:`stream_events`. This property gives callers a reliable way to check for
+        silent failures after consuming the stream:
+
+        .. code-block:: python
+
+            result = Runner.run_streamed(agent, "hello")
+            async for event in result.stream_events():
+                pass
+            if result.run_loop_exception:
+                raise result.run_loop_exception
+
+        Returns ``None`` if the run loop completed without error, has not yet finished,
+        or was cancelled.
+        """
+        task = self.run_loop_task
+        if task is None or not task.done() or task.cancelled():
+            return None
+        return task.exception()
+
     def cancel(self, mode: Literal["immediate", "after_turn"] = "immediate") -> None:
         """Cancel the streaming run.
 
@@ -725,6 +750,11 @@ class RunResultStreaming(RunResultBase):
                     # Ensure main execution completes before cleanup to avoid race conditions
                     # with session operations.
                     await self._await_task_safely(self.run_loop_task)
+                    # Re-check for exceptions now that the run loop has fully settled.
+                    # _await_task_safely swallows exceptions; without this call, a run-loop
+                    # failure that races past the sentinel (e.g. early sandbox failures) would
+                    # be silently lost instead of surfaced via _stored_exception.
+                    self._check_errors()
                     # Safely terminate all background tasks after main execution has finished.
                     self._cleanup_tasks()
 

@@ -545,6 +545,206 @@ class TestOpenAIResponsesCompactionSession:
         )
 
     @pytest.mark.asyncio
+    async def test_run_compaction_normalizes_compacted_user_image_messages(self) -> None:
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = []
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "analyze this input"},
+                    {
+                        "type": "input_image",
+                        "image_url": "https://example.com/image.png",
+                        "file_id": None,
+                        "detail": "auto",
+                    },
+                ],
+            }
+        ]
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        await session.run_compaction({"force": True, "compaction_mode": "input"})
+
+        stored_items = mock_session.add_items.call_args[0][0]
+        assert stored_items == [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "analyze this input"},
+                    {
+                        "type": "input_image",
+                        "image_url": "https://example.com/image.png",
+                        "detail": "auto",
+                    },
+                ],
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_normalizes_compacted_user_file_messages(self) -> None:
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = []
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "analyze this input"},
+                    {
+                        "type": "input_file",
+                        "file_url": "https://example.com/report.pdf",
+                        "file_id": None,
+                        "filename": "report.pdf",
+                        "detail": "high",
+                    },
+                ],
+            }
+        ]
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        await session.run_compaction({"force": True, "compaction_mode": "input"})
+
+        stored_items = mock_session.add_items.call_args[0][0]
+        assert stored_items == [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "analyze this input"},
+                    {
+                        "type": "input_file",
+                        "file_url": "https://example.com/report.pdf",
+                        "filename": "report.pdf",
+                        "detail": "high",
+                    },
+                ],
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_normalizes_file_id_inputs_and_preserves_metadata(self) -> None:
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = []
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "analyze this input"},
+                    {
+                        "type": "input_file",
+                        "file_id": "file_123",
+                        "file_url": None,
+                        "filename": "report.pdf",
+                        "detail": "low",
+                    },
+                ],
+            }
+        ]
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        await session.run_compaction({"force": True, "compaction_mode": "input"})
+
+        stored_items = mock_session.add_items.call_args[0][0]
+        assert stored_items == [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "analyze this input"},
+                    {
+                        "type": "input_file",
+                        "file_id": "file_123",
+                        "filename": "report.pdf",
+                        "detail": "low",
+                    },
+                ],
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_preserves_history_when_output_normalization_fails(self) -> None:
+        history = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}],
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "world"}],
+            },
+        ]
+        underlying = SimpleListSession(history=cast(list[TResponseInputItem], history))
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "hello"},
+                    {"type": "input_image", "detail": "auto"},
+                ],
+            }
+        ]
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        with pytest.raises(
+            ValueError, match="Compaction input_image item missing image_url or file_id."
+        ):
+            await session.run_compaction({"force": True, "compaction_mode": "input"})
+
+        assert await session.get_items() == history
+
+    @pytest.mark.asyncio
     async def test_compaction_runs_during_runner_flow(self) -> None:
         """Ensure Runner triggers compaction when using a compaction-aware session."""
         underlying = SimpleListSession()

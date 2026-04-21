@@ -1,6 +1,7 @@
 """Tests for session memory functionality."""
 
 import asyncio
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -215,6 +216,25 @@ async def test_sqlite_session_memory_direct():
 
 
 @pytest.mark.asyncio
+async def test_sqlite_session_close_closes_worker_thread_connections():
+    """Test that close cleans up connections opened by async worker threads."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_worker_thread_close.db"
+        session = SQLiteSession("worker_thread_close", db_path)
+
+        await session.add_items([{"role": "user", "content": "Hello"}])
+        connections = list(session._connections)
+
+        assert connections
+
+        session.close()
+
+        assert session._connections == set()
+        with pytest.raises(sqlite3.ProgrammingError):
+            connections[0].execute("SELECT 1")
+
+
+@pytest.mark.asyncio
 async def test_sqlite_session_memory_pop_item():
     """Test SQLiteSession pop_item functionality."""
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -415,31 +435,34 @@ async def test_session_callback_prepared_input(runner_method):
             {"role": "user", "content": "Hello there."},
             {"role": "assistant", "content": "Hi, I'm here to assist you."},
         ]
-        await session.add_items(initial_history)
+        try:
+            await session.add_items(initial_history)
 
-        def filter_assistant_messages(history, new_input):
-            # Only include user messages from history
-            return [item for item in history if item["role"] == "user"] + new_input
+            def filter_assistant_messages(history, new_input):
+                # Only include user messages from history
+                return [item for item in history if item["role"] == "user"] + new_input
 
-        new_turn_input = [{"role": "user", "content": "What your name?"}]
-        model.set_next_output([get_text_message("I'm gpt-4o")])
+            new_turn_input = [{"role": "user", "content": "What your name?"}]
+            model.set_next_output([get_text_message("I'm gpt-4o")])
 
-        # Run the agent with the callable
-        await run_agent_async(
-            runner_method,
-            agent,
-            new_turn_input,
-            session=session,
-            run_config=RunConfig(session_input_callback=filter_assistant_messages),
-        )
+            # Run the agent with the callable
+            await run_agent_async(
+                runner_method,
+                agent,
+                new_turn_input,
+                session=session,
+                run_config=RunConfig(session_input_callback=filter_assistant_messages),
+            )
 
-        expected_model_input = [
-            initial_history[0],  # From history
-            new_turn_input[0],  # New input
-        ]
+            expected_model_input = [
+                initial_history[0],  # From history
+                new_turn_input[0],  # New input
+            ]
 
-        assert len(model.last_turn_args["input"]) == 2
-        assert model.last_turn_args["input"] == expected_model_input
+            assert len(model.last_turn_args["input"]) == 2
+            assert model.last_turn_args["input"] == expected_model_input
+        finally:
+            session.close()
 
 
 @pytest.mark.asyncio

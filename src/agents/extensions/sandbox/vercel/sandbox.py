@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
-import os
+import posixpath
 import tarfile
 import uuid
 from collections.abc import Awaitable, Callable
@@ -39,7 +39,6 @@ from ....sandbox.errors import (
     ExecTimeoutError,
     ExecTransportError,
     ExposedPortUnavailableError,
-    InvalidManifestPathError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
@@ -51,6 +50,7 @@ from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
+from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
 from ....sandbox.snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from ....sandbox.types import ExecResult, ExposedPortEndpoint, User
@@ -60,6 +60,7 @@ from ....sandbox.util.retry import (
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tarfile
+from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 
 WorkspacePersistenceMode = Literal["tar", "snapshot"]
 
@@ -125,21 +126,7 @@ def _resolve_manifest_root(manifest: Manifest | None) -> Manifest:
 
     if manifest.root == _DEFAULT_MANIFEST_ROOT:
         return manifest.model_copy(update={"root": DEFAULT_VERCEL_WORKSPACE_ROOT})
-
-    root = Path(manifest.root)
-    default_root = Path(DEFAULT_VERCEL_WORKSPACE_ROOT)
-    if not root.is_absolute() or root == default_root or default_root in root.parents:
-        return manifest
-
-    raise ConfigurationError(
-        message=(
-            "Vercel sandboxes require manifest.root to stay within "
-            f"{DEFAULT_VERCEL_WORKSPACE_ROOT!r}"
-        ),
-        error_code=ErrorCode.SANDBOX_CONFIG_INVALID,
-        op="start",
-        context={"backend": "vercel", "manifest_root": manifest.root},
-    )
+    return manifest
 
 
 def _validate_network_policy(value: object) -> NetworkPolicy | None:
@@ -292,28 +279,11 @@ class VercelSandboxSession(BaseSandboxSession):
             self._reject_user_arg(op="exec", user=user)
         return super()._prepare_exec_command(*command, shell=shell, user=user)
 
-    def normalize_path(self, path: Path | str) -> Path:
-        # Keep normalization lexical so host filesystem quirks do not rewrite sandbox paths.
-        if isinstance(path, str):
-            path = Path(path)
+    async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
+        return await self._validate_remote_path_access(path, for_write=for_write)
 
-        root = PurePosixPath(os.path.normpath(self.state.manifest.root))
-        normalized = PurePosixPath(
-            os.path.normpath(
-                str(path) if path.is_absolute() else str(root / PurePosixPath(*path.parts))
-            )
-        )
-        try:
-            normalized.relative_to(root)
-        except ValueError as exc:
-            reason: Literal["absolute", "escape_root"] = (
-                "absolute" if path.is_absolute() else "escape_root"
-            )
-            raise InvalidManifestPathError(rel=path, reason=reason, cause=exc) from exc
-        return Path(str(normalized))
-
-    async def _normalize_path_for_io(self, path: Path | str) -> Path:
-        return self.normalize_path(path)
+    def _runtime_helpers(self) -> tuple[RuntimeHelperScript, ...]:
+        return (RESOLVE_WORKSPACE_PATH_HELPER,)
 
     def _validate_tar_bytes(self, raw: bytes) -> None:
         try:
@@ -324,44 +294,23 @@ class VercelSandboxSession(BaseSandboxSession):
         except (tarfile.TarError, OSError) as exc:
             raise ValueError("invalid tar stream") from exc
 
-    async def _ensure_workspace_root(self) -> None:
-        root = Path(self.state.manifest.root)
-        sandbox = await self._ensure_sandbox()
+    async def _prepare_backend_workspace(self) -> None:
+        root = PurePosixPath(posixpath.normpath(self.state.manifest.root))
         try:
+            sandbox = await self._ensure_sandbox()
             finished = await sandbox.run_command("mkdir", ["-p", "--", root.as_posix()])
         except Exception as exc:
-            raise WorkspaceStartError(path=root, cause=exc) from exc
-        if finished.exit_code != 0:
-            raise WorkspaceStartError(
-                path=root,
-                context={
-                    "exit_code": finished.exit_code,
-                    "stdout": await finished.stdout(),
-                    "stderr": await finished.stderr(),
-                },
-            )
-        try:
-            finished = await sandbox.run_command("test", ["-d", root.as_posix()])
-        except Exception as exc:
-            raise WorkspaceStartError(path=root, cause=exc) from exc
-        if finished.exit_code != 0:
-            raise WorkspaceStartError(
-                path=root,
-                context={
-                    "exit_code": finished.exit_code,
-                    "stdout": await finished.stdout(),
-                    "stderr": await finished.stderr(),
-                },
-            )
+            raise WorkspaceStartError(path=posix_path_as_path(root), cause=exc) from exc
 
-    async def start(self) -> None:
-        try:
-            await self._ensure_workspace_root()
-        except WorkspaceStartError:
-            raise
-        except Exception as exc:
-            raise WorkspaceStartError(path=Path(self.state.manifest.root), cause=exc) from exc
-        await super().start()
+        if finished.exit_code != 0:
+            raise WorkspaceStartError(
+                path=posix_path_as_path(root),
+                context={
+                    "exit_code": finished.exit_code,
+                    "stdout": await finished.stdout(),
+                    "stderr": await finished.stderr(),
+                },
+            )
 
     async def _ensure_sandbox(self, *, source: Any | None = None) -> Any:
         sandbox = self._sandbox
@@ -459,7 +408,7 @@ class VercelSandboxSession(BaseSandboxSession):
         self,
         operation: Callable[[], Awaitable[io.IOBase]],
     ) -> io.IOBase:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         unmounted_mounts: list[tuple[Any, Path]] = []
         unmount_error: WorkspaceArchiveReadError | None = None
         for mount_entry, mount_path in self.state.manifest.ephemeral_mount_targets():
@@ -508,7 +457,7 @@ class VercelSandboxSession(BaseSandboxSession):
         self,
         operation: Callable[[], Awaitable[None]],
     ) -> None:
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         unmounted_mounts: list[tuple[Any, Path]] = []
         unmount_error: WorkspaceArchiveWriteError | None = None
         for mount_entry, mount_path in self.state.manifest.ephemeral_mount_targets():
@@ -615,10 +564,10 @@ class VercelSandboxSession(BaseSandboxSession):
         if user is not None:
             self._reject_user_arg(op="read", user=user)
 
+        normalized_path = await self._validate_path_access(path)
         sandbox = await self._ensure_sandbox()
-        normalized_path = await self._normalize_path_for_io(path)
         try:
-            payload = await sandbox.read_file(str(normalized_path))
+            payload = await sandbox.read_file(sandbox_path_str(normalized_path))
         except Exception as exc:
             raise WorkspaceArchiveReadError(path=normalized_path, cause=exc) from exc
         if payload is None:
@@ -635,7 +584,7 @@ class VercelSandboxSession(BaseSandboxSession):
         if user is not None:
             self._reject_user_arg(op="write", user=user)
 
-        normalized_path = await self._normalize_path_for_io(path)
+        normalized_path = await self._validate_path_access(path, for_write=True)
         payload = data.read()
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
@@ -646,7 +595,7 @@ class VercelSandboxSession(BaseSandboxSession):
             )
         try:
             await self._write_files_with_retry(
-                [{"path": str(normalized_path), "content": bytes(payload)}]
+                [{"path": sandbox_path_str(normalized_path), "content": bytes(payload)}]
             )
         except Exception as exc:
             raise WorkspaceArchiveWriteError(path=normalized_path, cause=exc) from exc
@@ -656,7 +605,7 @@ class VercelSandboxSession(BaseSandboxSession):
 
     async def _persist_workspace_internal(self) -> io.IOBase:
         if self.state.workspace_persistence == _WORKSPACE_PERSISTENCE_SNAPSHOT:
-            root = Path(self.state.manifest.root)
+            root = self._workspace_root_path()
             sandbox = await self._ensure_sandbox()
             try:
                 snapshot = await sandbox.snapshot(expiration=self.state.snapshot_expiration_ms)
@@ -664,9 +613,11 @@ class VercelSandboxSession(BaseSandboxSession):
                 raise WorkspaceArchiveReadError(path=root, cause=exc) from exc
             return io.BytesIO(_encode_snapshot_ref(snapshot_id=snapshot.snapshot_id))
 
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         sandbox = await self._ensure_sandbox()
-        archive_path = Path("/tmp") / f"openai-agents-{self.state.session_id.hex}.tar"
+        archive_path = posix_path_as_path(
+            coerce_posix_path(f"/tmp/openai-agents-{self.state.session_id.hex}.tar")
+        )
         excludes = [
             f"--exclude=./{rel_path.as_posix()}"
             for rel_path in sorted(
@@ -674,7 +625,7 @@ class VercelSandboxSession(BaseSandboxSession):
                 key=lambda item: item.as_posix(),
             )
         ]
-        tar_command = ("tar", "cf", str(archive_path), *excludes, ".")
+        tar_command = ("tar", "cf", archive_path.as_posix(), *excludes, ".")
         try:
             result = await self.exec(*tar_command, shell=False)
             if not result.ok():
@@ -686,7 +637,7 @@ class VercelSandboxSession(BaseSandboxSession):
                         context={"backend": "vercel", "sandbox_id": self.state.sandbox_id},
                     ),
                 )
-            archive = await sandbox.read_file(str(archive_path))
+            archive = await sandbox.read_file(archive_path.as_posix())
             if archive is None:
                 raise WorkspaceReadNotFoundError(path=archive_path)
             return io.BytesIO(archive)
@@ -698,7 +649,9 @@ class VercelSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveReadError(path=root, cause=exc) from exc
         finally:
             try:
-                await sandbox.run_command("rm", [str(archive_path)], cwd=self.state.manifest.root)
+                await sandbox.run_command(
+                    "rm", [archive_path.as_posix()], cwd=self.state.manifest.root
+                )
             except Exception:
                 pass
 
@@ -708,7 +661,7 @@ class VercelSandboxSession(BaseSandboxSession):
             raw = raw.encode("utf-8")
         if not isinstance(raw, bytes | bytearray):
             raise WorkspaceWriteTypeError(
-                path=Path(self.state.manifest.root),
+                path=self._workspace_root_path(),
                 actual_type=type(raw).__name__,
             )
 
@@ -727,19 +680,21 @@ class VercelSandboxSession(BaseSandboxSession):
                 await self._replace_sandbox_from_snapshot(snapshot_id)
             except Exception as exc:
                 raise WorkspaceArchiveWriteError(
-                    path=Path(self.state.manifest.root),
+                    path=self._workspace_root_path(),
                     cause=exc,
                 ) from exc
             return
 
-        root = Path(self.state.manifest.root)
+        root = self._workspace_root_path()
         sandbox = await self._ensure_sandbox()
-        archive_path = Path("/tmp") / f"openai-agents-{self.state.session_id.hex}.tar"
-        tar_command = ("tar", "xf", str(archive_path), "-C", str(root))
+        archive_path = posix_path_as_path(
+            coerce_posix_path(f"/tmp/openai-agents-{self.state.session_id.hex}.tar")
+        )
+        tar_command = ("tar", "xf", archive_path.as_posix(), "-C", root.as_posix())
         try:
             self._validate_tar_bytes(raw)
             await self.mkdir(root, parents=True)
-            await self._write_files_with_retry([{"path": str(archive_path), "content": raw}])
+            await self._write_files_with_retry([{"path": archive_path.as_posix(), "content": raw}])
             result = await self.exec(*tar_command, shell=False)
             if not result.ok():
                 raise WorkspaceArchiveWriteError(
@@ -756,7 +711,9 @@ class VercelSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveWriteError(path=root, cause=exc) from exc
         finally:
             try:
-                await sandbox.run_command("rm", [str(archive_path)], cwd=self.state.manifest.root)
+                await sandbox.run_command(
+                    "rm", [archive_path.as_posix()], cwd=self.state.manifest.root
+                )
             except Exception:
                 pass
 

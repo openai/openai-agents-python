@@ -15,6 +15,7 @@ from ..errors import SkillsConfigError
 from ..manifest import Manifest
 from ..session.base_sandbox_session import BaseSandboxSession
 from ..types import User
+from ..workspace_paths import coerce_posix_path, posix_path_as_path, windows_absolute_path
 from .capability import Capability
 
 _SKILLS_SECTION_INTRO = (
@@ -262,42 +263,58 @@ def _validate_relative_path(
     field_name: str,
     context: Mapping[str, object] | None = None,
 ) -> Path:
-    rel = value if isinstance(value, Path) else Path(value)
-    if rel.is_absolute():
+    if (windows_path := windows_absolute_path(value)) is not None:
         raise SkillsConfigError(
             message=f"{field_name} must be a relative path",
             context={
                 "field": field_name,
-                "path": str(rel),
+                "path": windows_path.as_posix(),
                 "reason": "absolute",
                 **(context or {}),
             },
         )
-    if ".." in rel.parts:
+    rel_posix = coerce_posix_path(value)
+    if rel_posix.is_absolute():
+        raise SkillsConfigError(
+            message=f"{field_name} must be a relative path",
+            context={
+                "field": field_name,
+                "path": rel_posix.as_posix(),
+                "reason": "absolute",
+                **(context or {}),
+            },
+        )
+    if ".." in rel_posix.parts:
         raise SkillsConfigError(
             message=f"{field_name} must not escape the skills root",
             context={
                 "field": field_name,
-                "path": str(rel),
+                "path": rel_posix.as_posix(),
                 "reason": "escape_root",
                 **(context or {}),
             },
         )
-    if rel.parts in [(), (".",)]:
+    if rel_posix.parts in [(), (".",)]:
         raise SkillsConfigError(
             message=f"{field_name} must be non-empty",
-            context={"field": field_name, "path": str(rel), "reason": "empty", **(context or {})},
+            context={
+                "field": field_name,
+                "path": rel_posix.as_posix(),
+                "reason": "empty",
+                **(context or {}),
+            },
         )
-    return rel
+    return posix_path_as_path(rel_posix)
 
 
 def _manifest_entry_paths(manifest: Manifest) -> set[Path]:
-    return {key if isinstance(key, Path) else Path(key) for key in manifest.entries}
+    return {posix_path_as_path(coerce_posix_path(key)) for key in manifest.entries}
 
 
 def _get_manifest_entry_by_path(manifest: Manifest, path: Path) -> BaseEntry | None:
+    path = posix_path_as_path(coerce_posix_path(path))
     for key, entry in manifest.entries.items():
-        normalized = key if isinstance(key, Path) else Path(key)
+        normalized = posix_path_as_path(coerce_posix_path(key))
         if normalized == path:
             return entry
     return None
@@ -523,7 +540,7 @@ class Skills(Capability):
             seen_names.add(rel)
 
     def process_manifest(self, manifest: Manifest) -> Manifest:
-        skills_root = Path(self.skills_path)
+        skills_root = posix_path_as_path(coerce_posix_path(self.skills_path))
         existing_paths = _manifest_entry_paths(manifest)
 
         if self.lazy_from:
@@ -618,7 +635,9 @@ class Skills(Capability):
         if self.session is None:
             return []
 
-        skills_root = Path(manifest.root) / Path(self.skills_path)
+        skills_root = posix_path_as_path(
+            coerce_posix_path(manifest.root) / coerce_posix_path(self.skills_path)
+        )
         try:
             entries = await self.session.ls(skills_root, user=self.run_as)
         except Exception:
@@ -629,9 +648,9 @@ class Skills(Capability):
             if not entry.is_dir():
                 continue
 
-            skill_dir = Path(entry.path)
+            skill_dir = posix_path_as_path(coerce_posix_path(entry.path))
             skill_name = skill_dir.name
-            skill_path = Path(self.skills_path) / skill_name
+            skill_path = posix_path_as_path(coerce_posix_path(self.skills_path) / skill_name)
             skill_md_path = skill_dir / "SKILL.md"
 
             try:
@@ -665,7 +684,7 @@ class Skills(Capability):
                 SkillMetadata(
                     name=skill.name,
                     description=skill.description,
-                    path=Path(self.skills_path) / skill.name,
+                    path=posix_path_as_path(coerce_posix_path(self.skills_path) / skill.name),
                 )
             )
 
@@ -678,12 +697,12 @@ class Skills(Capability):
             for key, entry in self.from_.children.items():
                 if not isinstance(entry, Dir):
                     continue
-                skill_name = str(key if isinstance(key, Path) else Path(key))
+                skill_name = coerce_posix_path(key).as_posix()
                 metadata.append(
                     SkillMetadata(
                         name=skill_name,
                         description=entry.description or "No description provided.",
-                        path=Path(self.skills_path) / skill_name,
+                        path=posix_path_as_path(coerce_posix_path(self.skills_path) / skill_name),
                     )
                 )
 

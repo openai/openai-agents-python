@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from openai import AsyncOpenAI
 
+from ..items import TResponseInputItem
 from ..models._openai_shared import get_default_openai_client
 from ..run_internal.items import normalize_input_items_for_api
 from .openai_conversations_session import OpenAIConversationsSession
@@ -16,7 +17,6 @@ from .session import (
 )
 
 if TYPE_CHECKING:
-    from ..items import TResponseInputItem
     from .session import Session
 
 logger = logging.getLogger("openai-agents.openai.compaction")
@@ -213,19 +213,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         compacted = await self.client.responses.compact(**compact_kwargs)
 
+        output_items = _normalize_compaction_output_items(compacted.output or [])
         await self.underlying_session.clear_session()
-        output_items: list[TResponseInputItem] = []
-        if compacted.output:
-            for item in compacted.output:
-                if isinstance(item, dict):
-                    output_items.append(item)
-                else:
-                    # Suppress Pydantic literal warnings: responses.compact can return
-                    # user-style input_text content inside ResponseOutputMessage.
-                    output_items.append(
-                        item.model_dump(exclude_unset=True, warnings=False)  # type: ignore
-                    )
-
         output_items = _strip_orphaned_assistant_ids(output_items)
 
         if output_items:
@@ -337,6 +326,101 @@ def _strip_orphaned_assistant_ids(
             item = {k: v for k, v in item.items() if k != "id"}  # type: ignore[assignment]
         cleaned.append(item)
     return cleaned
+
+
+def _normalize_compaction_output_items(items: list[Any]) -> list[TResponseInputItem]:
+    """Normalize compacted output into replay-safe Responses input items."""
+    output_items: list[TResponseInputItem] = []
+    for item in items:
+        if isinstance(item, dict):
+            output_item = item
+        else:
+            # Suppress Pydantic literal warnings: responses.compact can return
+            # user-style input_text content inside ResponseOutputMessage.
+            output_item = item.model_dump(exclude_unset=True, warnings=False)
+
+        if (
+            isinstance(output_item, dict)
+            and output_item.get("type") == "message"
+            and output_item.get("role") == "user"
+        ):
+            output_items.append(_normalize_compaction_user_message(output_item))
+            continue
+
+        output_items.append(cast(TResponseInputItem, output_item))
+    return output_items
+
+
+def _normalize_compaction_user_message(item: dict[str, Any]) -> TResponseInputItem:
+    """Normalize compacted user message content before it is reused as input."""
+    content = item.get("content")
+    if not isinstance(content, list):
+        return cast(TResponseInputItem, item)
+
+    normalized_content: list[Any] = []
+    for content_item in content:
+        if not isinstance(content_item, dict):
+            normalized_content.append(content_item)
+            continue
+
+        content_type = content_item.get("type")
+        if content_type == "input_image":
+            normalized_content.append(_normalize_compaction_input_image(content_item))
+        elif content_type == "input_file":
+            normalized_content.append(_normalize_compaction_input_file(content_item))
+        else:
+            normalized_content.append(content_item)
+
+    normalized_item = dict(item)
+    normalized_item["content"] = normalized_content
+    return cast(TResponseInputItem, normalized_item)
+
+
+def _normalize_compaction_input_image(content_item: dict[str, Any]) -> dict[str, Any]:
+    """Return a valid replay shape for a compacted Responses image input."""
+    normalized = {"type": "input_image"}
+
+    image_url = content_item.get("image_url")
+    file_id = content_item.get("file_id")
+    if isinstance(image_url, str) and image_url:
+        normalized["image_url"] = image_url
+    elif isinstance(file_id, str) and file_id:
+        normalized["file_id"] = file_id
+    else:
+        raise ValueError("Compaction input_image item missing image_url or file_id.")
+
+    detail = content_item.get("detail")
+    if isinstance(detail, str) and detail:
+        normalized["detail"] = detail
+
+    return normalized
+
+
+def _normalize_compaction_input_file(content_item: dict[str, Any]) -> dict[str, Any]:
+    """Return a valid replay shape for a compacted Responses file input."""
+    normalized = {"type": "input_file"}
+
+    file_data = content_item.get("file_data")
+    file_url = content_item.get("file_url")
+    file_id = content_item.get("file_id")
+    if isinstance(file_data, str) and file_data:
+        normalized["file_data"] = file_data
+    elif isinstance(file_url, str) and file_url:
+        normalized["file_url"] = file_url
+    elif isinstance(file_id, str) and file_id:
+        normalized["file_id"] = file_id
+    else:
+        raise ValueError("Compaction input_file item missing file_data, file_url, or file_id.")
+
+    filename = content_item.get("filename")
+    if isinstance(filename, str) and filename:
+        normalized["filename"] = filename
+
+    detail = content_item.get("detail")
+    if isinstance(detail, str) and detail:
+        normalized["detail"] = detail
+
+    return normalized
 
 
 def _normalize_compaction_session_items(
