@@ -70,11 +70,11 @@ Generic local/container strategies:
 
 | Strategy or pattern | Use it when | Notes |
 | --- | --- | --- |
-| `InContainerMountStrategy(pattern=RcloneMountPattern(...))` | The sandbox image can run `rclone`. | Supports S3, GCS, R2, and Azure Blob. `RcloneMountPattern` can run in `fuse` mode or `nfs` mode. |
+| `InContainerMountStrategy(pattern=RcloneMountPattern(...))` | The sandbox image can run `rclone`. | Supports S3, GCS, R2, Azure Blob, and Box. `RcloneMountPattern` can run in `fuse` mode or `nfs` mode. |
 | `InContainerMountStrategy(pattern=MountpointMountPattern(...))` | The image has `mount-s3` and you want Mountpoint-style S3 or S3-compatible access. | Supports `S3Mount` and `GCSMount`. |
 | `InContainerMountStrategy(pattern=FuseMountPattern(...))` | The image has `blobfuse2` and FUSE support. | Supports `AzureBlobMount`. |
 | `InContainerMountStrategy(pattern=S3FilesMountPattern(...))` | The image has `mount.s3files` and can reach an existing S3 Files mount target. | Supports `S3FilesMount`. |
-| `DockerVolumeMountStrategy(driver=...)` | Docker should attach a volume-driver-backed mount before the container starts. | Docker-only. S3, GCS, R2, and Azure Blob support `rclone`; S3 and GCS also support `mountpoint`. |
+| `DockerVolumeMountStrategy(driver=...)` | Docker should attach a volume-driver-backed mount before the container starts. | Docker-only. S3, GCS, R2, Azure Blob, and Box support `rclone`; S3 and GCS also support `mountpoint`. |
 
 </div>
 
@@ -106,13 +106,13 @@ Hosted sandbox clients expose provider-specific mount strategies. Choose the bac
 
 | Backend | Mount notes |
 | --- | --- |
-| Docker | Supports `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `S3FilesMount` with local strategies such as `InContainerMountStrategy` and `DockerVolumeMountStrategy`. |
+| Docker | Supports `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, `BoxMount`, and `S3FilesMount` with local strategies such as `InContainerMountStrategy` and `DockerVolumeMountStrategy`. |
 | `ModalSandboxClient` | Supports Modal cloud bucket mounts with `ModalCloudBucketMountStrategy` on `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. You can use inline credentials or a named Modal Secret. |
 | `CloudflareSandboxClient` | Supports Cloudflare bucket mounts with `CloudflareBucketMountStrategy` on `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. |
 | `BlaxelSandboxClient` | Supports cloud bucket mounts with `BlaxelCloudBucketMountStrategy` on `S3Mount`, `R2Mount`, and `GCSMount`. Also supports persistent Blaxel Drives with `BlaxelDriveMount` and `BlaxelDriveMountStrategy` from `agents.extensions.sandbox.blaxel`. |
-| `DaytonaSandboxClient` | Supports cloud bucket mounts with `DaytonaCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, and `AzureBlobMount`. |
-| `E2BSandboxClient` | Supports cloud bucket mounts with `E2BCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, and `AzureBlobMount`. |
-| `RunloopSandboxClient` | Supports cloud bucket mounts with `RunloopCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, and `AzureBlobMount`. |
+| `DaytonaSandboxClient` | Supports rclone-backed cloud storage mounts with `DaytonaCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
+| `E2BSandboxClient` | Supports rclone-backed cloud storage mounts with `E2BCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
+| `RunloopSandboxClient` | Supports rclone-backed cloud storage mounts with `RunloopCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
 | `VercelSandboxClient` | No hosted-specific mount strategy is currently exposed. Use manifest files, repos, or other workspace inputs instead. |
 
 </div>
@@ -121,16 +121,16 @@ The table below summarizes which remote storage entries each backend can mount d
 
 <div class="sandbox-nowrap-first-column-table" markdown="1">
 
-| Backend | AWS S3 | Cloudflare R2 | GCS | Azure Blob Storage | S3 Files |
-| --- | --- | --- | --- | --- | --- |
-| Docker | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `ModalSandboxClient` | ✓ | ✓ | ✓ | - | - |
-| `CloudflareSandboxClient` | ✓ | ✓ | ✓ | - | - |
-| `BlaxelSandboxClient` | ✓ | ✓ | ✓ | - | - |
-| `DaytonaSandboxClient` | ✓ | ✓ | ✓ | ✓ | - |
-| `E2BSandboxClient` | ✓ | ✓ | ✓ | ✓ | - |
-| `RunloopSandboxClient` | ✓ | ✓ | ✓ | ✓ | - |
-| `VercelSandboxClient` | - | - | - | - | - |
+| Backend | AWS S3 | Cloudflare R2 | GCS | Azure Blob Storage | Box | S3 Files |
+| --- | --- | --- | --- | --- | --- | --- |
+| Docker | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `ModalSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
+| `CloudflareSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
+| `BlaxelSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
+| `DaytonaSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
+| `E2BSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
+| `RunloopSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
+| `VercelSandboxClient` | - | - | - | - | - | - |
 
 </div>
 

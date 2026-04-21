@@ -127,6 +127,7 @@ def test_core_sandbox_public_export_surface_is_stable() -> None:
         "agents.sandbox.entries": {
             "AzureBlobMount",
             "BaseEntry",
+            "BoxMount",
             "Dir",
             "File",
             "DockerVolumeMountStrategy",

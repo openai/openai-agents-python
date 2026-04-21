@@ -229,7 +229,7 @@ Use manifest entries for the material the agent needs before work begins:
 | `File`, `Dir` | Small synthetic inputs, helper files, or output directories. |
 | `LocalFile`, `LocalDir` | Host files or directories that should be materialized into the sandbox. |
 | `GitRepo` | A repository that should be fetched into the workspace. |
-| mounts such as `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, `S3FilesMount` | External storage that should appear inside the sandbox. |
+| mounts such as `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, `BoxMount`, `S3FilesMount` | External storage that should appear inside the sandbox. |
 
 </div>
 

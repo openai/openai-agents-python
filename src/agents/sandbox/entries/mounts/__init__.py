@@ -15,10 +15,11 @@ from .patterns import (
     RcloneMountPattern,
     S3FilesMountPattern,
 )
-from .providers import AzureBlobMount, GCSMount, R2Mount, S3FilesMount, S3Mount
+from .providers import AzureBlobMount, BoxMount, GCSMount, R2Mount, S3FilesMount, S3Mount
 
 __all__ = [
     "AzureBlobMount",
+    "BoxMount",
     "FuseMountPattern",
     "GCSMount",
     "DockerVolumeMountStrategy",

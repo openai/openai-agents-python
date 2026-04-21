@@ -14,3 +14,4 @@
             - R2Mount
             - S3Mount
             - S3FilesMount
+            - BoxMount

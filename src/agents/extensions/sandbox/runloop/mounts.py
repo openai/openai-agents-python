@@ -171,7 +171,7 @@ def _assert_runloop_session(session: BaseSandboxSession) -> None:
 
 
 class RunloopCloudBucketMountStrategy(MountStrategyBase):
-    """Mount cloud buckets in Runloop sandboxes via rclone."""
+    """Mount rclone-backed cloud storage in Runloop sandboxes."""
 
     type: Literal["runloop_cloud_bucket"] = "runloop_cloud_bucket"
     pattern: RcloneMountPattern = RcloneMountPattern(mode="fuse")
