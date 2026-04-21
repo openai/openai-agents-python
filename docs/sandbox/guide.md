@@ -205,6 +205,7 @@ By default, `SandboxAgent.capabilities` uses `Capabilities.default()`, which inc
 For skills, choose the source based on how you want them materialized:
 
 - `Skills(lazy_from=LocalDirLazySkillSource(...))` is a good default for larger local skill directories because the model can discover the index first and load only what it needs.
+- `LocalDirLazySkillSource(source=LocalDir(...))` reads from the host filesystem, not from a path that already exists inside the sandbox image or workspace. If you mount skills into the sandbox at `/skills`, still pass the original host directory to `LocalDir(...)`.
 - `Skills(from_=LocalDir(src=...))` is better for a small local bundle you want staged up front.
 - `Skills(from_=GitRepo(repo=..., ref=...))` is the right fit when the skills themselves should come from a repository.
 

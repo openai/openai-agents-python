@@ -556,8 +556,18 @@ class TestSkillsLazyLoading:
         )
         capability.bind(_SkillsSession(Manifest(root=str(workspace_root))))
 
-        with pytest.raises(SkillsConfigError):
+        with pytest.raises(SkillsConfigError) as exc_info:
             await capability.load_skill("missing-skill")
+
+        assert (
+            exc_info.value.message
+            == "lazy skill source directory is unavailable; "
+            "LocalDirLazySkillSource expects a host filesystem path, not a path inside the sandbox"
+        )
+        assert exc_info.value.context == {
+            "skill_name": "missing-skill",
+            "configured_source_path": str(tmp_path / "missing-skills"),
+        }
 
     @pytest.mark.asyncio
     async def test_load_skill_rejects_ambiguous_skill_name(self, tmp_path: Path) -> None:

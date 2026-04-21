@@ -65,6 +65,8 @@ def build_agent(model: str) -> SandboxAgent[None]:
         capabilities=Capabilities.default() + [
             Skills(
                 lazy_from=LocalDirLazySkillSource(
+                    # This is a host path. The lazy loader copies skills into `.agents/`
+                    # on demand, so do not point this at an in-sandbox path such as `/skills`.
                     source=LocalDir(src=HOST_SKILLS_DIR),
                 )
             ),
