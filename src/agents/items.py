@@ -420,8 +420,8 @@ class ToolCallOutputItem(RunItemBase[Any]):
         used to correlate outputs with their originating tool calls without a manual join.
         """
         if isinstance(self.raw_item, dict):
-            return self.raw_item.get("call_id")
-        return getattr(self.raw_item, "call_id", None)
+            return cast("str | None", self.raw_item.get("call_id"))
+        return cast("str | None", getattr(self.raw_item, "call_id", None))
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts the tool output into an input item for the next model turn.

@@ -655,7 +655,7 @@ def test_tool_call_item_tool_name_none_for_computer_call() -> None:
         call_id="call_cu",
         type="computer_call",
         status="completed",
-        action={"type": "screenshot"},
+        action=ActionScreenshot(type="screenshot"),
         actions=[],
         pending_safety_checks=[],
     )
