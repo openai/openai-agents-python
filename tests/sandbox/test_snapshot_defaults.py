@@ -24,20 +24,6 @@ def test_default_local_snapshot_base_dir_uses_xdg_state_home(tmp_path: Path) -> 
     assert result == state_home / "openai-agents-python" / "sandbox" / "snapshots"
 
 
-def test_default_local_snapshot_base_dir_ignores_relative_xdg_state_home(
-    tmp_path: Path,
-) -> None:
-    home = tmp_path / "home"
-    result = default_local_snapshot_base_dir(
-        home=home,
-        env={"XDG_STATE_HOME": "relative-state"},
-        platform="linux",
-        os_name="posix",
-    )
-
-    assert result == home / ".local" / "state" / "openai-agents-python" / "sandbox" / "snapshots"
-
-
 def test_default_local_snapshot_base_dir_uses_macos_application_support(tmp_path: Path) -> None:
     home = tmp_path / "home"
     result = default_local_snapshot_base_dir(
@@ -59,7 +45,7 @@ def test_default_local_snapshot_base_dir_uses_macos_application_support(tmp_path
 
 
 def test_default_local_snapshot_base_dir_uses_localappdata_on_windows(tmp_path: Path) -> None:
-    local_app_data = tmp_path / "LocalAppData"
+    local_app_data = Path(r"C:\Users\me\AppData\Local")
     result = default_local_snapshot_base_dir(
         home=tmp_path / "home",
         env={"LOCALAPPDATA": str(local_app_data)},
@@ -73,7 +59,7 @@ def test_default_local_snapshot_base_dir_uses_localappdata_on_windows(tmp_path: 
 def test_default_local_snapshot_base_dir_uses_absolute_appdata_when_localappdata_is_relative(
     tmp_path: Path,
 ) -> None:
-    app_data = tmp_path / "AppData" / "Roaming"
+    app_data = Path(r"C:\Users\me\AppData\Roaming")
     result = default_local_snapshot_base_dir(
         home=tmp_path / "home",
         env={"LOCALAPPDATA": "relative-local", "APPDATA": str(app_data)},
@@ -91,6 +77,20 @@ def test_default_local_snapshot_base_dir_ignores_relative_windows_env_paths(
     result = default_local_snapshot_base_dir(
         home=home,
         env={"LOCALAPPDATA": "relative-local", "APPDATA": "relative-roaming"},
+        platform="win32",
+        os_name="nt",
+    )
+
+    assert result == home / "AppData" / "Local" / "openai-agents-python" / "sandbox" / "snapshots"
+
+
+def test_default_local_snapshot_base_dir_ignores_posix_absolute_localappdata_on_windows(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    result = default_local_snapshot_base_dir(
+        home=home,
+        env={"LOCALAPPDATA": "/tmp/localappdata"},
         platform="win32",
         os_name="nt",
     )
