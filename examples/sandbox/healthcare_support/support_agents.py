@@ -115,7 +115,13 @@ def build_policy_sandbox_agent(*, skills_root: Path) -> SandboxAgent[HealthcareS
         capabilities=[
             Shell(),
             Filesystem(),
-            Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=skills_root))),
+            Skills(
+                lazy_from=LocalDirLazySkillSource(
+                    # This is a host path read by the SDK process.
+                    # Requested skills are copied into `skills_path` in the sandbox.
+                    source=LocalDir(src=skills_root),
+                )
+            ),
         ],
         model_settings=ModelSettings(
             reasoning=Reasoning(effort="low"),
