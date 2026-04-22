@@ -46,6 +46,9 @@ from examples.agent_patterns.structured_agent_audit import (
     render_report_summary,
     run_structured_agent_audit,
 )
+from examples.agent_patterns.structured_agent_audit_with_guardrails import (
+    actionable_report_guardrail,
+)
 from examples.sandbox.basic import _import_docker_from_env
 from examples.sandbox.docker.docker_runner import (
     _format_tool_call,
@@ -275,6 +278,39 @@ def test_audit_playbooks_and_rubric_include_core_guidance() -> None:
     assert "wrapper layering" in AUDIT_PLAYBOOKS["wrapper_regression"]
     assert "Context cleanliness" in AUDIT_RUBRIC
     assert "Severity heuristics" in AUDIT_RUBRIC
+
+
+@pytest.mark.asyncio
+async def test_actionable_report_guardrail_trips_on_severe_findings_without_fix_plan() -> None:
+    report = AuditReport(
+        executive_verdict=ExecutiveVerdict(
+            overall_health="high_risk",
+            primary_failure_mode="Fresh probes are skipped.",
+            most_urgent_fix="Enforce tool use in code.",
+        ),
+        findings=[
+            Finding(
+                severity="critical",
+                title="Fresh probe bypass",
+                symptom="The agent answers operational questions without tools.",
+                source_layer="tool_selection",
+                root_cause="Prompt-only enforcement.",
+                recommended_fix="Require tool execution before final answer generation.",
+            )
+        ],
+        conflict_map=[],
+        ordered_fix_plan=[],
+    )
+
+    result = await actionable_report_guardrail.guardrail_function(
+        RunContextWrapper(context=None),
+        Agent(name="report_guardrail_agent"),
+        report,
+    )
+
+    assert result.tripwire_triggered is True
+    assert result.output_info["severe_findings"] == 1
+    assert result.output_info["missing_fix_plan"] is True
 
 
 def test_sandbox_basic_direct_run_imports_external_docker_sdk(
