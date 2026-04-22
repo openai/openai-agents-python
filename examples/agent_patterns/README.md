@@ -46,6 +46,8 @@ useful when you want structured scope, evidence, failure mapping, an ordered fix
 playbook / rubric / schema guidance instead of a freeform review.
 
 See the [`structured_agent_audit.py`](./structured_agent_audit.py) file for an example of this.
+See the [`structured_agent_audit_with_guardrails.py`](./structured_agent_audit_with_guardrails.py)
+file for a tracing + output-guardrail variant.
 
 ## Parallelization
 
