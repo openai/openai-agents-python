@@ -30,23 +30,12 @@ from agents import (
 from agents.agent import ToolsToFinalOutputResult
 from agents.items import TResponseInputItem
 from agents.tool import FunctionToolResult, function_tool
-from examples.sandbox.basic import _import_docker_from_env
-from examples.sandbox.docker.docker_runner import (
-    _format_tool_call,
-    _format_tool_output,
-)
-from examples.sandbox.sandbox_agents_as_tools import (
-    PricingPacketReview,
-    RolloutRiskReview,
-    _structured_tool_output_extractor,
-)
 from examples.agent_patterns.structured_agent_audit import (
-    AuditReport,
-    AuditScope,
     AUDIT_PLAYBOOKS,
     AUDIT_RUBRIC,
+    AuditReport,
+    AuditScope,
     ConflictEdge,
-    EvidenceItem,
     EvidencePack,
     ExecutiveVerdict,
     FailureMap,
@@ -56,6 +45,16 @@ from examples.agent_patterns.structured_agent_audit import (
     audit_report_schema,
     render_report_summary,
     run_structured_agent_audit,
+)
+from examples.sandbox.basic import _import_docker_from_env
+from examples.sandbox.docker.docker_runner import (
+    _format_tool_call,
+    _format_tool_output,
+)
+from examples.sandbox.sandbox_agents_as_tools import (
+    PricingPacketReview,
+    RolloutRiskReview,
+    _structured_tool_output_extractor,
 )
 
 from .fake_model import FakeModel
@@ -98,7 +97,9 @@ async def test_structured_agent_audit_workflow_chains_typed_artifacts() -> None:
                             {
                                 "kind": "code",
                                 "source": "runtime/router.py",
-                                "summary": "Tool selection silently falls back to markdown reasoning.",
+                                "summary": (
+                                    "Tool selection silently falls back to markdown reasoning."
+                                ),
                                 "time_scope": "current",
                             }
                         ],
@@ -122,7 +123,9 @@ async def test_structured_agent_audit_workflow_chains_typed_artifacts() -> None:
                                 "symptom": "The wrapper skips tools under pressure.",
                                 "source_layer": "tool_selection",
                                 "root_cause": "Tool use is instructed but not enforced in code.",
-                                "recommended_fix": "Require tool execution in code before final answer generation.",
+                                "recommended_fix": (
+                                    "Require tool execution in code before final answer generation."
+                                ),
                             }
                         ],
                         "conflict_map": [
@@ -147,7 +150,9 @@ async def test_structured_agent_audit_workflow_chains_typed_artifacts() -> None:
                     {
                         "executive_verdict": {
                             "overall_health": "high_risk",
-                            "primary_failure_mode": "Prompt-only controls drift under wrapper pressure.",
+                            "primary_failure_mode": (
+                                "Prompt-only controls drift under wrapper pressure."
+                            ),
                             "most_urgent_fix": "Enforce tool requirements in code.",
                         },
                         "findings": [
@@ -157,7 +162,9 @@ async def test_structured_agent_audit_workflow_chains_typed_artifacts() -> None:
                                 "symptom": "The wrapper skips tools under pressure.",
                                 "source_layer": "tool_selection",
                                 "root_cause": "Tool use is instructed but not enforced in code.",
-                                "recommended_fix": "Require tool execution in code before final answer generation.",
+                                "recommended_fix": (
+                                    "Require tool execution in code before final answer generation."
+                                ),
                             }
                         ],
                         "conflict_map": [
@@ -173,7 +180,10 @@ async def test_structured_agent_audit_workflow_chains_typed_artifacts() -> None:
                                 "order": 1,
                                 "goal": "Move tool discipline into code gates",
                                 "why_now": "This blocks the highest-impact correctness failure.",
-                                "expected_effect": "The wrapper can no longer answer without current-turn evidence.",
+                                "expected_effect": (
+                                    "The wrapper can no longer answer without current-turn "
+                                    "evidence."
+                                ),
                             }
                         ],
                     }
@@ -201,7 +211,10 @@ async def test_structured_agent_audit_workflow_chains_typed_artifacts() -> None:
     assert "Evidence JSON" in failure_model.last_turn_args["input"][0]["content"]
     assert "Failure map JSON" in report_model.last_turn_args["input"][0]["content"]
     assert "Playbook: wrapper_regression" in scope_model.last_turn_args["input"][0]["content"]
-    assert AUDIT_PLAYBOOKS["wrapper_regression"] in evidence_model.last_turn_args["input"][0]["content"]
+    assert (
+        AUDIT_PLAYBOOKS["wrapper_regression"]
+        in evidence_model.last_turn_args["input"][0]["content"]
+    )
     assert "Audit rubric:" in failure_model.last_turn_args["input"][0]["content"]
     assert "Report JSON schema:" in report_model.last_turn_args["input"][0]["content"]
 
