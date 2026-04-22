@@ -1,4 +1,4 @@
-![OpenAI Agents Python README Banner](docs/readme-banner.png)
+![OpenAI Agents Python README Banner](https://raw.githubusercontent.com/huangrichao2020/openai-agents-python/codex/update-readme-banner/docs/readme-banner.png)
 
 # OpenAI Agents SDK [![PyPI](https://img.shields.io/pypi/v/openai-agents?label=pypi%20package)](https://pypi.org/project/openai-agents/)
 
