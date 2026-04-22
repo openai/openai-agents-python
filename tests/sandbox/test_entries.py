@@ -679,7 +679,7 @@ async def test_dir_metadata_strips_file_type_bits_before_chmod() -> None:
 
     await Dir()._apply_metadata(session, dest)
 
-    assert ("chmod", "0755", str(dest)) in session.exec_calls
+    assert ("chmod", "0755", "/workspace/dir") in session.exec_calls
 
 
 @pytest.mark.asyncio
@@ -710,5 +710,5 @@ async def test_apply_manifest_raises_on_chgrp_failure() -> None:
     with pytest.raises(ExecNonZeroError):
         await session.apply_manifest()
 
-    assert ("chgrp", "sandbox-user", str(Path("/workspace/copied.txt"))) in session.exec_calls
+    assert ("chgrp", "sandbox-user", "/workspace/copied.txt") in session.exec_calls
     assert not any(call[0] == "chmod" for call in session.exec_calls)
