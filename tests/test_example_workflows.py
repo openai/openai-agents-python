@@ -40,6 +40,20 @@ from examples.sandbox.sandbox_agents_as_tools import (
     RolloutRiskReview,
     _structured_tool_output_extractor,
 )
+from examples.agent_patterns.structured_agent_audit import (
+    AuditReport,
+    AuditScope,
+    ConflictEdge,
+    EvidenceItem,
+    EvidencePack,
+    ExecutiveVerdict,
+    FailureMap,
+    Finding,
+    OrderedFix,
+    StructuredAuditAgents,
+    render_report_summary,
+    run_structured_agent_audit,
+)
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -49,6 +63,182 @@ from .test_responses import (
     get_text_input_item,
     get_text_message,
 )
+
+
+@pytest.mark.asyncio
+async def test_structured_agent_audit_workflow_chains_typed_artifacts() -> None:
+    scope_model = FakeModel()
+    scope_model.set_next_output(
+        [
+            get_final_output_message(
+                json.dumps(
+                    {
+                        "target_name": "wrapper-runtime",
+                        "entrypoints": ["cli"],
+                        "model_stack": ["gpt-4.1", "tool-router"],
+                        "symptoms": ["tool skips", "stale recall"],
+                        "time_window": "last 24h",
+                        "layers_to_audit": ["tool_selection", "active_recall"],
+                    }
+                )
+            )
+        ]
+    )
+
+    evidence_model = FakeModel()
+    evidence_model.set_next_output(
+        [
+            get_final_output_message(
+                json.dumps(
+                    {
+                        "evidence_pack": [
+                            {
+                                "kind": "code",
+                                "source": "runtime/router.py",
+                                "summary": "Tool selection silently falls back to markdown reasoning.",
+                                "time_scope": "current",
+                            }
+                        ],
+                        "missing_evidence": ["historical session trace"],
+                    }
+                )
+            )
+        ]
+    )
+
+    failure_model = FakeModel()
+    failure_model.set_next_output(
+        [
+            get_final_output_message(
+                json.dumps(
+                    {
+                        "findings": [
+                            {
+                                "severity": "high",
+                                "title": "Prompt-only tool enforcement",
+                                "symptom": "The wrapper skips tools under pressure.",
+                                "source_layer": "tool_selection",
+                                "root_cause": "Tool use is instructed but not enforced in code.",
+                                "recommended_fix": "Require tool execution in code before final answer generation.",
+                            }
+                        ],
+                        "conflict_map": [
+                            {
+                                "from_layer": "active_recall",
+                                "to_layer": "tool_selection",
+                                "conflict_type": "stale_state",
+                                "note": "Stale recall biases tool choice toward old evidence.",
+                            }
+                        ],
+                    }
+                )
+            )
+        ]
+    )
+
+    report_model = FakeModel()
+    report_model.set_next_output(
+        [
+            get_final_output_message(
+                json.dumps(
+                    {
+                        "executive_verdict": {
+                            "overall_health": "high_risk",
+                            "primary_failure_mode": "Prompt-only controls drift under wrapper pressure.",
+                            "most_urgent_fix": "Enforce tool requirements in code.",
+                        },
+                        "findings": [
+                            {
+                                "severity": "high",
+                                "title": "Prompt-only tool enforcement",
+                                "symptom": "The wrapper skips tools under pressure.",
+                                "source_layer": "tool_selection",
+                                "root_cause": "Tool use is instructed but not enforced in code.",
+                                "recommended_fix": "Require tool execution in code before final answer generation.",
+                            }
+                        ],
+                        "conflict_map": [
+                            {
+                                "from_layer": "active_recall",
+                                "to_layer": "tool_selection",
+                                "conflict_type": "stale_state",
+                                "note": "Stale recall biases tool choice toward old evidence.",
+                            }
+                        ],
+                        "ordered_fix_plan": [
+                            {
+                                "order": 1,
+                                "goal": "Move tool discipline into code gates",
+                                "why_now": "This blocks the highest-impact correctness failure.",
+                                "expected_effect": "The wrapper can no longer answer without current-turn evidence.",
+                            }
+                        ],
+                    }
+                )
+            )
+        ]
+    )
+
+    agents = StructuredAuditAgents(
+        scope=Agent(name="scope", model=scope_model, output_type=AuditScope),
+        evidence=Agent(name="evidence", model=evidence_model, output_type=EvidencePack),
+        failure_map=Agent(name="failure_map", model=failure_model, output_type=FailureMap),
+        report=Agent(name="report", model=report_model, output_type=AuditReport),
+    )
+
+    report = await run_structured_agent_audit(
+        "Audit the runtime for wrapper regression and stale evidence reuse.",
+        agents=agents,
+    )
+
+    assert report.executive_verdict.overall_health == "high_risk"
+    assert report.findings[0].severity == "high"
+    assert report.ordered_fix_plan[0].order == 1
+    assert "Scope JSON" in evidence_model.last_turn_args["input"][0]["content"]
+    assert "Evidence JSON" in failure_model.last_turn_args["input"][0]["content"]
+    assert "Failure map JSON" in report_model.last_turn_args["input"][0]["content"]
+
+
+def test_render_report_summary_formats_findings_and_fixes() -> None:
+    report = AuditReport(
+        executive_verdict=ExecutiveVerdict(
+            overall_health="high_risk",
+            primary_failure_mode="Tool discipline collapses under wrapper pressure.",
+            most_urgent_fix="Enforce tool requirements in code.",
+        ),
+        findings=[
+            Finding(
+                severity="high",
+                title="Prompt-only tool enforcement",
+                symptom="The wrapper skips tools under pressure.",
+                source_layer="tool_selection",
+                root_cause="Tool use is instructed but not enforced in code.",
+                recommended_fix="Require tool execution in code before final answer generation.",
+            )
+        ],
+        conflict_map=[
+            ConflictEdge(
+                from_layer="active_recall",
+                to_layer="tool_selection",
+                conflict_type="stale_state",
+                note="Stale recall biases tool choice toward old evidence.",
+            )
+        ],
+        ordered_fix_plan=[
+            OrderedFix(
+                order=1,
+                goal="Move tool discipline into code gates",
+                why_now="This blocks the highest-impact correctness failure.",
+                expected_effect="The wrapper can no longer answer without current-turn evidence.",
+            )
+        ],
+    )
+
+    summary = render_report_summary(report)
+
+    assert "Overall health: high_risk" in summary
+    assert "[high] Prompt-only tool enforcement" in summary
+    assert "1. Move tool discipline into code gates" in summary
 
 
 def test_sandbox_basic_direct_run_imports_external_docker_sdk(
