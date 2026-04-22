@@ -17,6 +17,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Input/output guardrails
     -   LLM as a judge
     -   Structured agent audits with typed artifacts, playbooks, rubrics, and severity-ranked reports (`examples/agent_patterns/structured_agent_audit.py`)
+    -   A cookbook for structured agent audits, including guardrail and tracing composition (`docs/structured_agent_audits.md`)
     -   Routing
     -   Streaming guardrails
     -   Human-in-the-loop with tool approval and state serialization (`examples/agent_patterns/human_in_the_loop.py`)
