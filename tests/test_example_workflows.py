@@ -43,6 +43,8 @@ from examples.sandbox.sandbox_agents_as_tools import (
 from examples.agent_patterns.structured_agent_audit import (
     AuditReport,
     AuditScope,
+    AUDIT_PLAYBOOKS,
+    AUDIT_RUBRIC,
     ConflictEdge,
     EvidenceItem,
     EvidencePack,
@@ -51,6 +53,7 @@ from examples.agent_patterns.structured_agent_audit import (
     Finding,
     OrderedFix,
     StructuredAuditAgents,
+    audit_report_schema,
     render_report_summary,
     run_structured_agent_audit,
 )
@@ -197,6 +200,10 @@ async def test_structured_agent_audit_workflow_chains_typed_artifacts() -> None:
     assert "Scope JSON" in evidence_model.last_turn_args["input"][0]["content"]
     assert "Evidence JSON" in failure_model.last_turn_args["input"][0]["content"]
     assert "Failure map JSON" in report_model.last_turn_args["input"][0]["content"]
+    assert "Playbook: wrapper_regression" in scope_model.last_turn_args["input"][0]["content"]
+    assert AUDIT_PLAYBOOKS["wrapper_regression"] in evidence_model.last_turn_args["input"][0]["content"]
+    assert "Audit rubric:" in failure_model.last_turn_args["input"][0]["content"]
+    assert "Report JSON schema:" in report_model.last_turn_args["input"][0]["content"]
 
 
 def test_render_report_summary_formats_findings_and_fixes() -> None:
@@ -239,6 +246,22 @@ def test_render_report_summary_formats_findings_and_fixes() -> None:
     assert "Overall health: high_risk" in summary
     assert "[high] Prompt-only tool enforcement" in summary
     assert "1. Move tool discipline into code gates" in summary
+
+
+def test_audit_report_schema_exposes_expected_shape() -> None:
+    schema = audit_report_schema()
+
+    assert schema["title"] == "AuditReport"
+    assert "properties" in schema
+    assert "executive_verdict" in schema["properties"]
+    assert "ordered_fix_plan" in schema["properties"]
+
+
+def test_audit_playbooks_and_rubric_include_core_guidance() -> None:
+    assert "tool_discipline" in AUDIT_PLAYBOOKS
+    assert "wrapper layering" in AUDIT_PLAYBOOKS["wrapper_regression"]
+    assert "Context cleanliness" in AUDIT_RUBRIC
+    assert "Severity heuristics" in AUDIT_RUBRIC
 
 
 def test_sandbox_basic_direct_run_imports_external_docker_sdk(
