@@ -265,13 +265,23 @@ def _get_model_name(model: Any) -> str | None:
 
     Most built-in model implementations (``OpenAIResponsesModel``,
     ``OpenAIChatCompletionsModel``) expose a ``model`` attribute that contains
-    the underlying model name string.  This helper retrieves it in a
-    forward-compatible, duck-typed way so that third-party model implementations
-    that may not have this attribute are handled gracefully.
+    the underlying model name string. This helper retrieves it in a
+    forward-compatible, duck-typed way so that third-party model
+    implementations are handled gracefully.
+
+    The function tries ``model`` first, then ``model_name`` for
+    implementations that prefer that name. Any exception raised while
+    resolving the attribute (for example, a custom descriptor or property
+    that throws) is swallowed so that usage accounting can never crash the
+    run, and ``None`` is returned when no string-valued name is available.
     """
-    model_name = getattr(model, "model", None)
-    if isinstance(model_name, str):
-        return model_name
+    for attr in ("model", "model_name"):
+        try:
+            value = getattr(model, attr, None)
+        except Exception:
+            continue
+        if isinstance(value, str) and value:
+            return value
     return None
 
 

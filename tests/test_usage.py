@@ -397,6 +397,56 @@ def test_request_usage_default_agent_model_names_are_none():
     assert entry.model_name is None
 
 
+def test_serialize_deserialize_roundtrip_preserves_agent_and_model_names():
+    """JSON round-trip must preserve agent_name and model_name on each entry.
+
+    This guards against a regression where serialize_usage drops the new
+    attribution fields, or deserialize_usage forgets to read them back.
+    Both branches of the conditional emit (entry-with-name and entry-without-name)
+    are exercised so the all-None fast path can't silently strip the keys.
+    """
+    from agents.usage import deserialize_usage, serialize_usage
+
+    named_entry = RequestUsage(
+        input_tokens=10,
+        output_tokens=5,
+        total_tokens=15,
+        input_tokens_details=InputTokensDetails(cached_tokens=0),
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+        agent_name="Math Tutor",
+        model_name="gpt-4o",
+    )
+    unnamed_entry = RequestUsage(
+        input_tokens=2,
+        output_tokens=1,
+        total_tokens=3,
+        input_tokens_details=InputTokensDetails(cached_tokens=0),
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+    )
+    original = Usage(
+        requests=2,
+        input_tokens=12,
+        output_tokens=6,
+        total_tokens=18,
+        request_usage_entries=[named_entry, unnamed_entry],
+    )
+
+    restored = deserialize_usage(serialize_usage(original))
+
+    assert len(restored.request_usage_entries) == 2
+    restored_named = restored.request_usage_entries[0]
+    restored_unnamed = restored.request_usage_entries[1]
+
+    assert restored_named.agent_name == "Math Tutor"
+    assert restored_named.model_name == "gpt-4o"
+    assert restored_named.input_tokens == 10
+    assert restored_named.output_tokens == 5
+
+    assert restored_unnamed.agent_name is None
+    assert restored_unnamed.model_name is None
+    assert restored_unnamed.input_tokens == 2
+
+
 def test_request_usage_with_agent_and_model_names():
     """RequestUsage can be created with explicit agent_name and model_name."""
     entry = RequestUsage(
@@ -584,10 +634,12 @@ async def test_multi_agent_run_attributes_usage_to_correct_agents():
     )
 
     specialist_model = FakeModel(initial_output=[get_text_message("specialist done")])
+    specialist_model.model = "gpt-4o-specialist"  # type: ignore[attr-defined]
     specialist_model.set_hardcoded_usage(specialist_usage)
     specialist_agent = Agent(name="Specialist Agent", model=specialist_model)
 
     triage_model = FakeModel()
+    triage_model.model = "gpt-4o-triage"  # type: ignore[attr-defined]
     triage_model.add_multiple_turn_outputs(
         [
             [get_handoff_tool_call(specialist_agent)],
@@ -607,9 +659,16 @@ async def test_multi_agent_run_attributes_usage_to_correct_agents():
 
     triage_entry = next(e for e in all_entries if e.agent_name == "Triage Agent")
     assert triage_entry.input_tokens == 100
+    assert triage_entry.model_name == "gpt-4o-triage", (
+        f"Triage entry model_name should be 'gpt-4o-triage', got {triage_entry.model_name!r}"
+    )
 
     specialist_entry = next(e for e in all_entries if e.agent_name == "Specialist Agent")
     assert specialist_entry.input_tokens == 200
+    assert specialist_entry.model_name == "gpt-4o-specialist", (
+        "Specialist entry model_name should be 'gpt-4o-specialist', "
+        f"got {specialist_entry.model_name!r}"
+    )
 
 
 def test_add_does_not_mutate_other_entries() -> None:
