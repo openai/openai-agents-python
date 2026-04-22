@@ -42,8 +42,8 @@ See the [`llm_as_a_judge.py`](./llm_as_a_judge.py) file for an example of this.
 ## Structured agent audits
 
 You can also use deterministic, typed stages to audit an agent runtime itself. This pattern is
-useful when you want structured scope, evidence, failure mapping, and an ordered fix plan instead
-of a freeform review.
+useful when you want structured scope, evidence, failure mapping, an ordered fix plan, and explicit
+playbook / rubric / schema guidance instead of a freeform review.
 
 See the [`structured_agent_audit.py`](./structured_agent_audit.py) file for an example of this.
 
