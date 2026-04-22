@@ -61,13 +61,17 @@ async def test_reasoning_delta_snapshot_accumulates() -> None:
         if isinstance(event, ReasoningDeltaEvent):
             snapshots.append(event.snapshot)
 
+    # The stream must have produced at least one snapshot, otherwise the
+    # subsequent monotonic and content checks would silently pass on a
+    # broken implementation that never emits ReasoningDeltaEvent at all.
+    assert snapshots, "expected at least one ReasoningDeltaEvent snapshot"
+
     # Each snapshot must be at least as long as the previous one
     for i in range(1, len(snapshots)):
         assert len(snapshots[i]) >= len(snapshots[i - 1])
 
     # Last snapshot must contain the full reasoning text
-    if snapshots:
-        assert "Hello world" in snapshots[-1]
+    assert "Hello world" in snapshots[-1]
 
 
 @pytest.mark.asyncio
@@ -79,10 +83,16 @@ async def test_no_reasoning_delta_event_without_reasoning() -> None:
     agent = Agent(name="A", model=model)
     result = Runner.run_streamed(agent, input="hi")
 
+    event_count = 0
     async for event in result.stream_events():
+        event_count += 1
         assert not isinstance(event, ReasoningDeltaEvent), (
             "Got unexpected ReasoningDeltaEvent for a plain text response"
         )
+
+    # Sanity: ensure the run actually streamed something so the
+    # negative assertion above isn't passing on an empty event stream.
+    assert event_count > 0, "expected the stream to yield at least one event"
 
 
 @pytest.mark.asyncio
