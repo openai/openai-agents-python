@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -23,6 +23,55 @@ The goal is to keep the workflow evidence-first and typed end-to-end.
 
 
 Severity = Literal["critical", "high", "medium", "low"]
+AuditPlaybook = Literal[
+    "wrapper_regression",
+    "memory_contamination",
+    "tool_discipline",
+    "rendering_transport",
+    "hidden_agent_layers",
+]
+
+
+AUDIT_PLAYBOOKS: dict[AuditPlaybook, str] = {
+    "wrapper_regression": (
+        "Use when the base model looks strong but the wrapped agent behaves worse. "
+        "Focus on wrapper layering, duplicated context injection, and orchestration drift."
+    ),
+    "memory_contamination": (
+        "Use when old topics or stale artifacts bleed into current turns. "
+        "Focus on memory admission, same-session reentry, and stale retrieval ordering."
+    ),
+    "tool_discipline": (
+        "Use when the agent should have used a tool but skipped it, or used the wrong tool. "
+        "Focus on code-enforced tool requirements, preflight probes, and stale evidence binding."
+    ),
+    "rendering_transport": (
+        "Use when the answer seems correct internally but is degraded by delivery or formatting layers. "
+        "Focus on payload shape assumptions, fallback rendering, and semantic mutation in transport."
+    ),
+    "hidden_agent_layers": (
+        "Use when hidden retry, recap, summarize, or repair loops mutate results. "
+        "Focus on hidden second-pass model calls and undocumented repair behaviors."
+    ),
+}
+
+
+AUDIT_RUBRIC = """
+Audit rubric:
+1. Context cleanliness: detect duplicated context, stale carryover, and same-session artifact reentry.
+2. Tool discipline: distinguish prompt-only tool suggestions from code-enforced tool requirements.
+3. Failure handling: inspect retries, repair loops, and semantic mutation during fallback.
+4. Memory admission: prefer evidence-backed durable facts over assistant self-talk.
+5. Answer shaping: check whether final responses are derived from structured evidence or decorative prose.
+6. Hidden agent layers: identify recap, repair, summarize, or transport logic behaving like undeclared agents.
+7. JSON vs freeform boundary: keep internal orchestration typed and structured whenever possible.
+
+Severity heuristics:
+- critical: confidently wrong operational behavior
+- high: repeated corruption of otherwise good evidence
+- medium: correctness often survives, but the system is fragile or noisy
+- low: mostly maintainability or cosmetic concerns
+""".strip()
 
 
 class AuditScope(BaseModel):
@@ -101,6 +150,10 @@ class StructuredAuditAgents:
     report: Agent[AuditReport]
 
 
+def audit_report_schema() -> dict[str, Any]:
+    return AuditReport.model_json_schema()
+
+
 def build_audit_agents() -> StructuredAuditAgents:
     scope_agent = Agent(
         name="audit_scope_agent",
@@ -152,17 +205,29 @@ def build_audit_agents() -> StructuredAuditAgents:
 
 
 async def run_structured_agent_audit(
-    audit_request: str, agents: StructuredAuditAgents | None = None
+    audit_request: str,
+    agents: StructuredAuditAgents | None = None,
+    playbook: AuditPlaybook = "wrapper_regression",
 ) -> AuditReport:
     agents = agents or build_audit_agents()
+    playbook_guidance = AUDIT_PLAYBOOKS[playbook]
+    schema_json = AuditReport.model_json_schema()
 
     with trace("Structured agent audit"):
-        scope_result = await Runner.run(agents.scope, audit_request)
+        scope_prompt = (
+            f"Audit request:\n{audit_request}\n\n"
+            f"Playbook: {playbook}\n"
+            f"Playbook guidance: {playbook_guidance}"
+        )
+        scope_result = await Runner.run(agents.scope, scope_prompt)
         scope = scope_result.final_output
 
         evidence_prompt = (
             "Build an evidence pack for this audit.\n\n"
             f"Audit request:\n{audit_request}\n\n"
+            f"Playbook: {playbook}\n"
+            f"Playbook guidance: {playbook_guidance}\n\n"
+            f"Rubric:\n{AUDIT_RUBRIC}\n\n"
             f"Scope JSON:\n{scope.model_dump_json(indent=2)}"
         )
         evidence_result = await Runner.run(agents.evidence, evidence_prompt)
@@ -170,6 +235,9 @@ async def run_structured_agent_audit(
 
         failure_prompt = (
             "Build the failure map for this agent audit.\n\n"
+            f"Playbook: {playbook}\n"
+            f"Playbook guidance: {playbook_guidance}\n\n"
+            f"Rubric:\n{AUDIT_RUBRIC}\n\n"
             f"Scope JSON:\n{scope.model_dump_json(indent=2)}\n\n"
             f"Evidence JSON:\n{evidence.model_dump_json(indent=2)}"
         )
@@ -178,12 +246,22 @@ async def run_structured_agent_audit(
 
         report_prompt = (
             "Build the final audit report.\n\n"
+            f"Playbook: {playbook}\n"
+            f"Playbook guidance: {playbook_guidance}\n\n"
+            f"Rubric:\n{AUDIT_RUBRIC}\n\n"
+            f"Report JSON schema:\n{json_dumps_pretty(schema_json)}\n\n"
             f"Scope JSON:\n{scope.model_dump_json(indent=2)}\n\n"
             f"Evidence JSON:\n{evidence.model_dump_json(indent=2)}\n\n"
             f"Failure map JSON:\n{failure_map.model_dump_json(indent=2)}"
         )
         report_result = await Runner.run(agents.report, report_prompt)
         return report_result.final_output
+
+
+def json_dumps_pretty(data: dict[str, Any]) -> str:
+    import json
+
+    return json.dumps(data, indent=2, sort_keys=True)
 
 
 def render_report_summary(report: AuditReport) -> str:
