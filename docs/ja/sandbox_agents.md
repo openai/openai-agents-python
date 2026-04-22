@@ -6,27 +6,27 @@ search:
 
 !!! warning "ベータ機能"
 
-    Sandbox Agents はベータ版です。一般提供までの間に API の詳細、デフォルト値、対応機能は変更される可能性があり、また時間の経過とともにより高度な機能が追加される予定です。
+    Sandbox Agents はベータ版です。一般提供までに API の詳細、デフォルト設定、対応機能は変更される可能性があり、また時間とともにより高度な機能が追加される予定です。
 
-現代的なエージェントは、ファイルシステム内の実際のファイルを操作できるときに最も効果的に動作します。Agents SDK の **Sandbox Agents** は、モデルに永続的なワークスペースを提供し、そこでは大規模なドキュメント群の検索、ファイル編集、コマンド実行、成果物の生成、保存された sandbox 状態からの作業再開が可能です。
+モダンなエージェントは、ファイルシステム内の実際のファイルを操作できるときに最も効果を発揮します。Agents SDK の **Sandbox Agents** は、モデルに永続的なワークスペースを提供し、そこで大規模なドキュメント集合を検索し、ファイルを編集し、コマンドを実行し、成果物を生成し、保存された sandbox state から作業を再開できます。
 
-SDK は、ファイルのステージング、ファイルシステムツール、シェルアクセス、sandbox のライフサイクル、スナップショット、プロバイダー固有の接続処理を自分で組み合わせることなく、その実行ハーネスを提供します。通常の `Agent` と `Runner` のフローはそのまま維持しつつ、ワークスペース用の `Manifest` 、 sandbox ネイティブツール用の capabilities 、そして作業の実行場所を指定する `SandboxRunConfig` を追加できます。
+SDK は、ファイルのステージング、ファイルシステムツール、シェルアクセス、sandbox のライフサイクル、スナップショット、プロバイダー固有の接続処理を自分で組み合わせることなく、その実行ハーネスを提供します。通常の `Agent` と `Runner` のフローはそのままに、ワークスペース用の `Manifest`、sandbox ネイティブツール用の capabilities、作業の実行場所を指定する `SandboxRunConfig` を追加するだけです。
 
 ## 前提条件
 
 - Python 3.10 以上
-- OpenAI Agents SDK の基本的な知識
-- sandbox クライアント。ローカル開発では、まず `UnixLocalSandboxClient` から始めてください。
+- OpenAI Agents SDK の基本的な理解
+- sandbox クライアント。ローカル開発では、まず `UnixLocalSandboxClient` を使用してください。
 
 ## インストール
 
-まだ SDK をインストールしていない場合は、次を実行してください。
+まだ SDK をインストールしていない場合は、次を実行します。
 
 ```bash
 pip install openai-agents
 ```
 
-Docker ベースの sandbox の場合:
+Docker ベースの sandbox の場合は、次を実行します。
 
 ```bash
 pip install "openai-agents[docker]"
@@ -34,7 +34,7 @@ pip install "openai-agents[docker]"
 
 ## ローカル sandbox エージェントの作成
 
-この例では、ローカルのリポジトリを `repo/` 配下にステージングし、ローカル skills を遅延読み込みし、 runner が実行時に Unix ローカル sandbox セッションを作成できるようにします。
+この例では、`repo/` 配下にローカルリポジトリをステージングし、ローカル skills を遅延読み込みし、runner が実行時に Unix ローカル sandbox セッションを作成できるようにします。
 
 ```python
 import asyncio
@@ -69,6 +69,8 @@ def build_agent(model: str) -> SandboxAgent[None]:
         capabilities=Capabilities.default() + [
             Skills(
                 lazy_from=LocalDirLazySkillSource(
+                    # This is a host path read by the SDK process.
+                    # Requested skills are copied into `skills_path` in the sandbox.
                     source=LocalDir(src=HOST_SKILLS_DIR),
                 )
             ),
@@ -99,17 +101,17 @@ if __name__ == "__main__":
 基本的な実行が動作したら、次に多くの人が選ぶ項目は以下です。
 
 - `default_manifest`: 新しい sandbox セッション用のファイル、リポジトリ、ディレクトリ、マウント
-- `instructions`: プロンプト全体に適用される短いワークフロールール
+- `instructions`: プロンプト全体にわたって適用される短いワークフロールール
 - `base_instructions`: SDK の sandbox プロンプトを置き換えるための高度なエスケープハッチ
-- `capabilities`: ファイルシステム編集 / 画像検査、シェル、 skills 、メモリ、 compaction などの sandbox ネイティブツール
-- `run_as`: モデル向けツールにおける sandbox ユーザー ID
+- `capabilities`: ファイルシステム編集 / 画像検査、シェル、skills、メモリ、コンパクションなどの sandbox ネイティブツール
+- `run_as`: モデル向けツールに対する sandbox ユーザー ID
 - `SandboxRunConfig.client`: sandbox バックエンド
-- `SandboxRunConfig.session` 、 `session_state` 、または `snapshot`: 後続の実行を以前の作業に再接続する方法
+- `SandboxRunConfig.session`、`session_state`、または `snapshot`: 後続の実行を以前の作業に再接続する方法
 
 ## 次の参照先
 
-- [概念](sandbox/guide.md): manifests 、 capabilities 、 permissions 、 snapshots 、 run config 、構成パターンを理解します。
-- [Sandbox クライアント](sandbox/clients.md): Unix ローカル、 Docker 、ホスト型プロバイダー、マウント戦略を選びます。
-- [エージェントメモリ](sandbox/memory.md): 以前の sandbox 実行から得た学びを保持し、再利用します。
+- [概念](sandbox/guide.md): manifest、capabilities、権限、スナップショット、run config、構成パターンを理解します。
+- [sandbox クライアント](sandbox/clients.md): Unix ローカル、Docker、ホスト型プロバイダー、マウント戦略を選択します。
+- [エージェントメモリ](sandbox/memory.md): 以前の sandbox 実行から得た知見を保持し、再利用します。
 
-シェルアクセスが時々使うツールの 1 つにすぎない場合は、[ツールガイド](tools.md) のホスト型シェルから始めてください。ワークスペースの分離、sandbox クライアントの選択、または sandbox セッションの再開動作が設計の一部である場合は、sandbox エージェントを使用してください。
+シェルアクセスが単発でたまに使うツールの 1 つにすぎない場合は、[tools ガイド](tools.md) の hosted shell から始めてください。ワークスペース分離、sandbox クライアントの選択、または sandbox セッションの再開動作が設計の一部である場合は、sandbox エージェントを使用してください。
