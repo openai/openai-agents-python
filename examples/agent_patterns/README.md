@@ -39,6 +39,14 @@ For example, you could use an LLM to generate an outline for a story, and then u
 
 See the [`llm_as_a_judge.py`](./llm_as_a_judge.py) file for an example of this.
 
+## Structured agent audits
+
+You can also use deterministic, typed stages to audit an agent runtime itself. This pattern is
+useful when you want structured scope, evidence, failure mapping, and an ordered fix plan instead
+of a freeform review.
+
+See the [`structured_agent_audit.py`](./structured_agent_audit.py) file for an example of this.
+
 ## Parallelization
 
 Running multiple agents in parallel is a common pattern. This can be useful for both latency (e.g. if you have multiple steps that don't depend on each other) and also for other reasons e.g. generating multiple responses and picking the best one.
