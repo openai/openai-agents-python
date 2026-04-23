@@ -703,10 +703,13 @@ class OpenAIResponsesModel(Model):
         list_input = _to_dump_compatible(list_input)
         list_input = self._remove_openai_responses_api_incompatible_fields(list_input)
 
-        if model_settings.parallel_tool_calls and tools:
+        parallel_tool_calls_value = model_settings.parallel_tool_calls
+        if parallel_tool_calls_value is True:
             parallel_tool_calls: bool | Omit = True
-        elif model_settings.parallel_tool_calls is False:
+        elif parallel_tool_calls_value is False:
             parallel_tool_calls = False
+        elif isinstance(parallel_tool_calls_value, int):
+            parallel_tool_calls = parallel_tool_calls_value
         else:
             parallel_tool_calls = omit
 

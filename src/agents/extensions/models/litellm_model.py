@@ -456,13 +456,15 @@ class LitellmModel(Model):
         if tracing.include_data():
             span.span_data.input = converted_messages
 
-        parallel_tool_calls = (
-            True
-            if model_settings.parallel_tool_calls and tools and len(tools) > 0
-            else False
-            if model_settings.parallel_tool_calls is False
-            else None
-        )
+        parallel_tool_calls_value = model_settings.parallel_tool_calls
+        if parallel_tool_calls_value is True:
+            parallel_tool_calls = True
+        elif parallel_tool_calls_value is False:
+            parallel_tool_calls = False
+        elif isinstance(parallel_tool_calls_value, int):
+            parallel_tool_calls = parallel_tool_calls_value
+        else:
+            parallel_tool_calls = None
         tool_choice = Converter.convert_tool_choice(model_settings.tool_choice)
         response_format = Converter.convert_response_format(output_schema)
 

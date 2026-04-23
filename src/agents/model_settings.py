@@ -86,13 +86,15 @@ class ModelSettings:
     tool_choice: ToolChoice | None = None
     """The tool choice to use when calling the model."""
 
-    parallel_tool_calls: bool | None = None
+    parallel_tool_calls: bool | int | None = None
     """Controls whether the model can make multiple parallel tool calls in a single turn.
     If not provided (i.e., set to None), this behavior defers to the underlying
     model provider's default. For most current providers (e.g., OpenAI), this typically
     means parallel tool calls are enabled (True).
     Set to True to explicitly enable parallel tool calls, or False to restrict the
     model to at most one tool call per turn.
+    Set to an integer value to limit the maximum number of parallel tool calls.
+    For example, setting to 4 allows up to 4 parallel tool calls.
     """
 
     truncation: Literal["auto", "disabled"] | None = None
