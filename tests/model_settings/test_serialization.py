@@ -75,6 +75,7 @@ def test_all_fields_serialization() -> None:
                 jitter=False,
             ),
         ),
+        cache_system_prompt=True,
     )
 
     # Verify that every single field is set to a non-None value

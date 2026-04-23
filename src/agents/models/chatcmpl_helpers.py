@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+from typing import Any, cast
 
 from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletionContentPartTextParam, ChatCompletionSystemMessageParam
 from openai.types.chat.chat_completion_token_logprob import ChatCompletionTokenLogprob
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 from openai.types.responses.response_text_delta_event import (
@@ -99,6 +101,28 @@ class ChatCmplHelpers:
                 )
             )
         return converted
+
+    @classmethod
+    def build_system_message(
+        cls, system_instructions: str, model_settings: ModelSettings
+    ) -> ChatCompletionSystemMessageParam:
+        """Build the leading `role=system` message for Chat Completions-style calls.
+
+        When `model_settings.cache_system_prompt` is True, emits structured content
+        with an Anthropic-style `cache_control: {"type": "ephemeral"}` breakpoint so
+        providers routed via LiteLLM (Anthropic native, Bedrock, OpenRouter → Claude/
+        Gemini) can cache the system prefix. Otherwise, emits the plain string form
+        that the SDK has always used.
+        """
+        if model_settings.cache_system_prompt:
+            content_part: dict[str, Any] = {
+                "type": "text",
+                "text": system_instructions,
+                "cache_control": {"type": "ephemeral"},
+            }
+            content_parts = cast(list[ChatCompletionContentPartTextParam], [content_part])
+            return {"role": "system", "content": content_parts}
+        return {"role": "system", "content": system_instructions}
 
     @classmethod
     def clean_gemini_tool_call_id(cls, tool_call_id: str, model: str | None = None) -> str:

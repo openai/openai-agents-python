@@ -596,6 +596,33 @@ def test_store_param():
     )
 
 
+def test_build_system_message_defaults_to_plain_string():
+    """With no flag set, the system message content remains a plain string (unchanged behavior)."""
+    msg = ChatCmplHelpers.build_system_message("you are helpful", ModelSettings())
+    assert msg == {"role": "system", "content": "you are helpful"}
+
+
+def test_build_system_message_cache_flag_emits_structured_cache_control():
+    """cache_system_prompt=True wraps the prompt in a text part with cache_control."""
+    msg = ChatCmplHelpers.build_system_message(
+        "long system prompt", ModelSettings(cache_system_prompt=True)
+    )
+    assert msg["role"] == "system"
+    assert msg["content"] == [
+        {
+            "type": "text",
+            "text": "long system prompt",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
+def test_build_system_message_cache_flag_false_is_plain_string():
+    """cache_system_prompt=False behaves identically to unset (plain string)."""
+    msg = ChatCmplHelpers.build_system_message("hi", ModelSettings(cache_system_prompt=False))
+    assert msg == {"role": "system", "content": "hi"}
+
+
 def test_get_retry_advice_uses_openai_headers() -> None:
     request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
     response = httpx.Response(

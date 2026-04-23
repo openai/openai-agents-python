@@ -162,6 +162,18 @@ class ModelSettings:
     retry: ModelRetrySettings | None = None
     """Opt-in runner-managed retry settings for model calls."""
 
+    cache_system_prompt: bool | None = None
+    """If True, emit the system/instructions message as a structured text content
+    part with an Anthropic-style `cache_control: {"type": "ephemeral"}` breakpoint,
+    marking it as a cached prefix. Honored by providers routed through LiteLLM
+    that support this convention (Anthropic native, Bedrock, OpenRouter → Claude/
+    Gemini, etc.) — typically yielding 20–45% input-token cost reduction on
+    repeated calls with long system prompts. Providers that don't support
+    `cache_control` ignore the extra field.
+
+    Complements `prompt_cache_retention`, which is the OpenAI Responses API
+    equivalent. This field targets the Chat Completions–style path."""
+
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the
         override on top of this instance."""

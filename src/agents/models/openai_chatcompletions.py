@@ -342,10 +342,7 @@ class OpenAIChatCompletionsModel(Model):
         if system_instructions:
             converted_messages.insert(
                 0,
-                {
-                    "content": system_instructions,
-                    "role": "system",
-                },
+                ChatCmplHelpers.build_system_message(system_instructions, model_settings),
             )
         converted_messages = _to_dump_compatible(converted_messages)
 

@@ -671,7 +671,10 @@ class AnyLLMModel(Model):
             converted_messages = self._fix_tool_message_ordering(converted_messages)
 
         if system_instructions:
-            converted_messages.insert(0, {"content": system_instructions, "role": "system"})
+            converted_messages.insert(
+                0,
+                ChatCmplHelpers.build_system_message(system_instructions, model_settings),
+            )
         converted_messages = _to_dump_compatible(converted_messages)
 
         if tracing.include_data():
