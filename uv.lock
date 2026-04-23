@@ -2577,9 +2577,9 @@ requires-dist = [
     { name = "types-requests", specifier = ">=2.0,<3" },
     { name = "typing-extensions", specifier = ">=4.12.2,<5" },
     { name = "vercel", marker = "extra == 'vercel'", specifier = ">=0.5.6,<0.6" },
-    { name = "websockets", specifier = ">=15.0,<16" },
-    { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<16" },
-    { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<16" },
+    { name = "websockets", specifier = ">=15.0,<17" },
+    { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<17" },
+    { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<17" },
 ]
 provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "docker", "blaxel", "daytona", "cloudflare", "e2b", "modal", "runloop", "vercel", "s3", "temporal"]
 
