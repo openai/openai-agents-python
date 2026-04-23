@@ -23,7 +23,7 @@ These tests exercise both conversion directions:
 
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import pytest
 from openai import omit
@@ -517,3 +517,37 @@ def test_assistant_messages_in_history():
     assert messages[1]["content"] == "Hello?"
     assert messages[2]["role"] == "user"
     assert messages[2]["content"] == "What was my Name?"
+
+
+def test_normalize_preserves_cache_control_on_text_part():
+    """cache_control on a raw text part survives _normalize_input_content_part_alias."""
+    part = {
+        "type": "text",
+        "text": "system preamble",
+        "cache_control": {"type": "ephemeral"},
+    }
+    normalized = cast(dict[str, Any], Converter._normalize_input_content_part_alias(part))
+    assert normalized["type"] == "input_text"
+    assert normalized["text"] == "system preamble"
+    assert normalized["cache_control"] == {"type": "ephemeral"}
+
+
+def test_normalize_without_cache_control_is_unchanged():
+    """Plain text parts (no cache_control) are normalized as before — no extra keys."""
+    part = {"type": "text", "text": "hello"}
+    normalized = Converter._normalize_input_content_part_alias(part)
+    assert normalized == {"type": "input_text", "text": "hello"}
+
+
+def test_extract_all_content_preserves_cache_control():
+    """cache_control round-trips through extract_all_content onto the rebuilt text part."""
+    content: list[dict[str, Any]] = [
+        {"type": "text", "text": "first"},
+        {"type": "text", "text": "second", "cache_control": {"type": "ephemeral"}},
+    ]
+    result = Converter.extract_all_content(cast(Any, content))
+    assert isinstance(result, list) and len(result) == 2
+    assert result[0] == {"type": "text", "text": "first"}
+    second = cast(dict[str, Any], result[1])
+    assert second.get("cache_control") == {"type": "ephemeral"}
+    assert second["text"] == "second"

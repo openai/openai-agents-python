@@ -341,8 +341,13 @@ class Converter:
             text = content_part.get("text")
             if not isinstance(text, str):
                 raise UserError(f"Only text content is supported here, got: {content_part}")
+            normalized_text: dict[str, Any] = {"type": "input_text", "text": text}
+            # Preserve provider-specific prompt-caching breakpoint (e.g. Anthropic-style
+            # cache_control honored by LiteLLM for Claude, OpenRouter→Gemini, Bedrock, etc.).
+            if "cache_control" in content_part:
+                normalized_text["cache_control"] = content_part["cache_control"]  # type: ignore[typeddict-item]
             # Cast the normalized dict because we are constructing a TypedDict alias by hand.
-            return cast(ResponseInputTextParam, {"type": "input_text", "text": text})
+            return cast(ResponseInputTextParam, normalized_text)
 
         if content_type != "image_url":
             return content_part
@@ -374,12 +379,15 @@ class Converter:
             c = cls._normalize_input_content_part_alias(c)
             if isinstance(c, dict) and c.get("type") == "input_text":
                 casted_text_param = cast(ResponseInputTextParam, c)
-                out.append(
-                    ChatCompletionContentPartTextParam(
-                        type="text",
-                        text=casted_text_param["text"],
-                    )
+                text_part = ChatCompletionContentPartTextParam(
+                    type="text",
+                    text=casted_text_param["text"],
                 )
+                # Preserve provider-specific prompt-caching breakpoint (see
+                # _normalize_input_content_part_alias for rationale).
+                if "cache_control" in c:
+                    text_part["cache_control"] = c["cache_control"]  # type: ignore[typeddict-unknown-key,typeddict-item]
+                out.append(text_part)
             elif isinstance(c, dict) and c.get("type") == "input_image":
                 casted_image_param = cast(ResponseInputImageParam, c)
                 if "image_url" not in casted_image_param or not casted_image_param["image_url"]:
