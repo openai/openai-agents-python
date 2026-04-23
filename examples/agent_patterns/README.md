@@ -60,3 +60,14 @@ See the [`input_guardrails.py`](./input_guardrails.py) and [`output_guardrails.p
 You can pause runs for manual approval before executing sensitive tools. This is useful for operations like sending money, deleting data, or running destructive commands.
 
 See [`human_in_the_loop.py`](./human_in_the_loop.py) for the base approval flow and [`human_in_the_loop_custom_rejection.py`](./human_in_the_loop_custom_rejection.py) for run-level tool error formatting when approvals are rejected.
+
+## Multi-Agent Research Pipeline
+
+A three-stage research pipeline demonstrating parallel agent execution:
+1. **Research Planner** - breaks complex queries into researchable topics
+2. **Deep Research Agent** - investigates topics with structured findings
+3. **Summary Agent** - synthesizes findings into actionable insights
+
+Useful for: competitive analysis, technical research, market investigation.
+
+See the [`research_pipeline.py`](./research_pipeline.py) file for an example.
