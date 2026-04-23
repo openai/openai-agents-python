@@ -61,6 +61,7 @@ _GPT_5_DEFAULT_REASONING_EFFORT_PATTERNS: tuple[
     (re.compile(r"^gpt-5\.4-pro(?:-\d{4}-\d{2}-\d{2})?$"), "medium"),
     (re.compile(r"^gpt-5\.4-mini(?:-\d{4}-\d{2}-\d{2})?$"), "none"),
     (re.compile(r"^gpt-5\.4-nano(?:-\d{4}-\d{2}-\d{2})?$"), "none"),
+    (re.compile(r"^gpt-5\.5(?:-\d{4}-\d{2}-\d{2})?$"), "none"),
 )
 
 

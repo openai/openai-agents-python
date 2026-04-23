@@ -15,7 +15,7 @@ from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5.5"
 GTM_SESSION_ID = "gtm-q2-pipeline-review"
 ENGINEERING_SESSION_ID = "eng-invoice-test-fix"
 
@@ -123,7 +123,9 @@ def _build_engineering_agent(*, model: str, manifest: Manifest) -> SandboxAgent:
         model=model,
         instructions=(
             "You are an engineer. Inspect files before editing, make minimal changes, and verify "
-            "with tests."
+            "with tests. Use a non-login POSIX shell for commands. Make one focused pytest attempt; "
+            "if the local sandbox blocks Python or toolchain access, report that validation was "
+            "blocked and finish instead of retrying repeatedly."
         ),
         default_manifest=manifest,
         capabilities=[
@@ -204,6 +206,7 @@ async def main(*, model: str) -> None:
                 ENGINEERING_TURN,
                 session=engineering_conversation_session,
                 run_config=engineering_config,
+                max_turns=20,
             )
             print("\n[engineering]")
             print(engineering.final_output)

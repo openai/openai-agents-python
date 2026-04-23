@@ -22,7 +22,7 @@ from agents.sandbox.capabilities.capabilities import Capabilities
 from agents.sandbox.entries import LocalDir
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5.5"
 TARGET_TEST_CMD = "sh tests/test_credit_note.sh"
 DEFAULT_PROMPT = (
     "Open `repo/task.md`, use the `$credit-note-fixer` skill, fix the bug, run "

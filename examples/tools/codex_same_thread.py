@@ -73,7 +73,7 @@ async def main() -> None:
                 name="codex_engineer",
                 sandbox_mode="read-only",
                 default_thread_options=ThreadOptions(
-                    model="gpt-5.4",
+                    model="gpt-5.5",
                     model_reasoning_effort="low",
                     network_access_enabled=True,
                     web_search_enabled=False,

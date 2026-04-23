@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from openai.types.shared import Reasoning
+
 from agents import Agent, Model, ModelSettings, OpenAIConversationsSession, Runner, function_tool
 from agents.items import TResponseInputItem
 
@@ -80,7 +82,9 @@ async def run_scenario_step(
         ),
         tools=[approval_echo, approval_note],
         model=model,
-        model_settings=ModelSettings(tool_choice=step.tool_name),
+        model_settings=ModelSettings(
+            tool_choice=step.tool_name, reasoning=Reasoning(effort="none")
+        ),
         tool_use_behavior="stop_on_first_tool",
     )
 
@@ -389,7 +393,7 @@ async def main() -> None:
         print("OPENAI_API_KEY must be set to run the HITL session scenario.")
         raise SystemExit(1)
 
-    model_override = os.environ.get("HITL_MODEL", "gpt-5.4")
+    model_override = os.environ.get("HITL_MODEL", "gpt-5.5")
     if model_override:
         print(f"Model: {model_override}")
 

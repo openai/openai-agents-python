@@ -118,7 +118,7 @@ async def main() -> None:
                 default_thread_options=ThreadOptions(
                     # You can pass a Codex instance to customize CLI details
                     # codex=Codex(executable_path="/path/to/codex", base_url="..."),
-                    model="gpt-5.4",
+                    model="gpt-5.5",
                     model_reasoning_effort="low",
                     network_access_enabled=True,
                     web_search_enabled=False,

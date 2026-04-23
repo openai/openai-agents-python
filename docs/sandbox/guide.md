@@ -555,7 +555,7 @@ async def main(model: str, prompt: str) -> None:
 if __name__ == "__main__":
     asyncio.run(
         main(
-            model="gpt-5.4",
+            model="gpt-5.5",
             prompt=(
                 "Open `repo/task.md`, use the `$credit-note-fixer` skill, fix the bug, "
                 f"run `{TARGET_TEST_CMD}`, and summarize the change."

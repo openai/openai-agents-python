@@ -163,7 +163,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--model",
-        default="gpt-5.4",
+        default="gpt-5.5",
         help="Model ID to use for the agent.",
     )
     args = parser.parse_args()
