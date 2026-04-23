@@ -435,7 +435,7 @@ async def test_concurrent_add_items(stub: AsyncMock):
 
     got = await s.get_items()
     assert len(got) == 15
-    contents = {it.get("content") for it in got}
+    contents = {str(it.get("content")) for it in got}
     assert contents == {f"m{i}" for i in range(15)}
 
 
@@ -513,10 +513,30 @@ async def test_from_url_forwards_session_settings():
         await s.close()
 
 
+async def test_from_url_with_username():
+    """from_url should forward the username to ServerCredentials for ACL auth."""
+    with (
+        patch("agents.extensions.memory.valkey_session.GlideClient") as MockGlide,
+        patch("agents.extensions.memory.valkey_session.ServerCredentials") as MockCreds,
+    ):
+        MockGlide.create = AsyncMock(return_value=_make_stub_client())
+        s = await ValkeySession.from_url("u", url="valkey://alice:secret@localhost:6379/0")
+        MockCreds.assert_called_once_with(password="secret", username="alice")
+        assert s._owns_client is True
+        await s.close()
+
+
+async def test_from_url_rejects_nonzero_db():
+    """from_url should raise ValueError when the URL specifies a non-zero database."""
+    with pytest.raises(ValueError, match="does not support database selection"):
+        await ValkeySession.from_url("u", url="valkey://localhost:6379/5")
+
+
 def test_parse_url_basic():
     r = _parse_valkey_url("valkey://localhost:6379/0")
     assert (r["host"], r["port"], r["db"]) == ("localhost", 6379, 0)
     assert r["password"] is None and r["use_tls"] is False
+    assert r["username"] is None
 
 
 def test_parse_url_password_and_db():
@@ -525,6 +545,13 @@ def test_parse_url_password_and_db():
     assert r["host"] == "host"
     assert r["port"] == 6380
     assert r["db"] == 5
+
+
+def test_parse_url_username_and_password():
+    r = _parse_valkey_url("valkey://alice:secret@host:6379/0")
+    assert r["username"] == "alice"
+    assert r["password"] == "secret"
+    assert r["host"] == "host"
 
 
 def test_parse_url_tls_schemes():
@@ -536,6 +563,13 @@ def test_parse_url_tls_schemes():
 def test_parse_url_defaults():
     r = _parse_valkey_url("valkey://myhost")
     assert (r["host"], r["port"], r["db"]) == ("myhost", 6379, 0)
+
+
+def test_parse_url_invalid_scheme():
+    with pytest.raises(ValueError, match="Unsupported URL scheme"):
+        _parse_valkey_url("http://localhost:6379/0")
+    with pytest.raises(ValueError, match="Unsupported URL scheme"):
+        _parse_valkey_url("ftp://localhost:6379/0")
 
 
 # ===================================================================

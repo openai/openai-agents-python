@@ -5,7 +5,7 @@ Usage::
     from agents.extensions.memory import ValkeySession
 
     # Create from Valkey URL
-    session = ValkeySession.from_url(
+    session = await ValkeySession.from_url(
         session_id="user-123",
         url="valkey://localhost:6379/0",
     )
@@ -45,6 +45,8 @@ from ...items import TResponseInputItem
 from ...memory.session import SessionABC
 from ...memory.session_settings import SessionSettings, resolve_session_limit
 
+_VALID_SCHEMES = {"valkey", "valkeys", "redis", "rediss"}
+
 
 def _parse_valkey_url(url: str) -> dict[str, Any]:
     """Parse a Valkey/Redis-style URL into connection parameters.
@@ -56,10 +58,18 @@ def _parse_valkey_url(url: str) -> dict[str, Any]:
         url: Connection URL string.
 
     Returns:
-        Dictionary with host, port, db, password, and use_tls keys.
+        Dictionary with host, port, db, password, username, and use_tls keys.
+
+    Raises:
+        ValueError: If the URL scheme is not one of the supported schemes.
     """
     parsed: ParseResult = urlparse(url)
     scheme = parsed.scheme.lower()
+
+    if scheme not in _VALID_SCHEMES:
+        raise ValueError(
+            f"Unsupported URL scheme '{scheme}'. Use one of: {', '.join(sorted(_VALID_SCHEMES))}"
+        )
 
     use_tls = scheme in ("valkeys", "rediss")
 
@@ -75,12 +85,14 @@ def _parse_valkey_url(url: str) -> dict[str, Any]:
             db = 0
 
     password: str | None = parsed.password
+    username: str | None = parsed.username
 
     return {
         "host": host,
         "port": port,
         "db": db,
         "password": password,
+        "username": username,
         "use_tls": use_tls,
     }
 
@@ -139,8 +151,8 @@ class ValkeySession(SessionABC):
             session_id (str): Conversation ID.
             url (str): Valkey URL, e.g. "valkey://localhost:6379/0" or "valkeys://host:6380".
                 Also accepts "redis://" and "rediss://" schemes for compatibility.
-                Note: the database number in the path (e.g. ``/0``) is parsed but ignored
-                because GlideClient does not support the ``SELECT`` command.
+                Note: GlideClient does not support the ``SELECT`` command, so a non-zero
+                database number in the path (e.g. ``/5``) will raise ``ValueError``.
             session_settings (SessionSettings | None): Session configuration settings including
                 default limit for retrieving items. If None, uses default SessionSettings().
             **kwargs: Additional keyword arguments forwarded to the main constructor
@@ -148,13 +160,28 @@ class ValkeySession(SessionABC):
 
         Returns:
             ValkeySession: An instance of ValkeySession connected to the specified Valkey server.
+
+        Raises:
+            ValueError: If the URL contains a non-zero database number or an unsupported scheme.
         """
         params = _parse_valkey_url(url)
 
+        if params["db"] != 0:
+            raise ValueError(
+                f"GlideClient does not support database selection. "
+                f"URL specifies database {params['db']}, but only database 0 is supported. "
+                f"Remove the database path from the URL."
+            )
+
         addresses = [NodeAddress(params["host"], params["port"])]
 
-        # Build credentials when a password is present in the URL.
-        credentials = ServerCredentials(password=params["password"]) if params["password"] else None
+        # Build credentials when a password or username is present in the URL.
+        credentials = None
+        if params["password"]:
+            cred_kwargs: dict[str, Any] = {"password": params["password"]}
+            if params.get("username"):
+                cred_kwargs["username"] = params["username"]
+            credentials = ServerCredentials(**cred_kwargs)
 
         config = GlideClientConfiguration(
             addresses=addresses,
@@ -272,9 +299,6 @@ class ValkeySession(SessionABC):
             # Add all items to the messages list.
             if serialized_items:
                 pipe.rpush(self._messages_key, serialized_items)
-
-            # Update the session timestamp.
-            pipe.hset(self._session_key, {"updated_at": now})
 
             # Set TTL if configured.
             if self._ttl is not None:

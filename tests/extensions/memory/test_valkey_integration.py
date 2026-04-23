@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import sys
+from collections.abc import AsyncGenerator
 
 import pytest
 import pytest_asyncio
@@ -91,7 +92,7 @@ def valkey_server(valkey_container) -> tuple[str, int]:
 
 
 @pytest_asyncio.fixture(loop_scope="function")
-async def glide_client(valkey_server: tuple[str, int]) -> GlideClient:
+async def glide_client(valkey_server: tuple[str, int]) -> AsyncGenerator[GlideClient]:
     """Create a GlideClient connected to the Valkey container.
 
     Uses ``loop_scope="function"`` because GlideClient's internal Rust event
@@ -102,7 +103,7 @@ async def glide_client(valkey_server: tuple[str, int]) -> GlideClient:
     config = GlideClientConfiguration(addresses=[NodeAddress(host, port)])
     client = await GlideClient.create(config)
     try:
-        yield client  # type: ignore[misc]
+        yield client
     finally:
         try:
             await client.close()
@@ -111,7 +112,7 @@ async def glide_client(valkey_server: tuple[str, int]) -> GlideClient:
 
 
 @pytest_asyncio.fixture(loop_scope="function")
-async def session(glide_client: GlideClient) -> ValkeySession:
+async def session(glide_client: GlideClient) -> AsyncGenerator[ValkeySession]:
     """Provide a clean ValkeySession. Clears data before and after each test."""
     s = ValkeySession(
         session_id="integration_test",
@@ -120,7 +121,7 @@ async def session(glide_client: GlideClient) -> ValkeySession:
     )
     await s.clear_session()
     try:
-        yield s  # type: ignore[misc]
+        yield s
     finally:
         await s.clear_session()
 
@@ -438,7 +439,7 @@ async def test_concurrent_add_items(glide_client: GlideClient):
 
         got = await s.get_items()
         assert len(got) == 15
-        contents = {it.get("content") for it in got}
+        contents = {str(it.get("content")) for it in got}
         assert contents == {f"m{i}" for i in range(15)}
     finally:
         await s.clear_session()
