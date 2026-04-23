@@ -1,18 +1,30 @@
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_output_item import McpCall, McpListTools, McpListToolsTool
 
 from agents import Agent, HostedMCPTool
-from agents.items import MCPListToolsItem, ModelResponse, RunItem, ToolCallItem, TResponseInputItem
+from agents.items import (
+    MCPListToolsItem,
+    ModelResponse,
+    RunItem,
+    ToolApprovalItem,
+    ToolCallItem,
+    ToolCallOutputItem,
+    TResponseInputItem,
+)
 from agents.lifecycle import RunHooks
 from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.result import RunResultStreaming
 from agents.run_config import ModelInputData, RunConfig
 from agents.run_context import RunContextWrapper
 from agents.run_internal.agent_bindings import bind_public_agent
+from agents.run_internal.agent_runner_helpers import get_unsent_tool_call_ids_for_interrupted_state
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
 from agents.run_internal.run_loop import get_new_response, run_single_turn_streamed
+from agents.run_internal.run_steps import NextStepInterruption
 from agents.run_internal.tool_use_tracker import AgentToolUseTracker
 from agents.stream_events import RunItemStreamEvent
 from agents.usage import Usage
@@ -83,6 +95,118 @@ def test_prepare_input_filters_items_seen_by_server_and_tool_calls() -> None:
     assert prepared == [new_raw_item]
     assert tracker.sent_initial_input is True
     assert tracker.remaining_initial_input is None
+
+
+def test_hydrate_from_state_preserves_unsent_outputs_from_interrupted_turn() -> None:
+    agent = Agent(name="test")
+    cleanup1_call = ResponseFunctionToolCall(
+        id="fc_001",
+        type="function_call",
+        call_id="call_CLEANUP1",
+        name="run_cleanup",
+        arguments='{"target": "temp_files"}',
+        status="completed",
+    )
+    diagnostic_call = ResponseFunctionToolCall(
+        id="fc_002",
+        type="function_call",
+        call_id="call_DIAG",
+        name="run_diagnostic",
+        arguments='{"check_name": "thermal"}',
+        status="completed",
+    )
+    cleanup2_call = ResponseFunctionToolCall(
+        id="fc_003",
+        type="function_call",
+        call_id="call_CLEANUP2",
+        name="run_cleanup",
+        arguments='{"target": "winsxs_cache"}',
+        status="completed",
+    )
+    model_response = ModelResponse(
+        output=[cleanup1_call, diagnostic_call, cleanup2_call],
+        usage=Usage(),
+        response_id="resp_002",
+    )
+    diagnostic_output = ToolCallOutputItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call_output",
+            "call_id": "call_DIAG",
+            "output": "Diagnostic completed.",
+        },
+        output="Diagnostic completed.",
+    )
+    generated_items: list[RunItem] = [
+        ToolCallItem(agent=agent, raw_item=cleanup1_call),
+        ToolCallItem(agent=agent, raw_item=diagnostic_call),
+        ToolCallItem(agent=agent, raw_item=cleanup2_call),
+        diagnostic_output,
+        ToolApprovalItem(agent=agent, raw_item=cleanup1_call, tool_name="run_cleanup"),
+        ToolApprovalItem(agent=agent, raw_item=cleanup2_call, tool_name="run_cleanup"),
+    ]
+    interrupted_state = SimpleNamespace(
+        _current_step=NextStepInterruption(interruptions=[]),
+        _last_processed_response=SimpleNamespace(
+            handoffs=[],
+            functions=[
+                SimpleNamespace(tool_call=cleanup1_call),
+                SimpleNamespace(tool_call=diagnostic_call),
+                SimpleNamespace(tool_call=cleanup2_call),
+            ],
+            computer_actions=[],
+            custom_tool_calls=[],
+            local_shell_calls=[],
+            shell_calls=[],
+            apply_patch_calls=[],
+        ),
+    )
+
+    tracker = OpenAIServerConversationTracker(previous_response_id="resp_002")
+    tracker.hydrate_from_state(
+        original_input="Run cleanup, diagnostics, and cleanup.",
+        generated_items=generated_items,
+        model_responses=[model_response],
+        unsent_tool_call_ids=get_unsent_tool_call_ids_for_interrupted_state(
+            cast(Any, interrupted_state)
+        ),
+    )
+
+    assert "call_DIAG" not in tracker.server_tool_call_ids
+
+    prepared = tracker.prepare_input(
+        "Run cleanup, diagnostics, and cleanup.",
+        [
+            ToolCallItem(agent=agent, raw_item=cleanup1_call),
+            ToolCallItem(agent=agent, raw_item=diagnostic_call),
+            ToolCallItem(agent=agent, raw_item=cleanup2_call),
+            diagnostic_output,
+            ToolCallOutputItem(
+                agent=agent,
+                raw_item={
+                    "type": "function_call_output",
+                    "call_id": "call_CLEANUP1",
+                    "output": "Tool call not approved.",
+                },
+                output="Tool call not approved.",
+            ),
+            ToolCallOutputItem(
+                agent=agent,
+                raw_item={
+                    "type": "function_call_output",
+                    "call_id": "call_CLEANUP2",
+                    "output": "Tool call not approved.",
+                },
+                output="Tool call not approved.",
+            ),
+        ],
+    )
+
+    assert [
+        item.get("call_id")
+        for item in prepared
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ] == ["call_DIAG", "call_CLEANUP1", "call_CLEANUP2"]
 
 
 def test_hydrate_from_state_does_not_track_string_initial_input_by_object_identity() -> None:

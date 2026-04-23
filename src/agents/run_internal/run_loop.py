@@ -86,6 +86,7 @@ from .agent_bindings import AgentBindings, bind_public_agent
 from .agent_runner_helpers import (
     apply_resumed_conversation_settings,
     attach_usage_to_span,
+    get_unsent_tool_call_ids_for_interrupted_state,
     snapshot_usage,
     usage_delta,
 )
@@ -577,6 +578,7 @@ async def start_streaming(
                 generated_items=run_state._generated_items,
                 model_responses=run_state._model_responses,
                 session_items=session_items,
+                unsent_tool_call_ids=get_unsent_tool_call_ids_for_interrupted_state(run_state),
             )
 
         streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))

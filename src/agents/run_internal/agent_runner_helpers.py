@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, cast
 
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
@@ -49,6 +50,7 @@ __all__ = [
     "describe_run_state_step",
     "ensure_context_wrapper",
     "finalize_conversation_tracking",
+    "get_unsent_tool_call_ids_for_interrupted_state",
     "input_guardrails_triggered",
     "validate_session_conversation_settings",
     "resolve_trace_settings",
@@ -182,6 +184,41 @@ def apply_resumed_conversation_settings(
     run_state._previous_response_id = previous_response_id
     run_state._auto_previous_response_id = auto_previous_response_id
     return conversation_id, previous_response_id, auto_previous_response_id
+
+
+def _extract_tool_call_id(raw: Any) -> str | None:
+    if isinstance(raw, Mapping):
+        candidate = raw.get("call_id") or raw.get("id")
+    else:
+        candidate = getattr(raw, "call_id", None) or getattr(raw, "id", None)
+    return candidate if isinstance(candidate, str) else None
+
+
+def get_unsent_tool_call_ids_for_interrupted_state(run_state: RunState[Any] | None) -> set[str]:
+    """Return tool call IDs whose local outputs belong to the current interruption."""
+    if run_state is None or not isinstance(run_state._current_step, NextStepInterruption):
+        return set()
+
+    processed_response = run_state._last_processed_response
+    if processed_response is None:
+        return set()
+
+    tool_call_ids: set[str] = set()
+    tool_run_groups = (
+        processed_response.handoffs,
+        processed_response.functions,
+        processed_response.computer_actions,
+        processed_response.custom_tool_calls,
+        processed_response.local_shell_calls,
+        processed_response.shell_calls,
+        processed_response.apply_patch_calls,
+    )
+    for tool_runs in tool_run_groups:
+        for tool_run in tool_runs:
+            call_id = _extract_tool_call_id(getattr(tool_run, "tool_call", None))
+            if call_id is not None:
+                tool_call_ids.add(call_id)
+    return tool_call_ids
 
 
 def validate_session_conversation_settings(
