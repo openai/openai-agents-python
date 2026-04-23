@@ -440,6 +440,7 @@ def test_optional_sandbox_dataclass_constructor_field_order_is_stable(
                 "timeout",
                 "use_sleep_cmd",
                 "image_builder_version",
+                "idle_timeout",
             ),
         ),
         (
@@ -613,6 +614,7 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
                 "timeout",
                 "use_sleep_cmd",
                 "image_builder_version",
+                "idle_timeout",
             ),
         ),
         (

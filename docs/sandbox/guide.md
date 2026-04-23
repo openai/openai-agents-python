@@ -194,7 +194,7 @@ Built-in capabilities include:
 | --- | --- | --- |
 | `Shell` | The agent needs shell access. | Adds `exec_command`, plus `write_stdin` when the sandbox client supports PTY interaction. |
 | `Filesystem` | The agent needs to edit files or inspect local images. | Adds `apply_patch` and `view_image`; patch paths are workspace-root-relative. |
-| `Skills` | You want skill discovery and materialization in the sandbox. | Prefer this over mounting `.agents` or `.agents/skills` manually for sandbox-local `SKILL.md` skills. |
+| `Skills` | You want skill discovery and materialization in the sandbox. | Prefer this over manually mounting `.agents` or `.agents/skills`; `Skills` indexes and materializes skills into the sandbox for you. |
 | `Memory` | Follow-on runs should read or generate memory artifacts. | Requires `Shell`; live updates also require `Filesystem`. |
 | `Compaction` | Long-running flows need context trimming after compaction items. | Adjusts model sampling and input handling. |
 
@@ -205,8 +205,11 @@ By default, `SandboxAgent.capabilities` uses `Capabilities.default()`, which inc
 For skills, choose the source based on how you want them materialized:
 
 - `Skills(lazy_from=LocalDirLazySkillSource(...))` is a good default for larger local skill directories because the model can discover the index first and load only what it needs.
+- `LocalDirLazySkillSource(source=LocalDir(src=...))` reads from the filesystem where the SDK process is running. Pass the original host-side skills directory, not a path that only exists inside the sandbox image or workspace.
 - `Skills(from_=LocalDir(src=...))` is better for a small local bundle you want staged up front.
 - `Skills(from_=GitRepo(repo=..., ref=...))` is the right fit when the skills themselves should come from a repository.
+
+`LocalDir.src` is the source path on the SDK host. `skills_path` is the relative destination path inside the sandbox workspace where skills are staged when `load_skill` is called.
 
 If your skills already live on disk under something like `.agents/skills/<name>/SKILL.md`, point `LocalDir(...)` at that source root and still use `Skills(...)` to expose them. Keep the default `skills_path=".agents"` unless you have an existing workspace contract that depends on a different in-sandbox layout.
 
@@ -525,9 +528,10 @@ def build_agent(model: str) -> SandboxAgent[None]:
             }
         ),
         capabilities=Capabilities.default() + [
-            # Let Skills(...) stage and index sandbox-local skills for you.
             Skills(
                 lazy_from=LocalDirLazySkillSource(
+                    # This is a host path read by the SDK process.
+                    # Requested skills are copied into `skills_path` in the sandbox.
                     source=LocalDir(src=HOST_SKILLS_DIR),
                 )
             ),

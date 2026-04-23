@@ -175,7 +175,13 @@ def _write_local_skill(skills_root: Path) -> None:
 
 def _build_agent(model: RecordingModel, skills_root: Path) -> SandboxAgent:
     capabilities = Capabilities.default() + [
-        Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=skills_root))),
+        Skills(
+            lazy_from=LocalDirLazySkillSource(
+                # This is a host path read by the SDK process.
+                # Requested skills are copied into `skills_path` in the sandbox.
+                source=LocalDir(src=skills_root),
+            )
+        ),
     ]
 
     def apply_patch_needs_approval(

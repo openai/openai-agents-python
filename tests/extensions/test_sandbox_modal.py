@@ -378,6 +378,25 @@ async def test_modal_sandbox_create_passes_manifest_environment(
 
 
 @pytest.mark.asyncio
+async def test_modal_sandbox_create_passes_idle_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    client = modal_module.ModalSandboxClient()
+    session = await client.create(
+        options=modal_module.ModalSandboxClientOptions(
+            app_name="sandbox-tests",
+            idle_timeout=60,
+        ),
+    )
+
+    assert create_calls
+    assert create_calls[0]["idle_timeout"] == 60
+    assert session.state.idle_timeout == 60
+
+
+@pytest.mark.asyncio
 async def test_modal_sandbox_create_sets_default_cmd_for_custom_registry_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -476,6 +495,27 @@ def test_modal_deserialize_session_state_defaults_missing_image_builder_version(
     )
 
     assert restored.image_builder_version == "2025.06"
+
+
+def test_modal_deserialize_session_state_defaults_missing_idle_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        idle_timeout=60,
+    )
+    payload = state.model_dump(mode="json")
+    payload.pop("idle_timeout")
+
+    restored = modal_module.ModalSandboxClient().deserialize_session_state(
+        cast(dict[str, object], payload)
+    )
+
+    assert restored.idle_timeout is None
 
 
 @pytest.mark.asyncio
@@ -2764,6 +2804,7 @@ async def test_modal_snapshot_filesystem_restore_preserves_exposed_ports(
         app_name="sandbox-tests",
         workspace_persistence="snapshot_filesystem",
         exposed_ports=(8765,),
+        idle_timeout=60,
     )
     session = modal_module.ModalSandboxSession.from_state(state)
     call_names: list[str] = []
@@ -2789,6 +2830,7 @@ async def test_modal_snapshot_filesystem_restore_preserves_exposed_ports(
 
     assert create_calls
     assert create_calls[0]["encrypted_ports"] == (8765,)
+    assert create_calls[0]["idle_timeout"] == 60
     assert sys.modules["modal"].Image.from_id_calls == ["snap-123"]
     assert call_names == []
     assert call_timeouts == []

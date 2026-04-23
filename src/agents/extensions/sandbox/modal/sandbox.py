@@ -158,6 +158,7 @@ class ModalSandboxClientOptions(BaseSandboxClientOptions):
     timeout: int = 300  # Lifetime of a sandbox from creation in seconds, defaults to 5 minutes
     use_sleep_cmd: bool = True
     image_builder_version: str | None = _DEFAULT_IMAGE_BUILDER_VERSION
+    idle_timeout: int | None = None
 
     def __init__(
         self,
@@ -171,6 +172,7 @@ class ModalSandboxClientOptions(BaseSandboxClientOptions):
         timeout: int = 300,  # 5 minutes
         use_sleep_cmd: bool = True,
         image_builder_version: str | None = _DEFAULT_IMAGE_BUILDER_VERSION,
+        idle_timeout: int | None = None,
         *,
         type: Literal["modal"] = "modal",
     ) -> None:
@@ -186,6 +188,7 @@ class ModalSandboxClientOptions(BaseSandboxClientOptions):
             timeout=timeout,
             use_sleep_cmd=use_sleep_cmd,
             image_builder_version=image_builder_version,
+            idle_timeout=idle_timeout,
         )
 
 
@@ -319,6 +322,7 @@ class ModalSandboxSessionState(SandboxSessionState):
     timeout: int = 300  # 5 minutes
     use_sleep_cmd: bool = True
     image_builder_version: str | None = _DEFAULT_IMAGE_BUILDER_VERSION
+    idle_timeout: int | None = None
 
 
 @dataclass
@@ -571,6 +575,7 @@ class ModalSandboxSession(BaseSandboxSession):
             volumes=volumes,
             gpu=self.state.gpu,
             timeout=self.state.timeout,
+            idle_timeout=self.state.idle_timeout,
         )
         async with _override_modal_image_builder_version(self.state.image_builder_version):
             if self.state.sandbox_create_timeout_s is None:
@@ -1625,6 +1630,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 volumes=self._modal_cloud_bucket_mounts_for_manifest(),
                 gpu=self.state.gpu,
                 timeout=self.state.timeout,
+                idle_timeout=self.state.idle_timeout,
             )
             try:
                 mkdir_proc = await sb.exec.aio("mkdir", "-p", "--", root.as_posix(), text=False)
@@ -1839,6 +1845,7 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
         - snapshot_filesystem_restore_timeout_s: float | None
           (async timeout for snapshot restore call)
         - timeout: int (maximum sandbox lifetime in seconds, default 300)
+        - idle_timeout: int | None (maximum sandbox inactivity in seconds, default None)
         - image_builder_version: str | None (Modal image builder version, default "2025.06")
         """
 
@@ -1960,6 +1967,7 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
             timeout=options.timeout,
             use_sleep_cmd=options.use_sleep_cmd,
             image_builder_version=image_builder_version,
+            idle_timeout=options.idle_timeout,
         )
         if sandbox_create_timeout_s is not None:
             state.sandbox_create_timeout_s = float(sandbox_create_timeout_s)
