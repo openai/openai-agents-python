@@ -10,7 +10,12 @@ from mcp.types import CallToolResult, ImageContent, TextContent, Tool as MCPTool
 from pydantic import BaseModel, TypeAdapter
 
 from agents import Agent, FunctionTool, RunContextWrapper, default_tool_error_function
-from agents.exceptions import AgentsException, MCPToolCancellationError, ModelBehaviorError
+from agents.exceptions import (
+    AgentsException,
+    MCPToolCancellationError,
+    ModelBehaviorError,
+    UserError,
+)
 from agents.mcp import MCPServer, MCPUtil
 from agents.tool_context import ToolContext
 
@@ -80,6 +85,236 @@ async def test_get_all_function_tools():
     tools = await MCPUtil.get_all_function_tools(servers, True, run_context, agent)
     assert len(tools) == 5
     assert all(tool.name in names for tool in tools)
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_duplicate_names_raise_by_default():
+    server1 = FakeMCPServer(server_name="docs")
+    server1.add_tool("search", {})
+
+    server2 = FakeMCPServer(server_name="calendar")
+    server2.add_tool("search", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
+    with pytest.raises(UserError, match="Duplicate tool names"):
+        await MCPUtil.get_all_function_tools(
+            [server1, server2],
+            False,
+            run_context,
+            agent,
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_can_prefix_server_tool_names():
+    captured_meta_context: dict[str, Any] = {}
+
+    def resolve_meta(context):
+        captured_meta_context["server_name"] = context.server_name
+        captured_meta_context["tool_name"] = context.tool_name
+        return None
+
+    server1 = FakeMCPServer(server_name="docs")
+    server1.add_tool("search", {})
+    server1.add_tool("fetch", {})
+
+    server2 = FakeMCPServer(server_name="calendar", tool_meta_resolver=resolve_meta)
+    server2.add_tool("search", {})
+    server2.add_tool("update", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
+    tools = await MCPUtil.get_all_function_tools(
+        [server1, server2],
+        False,
+        run_context,
+        agent,
+        include_server_in_tool_names=True,
+    )
+
+    tool_names = [tool.name for tool in tools]
+    assert tool_names == [
+        "mcp_docs__search",
+        "mcp_docs__fetch",
+        "mcp_calendar__search",
+        "mcp_calendar__update",
+    ]
+
+    calendar_search_tool = tools[2]
+    assert isinstance(calendar_search_tool, FunctionTool)
+    assert calendar_search_tool._tool_origin is not None
+    assert calendar_search_tool._tool_origin.mcp_server_name == "calendar"
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name=calendar_search_tool.name,
+        tool_call_id="call_calendar_search",
+        tool_arguments="{}",
+    )
+
+    await calendar_search_tool.on_invoke_tool(tool_context, "{}")
+
+    assert server1.tool_calls == []
+    assert server2.tool_calls == ["search"]
+    assert captured_meta_context == {"server_name": "calendar", "tool_name": "search"}
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_prefixes_non_ascii_server_names_safely():
+    server = FakeMCPServer(server_name="天気サーバー")
+    server.add_tool("search", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
+    tools = await MCPUtil.get_all_function_tools(
+        [server],
+        False,
+        run_context,
+        agent,
+        include_server_in_tool_names=True,
+    )
+
+    assert len(tools) == 1
+    assert tools[0].name == "mcp_server__search"
+    assert all(char.isascii() and (char.isalnum() or char in {"_", "-"}) for char in tools[0].name)
+    assert len(tools[0].name) <= 64
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_prefixes_non_ascii_tool_names_safely():
+    server = FakeMCPServer(server_name="docs")
+    server.add_tool("検索", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
+    tools = await MCPUtil.get_all_function_tools(
+        [server],
+        False,
+        run_context,
+        agent,
+        include_server_in_tool_names=True,
+    )
+
+    assert len(tools) == 1
+    tool = tools[0]
+    assert isinstance(tool, FunctionTool)
+    assert tool.name == "mcp_docs__tool"
+    assert all(char.isascii() and (char.isalnum() or char in {"_", "-"}) for char in tool.name)
+    assert len(tool.name) <= 64
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name=tool.name,
+        tool_call_id="call_non_ascii_tool",
+        tool_arguments="{}",
+    )
+    await tool.on_invoke_tool(tool_context, "{}")
+    assert server.tool_calls == ["検索"]
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_prefixes_long_names_with_deterministic_hashes():
+    long_server_name = "server_" + ("a" * 100)
+    long_tool_name = "tool_" + ("b" * 100)
+
+    server1 = FakeMCPServer(server_name=long_server_name)
+    server1.add_tool(long_tool_name, {})
+
+    server2 = FakeMCPServer(server_name=long_server_name)
+    server2.add_tool(long_tool_name, {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
+    tools = await MCPUtil.get_all_function_tools(
+        [server1, server2],
+        False,
+        run_context,
+        agent,
+        include_server_in_tool_names=True,
+    )
+
+    tool_names = [tool.name for tool in tools]
+    assert len(tool_names) == 2
+    assert len(set(tool_names)) == 2
+    assert all(len(name) <= 64 for name in tool_names)
+    assert all(
+        char.isascii() and (char.isalnum() or char in {"_", "-"})
+        for name in tool_names
+        for char in name
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_prefixes_normalized_server_name_collisions():
+    servers: list[MCPServer] = []
+    for server_name in ["foo", "foo!", "foo_0beec7b5"]:
+        server = FakeMCPServer(server_name=server_name)
+        server.add_tool("create_issue", {})
+        servers.append(server)
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
+    tools = await MCPUtil.get_all_function_tools(
+        servers,
+        False,
+        run_context,
+        agent,
+        include_server_in_tool_names=True,
+    )
+
+    tool_names = [tool.name for tool in tools]
+    assert len(tool_names) == 3
+    assert len(set(tool_names)) == 3
+    assert "mcp_foo__create_issue" in tool_names
+    assert "mcp_foo_0beec7b5__create_issue" in tool_names
+    assert any(name.startswith("mcp_foo__create_issue_") for name in tool_names)
+    assert all(len(name) <= 64 for name in tool_names)
+    assert all(
+        char.isascii() and (char.isalnum() or char in {"_", "-"})
+        for name in tool_names
+        for char in name
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_reserves_existing_tool_names_when_prefixing():
+    server = FakeMCPServer(server_name="docs")
+    server.add_tool("search", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
+    tools = await MCPUtil.get_all_function_tools(
+        [server],
+        False,
+        run_context,
+        agent,
+        include_server_in_tool_names=True,
+        reserved_tool_names={"mcp_docs__search"},
+    )
+
+    assert len(tools) == 1
+    tool = tools[0]
+    assert isinstance(tool, FunctionTool)
+    assert tool.name != "mcp_docs__search"
+    assert tool.name.startswith("mcp_docs__search_")
+    assert len(tool.name) <= 64
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name=tool.name,
+        tool_call_id="call_reserved_name",
+        tool_arguments="{}",
+    )
+    await tool.on_invoke_tool(tool_context, "{}")
+    assert server.tool_calls == ["search"]
 
 
 @pytest.mark.asyncio

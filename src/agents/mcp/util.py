@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import functools
+import hashlib
 import inspect
 import json
 from collections.abc import Awaitable, Callable
@@ -51,6 +52,10 @@ if TYPE_CHECKING:
 
     from ..agent import AgentBase
     from .server import MCPServer
+
+
+_MCP_FUNCTION_TOOL_NAME_MAX_LENGTH = 64
+_MCP_FUNCTION_TOOL_HASH_LENGTH = 8
 
 
 class HttpClientFactory(Protocol):
@@ -210,17 +215,41 @@ class MCPUtil:
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        include_server_in_tool_names: bool = False,
+        reserved_tool_names: set[str] | None = None,
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
         tools = []
         tool_names: set[str] = set()
-        for server in servers:
+        generated_tool_names: set[str] = set(reserved_tool_names or set())
+        for server_index, server in enumerate(servers):
+            effective_tool_name_override: Callable[[MCPTool], str] | None = None
+            if include_server_in_tool_names:
+
+                def _override_tool_name(
+                    tool: MCPTool,
+                    *,
+                    server: MCPServer = server,
+                    server_index: int = server_index,
+                ) -> str:
+                    public_name = cls._build_prefixed_tool_name(
+                        server.name,
+                        tool.name,
+                        server_index=server_index,
+                        reserved_names=generated_tool_names,
+                    )
+                    generated_tool_names.add(public_name)
+                    return public_name
+
+                effective_tool_name_override = _override_tool_name
+
             server_tools = await cls.get_function_tools(
                 server,
                 convert_schemas_to_strict,
                 run_context,
                 agent,
                 failure_error_function=failure_error_function,
+                tool_name_override=effective_tool_name_override,
             )
             server_tool_names = {tool.name for tool in server_tools}
             if len(server_tool_names & tool_names) > 0:
@@ -241,12 +270,30 @@ class MCPUtil:
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        include_server_in_tool_names: bool = False,
+        tool_name_override: Callable[[MCPTool], str] | None = None,
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
 
         with mcp_tools_span(server=server.name) as span:
             tools = await server.list_tools(run_context, agent)
             span.span_data.result = [tool.name for tool in tools]
+
+        effective_tool_name_override = tool_name_override
+        if effective_tool_name_override is None and include_server_in_tool_names:
+            reserved_tool_names: set[str] = set()
+
+            def _override_tool_name(tool: MCPTool) -> str:
+                public_name = cls._build_prefixed_tool_name(
+                    server.name,
+                    tool.name,
+                    server_index=0,
+                    reserved_names=reserved_tool_names,
+                )
+                reserved_tool_names.add(public_name)
+                return public_name
+
+            effective_tool_name_override = _override_tool_name
 
         return [
             cls.to_function_tool(
@@ -255,9 +302,63 @@ class MCPUtil:
                 convert_schemas_to_strict,
                 agent,
                 failure_error_function=failure_error_function,
+                tool_name_override=(
+                    effective_tool_name_override(tool) if effective_tool_name_override else None
+                ),
             )
             for tool in tools
         ]
+
+    @staticmethod
+    def _safe_tool_name_part(value: str, fallback: str) -> str:
+        safe = "".join(
+            char if char.isascii() and (char.isalnum() or char in {"_", "-"}) else "_"
+            for char in value
+        )
+        safe = safe.strip("_-")
+        return safe or fallback
+
+    @staticmethod
+    def _shorten_tool_name(base_name: str, seed: str, *, force_hash: bool = False) -> str:
+        if not force_hash and len(base_name) <= _MCP_FUNCTION_TOOL_NAME_MAX_LENGTH:
+            return base_name
+
+        hash_suffix = hashlib.sha1(seed.encode("utf-8")).hexdigest()[
+            :_MCP_FUNCTION_TOOL_HASH_LENGTH
+        ]
+        suffix = f"_{hash_suffix}"
+        stem_length = _MCP_FUNCTION_TOOL_NAME_MAX_LENGTH - len(suffix)
+        stem = base_name[:stem_length].rstrip("_-") or "mcp"
+        return f"{stem}{suffix}"
+
+    @classmethod
+    def _build_prefixed_tool_name(
+        cls,
+        server_name: str,
+        tool_name: str,
+        *,
+        server_index: int,
+        reserved_names: set[str],
+    ) -> str:
+        server_part = cls._safe_tool_name_part(server_name, "server")
+        tool_part = cls._safe_tool_name_part(tool_name, "tool")
+        base_name = f"mcp_{server_part}__{tool_part}"
+        seed = f"{server_index}\0{server_name}\0{tool_name}"
+
+        candidate = cls._shorten_tool_name(base_name, seed)
+        if candidate not in reserved_names:
+            return candidate
+
+        collision_index = 1
+        while True:
+            candidate = cls._shorten_tool_name(
+                base_name,
+                f"{seed}\0{collision_index}",
+                force_hash=True,
+            )
+            if candidate not in reserved_names:
+                return candidate
+            collision_index += 1
 
     @classmethod
     def to_function_tool(
@@ -267,6 +368,7 @@ class MCPUtil:
         convert_schemas_to_strict: bool,
         agent: AgentBase | None = None,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        tool_name_override: str | None = None,
     ) -> FunctionTool:
         """Convert an MCP tool to an Agents SDK function tool.
 
@@ -276,11 +378,13 @@ class MCPUtil:
         policies. If the server uses a callable approval policy, approvals default
         to required to avoid bypassing dynamic checks.
         """
+        tool_public_name = tool_name_override or tool.name
         static_meta = cls._extract_static_meta(tool)
         invoke_func_impl = functools.partial(
             cls.invoke_mcp_tool,
             server,
             tool,
+            tool_display_name=tool_public_name,
             meta=static_meta,
         )
         effective_failure_error_function = server._get_failure_error_function(
@@ -304,7 +408,7 @@ class MCPUtil:
         ) = server._get_needs_approval_for_tool(tool, agent)
 
         function_tool = _build_wrapped_function_tool(
-            name=tool.name,
+            name=tool_public_name,
             description=resolve_mcp_tool_description_for_model(tool),
             params_json_schema=schema,
             invoke_tool_impl=invoke_func_impl,
@@ -374,23 +478,25 @@ class MCPUtil:
         input_json: str,
         *,
         meta: dict[str, Any] | None = None,
+        tool_display_name: str | None = None,
     ) -> ToolOutput:
         """Invoke an MCP tool and return the result as ToolOutput."""
+        tool_name_for_display = tool_display_name or tool.name
         try:
             json_data: dict[str, Any] = json.loads(input_json) if input_json else {}
         except Exception as e:
             if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"Invalid JSON input for tool {tool.name}")
+                logger.debug(f"Invalid JSON input for tool {tool_name_for_display}")
             else:
-                logger.debug(f"Invalid JSON input for tool {tool.name}: {input_json}")
+                logger.debug(f"Invalid JSON input for tool {tool_name_for_display}: {input_json}")
             raise ModelBehaviorError(
-                f"Invalid JSON input for tool {tool.name}: {input_json}"
+                f"Invalid JSON input for tool {tool_name_for_display}: {input_json}"
             ) from e
 
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug(f"Invoking MCP tool {tool.name}")
+            logger.debug(f"Invoking MCP tool {tool_name_for_display}")
         else:
-            logger.debug(f"Invoking MCP tool {tool.name} with input {input_json}")
+            logger.debug(f"Invoking MCP tool {tool_name_for_display} with input {input_json}")
 
         try:
             resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
@@ -430,20 +536,22 @@ class MCPUtil:
                 # failure_error_function=None will have the error raised as documented.
                 error_text = e.error.message if hasattr(e, "error") and e.error else str(e)
                 logger.warning(
-                    f"MCP tool {tool.name} on server '{server.name}' returned an error: "
-                    f"{error_text}"
+                    f"MCP tool {tool_name_for_display} on server '{server.name}' "
+                    f"returned an error: {error_text}"
                 )
                 raise
 
-            logger.error(f"Error invoking MCP tool {tool.name} on server '{server.name}': {e}")
+            logger.error(
+                f"Error invoking MCP tool {tool_name_for_display} on server '{server.name}': {e}"
+            )
             raise AgentsException(
-                f"Error invoking MCP tool {tool.name} on server '{server.name}': {e}"
+                f"Error invoking MCP tool {tool_name_for_display} on server '{server.name}': {e}"
             ) from e
 
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug(f"MCP tool {tool.name} completed.")
+            logger.debug(f"MCP tool {tool_name_for_display} completed.")
         else:
-            logger.debug(f"MCP tool {tool.name} returned {result}")
+            logger.debug(f"MCP tool {tool_name_for_display} returned {result}")
 
         # If structured content is requested and available, use it exclusively
         tool_output: ToolOutput
