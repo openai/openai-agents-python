@@ -43,6 +43,7 @@ realtime = ["websockets>=15.0, <17"]
 sqlalchemy = ["SQLAlchemy>=2.0", "asyncpg>=0.29.0"]
 encrypt = ["cryptography>=45.0, <46"]
 redis = ["redis>=7"]
+valkey = ["valkey-glide>=2.1"]
 dapr = ["dapr>=1.16.0", "grpcio>=1.60.0"]
 mongodb = ["pymongo>=4.14"]
 docker = ["docker>=6.1"]
@@ -162,6 +163,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["vercel", "vercel.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["glide", "glide.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]

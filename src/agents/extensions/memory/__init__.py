@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from .mongodb_session import MongoDBSession
     from .redis_session import RedisSession
     from .sqlalchemy_session import SQLAlchemySession
+    from .valkey_session import ValkeySession
 
 __all__: list[str] = [
     "AdvancedSQLiteSession",
@@ -33,6 +34,7 @@ __all__: list[str] = [
     "MongoDBSession",
     "RedisSession",
     "SQLAlchemySession",
+    "ValkeySession",
 ]
 
 
@@ -128,6 +130,17 @@ def __getattr__(name: str) -> Any:
             raise ImportError(
                 "MongoDBSession requires the 'mongodb' extra. "
                 "Install it with: pip install openai-agents[mongodb]"
+            ) from e
+
+    if name == "ValkeySession":
+        try:
+            from .valkey_session import ValkeySession  # noqa: F401
+
+            return ValkeySession
+        except ModuleNotFoundError as e:
+            raise ImportError(
+                "ValkeySession requires the 'valkey' extra. "
+                "Install it with: pip install openai-agents[valkey]"
             ) from e
 
     raise AttributeError(f"module {__name__} has no attribute {name}")

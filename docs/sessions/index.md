@@ -205,6 +205,7 @@ Use this table to pick a starting point before reading the detailed examples bel
 | `SQLiteSession` | Local development and simple apps | Built-in, lightweight, file-backed or in-memory |
 | `AsyncSQLiteSession` | Async SQLite with `aiosqlite` | Extension backend with async driver support |
 | `RedisSession` | Shared memory across workers/services | Good for low-latency distributed deployments |
+| `ValkeySession` | Shared memory with Valkey (Redis-compatible) | For teams using Valkey; uses the high-performance valkey-glide client |
 | `SQLAlchemySession` | Production apps with existing databases | Works with SQLAlchemy-supported databases |
 | `DaprSession` | Cloud-native deployments with Dapr sidecars | Supports multiple state stores plus TTL and consistency controls |
 | `OpenAIConversationsSession` | Server-managed storage in OpenAI | OpenAI Conversations API-backed history |
@@ -362,6 +363,48 @@ session = RedisSession.from_url(
 result = await Runner.run(agent, "Hello", session=session)
 ```
 
+### Valkey sessions
+
+Use `ValkeySession` for shared session memory backed by [Valkey](https://valkey.io/), the open-source Redis-compatible data store. It uses the [valkey-glide](https://github.com/valkey-io/valkey-glide) client for high-performance async access.
+
+```bash
+pip install openai-agents[valkey]
+```
+
+```python
+from agents import Agent, Runner
+from agents.extensions.memory import ValkeySession
+
+agent = Agent(name="Assistant")
+session = await ValkeySession.from_url(
+    "user_123",
+    url="valkey://localhost:6379/0",
+)
+result = await Runner.run(agent, "Hello", session=session)
+```
+
+You can also inject an existing `GlideClient` if your application already manages one:
+
+```python
+from glide import GlideClient, GlideClientConfiguration, NodeAddress
+from agents.extensions.memory import ValkeySession
+
+config = GlideClientConfiguration(addresses=[NodeAddress("localhost", 6379)])
+client = await GlideClient.create(config)
+
+session = ValkeySession(
+    session_id="user_123",
+    valkey_client=client,
+    ttl=3600,  # optional: expire session data after 1 hour
+)
+```
+
+Notes:
+
+-   `from_url(...)` is `async` because `GlideClient.create()` is async. It creates and owns the client; `close()` will shut it down.
+-   When you pass your own `valkey_client`, the session does not close it — your code manages the client lifecycle.
+-   `from_url` accepts `valkey://`, `valkeys://` (TLS), and `redis://`, `rediss://` schemes for compatibility.
+
 ### SQLAlchemy sessions
 
 Production-ready Agents SDK session persistence using any SQLAlchemy-supported database:
@@ -487,6 +530,7 @@ Use meaningful session IDs that help you organize conversations:
 -   Use file-based SQLite (`SQLiteSession("session_id", "path/to/db.sqlite")`) for persistent conversations
 -   Use async SQLite (`AsyncSQLiteSession("session_id", db_path="...")`) when you need an `aiosqlite`-based implementation
 -   Use Redis-backed sessions (`RedisSession.from_url("session_id", url="redis://...")`) for shared, low-latency session memory
+-   Use Valkey-backed sessions (`await ValkeySession.from_url("session_id", url="valkey://...")`) for shared session memory with the open-source Valkey data store
 -   Use SQLAlchemy-powered sessions (`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) for production systems with existing databases supported by SQLAlchemy
 -   Use Dapr state store sessions (`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) for production cloud-native deployments with support for 30+ database backends with built-in telemetry, tracing, and data isolation
 -   Use OpenAI-hosted storage (`OpenAIConversationsSession()`) when you prefer to store history in the OpenAI Conversations API
@@ -666,6 +710,7 @@ For detailed API documentation, see:
 -   [`SQLiteSession`][agents.memory.sqlite_session.SQLiteSession] - Basic SQLite implementation
 -   [`AsyncSQLiteSession`][agents.extensions.memory.async_sqlite_session.AsyncSQLiteSession] - Async SQLite implementation based on `aiosqlite`
 -   [`RedisSession`][agents.extensions.memory.redis_session.RedisSession] - Redis-backed session implementation
+-   [`ValkeySession`][agents.extensions.memory.valkey_session.ValkeySession] - Valkey-backed session implementation using valkey-glide
 -   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy-powered implementation
 -   [`DaprSession`][agents.extensions.memory.dapr_session.DaprSession] - Dapr state store implementation
 -   [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - Enhanced SQLite with branching and analytics
