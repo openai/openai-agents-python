@@ -706,6 +706,14 @@ def test_tool_call_output_item_call_id_none_when_missing() -> None:
     assert item.call_id is None
 
 
+def test_tool_call_output_item_call_id_falls_back_to_id() -> None:
+    """ToolCallOutputItem.call_id falls back to 'id' when 'call_id' is absent, matching ToolCallItem."""
+    agent = Agent(name="test", instructions="test")
+    raw_item: dict[str, Any] = {"type": "custom_output", "id": "id_fallback", "output": "result"}
+    item = ToolCallOutputItem(agent=agent, raw_item=raw_item, output="result")
+    assert item.call_id == "id_fallback"
+
+
 def test_tool_call_items_can_be_joined_by_call_id() -> None:
     """Demonstrates the motivating use-case: correlate outputs to calls via call_id."""
     agent = Agent(name="test", instructions="test")
