@@ -442,6 +442,13 @@ print(result.final_output)
 await session.close()
 ```
 
+Notes:
+
+-   `from_uri(...)` creates and owns the `AsyncMongoClient` and closes it on `session.close()`. If your application already manages a client, construct `MongoDBSession(...)` directly with `client=...`; in that case `session.close()` is a no-op and lifecycle stays with the caller.
+-   Connect to [MongoDB Atlas](https://www.mongodb.com/products/platform) by passing an `mongodb+srv://user:password@cluster.example.mongodb.net` URI to `from_uri(...)` with no other changes.
+-   Two collections are used and both names are configurable via `sessions_collection=` (default `agent_sessions`) and `messages_collection=` (default `agent_messages`). Indexes are created automatically on first use. Each message document carries a monotonically increasing `seq` counter that preserves ordering across concurrent writers and processes.
+-   Use `await session.ping()` to verify connectivity before your first run.
+
 ### Advanced SQLite sessions
 
 Enhanced SQLite sessions with conversation branching, usage analytics, and structured queries:
