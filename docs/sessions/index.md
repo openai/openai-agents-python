@@ -442,8 +442,6 @@ print(result.final_output)
 await session.close()
 ```
 
-See [MongoDB Sessions](mongodb_session.md) for detailed documentation.
-
 ### Advanced SQLite sessions
 
 Enhanced SQLite sessions with conversation branching, usage analytics, and structured queries:

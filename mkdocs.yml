@@ -71,7 +71,6 @@ plugins:
                 - Sessions:
                     - Overview: sessions/index.md
                     - SQLAlchemy session: sessions/sqlalchemy_session.md
-                    - MongoDB session: sessions/mongodb_session.md
                     - Advanced SQLite session: sessions/advanced_sqlite_session.md
                     - Encrypted session: sessions/encrypted_session.md
                 - Context management: context.md
