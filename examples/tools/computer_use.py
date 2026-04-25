@@ -202,7 +202,7 @@ async def run_agent(
             instructions="You are a helpful agent. Find the current weather in Tokyo.",
             tools=[ComputerTool(computer=computer_config)],
             # GPT-5.4 uses the built-in Responses API computer tool.
-            model="gpt-5.4",
+            model="gpt-5.5",
         )
         result = await Runner.run(agent, "What is the weather in Tokyo right now?")
         print(result.final_output)

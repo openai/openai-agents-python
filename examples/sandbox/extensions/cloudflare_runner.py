@@ -46,7 +46,7 @@ except Exception as exc:  # pragma: no cover - import path depends on optional e
     ) from exc
 
 
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_QUESTION = "Summarize this cloud sandbox workspace in 2 sentences."
 DEFAULT_PTY_QUESTION = (
     "Start an interactive Python session with `tty=true`. In that same session, compute "

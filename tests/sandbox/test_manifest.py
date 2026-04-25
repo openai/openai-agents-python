@@ -11,6 +11,7 @@ from agents.sandbox.entries import (
 )
 from agents.sandbox.errors import InvalidManifestPathError
 from agents.sandbox.manifest import Manifest
+from agents.sandbox.manifest_render import _truncate_manifest_description
 
 
 def test_manifest_rejects_nested_child_paths_that_escape_workspace() -> None:
@@ -41,6 +42,16 @@ def test_manifest_rejects_nested_absolute_child_paths() -> None:
 
     with pytest.raises(InvalidManifestPathError, match="must be relative"):
         manifest.validated_entries()
+
+
+def test_manifest_rejects_windows_drive_absolute_entry_paths() -> None:
+    manifest = Manifest(entries={"C:\\tmp\\outside.txt": File(content=b"nope")})
+
+    with pytest.raises(InvalidManifestPathError) as exc_info:
+        manifest.validated_entries()
+
+    assert str(exc_info.value) == "manifest path must be relative: C:/tmp/outside.txt"
+    assert exc_info.value.context == {"rel": "C:/tmp/outside.txt", "reason": "absolute"}
 
 
 def test_manifest_ephemeral_entry_paths_include_nested_children() -> None:
@@ -143,6 +154,25 @@ def test_manifest_ephemeral_mount_targets_reject_escaping_mount_paths() -> None:
         manifest.ephemeral_persistence_paths()
 
 
+def test_manifest_ephemeral_mount_targets_reject_windows_drive_mount_path() -> None:
+    manifest = Manifest(
+        root="/workspace",
+        entries={
+            "logical": GCSMount(
+                bucket="bucket",
+                mount_path=Path("C:\\tmp\\mount"),
+                mount_strategy=InContainerMountStrategy(pattern=MountpointMountPattern()),
+            ),
+        },
+    )
+
+    with pytest.raises(InvalidManifestPathError) as exc_info:
+        manifest.ephemeral_mount_targets()
+
+    assert str(exc_info.value) == "manifest path must be relative: C:/tmp/mount"
+    assert exc_info.value.context == {"rel": "C:/tmp/mount", "reason": "absolute"}
+
+
 def test_manifest_describe_preserves_tree_rendering_after_renderer_extract() -> None:
     manifest = Manifest(
         root="/workspace",
@@ -168,3 +198,17 @@ def test_manifest_describe_preserves_tree_rendering_after_renderer_extract() -> 
     assert "/workspace/data" in description
     assert "repo/" in description
     assert "/workspace/repo/README.md" in description
+
+
+def test_manifest_description_truncation_respects_short_limits() -> None:
+    description = "0123456789" * 20
+
+    for max_chars in range(0, 40):
+        truncated = _truncate_manifest_description(description, max_chars)
+        assert len(truncated) <= max_chars
+
+
+def test_manifest_description_truncation_preserves_unbounded_description() -> None:
+    description = "short"
+
+    assert _truncate_manifest_description(description, None) == description

@@ -52,6 +52,7 @@ from .run_internal.agent_runner_helpers import (
     build_resumed_stream_debug_extra,
     ensure_context_wrapper,
     finalize_conversation_tracking,
+    get_unsent_tool_call_ids_for_interrupted_state,
     input_guardrails_triggered,
     resolve_processed_response,
     resolve_resumed_context,
@@ -570,6 +571,7 @@ class AgentRunner:
                 generated_items=run_state._generated_items,
                 model_responses=run_state._model_responses,
                 session_items=session_input_items,
+                unsent_tool_call_ids=get_unsent_tool_call_ids_for_interrupted_state(run_state),
             )
 
         tool_use_tracker = AgentToolUseTracker()

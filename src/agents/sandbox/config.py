@@ -49,7 +49,7 @@ class MemoryGenerateConfig:
     )
     """Model settings used for phase-1 single-rollout extraction."""
 
-    phase_two_model: str | Model = "gpt-5.4"
+    phase_two_model: str | Model = "gpt-5.5"
     """Model used for phase-2 memory consolidation."""
 
     phase_two_model_settings: ModelSettings | None = field(

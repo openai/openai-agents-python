@@ -24,6 +24,7 @@ from agents.sandbox import SandboxPathGrant
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 from agents.sandbox.entries import (
     AzureBlobMount,
+    BoxMount,
     Dir,
     DockerVolumeMountStrategy,
     File,
@@ -336,7 +337,7 @@ class _HostBackedDockerSession(DockerSandboxSession):
                 pass
             else:
                 return ExecResult(
-                    stdout=str(self._container_path(candidate)).encode("utf-8"),
+                    stdout=self._container_path(candidate).as_posix().encode("utf-8"),
                     stderr=b"",
                     exit_code=0,
                 )
@@ -374,12 +375,12 @@ class _HostBackedDockerSession(DockerSandboxSession):
                         stdout=b"",
                         stderr=(
                             f"read-only extra path grant: {best_original}\n"
-                            f"resolved path: {self._container_path(candidate)}\n"
+                            f"resolved path: {self._container_path(candidate).as_posix()}\n"
                         ).encode(),
                         exit_code=114,
                     )
                 return ExecResult(
-                    stdout=str(self._container_path(candidate)).encode("utf-8"),
+                    stdout=self._container_path(candidate).as_posix().encode("utf-8"),
                     stderr=b"",
                     exit_code=0,
                 )
@@ -436,7 +437,7 @@ class _HostBackedDockerSession(DockerSandboxSession):
                 kind = EntryKind.FILE
             entries.append(
                 FileEntry(
-                    path=str(container_path / child.name),
+                    path=(container_path / child.name).as_posix(),
                     permissions=Permissions.from_mode(child.stat().st_mode),
                     owner="root",
                     group="root",
@@ -525,7 +526,7 @@ class _RecordingMount(Mount):
                 mount_path = mount._resolve_mount_path(session, dest)
                 host_path = cast(_HostBackedDockerSession, session)._host_path(mount_path)
                 host_path.mkdir(parents=True, exist_ok=True)
-                mount._events.append(("mount", str(mount_path)))
+                mount._events.append(("mount", mount_path.as_posix()))
                 if mount.remount_marker is not None:
                     (host_path / mount.remount_marker).write_text("remounted", encoding="utf-8")
                 return []
@@ -549,7 +550,7 @@ class _RecordingMount(Mount):
             ) -> None:
                 _ = strategy
                 host_path = cast(_HostBackedDockerSession, session)._host_path(path)
-                mount._events.append(("unmount", str(path)))
+                mount._events.append(("unmount", path.as_posix()))
                 if not mount.remove_on_unmount:
                     return
                 shutil.rmtree(host_path, ignore_errors=True)
@@ -563,7 +564,7 @@ class _RecordingMount(Mount):
                 _ = strategy
                 host_path = cast(_HostBackedDockerSession, session)._host_path(path)
                 host_path.mkdir(parents=True, exist_ok=True)
-                mount._events.append(("mount", str(path)))
+                mount._events.append(("mount", path.as_posix()))
                 if mount.remount_marker is not None:
                     (host_path / mount.remount_marker).write_text("remounted", encoding="utf-8")
 
@@ -1604,6 +1605,66 @@ async def test_docker_create_container_mounts_azure_with_rclone_driver(
                                 "azureblob-endpoint": "https://blob.example.test",
                                 "azureblob-msi-client-id": "client-id",
                                 "azureblob-key": "account-key",
+                            },
+                        }
+                    },
+                }
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_docker_create_container_mounts_box_with_rclone_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _ResumeContainer(status="created")
+    docker_client = _FakeCreateDockerClient(container)
+    client = DockerSandboxClient(docker_client=cast(object, docker_client))
+    manifest = Manifest(
+        entries={
+            "data": BoxMount(
+                path="/Shared/Finance",
+                client_id="client-id",
+                client_secret="client-secret",
+                access_token="access-token",
+                root_folder_id="12345",
+                impersonate="user-42",
+                mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+                read_only=False,
+            )
+        }
+    )
+
+    monkeypatch.setattr(client, "image_exists", lambda _image: True)
+
+    created = await client._create_container(DEFAULT_PYTHON_SANDBOX_IMAGE, manifest=manifest)
+
+    assert created is container
+    assert docker_client.containers.calls == [
+        {
+            "entrypoint": ["tail"],
+            "image": DEFAULT_PYTHON_SANDBOX_IMAGE,
+            "detach": True,
+            "command": ["-f", "/dev/null"],
+            "environment": {},
+            "mounts": [
+                {
+                    "Target": "/workspace/data",
+                    "Source": "sandbox_ac6cdb3eb035_workspace_data",
+                    "Type": "volume",
+                    "ReadOnly": False,
+                    "VolumeOptions": {
+                        "DriverConfig": {
+                            "Name": "rclone",
+                            "Options": {
+                                "type": "box",
+                                "path": "Shared/Finance",
+                                "box-client-id": "client-id",
+                                "box-client-secret": "client-secret",
+                                "box-access-token": "access-token",
+                                "box-root-folder-id": "12345",
+                                "box-impersonate": "user-42",
                             },
                         }
                     },

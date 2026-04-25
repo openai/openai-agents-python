@@ -92,7 +92,11 @@ def build_agent(model: str) -> SandboxAgent:
             Shell(),
             Filesystem(),
             Skills(
-                lazy_from=LocalDirLazySkillSource(source=LocalDir(src=SKILLS_SOURCE_DIR)),
+                lazy_from=LocalDirLazySkillSource(
+                    # This is a host path read by the SDK process.
+                    # Requested skills are copied into `skills_path` in the sandbox.
+                    source=LocalDir(src=SKILLS_SOURCE_DIR),
+                ),
                 skills_path="skills",
             ),
         ],

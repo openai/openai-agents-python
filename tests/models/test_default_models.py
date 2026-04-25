@@ -48,6 +48,7 @@ def test_gpt_5_reasoning_settings_required_detects_gpt_5_models_while_ignoring_c
     assert gpt_5_reasoning_settings_required("gpt-5.2-codex") is True
     assert gpt_5_reasoning_settings_required("gpt-5.2-pro") is True
     assert gpt_5_reasoning_settings_required("gpt-5.4-pro") is True
+    assert gpt_5_reasoning_settings_required("gpt-5.5") is True
     assert gpt_5_reasoning_settings_required("gpt-5-mini") is True
     assert gpt_5_reasoning_settings_required("gpt-5-nano") is True
     assert gpt_5_reasoning_settings_required("gpt-5-chat-latest") is False
@@ -87,6 +88,11 @@ def test_get_default_model_settings_returns_none_reasoning_defaults_for_gpt_5_4_
 def test_get_default_model_settings_returns_none_reasoning_defaults_for_gpt_5_4_mini_and_nano():
     assert get_default_model_settings("gpt-5.4-mini") == _gpt_5_default_settings("none")
     assert get_default_model_settings("gpt-5.4-nano") == _gpt_5_default_settings("none")
+
+
+def test_get_default_model_settings_returns_none_reasoning_defaults_for_gpt_5_5_models():
+    assert get_default_model_settings("gpt-5.5") == _gpt_5_default_settings("none")
+    assert get_default_model_settings("gpt-5.5-2026-04-23") == _gpt_5_default_settings("none")
 
 
 def test_get_default_model_settings_returns_low_reasoning_defaults_for_base_gpt_5():

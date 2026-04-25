@@ -9,6 +9,7 @@ import pytest
 from agents.sandbox import Manifest
 from agents.sandbox.entries import (
     AzureBlobMount,
+    BoxMount,
     DockerVolumeMountStrategy,
     FuseMountPattern,
     GCSMount,
@@ -286,6 +287,54 @@ async def test_azure_blob_mount_builds_rclone_runtime_config_without_hidden_patt
     assert "account = acct" in apply_config.config_text
     assert isinstance(unmount_config, RcloneMountConfig)
     assert unmount_config.remote_name == remote_name
+    assert unmount_config.config_text is None
+
+
+@pytest.mark.asyncio
+async def test_box_mount_builds_rclone_runtime_config_with_box_auth_options() -> None:
+    session_id = uuid.uuid4()
+    pattern = RcloneMountPattern(config_file_path=Path("rclone.conf"))
+    remote_name = pattern.resolve_remote_name(
+        session_id=session_id.hex,
+        remote_kind="box",
+        mount_type="box_mount",
+    )
+    session = _MountConfigSession(
+        session_id=session_id,
+        config_text=f"[{remote_name}]\ntype = box\n",
+    )
+    mount = BoxMount(
+        path="/Shared/Finance",
+        client_id="client-id",
+        client_secret="client-secret",
+        token='{"access_token":"token"}',
+        root_folder_id="12345",
+        impersonate="user-42",
+        mount_strategy=InContainerMountStrategy(pattern=pattern),
+        read_only=False,
+    )
+
+    apply_config = await mount.build_in_container_mount_config(
+        session, pattern, include_config_text=True
+    )
+    unmount_config = await mount.build_in_container_mount_config(
+        session, pattern, include_config_text=False
+    )
+
+    assert isinstance(apply_config, RcloneMountConfig)
+    assert apply_config.remote_name == remote_name
+    assert apply_config.remote_path == "Shared/Finance"
+    assert apply_config.read_only is False
+    assert apply_config.config_text is not None
+    assert "type = box" in apply_config.config_text
+    assert "client_id = client-id" in apply_config.config_text
+    assert "client_secret = client-secret" in apply_config.config_text
+    assert 'token = {"access_token":"token"}' in apply_config.config_text
+    assert "root_folder_id = 12345" in apply_config.config_text
+    assert "impersonate = user-42" in apply_config.config_text
+    assert isinstance(unmount_config, RcloneMountConfig)
+    assert unmount_config.remote_name == remote_name
+    assert unmount_config.remote_path == "Shared/Finance"
     assert unmount_config.config_text is None
 
 
@@ -1124,6 +1173,14 @@ async def test_blobfuse_cache_path_must_be_relative_to_workspace() -> None:
         "blobfuse cache_path must be relative to the workspace root"
     )
     assert escape_exc_info.value.context == {"cache_path": "../blobfuse-cache"}
+
+    with pytest.raises(MountConfigError) as windows_exc_info:
+        FuseMountPattern(cache_path=Path("C:\\blobfuse-cache"))
+
+    assert windows_exc_info.value.message == (
+        "blobfuse cache_path must be relative to the workspace root"
+    )
+    assert windows_exc_info.value.context == {"cache_path": "C:/blobfuse-cache"}
 
 
 @pytest.mark.asyncio

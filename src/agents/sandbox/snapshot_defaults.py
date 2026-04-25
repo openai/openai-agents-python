@@ -4,12 +4,22 @@ import os
 import sys
 import time
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from .snapshot import LocalSnapshotSpec
 
 _DEFAULT_LOCAL_SNAPSHOT_TTL_SECONDS = 60 * 60 * 24 * 30
 _DEFAULT_LOCAL_SNAPSHOT_SUBDIR = Path("openai-agents-python") / "sandbox" / "snapshots"
+
+
+def _first_absolute_windows_env_path(env: Mapping[str, str], *names: str) -> Path | None:
+    for name in names:
+        value = env.get(name)
+        if not value:
+            continue
+        if PureWindowsPath(value).is_absolute():
+            return Path(value)
+    return None
 
 
 def default_local_snapshot_base_dir(
@@ -27,8 +37,12 @@ def default_local_snapshot_base_dir(
     if resolved_platform == "darwin":
         base = resolved_home / "Library" / "Application Support"
     elif resolved_os_name == "nt":
-        local_app_data = resolved_env.get("LOCALAPPDATA") or resolved_env.get("APPDATA")
-        base = Path(local_app_data) if local_app_data else resolved_home / "AppData" / "Local"
+        env_base = _first_absolute_windows_env_path(
+            resolved_env,
+            "LOCALAPPDATA",
+            "APPDATA",
+        )
+        base = env_base if env_base is not None else resolved_home / "AppData" / "Local"
     else:
         xdg_state_home = resolved_env.get("XDG_STATE_HOME")
         base = Path(xdg_state_home) if xdg_state_home else resolved_home / ".local" / "state"

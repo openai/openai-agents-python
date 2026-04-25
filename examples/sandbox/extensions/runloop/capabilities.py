@@ -48,7 +48,7 @@ except Exception as exc:  # pragma: no cover - import path depends on optional e
     ) from exc
 
 
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_HTTP_PORT = 8123
 DEFAULT_AGENT_PROMPT = (
     "Inspect this Runloop sandbox workspace, verify the configuration using the shell tool, "

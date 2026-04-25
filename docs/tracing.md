@@ -222,3 +222,4 @@ The following community and vendor integrations support the OpenAI Agents SDK tr
 -   [PromptLayer](https://docs.promptlayer.com/languages/integrations#openai-agents-sdk)
 -   [HoneyHive](https://docs.honeyhive.ai/v2/integrations/openai-agents)
 -   [Asqav](https://www.asqav.com/docs/integrations#openai-agents)
+-   [Datadog](https://docs.datadoghq.com/llm_observability/instrumentation/auto_instrumentation/?tab=python#openai-agents)

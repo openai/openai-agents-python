@@ -90,7 +90,7 @@ step. Do not call tools.
 
 benefits_agent = Agent[HealthcareSupportContext](
     name="HealthcareBenefitsAgent",
-    model="gpt-5.4",
+    model="gpt-5.5",
     instructions=BENEFITS_PROMPT,
     model_settings=ModelSettings(reasoning=Reasoning(effort="low"), verbosity="low"),
     tools=[
@@ -105,7 +105,7 @@ benefits_agent = Agent[HealthcareSupportContext](
 def build_policy_sandbox_agent(*, skills_root: Path) -> SandboxAgent[HealthcareSupportContext]:
     return SandboxAgent[HealthcareSupportContext](
         name="HealthcarePolicySandboxAgent",
-        model="gpt-5.4",
+        model="gpt-5.5",
         instructions=(
             POLICY_SANDBOX_PROMPT + "\n\n"
             "Use `load_skill` before reading the skill file. Use `exec_command` with `pwd`, "
@@ -115,7 +115,13 @@ def build_policy_sandbox_agent(*, skills_root: Path) -> SandboxAgent[HealthcareS
         capabilities=[
             Shell(),
             Filesystem(),
-            Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=skills_root))),
+            Skills(
+                lazy_from=LocalDirLazySkillSource(
+                    # This is a host path read by the SDK process.
+                    # Requested skills are copied into `skills_path` in the sandbox.
+                    source=LocalDir(src=skills_root),
+                )
+            ),
         ],
         model_settings=ModelSettings(
             reasoning=Reasoning(effort="low"),
@@ -129,7 +135,7 @@ def build_policy_sandbox_agent(*, skills_root: Path) -> SandboxAgent[HealthcareS
 def build_orchestrator(*, sandbox_policy_tool: Tool) -> Agent[HealthcareSupportContext]:
     return Agent[HealthcareSupportContext](
         name="HealthcareSupportOrchestrator",
-        model="gpt-5.4",
+        model="gpt-5.5",
         instructions=ORCHESTRATOR_PROMPT,
         model_settings=ModelSettings(
             reasoning=Reasoning(effort="low"),
@@ -149,7 +155,7 @@ def build_orchestrator(*, sandbox_policy_tool: Tool) -> Agent[HealthcareSupportC
 
 memory_recap_agent = Agent[HealthcareSupportContext](
     name="HealthcareSupportMemoryAgent",
-    model="gpt-5.4",
+    model="gpt-5.5",
     instructions=MEMORY_PROMPT,
     model_settings=ModelSettings(reasoning=Reasoning(effort="low"), verbosity="low"),
     output_type=AgentOutputSchema(MemoryRecap, strict_json_schema=False),

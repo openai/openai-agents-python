@@ -301,7 +301,7 @@ By using the `clone()` method on an agent, you can duplicate an Agent, and optio
 pirate_agent = Agent(
     name="Pirate",
     instructions="Write like a pirate",
-    model="gpt-5.4",
+    model="gpt-5.5",
 )
 
 robot_agent = pirate_agent.clone(

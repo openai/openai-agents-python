@@ -4,6 +4,7 @@ from .artifacts import Dir, File, GitRepo, LocalDir, LocalFile
 from .base import BaseEntry, resolve_workspace_path
 from .mounts import (
     AzureBlobMount,
+    BoxMount,
     DockerVolumeMountStrategy,
     FuseMountPattern,
     GCSMount,
@@ -24,6 +25,7 @@ from .mounts import (
 __all__ = [
     "AzureBlobMount",
     "BaseEntry",
+    "BoxMount",
     "Dir",
     "File",
     "DockerVolumeMountStrategy",

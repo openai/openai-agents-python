@@ -1,7 +1,7 @@
 import abc
 import asyncio
 from collections.abc import Iterator, Mapping
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_serializer, field_validator
@@ -11,7 +11,12 @@ from .entries import BaseEntry, Dir, Mount, resolve_workspace_path
 from .errors import InvalidManifestPathError
 from .manifest_render import render_manifest_description
 from .types import Group, User
-from .workspace_paths import SandboxPathGrant
+from .workspace_paths import (
+    SandboxPathGrant,
+    coerce_posix_path,
+    posix_path_as_path,
+    windows_absolute_path,
+)
 
 DEFAULT_REMOTE_MOUNT_COMMAND_ALLOWLIST = [
     "ls",
@@ -119,7 +124,7 @@ class Manifest(BaseModel):
         return {path for path, artifact in self.iter_entries() if artifact.ephemeral}
 
     def mount_targets(self) -> list[tuple[Mount, Path]]:
-        root = Path(self.root)
+        root = posix_path_as_path(coerce_posix_path(self.root))
         mounts: list[tuple[Mount, Path]] = []
         for rel_path, artifact in self.iter_entries():
             if not isinstance(artifact, Mount):
@@ -138,7 +143,7 @@ class Manifest(BaseModel):
 
     def ephemeral_persistence_paths(self, depth: int | None = 1) -> set[Path]:
         _ = depth
-        root = Path(self.root)
+        root = posix_path_as_path(coerce_posix_path(self.root))
         skip = self.ephemeral_entry_paths(depth=depth)
         for _mount, mount_path in self.ephemeral_mount_targets():
             try:
@@ -150,47 +155,69 @@ class Manifest(BaseModel):
         return skip
 
     @staticmethod
-    def _coerce_rel_path(path: str | Path) -> Path:
-        return path if isinstance(path, Path) else Path(path)
+    def _coerce_rel_path(path: str | PurePath) -> Path:
+        if (windows_path := windows_absolute_path(path)) is not None:
+            raise InvalidManifestPathError(rel=windows_path.as_posix(), reason="absolute")
+        return posix_path_as_path(coerce_posix_path(path))
 
     @staticmethod
     def _validate_rel_path(rel: Path) -> None:
-        if rel.is_absolute():
-            raise InvalidManifestPathError(rel=rel, reason="absolute")
-        if ".." in rel.parts:
-            raise InvalidManifestPathError(rel=rel, reason="escape_root")
+        if (windows_path := windows_absolute_path(rel)) is not None:
+            raise InvalidManifestPathError(rel=windows_path.as_posix(), reason="absolute")
+        rel_path = coerce_posix_path(rel)
+        if rel_path.is_absolute():
+            raise InvalidManifestPathError(rel=rel_path.as_posix(), reason="absolute")
+        if ".." in rel_path.parts:
+            raise InvalidManifestPathError(rel=rel_path.as_posix(), reason="escape_root")
 
     @staticmethod
     def _normalize_rel_path_within_root(rel: Path, *, original: Path) -> Path:
-        if rel.is_absolute():
-            raise InvalidManifestPathError(rel=original, reason="absolute")
+        rel_path = coerce_posix_path(rel)
+        original_path = coerce_posix_path(original)
+        if (windows_path := windows_absolute_path(original)) is not None:
+            raise InvalidManifestPathError(rel=windows_path.as_posix(), reason="absolute")
+        if rel_path.is_absolute():
+            raise InvalidManifestPathError(rel=original_path.as_posix(), reason="absolute")
 
         normalized_parts: list[str] = []
-        for part in rel.parts:
+        for part in rel_path.parts:
             if part in ("", "."):
                 continue
             if part == "..":
                 if not normalized_parts:
-                    raise InvalidManifestPathError(rel=original, reason="escape_root")
+                    raise InvalidManifestPathError(
+                        rel=original_path.as_posix(), reason="escape_root"
+                    )
                 normalized_parts.pop()
                 continue
             normalized_parts.append(part)
 
-        return Path(*normalized_parts)
+        return posix_path_as_path(PurePosixPath(*normalized_parts))
 
     @classmethod
     def _normalize_in_workspace_path(cls, root: Path, path: Path) -> Path | None:
-        if not path.is_absolute():
-            normalized_rel = cls._normalize_rel_path_within_root(path, original=path)
+        root_path = coerce_posix_path(root)
+        if (windows_path := windows_absolute_path(path)) is not None:
+            raise InvalidManifestPathError(rel=windows_path.as_posix(), reason="absolute")
+        path_posix = coerce_posix_path(path)
+        if not path_posix.is_absolute():
+            normalized_rel = cls._normalize_rel_path_within_root(
+                posix_path_as_path(path_posix),
+                original=posix_path_as_path(path_posix),
+            )
             return root / normalized_rel if normalized_rel.parts else root
 
         try:
-            rel_path = path.relative_to(root)
+            rel_path = path_posix.relative_to(root_path)
         except ValueError:
             return None
 
-        normalized_rel = cls._normalize_rel_path_within_root(rel_path, original=path)
-        return root / normalized_rel if normalized_rel.parts else root
+        normalized_rel = cls._normalize_rel_path_within_root(
+            posix_path_as_path(rel_path),
+            original=posix_path_as_path(path_posix),
+        )
+        root_as_path = posix_path_as_path(root_path)
+        return root_as_path / normalized_rel if normalized_rel.parts else root_as_path
 
     def iter_entries(self) -> Iterator[tuple[Path, BaseEntry]]:
         stack = [

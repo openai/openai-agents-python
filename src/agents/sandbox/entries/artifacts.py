@@ -365,6 +365,7 @@ class LocalDir(BaseEntry):
     ) -> int:
         if not _OPEN_SUPPORTS_DIR_FD or not _HAS_O_DIRECTORY:
             return self._open_local_dir_file_for_copy_fallback(
+                base_dir=base_dir,
                 src_root=src_root,
                 rel_child=rel_child,
             )
@@ -539,7 +540,9 @@ class LocalDir(BaseEntry):
             )
         return LocalDirReadError(src=src_root, cause=error)
 
-    def _open_local_dir_file_for_copy_fallback(self, *, src_root: Path, rel_child: Path) -> int:
+    def _open_local_dir_file_for_copy_fallback(
+        self, *, base_dir: Path, src_root: Path, rel_child: Path
+    ) -> int:
         src = src_root / rel_child
         try:
             src_stat = src.lstat()
@@ -564,20 +567,32 @@ class LocalDir(BaseEntry):
         file_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
             leaf_fd = os.open(src, file_flags)
-            leaf_stat = os.fstat(leaf_fd)
-            if not stat.S_ISREG(leaf_stat.st_mode) or not os.path.samestat(src_stat, leaf_stat):
+            try:
+                self._resolve_local_dir_src_root(base_dir)
+                leaf_stat = os.fstat(leaf_fd)
+                if not stat.S_ISREG(leaf_stat.st_mode) or not os.path.samestat(src_stat, leaf_stat):
+                    raise LocalDirReadError(
+                        src=src_root,
+                        context={
+                            "reason": "path_changed_during_copy",
+                            "child": rel_child.as_posix(),
+                        },
+                    )
+                return leaf_fd
+            except Exception:
                 os.close(leaf_fd)
-                raise LocalDirReadError(
-                    src=src_root,
-                    context={"reason": "path_changed_during_copy", "child": rel_child.as_posix()},
-                )
-            return leaf_fd
+                raise
         except FileNotFoundError:
+            self._resolve_local_dir_src_root(base_dir)
             raise LocalDirReadError(
                 src=src_root,
                 context={"reason": "path_changed_during_copy", "child": rel_child.as_posix()},
             ) from None
         except OSError as e:
+            try:
+                self._resolve_local_dir_src_root(base_dir)
+            except LocalDirReadError as root_error:
+                raise root_error from e
             if e.errno == errno.ELOOP:
                 raise LocalDirReadError(
                     src=src_root,
