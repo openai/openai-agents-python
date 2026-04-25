@@ -129,6 +129,7 @@ class ModelProvider(abc.ABC):
 
     Model provider is responsible for looking up Models by name.
     """
+    print("hello world")
 
     @abc.abstractmethod
     def get_model(self, model_name: str | None) -> Model:
