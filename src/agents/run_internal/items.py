@@ -72,6 +72,9 @@ def run_item_to_input_item(
         return None
     to_input = getattr(run_item, "to_input_item", None)
     input_item = to_input() if callable(to_input) else cast(TResponseInputItem, run_item.raw_item)
+    if isinstance(input_item, dict) and input_item.get("status") is None:
+        input_item = dict(input_item)
+        input_item.pop("status", None)
     if (
         _should_omit_reasoning_item_ids(reasoning_item_id_policy)
         and run_item.type == "reasoning_item"
