@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-04-18T01:54:41.626048905Z"
+exclude-newer = "2026-04-19T02:17:07.061414832Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -2432,7 +2432,7 @@ wheels = [
 
 [[package]]
 name = "openai-agents"
-version = "0.14.6"
+version = "0.14.7"
 source = { editable = "." }
 dependencies = [
     { name = "griffelib" },
