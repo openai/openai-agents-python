@@ -779,12 +779,15 @@ class RealtimeSession(RealtimeModelListener):
                 incoming_item = event
                 if not event.content:
                     # Preserve existing content but update status and other metadata.
-                    incoming_item = existing_item.model_copy(
-                        update={
-                            "status": event.status,
-                            "previous_item_id": event.previous_item_id or existing_item.previous_item_id,
-                        }
-                    )
+                    update_fields: dict[str, Any] = {}
+                    if hasattr(event, "status") and hasattr(existing_item, "status"):
+                        update_fields["status"] = event.status
+                    if getattr(event, "previous_item_id", None):
+                        update_fields["previous_item_id"] = event.previous_item_id
+                    elif getattr(existing_item, "previous_item_id", None):
+                        update_fields["previous_item_id"] = existing_item.previous_item_id
+                        
+                    incoming_item = existing_item.model_copy(update=update_fields)
                 else:
                     # Specialized merge logic for non-empty content
                     if event.role == "assistant" and existing_item.role == "assistant":
