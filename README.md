@@ -23,7 +23,7 @@ Explore the [examples](https://github.com/openai/openai-agents-python/tree/main/
 
 ## Get started
 
-To get started, set up your Python environment (Python 3.10 or newer required), and then install OpenAI Agents SDK package.
+To get started, set up your Python environment (Python 3.10 or newer required), and then install the OpenAI Agents SDK package.
 
 ### venv
 
