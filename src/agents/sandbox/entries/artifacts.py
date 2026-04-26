@@ -17,9 +17,10 @@ from ..errors import (
     GitCloneError,
     GitCopyError,
     GitMissingInImageError,
-    LocalChecksumError,
+    LocalArtifactError,
     LocalDirReadError,
     LocalFileReadError,
+    WorkspaceArchiveWriteError,
 )
 from ..materialization import MaterializedFile, gather_in_order
 from ..types import ExecResult, User
@@ -33,14 +34,109 @@ _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _HAS_O_DIRECTORY = hasattr(os, "O_DIRECTORY")
 
 
-def _sha256_handle(handle: io.BufferedReader) -> str:
-    digest = hashlib.sha256()
-    while True:
-        chunk = handle.read(1024 * 1024)
+class _HashingReader(io.IOBase):
+    def __init__(
+        self,
+        stream: io.BufferedReader,
+        *,
+        read_error_factory: Callable[[OSError], BaseException] | None = None,
+    ) -> None:
+        self._stream = stream
+        self._digest = hashlib.sha256()
+        self._read_attempted = False
+        self._started = False
+        self._finished = False
+        self._read_error_factory = read_error_factory
+
+    def readable(self) -> bool:
+        return True
+
+    @property
+    def read_attempted(self) -> bool:
+        return self._read_attempted
+
+    def read(self, size: int = -1) -> bytes:
+        self._read_attempted = True
+        try:
+            chunk = self._stream.read(size)
+        except OSError as e:
+            if self._read_error_factory is not None:
+                raise self._read_error_factory(e) from e
+            raise
+        if chunk is None:
+            self._finished = True
+            return b""
+        if isinstance(chunk, bytearray):
+            chunk = bytes(chunk)
+        self._started = True
         if not chunk:
-            break
-        digest.update(chunk)
-    return digest.hexdigest()
+            self._finished = True
+            return b""
+        self._digest.update(chunk)
+        if size < 0 or len(chunk) < size:
+            self._finished = True
+        return chunk
+
+    def readinto(self, b: bytearray) -> int:
+        data = self.read(len(b))
+        n = len(data)
+        b[:n] = data
+        return n
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if self._started:
+            raise io.UnsupportedOperation("cannot seek after reads begin")
+        try:
+            return int(self._stream.seek(offset, whence))
+        except OSError as e:
+            if self._read_error_factory is not None:
+                raise self._read_error_factory(e) from e
+            raise
+
+    def tell(self) -> int:
+        try:
+            return int(self._stream.tell())
+        except OSError as e:
+            if self._read_error_factory is not None:
+                raise self._read_error_factory(e) from e
+            raise
+
+    def hexdigest(self) -> str:
+        if not self._finished:
+            raise RuntimeError("checksum is not available until the stream is fully consumed")
+        return self._digest.hexdigest()
+
+
+def _find_nested_local_artifact_error(exc: BaseException) -> LocalArtifactError | None:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, LocalArtifactError):
+            return current
+        seen.add(id(current))
+        next_exc = getattr(current, "cause", None)
+        if not isinstance(next_exc, BaseException):
+            next_exc = current.__cause__
+        current = next_exc if isinstance(next_exc, BaseException) else None
+    return None
+
+
+def _reraise_nested_local_artifact_error(exc: BaseException) -> None:
+    nested_local_artifact_error = _find_nested_local_artifact_error(exc)
+    if nested_local_artifact_error is not None:
+        raise nested_local_artifact_error
+
+
+async def _cleanup_local_artifact_partial_write(
+    *,
+    session: BaseSandboxSession,
+    dest: Path,
+    user: str | User | None = None,
+) -> None:
+    try:
+        await session.rm(dest, user=user)
+    except Exception:
+        pass
 
 
 class Dir(BaseEntry):
@@ -122,13 +218,23 @@ class LocalFile(BaseEntry):
             )
             with os.fdopen(fd, "rb") as f:
                 fd = None
-                try:
-                    checksum = _sha256_handle(f)
-                    f.seek(0)
-                except OSError as e:
-                    raise LocalChecksumError(src=src, cause=e) from e
+                hashing_reader = _HashingReader(
+                    f,
+                    read_error_factory=lambda e: LocalFileReadError(src=src, cause=e),
+                )
                 await session.mkdir(Path(dest).parent, parents=True)
-                await session.write(dest, f)
+                try:
+                    await session.write(dest, hashing_reader)
+                except Exception:
+                    if hashing_reader.read_attempted:
+                        await _cleanup_local_artifact_partial_write(
+                            session=session,
+                            dest=dest,
+                        )
+                    raise
+        except WorkspaceArchiveWriteError as e:
+            _reraise_nested_local_artifact_error(e)
+            raise
         except LocalDirReadError as e:
             context = dict(e.context)
             context.pop("src", None)
@@ -139,7 +245,7 @@ class LocalFile(BaseEntry):
             if fd is not None:
                 os.close(fd)
         await self._apply_metadata(session, dest)
-        return [MaterializedFile(path=dest, sha256=checksum)]
+        return [MaterializedFile(path=dest, sha256=hashing_reader.hexdigest())]
 
 
 class LocalDir(BaseEntry):
@@ -367,16 +473,30 @@ class LocalDir(BaseEntry):
             )
             with os.fdopen(fd, "rb") as f:
                 fd = None
-                checksum = _sha256_handle(f)
-                f.seek(0)
+                hashing_reader = _HashingReader(
+                    f,
+                    read_error_factory=lambda e: LocalFileReadError(src=src, cause=e),
+                )
                 await session.mkdir(child_dest.parent, parents=True, user=user)
-                await session.write(child_dest, f, user=user)
+                try:
+                    await session.write(child_dest, hashing_reader, user=user)
+                except Exception:
+                    if hashing_reader.read_attempted:
+                        await _cleanup_local_artifact_partial_write(
+                            session=session,
+                            dest=child_dest,
+                            user=user,
+                        )
+                    raise
+        except WorkspaceArchiveWriteError as e:
+            _reraise_nested_local_artifact_error(e)
+            raise
         except OSError as e:
             raise LocalFileReadError(src=src, cause=e) from e
         finally:
             if fd is not None:
                 os.close(fd)
-        return MaterializedFile(path=child_dest, sha256=checksum)
+        return MaterializedFile(path=child_dest, sha256=hashing_reader.hexdigest())
 
     def _open_local_dir_file_for_copy(
         self, *, base_dir: Path, src_root: Path, rel_child: Path
