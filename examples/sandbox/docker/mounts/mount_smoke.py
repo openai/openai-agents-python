@@ -66,7 +66,7 @@ def build_agent(name: str, manifest: Manifest) -> SandboxAgent:
 
     return SandboxAgent(
         name=name,
-        model=os.getenv("OPENAI_MODEL", "gpt-5.4"),
+        model=os.getenv("OPENAI_MODEL", "gpt-5.5"),
         instructions=(
             "Use the shell tool only. Write the requested exact content to the requested exact "
             "path, read the file back with cat, and then reply with only `done`."

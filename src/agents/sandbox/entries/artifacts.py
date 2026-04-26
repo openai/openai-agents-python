@@ -23,7 +23,6 @@ from ..errors import (
 )
 from ..materialization import MaterializedFile, gather_in_order
 from ..types import ExecResult, User
-from ..util.checksums import sha256_file
 from .base import BaseEntry
 
 if TYPE_CHECKING:
@@ -109,17 +108,36 @@ class LocalFile(BaseEntry):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
-        src = (base_dir / self.src).resolve()
+        src = base_dir / self.src
+        src = src if src.is_absolute() else src.absolute()
+        local_dir = LocalDir(src=self.src.parent)
+        rel_child = Path(self.src.name)
+        fd: int | None = None
         try:
-            checksum = sha256_file(src)
-        except OSError as e:
-            raise LocalChecksumError(src=src, cause=e) from e
-        await session.mkdir(Path(dest).parent, parents=True)
-        try:
-            with src.open("rb") as f:
+            src_root = local_dir._resolve_local_dir_src_root(base_dir)
+            fd = local_dir._open_local_dir_file_for_copy(
+                base_dir=base_dir,
+                src_root=src_root,
+                rel_child=rel_child,
+            )
+            with os.fdopen(fd, "rb") as f:
+                fd = None
+                try:
+                    checksum = _sha256_handle(f)
+                    f.seek(0)
+                except OSError as e:
+                    raise LocalChecksumError(src=src, cause=e) from e
+                await session.mkdir(Path(dest).parent, parents=True)
                 await session.write(dest, f)
+        except LocalDirReadError as e:
+            context = dict(e.context)
+            context.pop("src", None)
+            raise LocalFileReadError(src=src, context=context, cause=e.cause) from e
         except OSError as e:
             raise LocalFileReadError(src=src, cause=e) from e
+        finally:
+            if fd is not None:
+                os.close(fd)
         await self._apply_metadata(session, dest)
         return [MaterializedFile(path=dest, sha256=checksum)]
 
@@ -365,6 +383,7 @@ class LocalDir(BaseEntry):
     ) -> int:
         if not _OPEN_SUPPORTS_DIR_FD or not _HAS_O_DIRECTORY:
             return self._open_local_dir_file_for_copy_fallback(
+                base_dir=base_dir,
                 src_root=src_root,
                 rel_child=rel_child,
             )
@@ -539,8 +558,12 @@ class LocalDir(BaseEntry):
             )
         return LocalDirReadError(src=src_root, cause=error)
 
-    def _open_local_dir_file_for_copy_fallback(self, *, src_root: Path, rel_child: Path) -> int:
+    def _open_local_dir_file_for_copy_fallback(
+        self, *, base_dir: Path, src_root: Path, rel_child: Path
+    ) -> int:
+        assert self.src is not None
         src = src_root / rel_child
+        validation_dir = LocalDir(src=self.src / rel_child.parent)
         try:
             src_stat = src.lstat()
         except FileNotFoundError:
@@ -564,20 +587,32 @@ class LocalDir(BaseEntry):
         file_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
             leaf_fd = os.open(src, file_flags)
-            leaf_stat = os.fstat(leaf_fd)
-            if not stat.S_ISREG(leaf_stat.st_mode) or not os.path.samestat(src_stat, leaf_stat):
+            try:
+                validation_dir._resolve_local_dir_src_root(base_dir)
+                leaf_stat = os.fstat(leaf_fd)
+                if not stat.S_ISREG(leaf_stat.st_mode) or not os.path.samestat(src_stat, leaf_stat):
+                    raise LocalDirReadError(
+                        src=src_root,
+                        context={
+                            "reason": "path_changed_during_copy",
+                            "child": rel_child.as_posix(),
+                        },
+                    )
+                return leaf_fd
+            except Exception:
                 os.close(leaf_fd)
-                raise LocalDirReadError(
-                    src=src_root,
-                    context={"reason": "path_changed_during_copy", "child": rel_child.as_posix()},
-                )
-            return leaf_fd
+                raise
         except FileNotFoundError:
+            validation_dir._resolve_local_dir_src_root(base_dir)
             raise LocalDirReadError(
                 src=src_root,
                 context={"reason": "path_changed_during_copy", "child": rel_child.as_posix()},
             ) from None
         except OSError as e:
+            try:
+                validation_dir._resolve_local_dir_src_root(base_dir)
+            except LocalDirReadError as root_error:
+                raise root_error from e
             if e.errno == errno.ELOOP:
                 raise LocalDirReadError(
                     src=src_root,

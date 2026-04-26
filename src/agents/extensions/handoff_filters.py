@@ -1,3 +1,5 @@
+"""Contains common handoff input filters, for convenience."""
+
 from __future__ import annotations
 
 from ..handoffs import (
@@ -20,8 +22,6 @@ from ..items import (
     ToolSearchOutputItem,
     TResponseInputItem,
 )
-
-"""Contains common handoff input filters, for convenience. """
 
 __all__ = [
     "remove_all_tools",

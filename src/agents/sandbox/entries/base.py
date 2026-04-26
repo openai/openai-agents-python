@@ -3,9 +3,10 @@ from __future__ import annotations
 import abc
 import builtins
 import inspect
+import posixpath
 import stat
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel, Field
@@ -13,41 +14,70 @@ from pydantic import BaseModel, Field
 from ..errors import InvalidManifestPathError
 from ..materialization import MaterializedFile
 from ..types import FileMode, Group, Permissions, User
+from ..workspace_paths import (
+    coerce_posix_path,
+    posix_path_as_path,
+    sandbox_path_str,
+    windows_absolute_path,
+)
 
 if TYPE_CHECKING:
     from ..session.base_sandbox_session import BaseSandboxSession
 
 
 def resolve_workspace_path(
-    workspace_root: Path,
-    rel: str | Path,
+    workspace_root: str | PurePath,
+    rel: str | PurePath,
     *,
     allow_absolute_within_root: bool = False,
 ) -> Path:
-    rel = Path(rel)
-    workspace_root = Path(workspace_root)
+    if (windows_path := windows_absolute_path(rel)) is not None:
+        raise InvalidManifestPathError(rel=windows_path.as_posix(), reason="absolute")
+    rel_path = coerce_posix_path(rel)
+    root_path = coerce_posix_path(workspace_root)
 
-    if rel.is_absolute():
+    if rel_path.is_absolute():
         if not allow_absolute_within_root:
-            raise InvalidManifestPathError(rel=rel, reason="absolute")
-        resolved_workspace_root = workspace_root.resolve(strict=False)
-        resolved_rel = rel.resolve(strict=False)
+            raise InvalidManifestPathError(rel=rel_path.as_posix(), reason="absolute")
+        rel_path = PurePosixPath(posixpath.normpath(rel_path.as_posix()))
+        root_path = PurePosixPath(posixpath.normpath(root_path.as_posix()))
+        host_root = Path(root_path.as_posix())
+        if _path_exists(host_root):
+            try:
+                Path(rel_path.as_posix()).resolve(strict=False).relative_to(
+                    host_root.resolve(strict=False)
+                )
+            except ValueError as exc:
+                raise InvalidManifestPathError(
+                    rel=rel_path.as_posix(), reason="absolute", cause=exc
+                ) from exc
         try:
-            resolved_rel.relative_to(resolved_workspace_root)
+            rel_path.relative_to(root_path)
         except ValueError as exc:
-            raise InvalidManifestPathError(rel=rel, reason="absolute", cause=exc) from exc
-        return resolved_rel
+            raise InvalidManifestPathError(
+                rel=rel_path.as_posix(), reason="absolute", cause=exc
+            ) from exc
+        return posix_path_as_path(rel_path)
 
-    if ".." in rel.parts:
-        raise InvalidManifestPathError(rel=rel, reason="escape_root")
+    if ".." in rel_path.parts:
+        raise InvalidManifestPathError(rel=rel_path.as_posix(), reason="escape_root")
 
-    resolved = workspace_root / rel if rel.parts else workspace_root
+    resolved = root_path / rel_path if rel_path.parts else root_path
     if allow_absolute_within_root and resolved.is_absolute():
         try:
-            resolved.relative_to(workspace_root)
+            resolved.relative_to(root_path)
         except ValueError as exc:
-            raise InvalidManifestPathError(rel=rel, reason="escape_root", cause=exc) from exc
-    return resolved
+            raise InvalidManifestPathError(
+                rel=rel_path.as_posix(), reason="escape_root", cause=exc
+            ) from exc
+    return posix_path_as_path(resolved)
+
+
+def _path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
 
 
 class BaseEntry(BaseModel, abc.ABC):
@@ -132,11 +162,12 @@ class BaseEntry(BaseModel, abc.ABC):
         session: BaseSandboxSession,
         dest: Path,
     ) -> None:
+        dest_arg = sandbox_path_str(dest)
         if self.group is not None:
-            await session._exec_checked_nonzero("chgrp", self.group.name, str(dest))
+            await session._exec_checked_nonzero("chgrp", self.group.name, dest_arg)
 
         chmod_perms = f"{stat.S_IMODE(self.permissions.to_mode()):o}".zfill(4)
-        await session._exec_checked_nonzero("chmod", chmod_perms, str(dest))
+        await session._exec_checked_nonzero("chmod", chmod_perms, dest_arg)
 
     @abc.abstractmethod
     async def apply(

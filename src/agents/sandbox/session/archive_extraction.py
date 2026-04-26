@@ -7,12 +7,12 @@ import tempfile
 import zipfile
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal, cast
 
 from ..errors import ExecNonZeroError, WorkspaceArchiveWriteError
 from ..files import EntryKind, FileEntry
-from ..util.tar_utils import UnsafeTarMemberError, safe_tar_member_rel_path
+from ..util.tar_utils import UnsafeTarMemberError, safe_tar_member_rel_path, validate_tarfile
 
 
 class UnsafeZipMemberError(ValueError):
@@ -46,6 +46,7 @@ class WorkspaceArchiveExtractor:
         child_entry_cache: dict[Path, dict[str, EntryKind]] = {}
         try:
             with tarfile.open(fileobj=data, mode="r:*") as archive:
+                validate_tarfile(archive, allow_symlinks=False)
                 for member in archive.getmembers():
                     rel_path = safe_tar_member_rel_path(member)
                     if rel_path is None:
@@ -112,6 +113,7 @@ class WorkspaceArchiveExtractor:
         try:
             with zipfile_compatible_stream(data) as zip_data:
                 with zipfile.ZipFile(zip_data) as archive:
+                    validate_zipfile(archive)
                     for member in archive.infolist():
                         rel_path = safe_zip_member_rel_path(member)
                         if rel_path is None:
@@ -281,6 +283,12 @@ def safe_zip_member_rel_path(member: zipfile.ZipInfo) -> Path | None:
     if member.filename in ("", ".", "./"):
         return None
 
+    windows_path = PureWindowsPath(member.filename)
+    if windows_path.drive:
+        raise UnsafeZipMemberError(member=member.filename, reason="windows drive path")
+    if "\\" in member.filename:
+        raise UnsafeZipMemberError(member=member.filename, reason="windows path separator")
+
     rel = PurePosixPath(member.filename)
     if rel.is_absolute():
         raise UnsafeZipMemberError(member=member.filename, reason="absolute path")
@@ -292,6 +300,36 @@ def safe_zip_member_rel_path(member: zipfile.ZipInfo) -> Path | None:
         raise UnsafeZipMemberError(member=member.filename, reason="link member not allowed")
 
     return Path(*rel.parts)
+
+
+def validate_zipfile(archive: zipfile.ZipFile) -> None:
+    members_by_rel_path: dict[Path, zipfile.ZipInfo] = {}
+    members: list[tuple[zipfile.ZipInfo, Path]] = []
+
+    for member in archive.infolist():
+        rel_path = safe_zip_member_rel_path(member)
+        if rel_path is None:
+            continue
+
+        previous = members_by_rel_path.get(rel_path)
+        if previous is not None and not (previous.is_dir() and member.is_dir()):
+            raise UnsafeZipMemberError(
+                member=member.filename,
+                reason=f"duplicate archive path: {rel_path.as_posix()}",
+            )
+        members_by_rel_path[rel_path] = member
+        members.append((member, rel_path))
+
+    for member, rel_path in members:
+        for parent in rel_path.parents:
+            if parent == Path():
+                break
+            parent_member = members_by_rel_path.get(parent)
+            if parent_member is not None and not parent_member.is_dir():
+                raise UnsafeZipMemberError(
+                    member=member.filename,
+                    reason=f"archive path descends through non-directory: {parent.as_posix()}",
+                )
 
 
 class _ZipFileStreamAdapter(io.IOBase):

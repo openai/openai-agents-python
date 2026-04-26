@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import sys
 import tempfile
 import time
 import urllib.request
@@ -23,6 +24,11 @@ from docker.errors import DockerException  # type: ignore[import-untyped]
 # Skip tests if dependencies are not available
 pytest.importorskip("dapr")  # Skip tests if Dapr is not installed
 pytest.importorskip("testcontainers")  # Skip if testcontainers is not installed
+if sys.platform == "win32":
+    pytest.skip(
+        "Dapr Docker integration tests are not supported on Windows",
+        allow_module_level=True,
+    )
 if shutil.which("docker") is None:
     pytest.skip(
         "Docker executable is not available; skipping Dapr integration tests",

@@ -158,6 +158,23 @@ def test_snapshot_exclude_unset_preserves_type_discriminator() -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_local_snapshot_restorable_requires_file(tmp_path: Path) -> None:
+    snapshot = LocalSnapshot(id="local-snapshot", base_path=tmp_path)
+    snapshot_path = tmp_path / "local-snapshot.tar"
+
+    assert await snapshot.restorable() is False
+
+    snapshot_path.mkdir()
+
+    assert await snapshot.restorable() is False
+
+    snapshot_path.rmdir()
+    snapshot_path.write_bytes(b"workspace")
+
+    assert await snapshot.restorable() is True
+
+
 def test_snapshot_parse_uses_registered_custom_snapshot_type() -> None:
     parsed = SnapshotBase.parse({"type": "test-noop", "id": "registered"})
 

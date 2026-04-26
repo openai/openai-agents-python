@@ -1,3 +1,11 @@
+import sys
+
+if sys.platform == "win32":  # pragma: no cover
+    raise ImportError(
+        "UnixLocalSandbox is not supported on Windows. "
+        "Use DockerSandboxClient or another sandbox backend."
+    )
+
 import asyncio
 import errno
 import fcntl
@@ -7,7 +15,6 @@ import os
 import shlex
 import shutil
 import signal
-import sys
 import tarfile
 import tempfile
 import termios

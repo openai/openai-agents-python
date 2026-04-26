@@ -134,6 +134,28 @@ def _zip_bytes(*, members: dict[str, bytes]) -> io.BytesIO:
     return buf
 
 
+async def _assert_extract_rejects_member(
+    tmp_path: Path,
+    archive_name: str,
+    data: io.IOBase,
+    *,
+    expected_member: str,
+    expected_reason: str,
+) -> Path:
+    session = _build_session(tmp_path)
+    await session.start()
+    try:
+        workspace = Path(session.state.manifest.root)
+        with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+            await session.extract(archive_name, data)
+
+        assert exc_info.value.context["member"] == expected_member
+        assert exc_info.value.context["reason"] == expected_reason
+        return workspace
+    finally:
+        await session.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_extract_tar_writes_archive_and_unpacks_contents(tmp_path: Path) -> None:
     session = _build_session(tmp_path)
@@ -298,6 +320,86 @@ async def test_extract_zip_rejects_symlinked_parent_paths(tmp_path: Path) -> Non
         assert not (outside / "hello.txt").exists()
     finally:
         await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_extract_tar_rejects_windows_drive_member_paths(tmp_path: Path) -> None:
+    await _assert_extract_rejects_member(
+        tmp_path,
+        "bundle.tar",
+        _tar_bytes(members={"C:/tmp/evil.txt": b"evil"}),
+        expected_member="C:/tmp/evil.txt",
+        expected_reason="windows drive path",
+    )
+
+
+@pytest.mark.asyncio
+async def test_extract_zip_rejects_windows_drive_member_paths(tmp_path: Path) -> None:
+    await _assert_extract_rejects_member(
+        tmp_path,
+        "bundle.zip",
+        _zip_bytes(members={r"C:\tmp\evil.txt": b"evil"}),
+        expected_member=r"C:\tmp\evil.txt",
+        expected_reason="windows drive path",
+    )
+
+
+@pytest.mark.asyncio
+async def test_extract_tar_rejects_windows_separator_member_paths(tmp_path: Path) -> None:
+    await _assert_extract_rejects_member(
+        tmp_path,
+        "bundle.tar",
+        _tar_bytes(members={r"..\evil.txt": b"evil"}),
+        expected_member=r"..\evil.txt",
+        expected_reason="windows path separator",
+    )
+
+
+@pytest.mark.asyncio
+async def test_extract_zip_rejects_windows_separator_member_paths(tmp_path: Path) -> None:
+    await _assert_extract_rejects_member(
+        tmp_path,
+        "bundle.zip",
+        _zip_bytes(members={r"\evil.txt": b"evil"}),
+        expected_member=r"\evil.txt",
+        expected_reason="windows path separator",
+    )
+
+
+@pytest.mark.asyncio
+async def test_extract_tar_rejects_member_under_non_directory_member(tmp_path: Path) -> None:
+    workspace = await _assert_extract_rejects_member(
+        tmp_path,
+        "bundle.tar",
+        _tar_bytes(
+            members={
+                "nested/hello.txt": b"hello from tar",
+                "nested": b"not a directory",
+            }
+        ),
+        expected_member="nested/hello.txt",
+        expected_reason="archive path descends through non-directory: nested",
+    )
+
+    assert not (workspace / "nested").exists()
+
+
+@pytest.mark.asyncio
+async def test_extract_zip_rejects_member_under_non_directory_member(tmp_path: Path) -> None:
+    workspace = await _assert_extract_rejects_member(
+        tmp_path,
+        "bundle.zip",
+        _zip_bytes(
+            members={
+                "nested/hello.txt": b"hello from zip",
+                "nested": b"not a directory",
+            }
+        ),
+        expected_member="nested/hello.txt",
+        expected_reason="archive path descends through non-directory: nested",
+    )
+
+    assert not (workspace / "nested").exists()
 
 
 @pytest.mark.asyncio

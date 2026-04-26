@@ -126,7 +126,7 @@ def _assert_e2b_session(session: BaseSandboxSession) -> None:
 
 
 class E2BCloudBucketMountStrategy(MountStrategyBase):
-    """Mount cloud buckets in E2B sandboxes via rclone."""
+    """Mount rclone-backed cloud storage in E2B sandboxes."""
 
     type: Literal["e2b_cloud_bucket"] = "e2b_cloud_bucket"
     pattern: RcloneMountPattern = RcloneMountPattern(mode="fuse")

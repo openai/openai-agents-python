@@ -117,9 +117,14 @@ class _FakeProcess:
         self._pty_handles: dict[str, _FakePtyHandle] = {}
         self.create_pty_session_error: BaseException | None = None
         self.symlinks: dict[str, str] = {}
+        self.workspace_roots: set[str] = set()
+        self.require_workspace_root_for_cd = False
 
     async def exec(self, cmd: str, **kwargs: object) -> _FakeExecResult:
         self.exec_calls.append((cmd, dict(kwargs)))
+        parts = shlex.split(cmd)
+        if len(parts) >= 4 and parts[:3] == ["mkdir", "-p", "--"]:
+            self.workspace_roots.add(parts[3])
         if "sleep 0.5" in cmd:
             await asyncio.sleep(0.5)
         result = self.next_result
@@ -150,6 +155,21 @@ class _FakeProcess:
     ) -> object:
         self.execute_session_command_calls.append((session_id, request, dict(kwargs)))
         command = cast(str, getattr(request, "command", ""))
+        parts = shlex.split(command)
+        if (
+            self.require_workspace_root_for_cd
+            and len(parts) >= 3
+            and parts[0] == "cd"
+            and parts[2] == "&&"
+            and parts[1] not in self.workspace_roots
+        ):
+            return types.SimpleNamespace(
+                cmd_id="cmd-123",
+                exit_code=1,
+                stdout="",
+                stderr=f"cd: no such file or directory: {parts[1]}",
+                output=f"cd: no such file or directory: {parts[1]}",
+            )
         resolved = resolve_fake_workspace_path(
             command,
             symlinks=self.symlinks,
@@ -389,7 +409,7 @@ class _RecordingMount(Mount):
             ) -> list[MaterializedFile]:
                 _ = (strategy, session, base_dir)
                 path = mount._resolve_mount_path(session, dest)
-                mount._events.append(("mount", str(path)))
+                mount._events.append(("mount", path.as_posix()))
                 mount._mounted_paths.append(path)
                 return []
 
@@ -402,7 +422,7 @@ class _RecordingMount(Mount):
             ) -> None:
                 _ = (strategy, session, base_dir)
                 path = mount._resolve_mount_path(session, dest)
-                mount._events.append(("unmount", str(path)))
+                mount._events.append(("unmount", path.as_posix()))
                 mount._unmounted_paths.append(path)
 
             async def teardown_for_snapshot(
@@ -412,7 +432,7 @@ class _RecordingMount(Mount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("unmount", str(path)))
+                mount._events.append(("unmount", path.as_posix()))
                 mount._unmounted_paths.append(path)
 
             async def restore_after_snapshot(
@@ -422,19 +442,19 @@ class _RecordingMount(Mount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("mount", str(path)))
+                mount._events.append(("mount", path.as_posix()))
                 mount._mounted_paths.append(path)
 
         return _Adapter(self)
 
     async def mount(self, session: object, path: Path) -> None:
         _ = session
-        self._events.append(("mount", str(path)))
+        self._events.append(("mount", path.as_posix()))
         self._mounted_paths.append(path)
 
     async def unmount_path(self, session: object, path: Path) -> None:
         _ = session
-        self._events.append(("unmount", str(path)))
+        self._events.append(("unmount", path.as_posix()))
         self._unmounted_paths.append(path)
 
 
@@ -467,7 +487,7 @@ class _FailingUnmountMount(_RecordingMount):
             ) -> None:
                 _ = (strategy, session, base_dir)
                 path = mount._resolve_mount_path(session, dest)
-                mount._events.append(("unmount_fail", str(path)))
+                mount._events.append(("unmount_fail", path.as_posix()))
                 raise RuntimeError("boom while unmounting second mount")
 
             async def teardown_for_snapshot(
@@ -477,7 +497,7 @@ class _FailingUnmountMount(_RecordingMount):
                 path: Path,
             ) -> None:
                 _ = (strategy, session)
-                mount._events.append(("unmount_fail", str(path)))
+                mount._events.append(("unmount_fail", path.as_posix()))
                 raise RuntimeError("boom while unmounting second mount")
 
             async def restore_after_snapshot(
@@ -492,7 +512,7 @@ class _FailingUnmountMount(_RecordingMount):
 
     async def unmount_path(self, session: object, path: Path) -> None:
         _ = session
-        self._events.append(("unmount_fail", str(path)))
+        self._events.append(("unmount_fail", path.as_posix()))
         raise RuntimeError("boom while unmounting second mount")
 
 
@@ -510,6 +530,58 @@ class TestDaytonaSandbox:
             session = await client.create(options=daytona_module.DaytonaSandboxClientOptions())
 
         assert session.state.manifest.root == daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT
+
+    @pytest.mark.asyncio
+    async def test_start_prepares_workspace_root_before_runtime_helpers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify Daytona creates the root before exec uses it as cwd."""
+
+        daytona_module = _load_daytona_module(monkeypatch)
+
+        async with daytona_module.DaytonaSandboxClient() as client:
+            session = await client.create(options=daytona_module.DaytonaSandboxClientOptions())
+            sandbox = _FakeAsyncDaytona.current_sandbox
+            assert sandbox is not None
+            sandbox.process.require_workspace_root_for_cd = True
+
+            await session.start()
+
+        root = daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT
+        assert root in sandbox.process.workspace_roots
+        assert sandbox.process.exec_calls[0][0] == f"mkdir -p -- {root}"
+        assert sandbox.process.execute_session_command_calls
+        _session_id, request, _kwargs = sandbox.process.execute_session_command_calls[0]
+        assert cast(str, cast(Any, request).command).startswith(f"cd {root} && ")
+        assert session.state.workspace_root_ready is True
+
+    @pytest.mark.asyncio
+    async def test_start_wraps_workspace_root_prepare_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify Daytona surfaces root preparation failures as start errors."""
+
+        daytona_module = _load_daytona_module(monkeypatch)
+
+        async with daytona_module.DaytonaSandboxClient() as client:
+            session = await client.create(options=daytona_module.DaytonaSandboxClientOptions())
+            sandbox = _FakeAsyncDaytona.current_sandbox
+            assert sandbox is not None
+            sandbox.process.next_result = _FakeExecResult(exit_code=2, result="mkdir failed")
+
+            with pytest.raises(daytona_module.WorkspaceStartError) as exc_info:
+                await session.start()
+
+        assert exc_info.value.context == {
+            "path": daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT,
+            "reason": "workspace_root_nonzero_exit",
+            "exit_code": 2,
+            "output": "mkdir failed",
+        }
+        assert sandbox.process.execute_session_command_calls == []
+        assert session.state.workspace_root_ready is False
 
     @pytest.mark.asyncio
     async def test_create_passes_only_option_env_vars_to_daytona(

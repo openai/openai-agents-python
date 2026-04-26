@@ -17,7 +17,7 @@ from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
 )
-from openai.types.responses.response_output_item import McpCall, McpListTools
+from openai.types.responses.response_output_item import McpCall, McpListTools, ResponseOutputItem
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
@@ -86,6 +86,7 @@ from .agent_bindings import AgentBindings, bind_public_agent
 from .agent_runner_helpers import (
     apply_resumed_conversation_settings,
     attach_usage_to_span,
+    get_unsent_tool_call_ids_for_interrupted_state,
     snapshot_usage,
     usage_delta,
 )
@@ -577,6 +578,7 @@ async def start_streaming(
                 generated_items=run_state._generated_items,
                 model_responses=run_state._model_responses,
                 session_items=session_items,
+                unsent_tool_call_ids=get_unsent_tool_call_ids_for_interrupted_state(run_state),
             )
 
         streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))
@@ -1337,6 +1339,7 @@ async def run_single_turn_streamed(
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
     final_response: ModelResponse | None = None
+    streamed_response_output: list[ResponseOutputItem] = []
 
     if server_conversation_tracker is not None:
         items_for_input = (
@@ -1474,7 +1477,9 @@ async def run_single_turn_streamed(
         streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
         terminal_response: Response | None = None
+        is_completed_event = False
         if isinstance(event, ResponseCompletedEvent):
+            is_completed_event = True
             terminal_response = event.response
         elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
             maybe_response = getattr(event, "response", None)
@@ -1482,6 +1487,11 @@ async def run_single_turn_streamed(
                 terminal_response = maybe_response
 
         if terminal_response is not None:
+            if is_completed_event and not terminal_response.output and streamed_response_output:
+                # Some streaming backends emit output items during item.done events while leaving
+                # the terminal response output empty. Preserve those items so the runner can
+                # resolve the completed step correctly.
+                terminal_response.output = list(streamed_response_output)
             usage = (
                 apply_retry_attempt_usage(
                     Usage(
@@ -1506,6 +1516,7 @@ async def run_single_turn_streamed(
 
         if isinstance(event, ResponseOutputItemDoneEvent):
             output_item = event.item
+            streamed_response_output.append(output_item)
             output_item_type = getattr(output_item, "type", None)
 
             if output_item_type == "tool_search_call":

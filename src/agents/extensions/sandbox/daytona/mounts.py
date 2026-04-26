@@ -4,7 +4,7 @@ Provides ``DaytonaCloudBucketMountStrategy``, a wrapper around the generic
 :class:`InContainerMountStrategy` that ensures ``rclone`` is installed inside
 the sandbox before delegating to :class:`RcloneMountPattern`.
 
-Supports S3, R2, GCS, and Azure Blob mounts through a single code path.
+Supports S3, R2, GCS, Azure Blob, and Box mounts through a single code path.
 """
 
 from __future__ import annotations
@@ -161,12 +161,12 @@ def _assert_daytona_session(session: BaseSandboxSession) -> None:
 
 
 class DaytonaCloudBucketMountStrategy(MountStrategyBase):
-    """Mount cloud buckets in Daytona sandboxes via rclone.
+    """Mount rclone-backed cloud storage in Daytona sandboxes.
 
     Wraps :class:`InContainerMountStrategy` with automatic ``rclone``
-    provisioning.  Use with any provider mount (``S3Mount``, ``R2Mount``,
-    ``GCSMount``, ``AzureBlobMount``) and let the generic framework handle
-    config generation and mount execution.
+    provisioning.  Use with any rclone-backed provider mount (``S3Mount``,
+    ``R2Mount``, ``GCSMount``, ``AzureBlobMount``, ``BoxMount``) and let the
+    generic framework handle config generation and mount execution.
 
     Usage::
 

@@ -29,6 +29,7 @@ _MODEL_CONTEXT_WINDOWS: dict[str, int] = {
             "gpt-5.4-2026-03-05",
             "gpt-5.4-pro",
             "gpt-5.4-pro-2026-03-05",
+            "gpt-5.5",
             "gpt-4.1",
             "gpt-4.1-2025-04-14",
             "gpt-4.1-mini",

@@ -206,6 +206,7 @@ Use this table to pick a starting point before reading the detailed examples bel
 | `AsyncSQLiteSession` | Async SQLite with `aiosqlite` | Extension backend with async driver support |
 | `RedisSession` | Shared memory across workers/services | Good for low-latency distributed deployments |
 | `SQLAlchemySession` | Production apps with existing databases | Works with SQLAlchemy-supported databases |
+| `MongoDBSession` | Apps already using MongoDB or needing multi-process storage | Async pymongo; atomic sequence counter for ordering |
 | `DaprSession` | Cloud-native deployments with Dapr sidecars | Supports multiple state stores plus TTL and consistency controls |
 | `OpenAIConversationsSession` | Server-managed storage in OpenAI | OpenAI Conversations API-backed history |
 | `OpenAIResponsesCompactionSession` | Long conversations with automatic compaction | Wrapper around another session backend |
@@ -416,6 +417,38 @@ Notes:
 -   See [`examples/memory/dapr_session_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/dapr_session_example.py) for a full setup walkthrough, including local components and troubleshooting.
 
 
+### MongoDB sessions
+
+Use `MongoDBSession` for applications that already use MongoDB or need horizontally-scalable, multi-process session storage.
+
+```bash
+pip install openai-agents[mongodb]
+```
+
+```python
+from agents import Agent, Runner
+from agents.extensions.memory import MongoDBSession
+
+agent = Agent(name="Assistant")
+
+# Create from URI — owns the client and closes it when session.close() is called
+session = MongoDBSession.from_uri(
+    "user-123",
+    uri="mongodb://localhost:27017",
+    database="agents",
+)
+result = await Runner.run(agent, "Hello", session=session)
+print(result.final_output)
+await session.close()
+```
+
+Notes:
+
+-   `from_uri(...)` creates and owns the `AsyncMongoClient` and closes it on `session.close()`. If your application already manages a client, construct `MongoDBSession(...)` directly with `client=...`; in that case `session.close()` is a no-op and lifecycle stays with the caller.
+-   Connect to [MongoDB Atlas](https://www.mongodb.com/products/platform) by passing an `mongodb+srv://user:password@cluster.example.mongodb.net` URI to `from_uri(...)` with no other changes.
+-   Two collections are used and both names are configurable via `sessions_collection=` (default `agent_sessions`) and `messages_collection=` (default `agent_messages`). Indexes are created automatically on first use. Each message document carries a monotonically increasing `seq` counter that preserves ordering across concurrent writers and processes.
+-   Use `await session.ping()` to verify connectivity before your first run.
+
 ### Advanced SQLite sessions
 
 Enhanced SQLite sessions with conversation branching, usage analytics, and structured queries:
@@ -488,6 +521,7 @@ Use meaningful session IDs that help you organize conversations:
 -   Use async SQLite (`AsyncSQLiteSession("session_id", db_path="...")`) when you need an `aiosqlite`-based implementation
 -   Use Redis-backed sessions (`RedisSession.from_url("session_id", url="redis://...")`) for shared, low-latency session memory
 -   Use SQLAlchemy-powered sessions (`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) for production systems with existing databases supported by SQLAlchemy
+-   Use MongoDB sessions (`MongoDBSession.from_uri("session_id", uri="mongodb://localhost:27017")`) for applications already using MongoDB or needing multi-process, horizontally-scalable session storage
 -   Use Dapr state store sessions (`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) for production cloud-native deployments with support for 30+ database backends with built-in telemetry, tracing, and data isolation
 -   Use OpenAI-hosted storage (`OpenAIConversationsSession()`) when you prefer to store history in the OpenAI Conversations API
 -   Use encrypted sessions (`EncryptedSession(session_id, underlying_session, encryption_key)`) to wrap any session with transparent encryption and TTL-based expiration
@@ -667,6 +701,7 @@ For detailed API documentation, see:
 -   [`AsyncSQLiteSession`][agents.extensions.memory.async_sqlite_session.AsyncSQLiteSession] - Async SQLite implementation based on `aiosqlite`
 -   [`RedisSession`][agents.extensions.memory.redis_session.RedisSession] - Redis-backed session implementation
 -   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy-powered implementation
+-   [`MongoDBSession`][agents.extensions.memory.mongodb_session.MongoDBSession] - MongoDB-backed session implementation
 -   [`DaprSession`][agents.extensions.memory.dapr_session.DaprSession] - Dapr state store implementation
 -   [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - Enhanced SQLite with branching and analytics
 -   [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - Encrypted wrapper for any session
