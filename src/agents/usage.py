@@ -248,8 +248,12 @@ class Usage:
                     total_tokens=entry.total_tokens,
                     input_tokens_details=entry.input_tokens_details,
                     output_tokens_details=entry.output_tokens_details,
-                    agent_name=agent_name if (agent_name is not None and entry.agent_name is None) else entry.agent_name,
-                    model_name=model_name if (model_name is not None and entry.model_name is None) else entry.model_name,
+                    agent_name=agent_name
+                    if (agent_name is not None and entry.agent_name is None)
+                    else entry.agent_name,
+                    model_name=model_name
+                    if (model_name is not None and entry.model_name is None)
+                    else entry.model_name,
                 )
                 self.request_usage_entries.append(annotated_entry)
 

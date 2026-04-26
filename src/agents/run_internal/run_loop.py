@@ -1640,7 +1640,7 @@ async def run_single_turn_streamed(
     if final_response is not None:
         context_wrapper.usage.add(
             final_response.usage,
-            agent_name=agent.name,
+            agent_name=public_agent.name,
             model_name=_get_model_name(model),
         )
         await asyncio.gather(
@@ -1922,7 +1922,7 @@ async def get_new_response(
 
     context_wrapper.usage.add(
         new_response.usage,
-        agent_name=agent.name,
+        agent_name=public_agent.name,
         model_name=_get_model_name(model),
     )
 
