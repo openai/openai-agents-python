@@ -84,6 +84,44 @@ print(result.final_output)
 
 Explore the [examples](https://github.com/openai/openai-agents-python/tree/main/examples) directory to see the SDK in action, and read our [documentation](https://openai.github.io/openai-agents-python/) for more details.
 
+
+## Frequently Asked Questions
+
+### Which LLM providers are supported?
+
+The SDK is provider-agnostic. While optimized for OpenAI models via the Responses and Chat Completions APIs, it supports 100+ other LLMs through the [any-llm](https://github.com/mozilla-ai/any-llm) and [LiteLLM](https://github.com/BerriAI/litellm) integrations.
+
+### How do I handle rate limits?
+
+The SDK includes built-in retry logic with exponential backoff. You can customize retry behavior via the `RunConfig` by setting `max_retries` and configuring the underlying HTTP client. For high-throughput scenarios, consider implementing request queuing or batching.
+
+### Can I use the SDK without an OpenAI API key?
+
+Yes. If you use a non-OpenAI provider through the any-llm or LiteLLM integration, you only need that provider's API key. Set the appropriate environment variable for your chosen provider.
+
+### How do sandbox agents work?
+
+Sandbox agents (introduced in v0.14.0) run inside a containerized environment with filesystem access. They are ideal for tasks that require inspecting files, running commands, applying patches, or maintaining workspace state across longer operations. Configure the sandbox via `SandboxRunConfig` with your preferred sandbox client.
+
+### What is the difference between agents as tools and handoffs?
+
+**Agents as tools** lets an agent call another agent as a tool — the calling agent retains control and can continue its work after the tool call returns. **Handoffs** transfer full control to another agent, which then becomes responsible for the conversation until it hands back or completes the task. Use tools for subtasks; use handoffs for role transitions.
+
+### How do I debug agent runs?
+
+The SDK includes built-in tracing that records every agent run. View traces in the OpenAI dashboard or export them to your preferred observability platform. Use the `tracing` module to add custom spans and annotations for deeper insight.
+
+### Is the SDK production-ready?
+
+Yes. The SDK is used in production by many organizations. It includes guardrails for input/output validation, human-in-the-loop patterns for critical decisions, and comprehensive observability. Review the [security documentation](https://openai.github.io/openai-agents-python/security/) for best practices.
+
+### Where can I get help?
+
+- **Documentation**: [openai.github.io/openai-agents-python](https://openai.github.io/openai-agents-python/)
+- **Examples**: [examples/](https://github.com/openai/openai-agents-python/tree/main/examples) directory
+- **GitHub Issues**: [Report bugs or request features](https://github.com/openai/openai-agents-python/issues)
+- **Discord**: Join the community for discussions and support
+
 ## Acknowledgements
 
 We'd like to acknowledge the excellent work of the open-source community, especially:
