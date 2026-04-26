@@ -272,15 +272,81 @@ async def test_get_all_function_tools_prefixes_normalized_server_name_collisions
     tool_names = [tool.name for tool in tools]
     assert len(tool_names) == 3
     assert len(set(tool_names)) == 3
-    assert "mcp_foo__create_issue" in tool_names
+    assert "mcp_foo__create_issue" not in tool_names
     assert "mcp_foo_0beec7b5__create_issue" in tool_names
-    assert any(name.startswith("mcp_foo__create_issue_") for name in tool_names)
+    assert sum(name.startswith("mcp_foo__create_issue_") for name in tool_names) == 2
     assert all(len(name) <= 64 for name in tool_names)
     assert all(
         char.isascii() and (char.isalnum() or char in {"_", "-"})
         for name in tool_names
         for char in name
     )
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_prefixes_normalized_tool_collisions_stably():
+    async def public_names_by_original_tool(tool_names: list[str]) -> dict[str, str]:
+        server = FakeMCPServer(server_name="docs")
+        for tool_name in tool_names:
+            server.add_tool(tool_name, {})
+
+        run_context = RunContextWrapper(context=None)
+        agent = Agent(name="test_agent", instructions="Test agent")
+        tools = await MCPUtil.get_all_function_tools(
+            [server],
+            False,
+            run_context,
+            agent,
+            include_server_in_tool_names=True,
+        )
+        return {
+            original_tool.name: public_tool.name
+            for original_tool, public_tool in zip(server.tools, tools, strict=False)
+        }
+
+    first_order = await public_names_by_original_tool(["search", "search!"])
+    reversed_order = await public_names_by_original_tool(["search!", "search"])
+
+    assert first_order == reversed_order
+    assert set(first_order) == {"search", "search!"}
+    assert "mcp_docs__search" not in first_order.values()
+    assert len(set(first_order.values())) == 2
+    assert all(name.startswith("mcp_docs__search_") for name in first_order.values())
+    assert all(len(name) <= 64 for name in first_order.values())
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_prefixes_normalized_server_collisions_stably():
+    async def public_names_by_server(server_names: list[str]) -> dict[str, str]:
+        servers: list[MCPServer] = []
+        for server_name in server_names:
+            server = FakeMCPServer(server_name=server_name)
+            server.add_tool("create_issue", {})
+            servers.append(server)
+
+        run_context = RunContextWrapper(context=None)
+        agent = Agent(name="test_agent", instructions="Test agent")
+        tools = await MCPUtil.get_all_function_tools(
+            servers,
+            False,
+            run_context,
+            agent,
+            include_server_in_tool_names=True,
+        )
+        return {
+            server.name: public_tool.name
+            for server, public_tool in zip(servers, tools, strict=False)
+        }
+
+    first_order = await public_names_by_server(["foo", "foo!"])
+    reversed_order = await public_names_by_server(["foo!", "foo"])
+
+    assert first_order == reversed_order
+    assert set(first_order) == {"foo", "foo!"}
+    assert "mcp_foo__create_issue" not in first_order.values()
+    assert len(set(first_order.values())) == 2
+    assert all(name.startswith("mcp_foo__create_issue_") for name in first_order.values())
+    assert all(len(name) <= 64 for name in first_order.values())
 
 
 @pytest.mark.asyncio

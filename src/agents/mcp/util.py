@@ -6,6 +6,7 @@ import functools
 import hashlib
 import inspect
 import json
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, Union
@@ -56,6 +57,16 @@ if TYPE_CHECKING:
 
 _MCP_FUNCTION_TOOL_NAME_MAX_LENGTH = 64
 _MCP_FUNCTION_TOOL_HASH_LENGTH = 8
+
+
+@dataclass(frozen=True)
+class _PrefixedToolNameCandidate:
+    tool_id: int
+    base_name: str
+    seed: str
+    initial_name: str
+    server_index: int
+    tool_index: int
 
 
 class HttpClientFactory(Protocol):
@@ -219,37 +230,50 @@ class MCPUtil:
         reserved_tool_names: set[str] | None = None,
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
-        tools = []
+        tools: list[Tool] = []
         tool_names: set[str] = set()
-        generated_tool_names: set[str] = set(reserved_tool_names or set())
-        for server_index, server in enumerate(servers):
-            effective_tool_name_override: Callable[[MCPTool], str] | None = None
-            if include_server_in_tool_names:
 
-                def _override_tool_name(
-                    tool: MCPTool,
-                    *,
-                    server: MCPServer = server,
-                    server_index: int = server_index,
-                ) -> str:
-                    public_name = cls._build_prefixed_tool_name(
-                        server.name,
-                        tool.name,
-                        server_index=server_index,
-                        reserved_names=generated_tool_names,
+        if include_server_in_tool_names:
+            server_tool_batches = []
+            for server_index, server in enumerate(servers):
+                listed_tools = await cls._list_tools_with_span(server, run_context, agent)
+                server_tool_batches.append((server_index, server, listed_tools))
+
+            tool_name_overrides = cls._build_prefixed_tool_name_overrides(
+                server_tool_batches,
+                reserved_names=set(reserved_tool_names or set()),
+            )
+
+            def _override_tool_name(tool: MCPTool) -> str:
+                return tool_name_overrides[id(tool)]
+
+            for _, server, mcp_tools in server_tool_batches:
+                function_tools = cls._convert_mcp_tools_to_function_tools(
+                    mcp_tools,
+                    server,
+                    convert_schemas_to_strict,
+                    agent,
+                    failure_error_function=failure_error_function,
+                    tool_name_override=_override_tool_name,
+                )
+                server_tool_names = {tool.name for tool in function_tools}
+                if len(server_tool_names & tool_names) > 0:
+                    raise UserError(
+                        f"Duplicate tool names found across MCP servers: "
+                        f"{server_tool_names & tool_names}"
                     )
-                    generated_tool_names.add(public_name)
-                    return public_name
+                tool_names.update(server_tool_names)
+                tools.extend(function_tools)
 
-                effective_tool_name_override = _override_tool_name
+            return tools
 
+        for server in servers:
             server_tools = await cls.get_function_tools(
                 server,
                 convert_schemas_to_strict,
                 run_context,
                 agent,
                 failure_error_function=failure_error_function,
-                tool_name_override=effective_tool_name_override,
             )
             server_tool_names = {tool.name for tool in server_tools}
             if len(server_tool_names & tool_names) > 0:
@@ -263,6 +287,40 @@ class MCPUtil:
         return tools
 
     @classmethod
+    async def _list_tools_with_span(
+        cls,
+        server: MCPServer,
+        run_context: RunContextWrapper[Any],
+        agent: AgentBase,
+    ) -> list[MCPTool]:
+        with mcp_tools_span(server=server.name) as span:
+            tools = await server.list_tools(run_context, agent)
+            span.span_data.result = [tool.name for tool in tools]
+            return tools
+
+    @classmethod
+    def _convert_mcp_tools_to_function_tools(
+        cls,
+        tools: list[MCPTool],
+        server: MCPServer,
+        convert_schemas_to_strict: bool,
+        agent: AgentBase,
+        failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        tool_name_override: Callable[[MCPTool], str] | None = None,
+    ) -> list[Tool]:
+        return [
+            cls.to_function_tool(
+                tool,
+                server,
+                convert_schemas_to_strict,
+                agent,
+                failure_error_function=failure_error_function,
+                tool_name_override=tool_name_override(tool) if tool_name_override else None,
+            )
+            for tool in tools
+        ]
+
+    @classmethod
     async def get_function_tools(
         cls,
         server: MCPServer,
@@ -272,42 +330,33 @@ class MCPUtil:
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
         include_server_in_tool_names: bool = False,
         tool_name_override: Callable[[MCPTool], str] | None = None,
+        reserved_tool_names: set[str] | None = None,
+        server_index: int = 0,
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
 
-        with mcp_tools_span(server=server.name) as span:
-            tools = await server.list_tools(run_context, agent)
-            span.span_data.result = [tool.name for tool in tools]
+        tools = await cls._list_tools_with_span(server, run_context, agent)
 
         effective_tool_name_override = tool_name_override
         if effective_tool_name_override is None and include_server_in_tool_names:
-            reserved_tool_names: set[str] = set()
+            tool_name_overrides = cls._build_prefixed_tool_name_overrides(
+                [(server_index, server, tools)],
+                reserved_names=set(reserved_tool_names or set()),
+            )
 
             def _override_tool_name(tool: MCPTool) -> str:
-                public_name = cls._build_prefixed_tool_name(
-                    server.name,
-                    tool.name,
-                    server_index=0,
-                    reserved_names=reserved_tool_names,
-                )
-                reserved_tool_names.add(public_name)
-                return public_name
+                return tool_name_overrides[id(tool)]
 
             effective_tool_name_override = _override_tool_name
 
-        return [
-            cls.to_function_tool(
-                tool,
-                server,
-                convert_schemas_to_strict,
-                agent,
-                failure_error_function=failure_error_function,
-                tool_name_override=(
-                    effective_tool_name_override(tool) if effective_tool_name_override else None
-                ),
-            )
-            for tool in tools
-        ]
+        return cls._convert_mcp_tools_to_function_tools(
+            tools,
+            server,
+            convert_schemas_to_strict,
+            agent,
+            failure_error_function=failure_error_function,
+            tool_name_override=effective_tool_name_override,
+        )
 
     @staticmethod
     def _safe_tool_name_part(value: str, fallback: str) -> str:
@@ -332,33 +381,68 @@ class MCPUtil:
         return f"{stem}{suffix}"
 
     @classmethod
-    def _build_prefixed_tool_name(
-        cls,
-        server_name: str,
-        tool_name: str,
-        *,
-        server_index: int,
-        reserved_names: set[str],
-    ) -> str:
+    def _build_prefixed_tool_base_name(cls, server_name: str, tool_name: str) -> str:
         server_part = cls._safe_tool_name_part(server_name, "server")
         tool_part = cls._safe_tool_name_part(tool_name, "tool")
-        base_name = f"mcp_{server_part}__{tool_part}"
-        seed = f"{server_index}\0{server_name}\0{tool_name}"
+        return f"mcp_{server_part}__{tool_part}"
 
-        candidate = cls._shorten_tool_name(base_name, seed)
-        if candidate not in reserved_names:
-            return candidate
+    @classmethod
+    def _build_prefixed_tool_name_overrides(
+        cls,
+        server_tool_batches: list[tuple[int, MCPServer, list[MCPTool]]],
+        *,
+        reserved_names: set[str],
+    ) -> dict[int, str]:
+        base_names = [
+            cls._build_prefixed_tool_base_name(server.name, tool.name)
+            for _, server, tools in server_tool_batches
+            for tool in tools
+        ]
+        base_name_counts = Counter(base_names)
 
-        collision_index = 1
-        while True:
-            candidate = cls._shorten_tool_name(
-                base_name,
-                f"{seed}\0{collision_index}",
-                force_hash=True,
-            )
-            if candidate not in reserved_names:
-                return candidate
-            collision_index += 1
+        candidates: list[_PrefixedToolNameCandidate] = []
+        for server_index, server, tools in server_tool_batches:
+            for tool_index, tool in enumerate(tools):
+                base_name = cls._build_prefixed_tool_base_name(server.name, tool.name)
+                seed = f"{server.name}\0{tool.name}"
+                force_hash = base_name_counts[base_name] > 1 or base_name in reserved_names
+                initial_name = cls._shorten_tool_name(base_name, seed, force_hash=force_hash)
+                candidates.append(
+                    _PrefixedToolNameCandidate(
+                        tool_id=id(tool),
+                        base_name=base_name,
+                        seed=seed,
+                        initial_name=initial_name,
+                        server_index=server_index,
+                        tool_index=tool_index,
+                    )
+                )
+
+        used_names = set(reserved_names)
+        tool_name_overrides: dict[int, str] = {}
+        for candidate in sorted(
+            candidates,
+            key=lambda item: (
+                item.initial_name,
+                item.seed,
+                item.server_index,
+                item.tool_index,
+            ),
+        ):
+            public_name = candidate.initial_name
+            collision_index = 1
+            while public_name in used_names:
+                public_name = cls._shorten_tool_name(
+                    candidate.base_name,
+                    f"{candidate.seed}\0{collision_index}",
+                    force_hash=True,
+                )
+                collision_index += 1
+
+            used_names.add(public_name)
+            tool_name_overrides[candidate.tool_id] = public_name
+
+        return tool_name_overrides
 
     @classmethod
     def to_function_tool(
