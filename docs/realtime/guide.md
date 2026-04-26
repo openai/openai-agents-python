@@ -206,6 +206,18 @@ agent = RealtimeAgent(
 )
 ```
 
+By default, the model generates a follow-up response after each tool's output is sent back. For
+side-effect tools where you do not want the agent to speak again immediately (for example, a tool
+that records analytics or schedules background work), pass `start_response=False`:
+
+```python
+@function_tool(start_response=False)
+def log_analytics(event: str) -> str:
+    """Record an analytics event without prompting the agent to speak again."""
+    record_event(event)
+    return "logged"
+```
+
 ### Tool approvals
 
 Function tools can require human approval before execution. When that happens, the session emits `tool_approval_required` and pauses the tool run until you call `approve_tool_call()` or `reject_tool_call()`.

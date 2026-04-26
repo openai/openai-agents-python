@@ -512,7 +512,7 @@ class RealtimeSession(RealtimeModelListener):
             RealtimeModelSendToolOutput(
                 tool_call=event,
                 output=rejection_message,
-                start_response=True,
+                start_response=bool(getattr(tool, "start_response", True)),
             )
         )
 
@@ -656,7 +656,7 @@ class RealtimeSession(RealtimeModelListener):
                 RealtimeModelSendToolOutput(
                     tool_call=event,
                     output=_serialize_tool_output(result),
-                    start_response=True,
+                    start_response=bool(getattr(func_tool, "start_response", True)),
                 )
             )
 

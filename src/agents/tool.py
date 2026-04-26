@@ -350,6 +350,13 @@ class FunctionTool:
     defer_loading: bool = False
     """Whether the Responses API should hide this tool definition until tool search loads it."""
 
+    start_response: bool = field(default=True, kw_only=True)
+    """Whether the model should automatically generate a follow-up response after this tool's
+    output is sent back. Currently only honored by Realtime sessions. Set to False when a tool
+    completes a side-effect (e.g. updates external state, logs telemetry, schedules background
+    work) and you do not want the agent to immediately speak again afterwards. Defaults to True
+    to preserve existing behavior."""
+
     _failure_error_function: ToolErrorFunction | None = field(
         default=None,
         kw_only=True,
@@ -488,6 +495,7 @@ def _build_wrapped_function_tool(
     timeout_behavior: ToolTimeoutBehavior = "error_as_result",
     timeout_error_function: ToolErrorFunction | None = None,
     defer_loading: bool = False,
+    start_response: bool = True,
     sync_invoker: bool = False,
     mcp_title: str | None = None,
     tool_origin: ToolOrigin | None = None,
@@ -515,6 +523,7 @@ def _build_wrapped_function_tool(
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
             defer_loading=defer_loading,
+            start_response=start_response,
             _mcp_title=mcp_title,
             _tool_origin=tool_origin,
         ),
@@ -1694,6 +1703,7 @@ def function_tool(
     timeout_behavior: ToolTimeoutBehavior = "error_as_result",
     timeout_error_function: ToolErrorFunction | None = None,
     defer_loading: bool = False,
+    start_response: bool = True,
 ) -> FunctionTool:
     """Overload for usage as @function_tool (no parentheses)."""
     ...
@@ -1717,6 +1727,7 @@ def function_tool(
     timeout_behavior: ToolTimeoutBehavior = "error_as_result",
     timeout_error_function: ToolErrorFunction | None = None,
     defer_loading: bool = False,
+    start_response: bool = True,
 ) -> Callable[[ToolFunction[...]], FunctionTool]:
     """Overload for usage as @function_tool(...)."""
     ...
@@ -1740,6 +1751,7 @@ def function_tool(
     timeout_behavior: ToolTimeoutBehavior = "error_as_result",
     timeout_error_function: ToolErrorFunction | None = None,
     defer_loading: bool = False,
+    start_response: bool = True,
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
     """
     Decorator to create a FunctionTool from a function. By default, we will:
@@ -1785,6 +1797,10 @@ def function_tool(
             timeout_behavior="error_as_result".
         defer_loading: Whether to hide this tool definition until Responses API tool search
             explicitly loads it.
+        start_response: Whether the model should automatically generate a follow-up response
+            after this tool's output is sent back. Currently only honored by Realtime sessions.
+            Set to False when a tool completes a side-effect and you do not want the agent to
+            speak again immediately afterwards. Defaults to True.
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
@@ -1855,6 +1871,7 @@ def function_tool(
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
             defer_loading=defer_loading,
+            start_response=start_response,
             sync_invoker=is_sync_function_tool,
         )
         return function_tool

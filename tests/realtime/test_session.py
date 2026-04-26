@@ -315,6 +315,7 @@ def _set_default_timeout_fields(tool: Mock) -> Mock:
     tool.timeout_seconds = None
     tool.timeout_behavior = "error_as_result"
     tool.timeout_error_function = None
+    tool.start_response = True
     return tool
 
 
@@ -1548,6 +1549,58 @@ class TestToolCallExecution:
         # Verify result
         sent_call, sent_output, _ = mock_model.sent_tool_outputs[0]
         assert sent_output == "result2"
+
+    @pytest.mark.asyncio
+    async def test_function_tool_start_response_false_skips_response_create(
+        self, mock_model, mock_agent
+    ):
+        """A FunctionTool with start_response=False should propagate False to the transport.
+
+        The realtime transport already honors RealtimeModelSendToolOutput.start_response.
+        Tool authors should be able to opt out of the automatic response.create at the
+        FunctionTool level, e.g. for side-effect tools that do not need the agent to
+        speak again immediately afterwards.
+        """
+        silent_tool = _set_default_timeout_fields(Mock(spec=FunctionTool))
+        silent_tool.name = "silent_tool"
+        silent_tool.on_invoke_tool = AsyncMock(return_value="logged")
+        silent_tool.needs_approval = False
+        silent_tool.start_response = False
+        mock_agent.get_all_tools.return_value = [silent_tool]
+
+        session = RealtimeSession(mock_model, mock_agent, None)
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="silent_tool", call_id="call_silent", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+
+        assert len(mock_model.sent_tool_outputs) == 1
+        _sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_output == "logged"
+        assert start_response is False
+
+    @pytest.mark.asyncio
+    async def test_function_tool_default_start_response_remains_true(
+        self, mock_model, mock_agent, mock_function_tool
+    ):
+        """Tools without an explicit start_response continue to trigger response.create.
+
+        Backward compatibility check: existing tools (default start_response=True) must
+        keep auto-triggering the model's follow-up response after their output is sent.
+        """
+        mock_agent.get_all_tools.return_value = [mock_function_tool]
+
+        session = RealtimeSession(mock_model, mock_agent, None)
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_default", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+
+        assert len(mock_model.sent_tool_outputs) == 1
+        _sent_call, _sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert start_response is True
 
 
 class TestGuardrailFunctionality:

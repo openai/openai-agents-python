@@ -951,3 +951,48 @@ def test_function_tool_timeout_error_function_must_be_callable() -> None:
             on_invoke_tool=_noop_on_invoke_tool,
             timeout_error_function=cast(Any, "not-callable"),
         )
+
+
+def test_function_tool_start_response_defaults_to_true() -> None:
+    """FunctionTool should default `start_response` to True for backward compatibility."""
+    tool = FunctionTool(
+        name="default_start_response",
+        description="default",
+        params_json_schema={},
+        on_invoke_tool=_noop_on_invoke_tool,
+    )
+    assert tool.start_response is True
+
+
+def test_function_tool_start_response_can_be_set_to_false() -> None:
+    """FunctionTool should accept `start_response=False` as a kw-only field."""
+    tool = FunctionTool(
+        name="silent_tool",
+        description="no follow-up response",
+        params_json_schema={},
+        on_invoke_tool=_noop_on_invoke_tool,
+        start_response=False,
+    )
+    assert tool.start_response is False
+
+
+def test_function_tool_decorator_threads_start_response() -> None:
+    """The @function_tool(start_response=False) kwarg should reach the produced FunctionTool."""
+
+    @function_tool(start_response=False)
+    def silent_side_effect_tool() -> str:
+        """Run a side effect and stay silent afterwards."""
+        return "logged"
+
+    assert silent_side_effect_tool.start_response is False
+
+
+def test_function_tool_decorator_default_start_response_is_true() -> None:
+    """Plain @function_tool usage keeps the existing auto-response behavior."""
+
+    @function_tool
+    def speaking_tool() -> str:
+        """Tool that should still auto-trigger a follow-up response by default."""
+        return "ok"
+
+    assert speaking_tool.start_response is True
