@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import pytest
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 
 from agents import Agent, Runner
-from agents.stream_events import ReasoningDeltaEvent, RawResponsesStreamEvent
-
-from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
+from agents.stream_events import RawResponsesStreamEvent, ReasoningDeltaEvent
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
@@ -25,10 +24,12 @@ def _make_reasoning_item(text: str) -> ResponseReasoningItem:
 async def test_reasoning_delta_event_emitted_during_streaming() -> None:
     """ReasoningDeltaEvent is emitted when the model streams a reasoning summary delta."""
     model = FakeModel()
-    model.set_next_output([
-        _make_reasoning_item("Let me think..."),
-        get_text_message("Answer"),
-    ])
+    model.set_next_output(
+        [
+            _make_reasoning_item("Let me think..."),
+            get_text_message("Answer"),
+        ]
+    )
 
     agent = Agent(name="A", model=model)
     result = Runner.run_streamed(agent, input="hi")
@@ -48,10 +49,12 @@ async def test_reasoning_delta_event_emitted_during_streaming() -> None:
 async def test_reasoning_delta_snapshot_accumulates() -> None:
     """The snapshot field grows monotonically across delta events."""
     model = FakeModel()
-    model.set_next_output([
-        _make_reasoning_item("Hello world"),
-        get_text_message("done"),
-    ])
+    model.set_next_output(
+        [
+            _make_reasoning_item("Hello world"),
+            get_text_message("done"),
+        ]
+    )
 
     agent = Agent(name="A", model=model)
     result = Runner.run_streamed(agent, input="hi")
@@ -99,10 +102,12 @@ async def test_no_reasoning_delta_event_without_reasoning() -> None:
 async def test_reasoning_delta_event_type_field() -> None:
     """ReasoningDeltaEvent.type is always 'reasoning_delta'."""
     model = FakeModel()
-    model.set_next_output([
-        _make_reasoning_item("some reasoning"),
-        get_text_message("answer"),
-    ])
+    model.set_next_output(
+        [
+            _make_reasoning_item("some reasoning"),
+            get_text_message("answer"),
+        ]
+    )
 
     agent = Agent(name="A", model=model)
     result = Runner.run_streamed(agent, input="hi")
@@ -120,10 +125,12 @@ async def test_reasoning_delta_event_type_field() -> None:
 async def test_raw_response_events_still_emitted_alongside_reasoning_delta() -> None:
     """RawResponsesStreamEvent is still emitted even when ReasoningDeltaEvent is also emitted."""
     model = FakeModel()
-    model.set_next_output([
-        _make_reasoning_item("thinking"),
-        get_text_message("result"),
-    ])
+    model.set_next_output(
+        [
+            _make_reasoning_item("thinking"),
+            get_text_message("result"),
+        ]
+    )
 
     agent = Agent(name="A", model=model)
     result = Runner.run_streamed(agent, input="hi")
@@ -146,6 +153,7 @@ async def test_raw_response_events_still_emitted_alongside_reasoning_delta() -> 
 async def test_reasoning_delta_event_importable_from_agents() -> None:
     """ReasoningDeltaEvent can be imported directly from the agents package."""
     from agents import ReasoningDeltaEvent as RDE
+
     assert RDE is ReasoningDeltaEvent
 
 

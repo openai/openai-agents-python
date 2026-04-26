@@ -367,6 +367,7 @@ async def test_complete_streaming_events():
 
     # Event 6: ReasoningDeltaEvent (emitted alongside the raw delta)
     from agents.stream_events import ReasoningDeltaEvent
+
     assert events[6].type == "reasoning_delta"
     assert isinstance(events[6], ReasoningDeltaEvent)
 
