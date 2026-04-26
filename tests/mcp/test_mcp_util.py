@@ -9,7 +9,7 @@ from inline_snapshot import snapshot
 from mcp.types import CallToolResult, ImageContent, TextContent, Tool as MCPTool
 from pydantic import BaseModel, TypeAdapter
 
-from agents import Agent, FunctionTool, RunContextWrapper, default_tool_error_function
+from agents import Agent, FunctionTool, RunContextWrapper, default_tool_error_function, handoff
 from agents.exceptions import (
     AgentsException,
     MCPToolCancellationError,
@@ -311,6 +311,39 @@ async def test_get_all_function_tools_reserves_existing_tool_names_when_prefixin
         context=None,
         tool_name=tool.name,
         tool_call_id="call_reserved_name",
+        tool_arguments="{}",
+    )
+    await tool.on_invoke_tool(tool_context, "{}")
+    assert server.tool_calls == ["search"]
+
+
+@pytest.mark.asyncio
+async def test_agent_get_mcp_tools_reserves_handoff_tool_names_when_prefixing():
+    server = FakeMCPServer(server_name="calendar")
+    server.add_tool("search", {})
+
+    handoff_agent = Agent(name="calendar_agent", instructions="Calendar agent")
+    agent = Agent(
+        name="test_agent",
+        instructions="Test agent",
+        handoffs=[handoff(handoff_agent, tool_name_override="mcp_calendar__search")],
+        mcp_servers=[server],
+        mcp_config={"include_server_in_tool_names": True},
+    )
+
+    tools = await agent.get_mcp_tools(RunContextWrapper(context=None))
+
+    assert len(tools) == 1
+    tool = tools[0]
+    assert isinstance(tool, FunctionTool)
+    assert tool.name != "mcp_calendar__search"
+    assert tool.name.startswith("mcp_calendar__search_")
+    assert len(tool.name) <= 64
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name=tool.name,
+        tool_call_id="call_handoff_reserved_name",
         tool_arguments="{}",
     )
     await tool.on_invoke_tool(tool_context, "{}")

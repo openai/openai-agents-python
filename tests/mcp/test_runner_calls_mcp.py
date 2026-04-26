@@ -12,6 +12,7 @@ from agents import (
     Runner,
     UserError,
     default_tool_error_function,
+    handoff,
 )
 from agents.exceptions import AgentsException
 
@@ -254,6 +255,49 @@ async def test_runner_prefixed_mcp_tool_names_do_not_collide_with_agent_tools(st
     assert local_tool_calls == []
     assert server1.tool_calls == []
     assert server2.tool_calls == ["search"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_runner_prefixed_mcp_tool_names_do_not_collide_with_handoffs(streaming: bool):
+    server = FakeMCPServer(server_name="calendar")
+    server.add_tool("search", {})
+
+    target_model = FakeModel()
+    target_agent = Agent(name="calendar_agent", model=target_model)
+    target_model.add_multiple_turn_outputs([[get_text_message("handoff target")]])
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        handoffs=[handoff(target_agent, tool_name_override="mcp_calendar__search")],
+        mcp_servers=[server],
+        mcp_config={"include_server_in_tool_names": True},
+    )
+
+    mcp_tools = await agent.get_mcp_tools(RunContextWrapper(context=None))
+    assert len(mcp_tools) == 1
+    calendar_search_tool_name = mcp_tools[0].name
+    assert calendar_search_tool_name != "mcp_calendar__search"
+    assert calendar_search_tool_name.startswith("mcp_calendar__search_")
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_text_message("a_message"), get_function_tool_call(calendar_search_tool_name, "")],
+            [get_text_message("done")],
+        ]
+    )
+
+    if streaming:
+        result = Runner.run_streamed(agent, input="user_message")
+        async for _ in result.stream_events():
+            pass
+    else:
+        await Runner.run(agent, input="user_message")
+
+    assert server.tool_calls == ["search"]
+    assert target_model.first_turn_args is None
 
 
 class Foo(BaseModel):
