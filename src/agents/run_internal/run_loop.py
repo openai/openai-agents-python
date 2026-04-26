@@ -19,14 +19,14 @@ from openai.types.responses import (
     ResponseOutputItemDoneEvent,
 )
 from openai.types.responses.response_output_item import McpCall, McpListTools, ResponseOutputItem
+from openai.types.responses.response_prompt_param import ResponsePromptParam
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from openai.types.responses.response_reasoning_summary_text_delta_event import (
     ResponseReasoningSummaryTextDeltaEvent,
 )
 from openai.types.responses.response_reasoning_text_delta_event import (
     ResponseReasoningTextDeltaEvent,
 )
-from openai.types.responses.response_prompt_param import ResponsePromptParam
-from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from .._mcp_tool_metadata import collect_mcp_list_tools_metadata
 from .._tool_identity import (
