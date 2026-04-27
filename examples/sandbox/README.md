@@ -22,6 +22,7 @@ in your shell environment.
 | [`memory_s3.py`](./memory_s3.py) | `source ~/.s3.env && uv run python examples/sandbox/memory_s3.py` | Runs sandbox memory across two fresh Docker sandboxes with S3-backed memory storage. |
 | [`memory_multi_agent_multiturn.py`](./memory_multi_agent_multiturn.py) | `uv run python examples/sandbox/memory_multi_agent_multiturn.py` | Shows separate memory layouts for two agents sharing one sandbox workspace. |
 | [`unix_local_pty.py`](./unix_local_pty.py) | `uv run python examples/sandbox/unix_local_pty.py` | Exercises an interactive pseudo-terminal in a Unix-local sandbox. |
+| [`unix_local_pty_multiturn.py`](./unix_local_pty_multiturn.py) | `uv run python examples/sandbox/unix_local_pty_multiturn.py` | Reuses one live Unix-local sandbox session across two agent turns. |
 | [`unix_local_runner.py`](./unix_local_runner.py) | `uv run python examples/sandbox/unix_local_runner.py` | Runs against the Unix-local sandbox backend directly. |
 
 ## Cloud backend examples
