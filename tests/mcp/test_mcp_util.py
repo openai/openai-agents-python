@@ -36,6 +36,61 @@ def _convertible_schema() -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+async def test_get_all_function_tools_duplicate_names_are_prefixed():
+    """Duplicate tool names across MCP servers should be renamed with a server prefix rather
+    than raising an error, so that all tools remain reachable.
+    """
+    server1 = FakeMCPServer(server_name="serverA")
+    server1.add_tool("run", {})
+    server1.add_tool("unique_a", {})
+
+    server2 = FakeMCPServer(server_name="serverB")
+    server2.add_tool("run", {})
+    server2.add_tool("unique_b", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
+    tools = await MCPUtil.get_all_function_tools([server1, server2], False, run_context, agent)
+    assert len(tools) == 4
+
+    tool_names = {tool.name for tool in tools}
+    # The conflicting "run" tools should be renamed; unique tools remain unchanged.
+    assert "serverA_run" in tool_names
+    assert "serverB_run" in tool_names
+    assert "unique_a" in tool_names
+    assert "unique_b" in tool_names
+    assert "run" not in tool_names
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_duplicate_invokes_original_tool_name():
+    """When a duplicate tool is renamed, invoking it should still call the server with the
+    original (un-prefixed) tool name.
+    """
+    server1 = FakeMCPServer(server_name="serverA")
+    server1.add_tool("run", {})
+
+    server2 = FakeMCPServer(server_name="serverB")
+    server2.add_tool("run", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
+    tools = await MCPUtil.get_all_function_tools([server1, server2], False, run_context, agent)
+
+    from agents.tool_context import ToolContext
+
+    serverA_tool = next(t for t in tools if t.name == "serverA_run")
+    ctx = ToolContext(context=None, tool_name="serverA_run", tool_call_id="c1", tool_arguments="{}")
+    await serverA_tool.on_invoke_tool(ctx, "{}")
+
+    # The underlying server should have been called with the original name "run"
+    assert server1.tool_calls == ["run"]
+    assert server2.tool_calls == []
+
+
+@pytest.mark.asyncio
 async def test_get_all_function_tools():
     """Test that the get_all_function_tools function returns all function tools from a list of MCP
     servers.

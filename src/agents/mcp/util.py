@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import functools
 import inspect
 import json
@@ -211,9 +212,14 @@ class MCPUtil:
         agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     ) -> list[Tool]:
-        """Get all function tools from a list of MCP servers."""
-        tools = []
-        tool_names: set[str] = set()
+        """Get all function tools from a list of MCP servers.
+
+        When multiple servers expose tools with the same name, the conflicting tools are
+        automatically renamed to ``{server_name}_{tool_name}`` so that all tools remain
+        uniquely identifiable.  A warning is logged for every renamed tool.
+        """
+        # Collect tools per server first so we can detect cross-server name collisions.
+        per_server: list[tuple[MCPServer, list[Tool]]] = []
         for server in servers:
             server_tools = await cls.get_function_tools(
                 server,
@@ -222,14 +228,26 @@ class MCPUtil:
                 agent,
                 failure_error_function=failure_error_function,
             )
-            server_tool_names = {tool.name for tool in server_tools}
-            if len(server_tool_names & tool_names) > 0:
-                raise UserError(
-                    f"Duplicate tool names found across MCP servers: "
-                    f"{server_tool_names & tool_names}"
-                )
-            tool_names.update(server_tool_names)
-            tools.extend(server_tools)
+            per_server.append((server, server_tools))
+
+        # Determine which tool names appear in more than one server.
+        name_counts: dict[str, int] = {}
+        for _server, server_tools in per_server:
+            for tool in server_tools:
+                name_counts[tool.name] = name_counts.get(tool.name, 0) + 1
+        duplicate_names = {name for name, count in name_counts.items() if count > 1}
+
+        tools: list[Tool] = []
+        for server, server_tools in per_server:
+            for tool in server_tools:
+                if tool.name in duplicate_names:
+                    prefixed_name = f"{server.name}_{tool.name}"
+                    logger.warning(
+                        f"Duplicate tool name '{tool.name}' found across MCP servers. "
+                        f"Renaming to '{prefixed_name}' for server '{server.name}'."
+                    )
+                    tool = dataclasses.replace(tool, name=prefixed_name)
+                tools.append(tool)
 
         return tools
 
