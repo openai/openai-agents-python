@@ -91,6 +91,37 @@ async def test_get_all_function_tools_duplicate_invokes_original_tool_name():
 
 
 @pytest.mark.asyncio
+async def test_get_all_function_tools_post_rename_collision_raises():
+    """When prefixing still produces a collision, a UserError should be raised.
+
+    Concretely: server "A" has tool "B_C" and server "A_B" has tool "C".
+    A third server exposes both "B_C" and "C" so that both names are in the
+    duplicate set and get prefixed:
+      server "A"   + "B_C" → "A_B_C"
+      server "A_B" + "C"   → "A_B_C"   ← collision → must raise UserError
+    """
+    from agents.exceptions import UserError
+
+    server1 = FakeMCPServer(server_name="A")
+    server1.add_tool("B_C", {})
+
+    server2 = FakeMCPServer(server_name="A_B")
+    server2.add_tool("C", {})
+
+    # A third server exposes both names, making both "B_C" and "C" duplicates
+    # that will receive the prefix treatment.
+    server3 = FakeMCPServer(server_name="extra")
+    server3.add_tool("B_C", {})
+    server3.add_tool("C", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
+    with pytest.raises(UserError, match="A_B_C"):
+        await MCPUtil.get_all_function_tools([server1, server2, server3], False, run_context, agent)
+
+
+@pytest.mark.asyncio
 async def test_get_all_function_tools():
     """Test that the get_all_function_tools function returns all function tools from a list of MCP
     servers.

@@ -237,6 +237,25 @@ class MCPUtil:
                 name_counts[tool.name] = name_counts.get(tool.name, 0) + 1
         duplicate_names = {name for name, count in name_counts.items() if count > 1}
 
+        # Compute the final name each tool will receive after any prefix is applied, then
+        # verify the result is still globally unique.  Prefixing can itself introduce
+        # collisions (e.g. server "A" + tool "B_C" and server "A_B" + tool "C" both
+        # produce "A_B_C"), so we must detect that before proceeding.
+        final_name_counts: dict[str, int] = {}
+        for server, server_tools in per_server:
+            for tool in server_tools:
+                final = f"{server.name}_{tool.name}" if tool.name in duplicate_names else tool.name
+                final_name_counts[final] = final_name_counts.get(final, 0) + 1
+
+        post_rename_duplicates = {n for n, c in final_name_counts.items() if c > 1}
+        if post_rename_duplicates:
+            raise UserError(
+                "Tool name collision could not be resolved automatically by prefixing with the "
+                "server name. The following names remain ambiguous after renaming: "
+                f"{sorted(post_rename_duplicates)}. Rename the conflicting MCP tools or servers "
+                "to make all tool names unique."
+            )
+
         tools: list[Tool] = []
         for server, server_tools in per_server:
             for tool in server_tools:
