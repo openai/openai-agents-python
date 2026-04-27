@@ -9,7 +9,7 @@ from inline_snapshot import snapshot
 from mcp.types import CallToolResult, ImageContent, TextContent, Tool as MCPTool
 from pydantic import BaseModel, TypeAdapter
 
-from agents import Agent, FunctionTool, RunContextWrapper, default_tool_error_function
+from agents import Agent, FunctionTool, RunContextWrapper, default_tool_error_function, function_tool
 from agents.exceptions import AgentsException, MCPToolCancellationError, ModelBehaviorError
 from agents.mcp import MCPServer, MCPUtil
 from agents.tool_context import ToolContext
@@ -119,6 +119,33 @@ async def test_get_all_function_tools_post_rename_collision_raises():
 
     with pytest.raises(UserError, match="A_B_C"):
         await MCPUtil.get_all_function_tools([server1, server2, server3], False, run_context, agent)
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_rename_collides_with_agent_tool_raises():
+    """A prefixed MCP tool name that matches an existing agent.tools name must raise UserError.
+
+    Example: two MCP servers both expose "run", so they become "serverA_run".  But the
+    agent already has a local function tool called "serverA_run".  That collision is not
+    detectable from MCP names alone and must be caught via the agent_tool_names check.
+    """
+    from agents.exceptions import UserError
+
+    server1 = FakeMCPServer(server_name="serverA")
+    server1.add_tool("run", {})
+
+    server2 = FakeMCPServer(server_name="serverB")
+    server2.add_tool("run", {})
+
+    @function_tool(name_override="serverA_run")
+    def local_serverA_run() -> str:
+        return "local"
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", tools=[local_serverA_run])
+
+    with pytest.raises(UserError, match="serverA_run"):
+        await MCPUtil.get_all_function_tools([server1, server2], False, run_context, agent)
 
 
 @pytest.mark.asyncio

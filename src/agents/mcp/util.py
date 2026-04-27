@@ -237,10 +237,20 @@ class MCPUtil:
                 name_counts[tool.name] = name_counts.get(tool.name, 0) + 1
         duplicate_names = {name for name, count in name_counts.items() if count > 1}
 
+        # Collect the names already claimed by the agent's non-MCP tools so that we can
+        # detect collisions between a renamed MCP tool and an existing agent tool.
+        agent_tool_names: set[str] = {
+            name
+            for t in agent.tools
+            if isinstance((name := getattr(t, "name", None)), str) and name
+        }
+
         # Compute the final name each tool will receive after any prefix is applied, then
         # verify the result is still globally unique.  Prefixing can itself introduce
         # collisions (e.g. server "A" + tool "B_C" and server "A_B" + tool "C" both
-        # produce "A_B_C"), so we must detect that before proceeding.
+        # produce "A_B_C"), so we must detect that before proceeding.  We also check
+        # against existing agent tool names so that a prefixed MCP tool cannot silently
+        # shadow a locally-defined tool.
         final_name_counts: dict[str, int] = {}
         for server, server_tools in per_server:
             for tool in server_tools:
@@ -248,11 +258,14 @@ class MCPUtil:
                 final_name_counts[final] = final_name_counts.get(final, 0) + 1
 
         post_rename_duplicates = {n for n, c in final_name_counts.items() if c > 1}
-        if post_rename_duplicates:
+        # Also flag any MCP final name that collides with an existing agent tool.
+        agent_collisions = {n for n in final_name_counts if n in agent_tool_names}
+        all_collisions = post_rename_duplicates | agent_collisions
+        if all_collisions:
             raise UserError(
                 "Tool name collision could not be resolved automatically by prefixing with the "
                 "server name. The following names remain ambiguous after renaming: "
-                f"{sorted(post_rename_duplicates)}. Rename the conflicting MCP tools or servers "
+                f"{sorted(all_collisions)}. Rename the conflicting MCP tools or servers "
                 "to make all tool names unique."
             )
 
