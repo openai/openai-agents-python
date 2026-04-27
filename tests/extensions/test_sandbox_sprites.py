@@ -844,3 +844,231 @@ async def test_sprites_platform_context_returns_none_when_file_missing(
     capability = SpritesPlatformContext()
     capability.bind(inner)
     assert await capability.instructions(state.manifest) is None
+
+
+# ---------- 15. SpritesUrlAccess capability ----------
+
+
+@pytest.mark.asyncio
+async def test_sprites_url_access_default_blocks_public(
+    patched_sprites: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agents.extensions.sandbox.sprites import SpritesUrlAccess
+
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=patched_sprites["client"], sprite=sprite)
+
+    capability = SpritesUrlAccess()
+    capability.bind(inner)
+    result = await capability._apply_visibility("public")
+    assert "disabled by application policy" in result
+    # URL setting was NOT touched.
+    assert sprite.update_url_settings_calls == []
+
+
+@pytest.mark.asyncio
+async def test_sprites_url_access_allow_public_calls_update(
+    patched_sprites: dict[str, Any],
+) -> None:
+    from agents.extensions.sandbox.sprites import SpritesUrlAccess
+
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=patched_sprites["client"], sprite=sprite)
+
+    capability = SpritesUrlAccess(allow_public=True)
+    capability.bind(inner)
+    result = await capability._apply_visibility("public")
+    assert "public" in result
+    assert len(sprite.update_url_settings_calls) == 1
+    settings = sprite.update_url_settings_calls[0]
+    assert getattr(settings, "auth", None) == "public"
+
+
+@pytest.mark.asyncio
+async def test_sprites_url_access_sprite_value_works_without_allow_public(
+    patched_sprites: dict[str, Any],
+) -> None:
+    from agents.extensions.sandbox.sprites import SpritesUrlAccess
+
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=patched_sprites["client"], sprite=sprite)
+
+    capability = SpritesUrlAccess(allow_public=False)
+    capability.bind(inner)
+    result = await capability._apply_visibility("sprite")
+    assert "sprite" in result
+    assert len(sprite.update_url_settings_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_sprites_url_access_invalid_value(patched_sprites: dict[str, Any]) -> None:
+    from agents.extensions.sandbox.sprites import SpritesUrlAccess
+
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=patched_sprites["client"], sprite=sprite)
+    capability = SpritesUrlAccess(allow_public=True)
+    capability.bind(inner)
+    result = await capability._apply_visibility("nonsense")
+    assert "must be" in result
+    assert sprite.update_url_settings_calls == []
+
+
+def test_sprites_url_access_tools_omit_or_include_public() -> None:
+    from agents.extensions.sandbox.sprites import SpritesUrlAccess
+
+    cap = SpritesUrlAccess(allow_public=False)
+    tools = cap.tools()
+    assert len(tools) == 1
+    cap_pub = SpritesUrlAccess(allow_public=True)
+    tools_pub = cap_pub.tools()
+    assert len(tools_pub) == 1
+
+
+# ---------- 16. SpritesCheckpoints capability ----------
+
+
+class _FakeCheckpoint:
+    def __init__(self, *, id: str, comment: str = "", create_time: Any = None) -> None:
+        from datetime import datetime, timezone
+
+        self.id = id
+        self.comment = comment
+        self.create_time = create_time or datetime.now(timezone.utc)
+
+
+from dataclasses import dataclass as _dataclass, field as _field  # noqa: E402
+
+
+@_dataclass
+class _CheckpointFakeOps:
+    """Tracks calls + state for the checkpoint stubs attached to a sprite."""
+
+    checkpoints: list[_FakeCheckpoint] = _field(default_factory=list)
+    create_calls: list[str] = _field(default_factory=list)
+    restore_calls: list[str] = _field(default_factory=list)
+    create_messages: list[Any] = _field(default_factory=list)
+    restore_messages: list[Any] = _field(default_factory=list)
+
+
+def _attach_checkpoint_methods(sprite: _FakeSprite) -> _CheckpointFakeOps:
+    """Wire create/list/restore stubs onto ``sprite`` and return the tracking ops."""
+
+    ops = _CheckpointFakeOps()
+
+    def _create(comment: str = "") -> Any:
+        ops.create_calls.append(comment)
+        from datetime import datetime, timedelta, timezone
+
+        latest_time = max(
+            (c.create_time for c in ops.checkpoints), default=datetime.now(timezone.utc)
+        ) + timedelta(seconds=1)
+        ops.checkpoints.append(
+            _FakeCheckpoint(
+                id=f"ckpt-{len(ops.checkpoints) + 1}",
+                comment=comment,
+                create_time=latest_time,
+            )
+        )
+        return iter(ops.create_messages)
+
+    def _list() -> list[_FakeCheckpoint]:
+        return list(ops.checkpoints)
+
+    def _restore(checkpoint_id: str) -> Any:
+        ops.restore_calls.append(checkpoint_id)
+        return iter(ops.restore_messages)
+
+    setattr(sprite, "create_checkpoint", _create)  # noqa: B010
+    setattr(sprite, "list_checkpoints", _list)  # noqa: B010
+    setattr(sprite, "restore_checkpoint", _restore)  # noqa: B010
+    return ops
+
+
+@pytest.mark.asyncio
+async def test_sprites_checkpoints_create_returns_id(patched_sprites: dict[str, Any]) -> None:
+    from agents.extensions.sandbox.sprites import SpritesCheckpoints
+
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    ops = _attach_checkpoint_methods(sprite)
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=patched_sprites["client"], sprite=sprite)
+
+    cap = SpritesCheckpoints()
+    cap.bind(inner)
+    out = await cap._create("before-refactor")
+    assert "id='ckpt-1'" in out
+    assert "before-refactor" in out
+    assert ops.create_calls == ["before-refactor"]
+
+
+@pytest.mark.asyncio
+async def test_sprites_checkpoints_list_renders_rows(patched_sprites: dict[str, Any]) -> None:
+    from agents.extensions.sandbox.sprites import SpritesCheckpoints
+
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    _attach_checkpoint_methods(sprite)
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=patched_sprites["client"], sprite=sprite)
+
+    cap = SpritesCheckpoints()
+    cap.bind(inner)
+    await cap._create("first")
+    await cap._create("second")
+    out = await cap._list()
+    assert "ckpt-1" in out
+    assert "ckpt-2" in out
+
+
+@pytest.mark.asyncio
+async def test_sprites_checkpoints_restore_blocked_by_default(
+    patched_sprites: dict[str, Any],
+) -> None:
+    from agents.extensions.sandbox.sprites import SpritesCheckpoints
+
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    ops = _attach_checkpoint_methods(sprite)
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=patched_sprites["client"], sprite=sprite)
+
+    cap = SpritesCheckpoints(allow_restore=False)
+    cap.bind(inner)
+    out = await cap._restore("ckpt-1")
+    assert "disabled" in out
+    assert ops.restore_calls == []
+
+
+@pytest.mark.asyncio
+async def test_sprites_checkpoints_restore_when_enabled(patched_sprites: dict[str, Any]) -> None:
+    from agents.extensions.sandbox.sprites import SpritesCheckpoints
+
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    ops = _attach_checkpoint_methods(sprite)
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=patched_sprites["client"], sprite=sprite)
+
+    cap = SpritesCheckpoints(allow_restore=True)
+    cap.bind(inner)
+    out = await cap._restore("ckpt-7")
+    assert "ckpt-7" in out
+    assert ops.restore_calls == ["ckpt-7"]
+
+
+def test_sprites_checkpoints_tool_count_depends_on_allow_restore() -> None:
+    from agents.extensions.sandbox.sprites import SpritesCheckpoints
+
+    cap_no = SpritesCheckpoints(allow_restore=False)
+    cap_yes = SpritesCheckpoints(allow_restore=True)
+    assert len(cap_no.tools()) == 2  # create + list
+    assert len(cap_yes.tools()) == 3  # + restore
