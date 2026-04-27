@@ -115,11 +115,13 @@ try:
         DEFAULT_SPRITES_CONTEXT_PATH as DEFAULT_SPRITES_CONTEXT_PATH,
         DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S as DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S,
         DEFAULT_SPRITES_WORKSPACE_ROOT as DEFAULT_SPRITES_WORKSPACE_ROOT,
+        SpritesCheckpoints as SpritesCheckpoints,
         SpritesPlatformContext as SpritesPlatformContext,
         SpritesSandboxClient as SpritesSandboxClient,
         SpritesSandboxClientOptions as SpritesSandboxClientOptions,
         SpritesSandboxSession as SpritesSandboxSession,
         SpritesSandboxSessionState as SpritesSandboxSessionState,
+        SpritesUrlAccess as SpritesUrlAccess,
     )
 
     _HAS_SPRITES = True
@@ -232,10 +234,12 @@ if _HAS_SPRITES:
             "DEFAULT_SPRITES_CONTEXT_PATH",
             "DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S",
             "DEFAULT_SPRITES_WORKSPACE_ROOT",
+            "SpritesCheckpoints",
             "SpritesPlatformContext",
             "SpritesSandboxClient",
             "SpritesSandboxClientOptions",
             "SpritesSandboxSession",
             "SpritesSandboxSessionState",
+            "SpritesUrlAccess",
         ]
     )
