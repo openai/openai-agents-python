@@ -43,7 +43,7 @@ async def main():
 
     print("=== MongoDB Session Example ===")
     print("This example requires MongoDB to be running on localhost:27017")
-    print("Start MongoDB with: mongod  (or: docker run -d -p 27017:27017 mongo:7)")
+    print("Start MongoDB with: mongod  (or: docker run -d -p 27017:27017 mongo)")
     print()
 
     # Create a MongoDB session instance
