@@ -332,6 +332,20 @@ def test_core_sandbox_public_export_surface_is_stable() -> None:
                 "VercelSandboxSessionState",
             },
         ),
+        (
+            "agents.extensions.sandbox.sprites",
+            {
+                "DEFAULT_SPRITES_API_URL",
+                "DEFAULT_SPRITES_CONTEXT_PATH",
+                "DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S",
+                "DEFAULT_SPRITES_WORKSPACE_ROOT",
+                "SpritesPlatformContext",
+                "SpritesSandboxClient",
+                "SpritesSandboxClientOptions",
+                "SpritesSandboxSession",
+                "SpritesSandboxSessionState",
+            },
+        ),
     ],
 )
 def test_extension_sandbox_package_export_surfaces_are_stable(
@@ -501,6 +515,23 @@ def test_optional_sandbox_dataclass_constructor_field_order_is_stable(
                 "workspace_persistence",
                 "snapshot_expiration_ms",
                 "network_policy",
+            ),
+        ),
+        (
+            "agents.extensions.sandbox.sprites",
+            "SpritesSandboxClientOptions",
+            (
+                "sprite_name",
+                "url_auth",
+                "ram_mb",
+                "cpus",
+                "region",
+                "storage_gb",
+                "exposed_ports",
+                "env",
+                "timeout_ms",
+                "wait_for_running_timeout_s",
+                "workspace_persistence",
             ),
         ),
     ],
@@ -738,6 +769,30 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
                 "network_policy",
             ),
         ),
+        (
+            "agents.extensions.sandbox.sprites",
+            "SpritesSandboxSessionState",
+            (
+                "type",
+                "session_id",
+                "snapshot",
+                "manifest",
+                "exposed_ports",
+                "snapshot_fingerprint",
+                "snapshot_fingerprint_version",
+                "workspace_root_ready",
+                "sprite_name",
+                "created_by_us",
+                "url_auth",
+                "ram_mb",
+                "cpus",
+                "region",
+                "storage_gb",
+                "env",
+                "timeout_ms",
+                "workspace_persistence",
+            ),
+        ),
     ],
 )
 def test_sandbox_session_state_field_order_is_stable(
@@ -778,6 +833,7 @@ def test_sandbox_session_state_field_order_is_stable(
         ),
         ("agents.extensions.sandbox.daytona", "DaytonaSandboxClientOptions", (), "daytona"),
         ("agents.extensions.sandbox.runloop", "RunloopSandboxClientOptions", (), "runloop"),
+        ("agents.extensions.sandbox.sprites", "SpritesSandboxClientOptions", (), "sprites"),
         ("agents.extensions.sandbox.vercel", "VercelSandboxClientOptions", (), "vercel"),
     ],
 )
@@ -840,6 +896,11 @@ def test_optional_sandbox_client_options_json_round_trip_preserves_type(
             {"devbox_id": "devbox-123"},
         ),
         (
+            "agents.extensions.sandbox.sprites",
+            "SpritesSandboxSessionState",
+            {"sprite_name": "sprite-xyz"},
+        ),
+        (
             "agents.extensions.sandbox.vercel",
             "VercelSandboxSessionState",
             {"sandbox_id": "sandbox-123"},
@@ -894,6 +955,8 @@ def test_core_discriminator_type_strings_are_stable() -> None:
         ("agents.sandbox.sandboxes.unix_local", "UnixLocalSandboxSessionState", "unix_local"),
         ("agents.sandbox.sandboxes.docker", "DockerSandboxClientOptions", "docker"),
         ("agents.sandbox.sandboxes.docker", "DockerSandboxSessionState", "docker"),
+        ("agents.extensions.sandbox.sprites", "SpritesSandboxClientOptions", "sprites"),
+        ("agents.extensions.sandbox.sprites", "SpritesSandboxSessionState", "sprites"),
     ],
 )
 def test_optional_sandbox_discriminator_type_strings_are_stable(

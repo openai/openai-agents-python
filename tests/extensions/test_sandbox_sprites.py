@@ -1,0 +1,846 @@
+from __future__ import annotations
+
+import asyncio
+import io
+import uuid
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
+
+import pytest
+import pytest_asyncio
+
+pytest.importorskip("agents.extensions.sandbox.sprites.sandbox")
+
+from sprites.exceptions import NotFoundError as _SpritesNotFoundError  # noqa: E402
+
+from agents.extensions.sandbox.sprites import (  # noqa: E402
+    SpritesPlatformContext,
+    SpritesSandboxClient,
+    SpritesSandboxClientOptions,
+    SpritesSandboxSession,
+    SpritesSandboxSessionState,
+    sandbox as sprites_sandbox,  # noqa: E402
+)
+from agents.sandbox.errors import (  # noqa: E402
+    ConfigurationError,
+    ExecTimeoutError,
+    ExecTransportError,
+    ExposedPortUnavailableError,
+    WorkspaceArchiveWriteError,
+    WorkspaceReadNotFoundError,
+    WorkspaceStartError,
+    WorkspaceWriteTypeError,
+)
+from agents.sandbox.manifest import Manifest  # noqa: E402
+from agents.sandbox.session.sandbox_client import BaseSandboxClientOptions  # noqa: E402
+from agents.sandbox.snapshot import NoopSnapshot  # noqa: E402
+from agents.sandbox.types import ExecResult, ExposedPortEndpoint, User  # noqa: E402
+
+SPRITE_NAME = "sprite-test-1"
+SESSION_UUID = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+
+def _attach(inner: SpritesSandboxSession, *, client: Any, sprite: Any = None) -> None:
+    """Inject fake client/sprite into a SpritesSandboxSession.
+
+    ``setattr`` is used to sidestep mypy's invariant attribute typing — the fakes
+    duck-type the real ``SpritesClient``/``Sprite`` interface only as far as the
+    tests exercise.
+    """
+
+    # ``setattr`` (instead of plain assignment) silences mypy's invariant attribute
+    # check; the fakes only duck-type the parts we exercise.
+    setattr(inner, "_client", client)  # noqa: B010
+    if sprite is not None:
+        setattr(inner, "_sprite", sprite)  # noqa: B010
+
+
+# ---------- Fakes ----------
+
+
+class _FakeFileNotFound(Exception):
+    """Stands in for ``sprites.exceptions.FileNotFoundError_`` in fake fs ops."""
+
+
+class _FakeOpConn:
+    def __init__(
+        self,
+        *,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+        exit_code: int = 0,
+        wait_event: asyncio.Event | None = None,
+        start_failure: BaseException | None = None,
+    ) -> None:
+        self._stdout = stdout
+        self._stderr = stderr
+        self.exit_code = exit_code
+        self._wait_event = wait_event
+        self._start_failure = start_failure
+        self.signals: list[str] = []
+        self.write_calls: list[bytes] = []
+        self.closed = False
+        self.on_stdout: Any = None
+        self.on_stderr: Any = None
+        self.on_message: Any = None
+
+    async def wait(self) -> int:
+        if self._wait_event is not None:
+            await self._wait_event.wait()
+        return self.exit_code
+
+    def get_stdout(self) -> bytes:
+        return self._stdout
+
+    def get_stderr(self) -> bytes:
+        return self._stderr
+
+    def get_exit_code(self) -> int:
+        return self.exit_code
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def signal(self, sig: str) -> None:
+        self.signals.append(sig)
+
+    async def write(self, data: bytes) -> None:
+        self.write_calls.append(data)
+
+
+class _FakeControlConnection:
+    def __init__(self) -> None:
+        self.start_op_calls: list[dict[str, Any]] = []
+        # Each entry is consumed in FIFO order; if empty, a default zero-exit op is returned.
+        self.next_ops: list[_FakeOpConn] = []
+        self.start_op_failures: list[BaseException] = []
+
+    async def start_op(
+        self,
+        op: str,
+        cmd: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        dir: str | None = None,
+        tty: bool = False,
+        rows: int = 24,
+        cols: int = 80,
+        stdin: bool = True,
+    ) -> _FakeOpConn:
+        self.start_op_calls.append(
+            {"op": op, "cmd": list(cmd or []), "dir": dir, "tty": tty, "stdin": stdin}
+        )
+        if self.start_op_failures:
+            raise self.start_op_failures.pop(0)
+        if self.next_ops:
+            return self.next_ops.pop(0)
+        return _FakeOpConn()
+
+
+class _FakeSpritePath:
+    def __init__(self, fs: _FakeSpriteFilesystem, path: str) -> None:
+        self._fs = fs
+        self._path = path
+
+    def read_bytes(self) -> bytes:
+        if self._fs.read_failure is not None:
+            raise self._fs.read_failure
+        if self._path not in self._fs.files:
+            raise _FakeFileNotFound(self._path)
+        return self._fs.files[self._path]
+
+    def write_bytes(self, data: bytes) -> None:
+        if self._fs.write_failure is not None:
+            raise self._fs.write_failure
+        self._fs.files[self._path] = bytes(data)
+
+
+class _FakeSpriteFilesystem:
+    def __init__(self, files: dict[str, bytes]) -> None:
+        self.files = files
+        self.read_failure: BaseException | None = None
+        self.write_failure: BaseException | None = None
+
+    def __truediv__(self, path: str) -> _FakeSpritePath:
+        return _FakeSpritePath(self, path)
+
+
+class _FakeService:
+    def __init__(self, *, http_port: int | None) -> None:
+        self.http_port = http_port
+
+
+class _FakeSprite:
+    def __init__(
+        self,
+        *,
+        name: str,
+        url: str | None = "https://example-sprite-org.sprites.dev",
+        status: str = "running",
+        services: list[_FakeService] | None = None,
+        files: dict[str, bytes] | None = None,
+        list_services_failure: BaseException | None = None,
+    ) -> None:
+        self.name = name
+        self.url = url
+        self.status = status
+        self.organization_name = "example-org"
+        self.update_url_settings_calls: list[Any] = []
+        self.close_control_connection_calls = 0
+        self.list_services_failure = list_services_failure
+        self._services = services or []
+        self._fs = _FakeSpriteFilesystem(files or {})
+
+    def filesystem(self, working_dir: str = "/") -> _FakeSpriteFilesystem:
+        return self._fs
+
+    def list_services(self) -> list[_FakeService]:
+        if self.list_services_failure is not None:
+            raise self.list_services_failure
+        return list(self._services)
+
+    def update_url_settings(self, settings: Any) -> None:
+        self.update_url_settings_calls.append(settings)
+
+    async def close_control_connection(self) -> None:
+        self.close_control_connection_calls += 1
+
+
+class _FakeSpritesClient:
+    def __init__(
+        self,
+        *,
+        token: str = "tok",
+        base_url: str = "https://api.sprites.dev",
+        control_mode: bool = False,
+        sprites_by_name: dict[str, _FakeSprite] | None = None,
+    ) -> None:
+        self.token = token
+        self.base_url = base_url
+        self.control_mode = control_mode
+        self.create_sprite_calls: list[tuple[str, Any]] = []
+        self.delete_sprite_calls: list[str] = []
+        self.get_sprite_calls: list[str] = []
+        self.sprite_handle_calls: list[str] = []
+        self.closed = False
+        self._sprites_by_name = sprites_by_name or {}
+        self.create_failures: list[BaseException] = []
+        self.get_failures: list[BaseException] = []
+
+    def create_sprite(self, name: str, config: Any | None = None) -> _FakeSprite:
+        self.create_sprite_calls.append((name, config))
+        if self.create_failures:
+            raise self.create_failures.pop(0)
+        sprite = _FakeSprite(name=name)
+        self._sprites_by_name[name] = sprite
+        return sprite
+
+    def sprite(self, name: str) -> _FakeSprite:
+        self.sprite_handle_calls.append(name)
+        return self._sprites_by_name.get(name) or _FakeSprite(name=name)
+
+    def get_sprite(self, name: str) -> _FakeSprite:
+        self.get_sprite_calls.append(name)
+        if self.get_failures:
+            raise self.get_failures.pop(0)
+        sprite = self._sprites_by_name.get(name)
+        if sprite is None:
+            raise _SpritesNotFoundError(f"sprite not found: {name}")
+        return sprite
+
+    def delete_sprite(self, name: str) -> None:
+        self.delete_sprite_calls.append(name)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+# ---------- Helpers ----------
+
+
+def _make_state(**overrides: object) -> SpritesSandboxSessionState:
+    base = {
+        "session_id": SESSION_UUID,
+        "snapshot": NoopSnapshot(id="snapshot-1"),
+        "manifest": Manifest(root="/workspace"),
+        "sprite_name": SPRITE_NAME,
+        "created_by_us": True,
+    }
+    base.update(overrides)
+    return SpritesSandboxSessionState.model_validate(base)
+
+
+@pytest_asyncio.fixture
+async def patched_sprites(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    fake_client = _FakeSpritesClient()
+    fake_control = _FakeControlConnection()
+
+    monkeypatch.setattr(sprites_sandbox, "SpritesClient", lambda **kw: fake_client)
+    monkeypatch.setattr(sprites_sandbox, "FileNotFoundError_", _FakeFileNotFound)
+
+    async def _get_control(_sprite: Any) -> _FakeControlConnection:
+        return fake_control
+
+    def _release_control(_sprite: Any, _cc: Any) -> None:
+        return None
+
+    monkeypatch.setattr(sprites_sandbox, "get_control_connection", _get_control)
+    monkeypatch.setattr(sprites_sandbox, "release_control_connection", _release_control)
+    return {"client": fake_client, "control": fake_control}
+
+
+# ---------- 1. Options & state roundtrip ----------
+
+
+def test_options_roundtrip_through_polymorphic_registry() -> None:
+    options = SpritesSandboxClientOptions(
+        sprite_name="my-sprite",
+        url_auth="public",
+        ram_mb=512,
+        cpus=2,
+        region="iad",
+        storage_gb=8,
+        exposed_ports=(8080,),
+        env={"FOO": "BAR"},
+        timeout_ms=120_000,
+    )
+    payload = options.model_dump(mode="json")
+    assert payload["type"] == "sprites"
+    restored = BaseSandboxClientOptions.parse(payload)
+    assert isinstance(restored, SpritesSandboxClientOptions)
+    assert restored.model_dump(mode="json") == payload
+
+
+def test_state_roundtrip_does_not_leak_token() -> None:
+    state = _make_state(sprite_name="x", created_by_us=False, url_auth="public")
+    payload = state.model_dump(mode="json")
+    assert "token" not in payload and "base_url" not in payload
+    client = SpritesSandboxClient(token="tok-1", base_url="https://example")
+    restored = client.deserialize_session_state(payload)
+    assert isinstance(restored, SpritesSandboxSessionState)
+    assert restored.model_dump(mode="json") == payload
+
+
+# ---------- 2. Auth resolution ----------
+
+
+def test_client_resolves_token_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SPRITES_API_TOKEN", "from-env")
+    client = SpritesSandboxClient()
+    assert client._token == "from-env"
+    assert client._base_url == "https://api.sprites.dev"
+
+
+def test_client_kwarg_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SPRITES_API_TOKEN", "from-env")
+    monkeypatch.setenv("SPRITES_API_URL", "https://env.example")
+    client = SpritesSandboxClient(token="kwarg", base_url="https://kwarg.example")
+    assert client._token == "kwarg"
+    assert client._base_url == "https://kwarg.example"
+
+
+def test_client_missing_token_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SPRITES_API_TOKEN", raising=False)
+    with pytest.raises(ConfigurationError):
+        SpritesSandboxClient()
+
+
+def test_resume_uses_live_client_token_after_env_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SPRITES_API_TOKEN", "from-env")
+    client = SpritesSandboxClient()
+    monkeypatch.delenv("SPRITES_API_TOKEN", raising=False)
+    assert client._token == "from-env"
+
+
+# ---------- 3 & 4. Lifecycle ephemeral & named-attach ----------
+
+
+@pytest.mark.asyncio
+async def test_create_ephemeral_sprite(patched_sprites: dict[str, Any]) -> None:
+    fake_client = patched_sprites["client"]
+    client = SpritesSandboxClient(token="tok")
+    options = SpritesSandboxClientOptions()
+    session = await client.create(options=options)
+    inner = session._inner
+    assert isinstance(inner, SpritesSandboxSession)
+    assert inner.state.created_by_us is True
+    assert len(fake_client.create_sprite_calls) == 1
+    assert fake_client.create_sprite_calls[0][0].startswith("openai-agents-")
+    # get_sprite called for status poll + the post-create refresh
+    assert len(fake_client.get_sprite_calls) >= 1
+    # delete via client.delete deletes the ephemeral sprite
+    await client.delete(session)
+    assert fake_client.delete_sprite_calls == [fake_client.create_sprite_calls[0][0]]
+
+
+@pytest.mark.asyncio
+async def test_create_attaches_to_named_sprite(patched_sprites: dict[str, Any]) -> None:
+    fake_client = patched_sprites["client"]
+    fake_client._sprites_by_name["existing"] = _FakeSprite(name="existing")
+    client = SpritesSandboxClient(token="tok")
+    options = SpritesSandboxClientOptions(sprite_name="existing")
+    session = await client.create(options=options)
+    inner = session._inner
+    assert isinstance(inner, SpritesSandboxSession)
+    assert inner.state.created_by_us is False
+    assert fake_client.create_sprite_calls == []
+    assert fake_client.sprite_handle_calls == ["existing"]
+    await client.delete(session)
+    assert fake_client.delete_sprite_calls == []
+
+
+# ---------- 5. Wait-for-running timeout ----------
+
+
+@pytest.mark.asyncio
+async def test_wait_for_running_raises_workspace_start_error(
+    patched_sprites: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sprites_sandbox, "_SPRITE_READY_POLL_INTERVAL_S", 0.0)
+    fake_client = patched_sprites["client"]
+    fake_client._sprites_by_name[SPRITE_NAME] = _FakeSprite(name=SPRITE_NAME, status="starting")
+    state = _make_state(timeout_ms=1)  # 1ms deadline
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client)
+    with pytest.raises(WorkspaceStartError) as excinfo:
+        await inner._wait_for_sprite_running()
+    assert excinfo.value.context.get("reason") == "wait_for_running_timeout"
+
+
+# ---------- 6. Exec mapping ----------
+
+
+@pytest.mark.asyncio
+async def test_exec_internal_returns_buffered_streams(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_control = patched_sprites["control"]
+    fake_control.next_ops.append(_FakeOpConn(stdout=b"hi\n", stderr=b"warn\n", exit_code=0))
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    fake_sprite = _FakeSprite(name=SPRITE_NAME)
+    _attach(inner, client=patched_sprites["client"], sprite=fake_sprite)
+    result = await inner._exec_internal("echo", "hi", timeout=5.0)
+    assert isinstance(result, ExecResult)
+    assert result.stdout == b"hi\n"
+    assert result.stderr == b"warn\n"
+    assert result.exit_code == 0
+    assert fake_control.start_op_calls == [
+        {"op": "exec", "cmd": ["echo", "hi"], "dir": "/workspace", "tty": False, "stdin": False}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_exec_internal_timeout_raises_and_signals_kill(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_control = patched_sprites["control"]
+    never = asyncio.Event()
+    op = _FakeOpConn(wait_event=never)
+    fake_control.next_ops.append(op)
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=patched_sprites["client"], sprite=_FakeSprite(name=SPRITE_NAME))
+    with pytest.raises(ExecTimeoutError):
+        await inner._exec_internal("sleep", "1000", timeout=0.05)
+    assert "KILL" in op.signals
+
+
+@pytest.mark.asyncio
+async def test_exec_internal_start_op_failure_raises_transport_error(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_control = patched_sprites["control"]
+    fake_control.start_op_failures.append(RuntimeError("ws closed"))
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=patched_sprites["client"], sprite=_FakeSprite(name=SPRITE_NAME))
+    with pytest.raises(ExecTransportError):
+        await inner._exec_internal("echo", "x", timeout=1.0)
+
+
+# ---------- 7. PTY ----------
+
+
+def test_supports_pty_is_true() -> None:
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    assert inner.supports_pty() is True
+
+
+@pytest.mark.asyncio
+async def test_pty_exec_start_registers_callbacks_and_pre_drains(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_control = patched_sprites["control"]
+    op = _FakeOpConn(stdout=b"pre-drain\n", exit_code=0)
+    fake_control.next_ops.append(op)
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    _attach(inner, client=patched_sprites["client"], sprite=sprite)
+
+    update = await inner.pty_exec_start(
+        "bash",
+        shell=False,
+        tty=True,
+        yield_time_s=0.001,
+    )
+    # Either pre-drain (via get_stdout) or callback drain ran; the chunk should
+    # appear in the returned output.
+    assert b"pre-drain" in update.output
+    assert fake_control.start_op_calls[0]["tty"] is True
+
+
+@pytest.mark.asyncio
+async def test_pty_write_stdin_writes_and_returns_buffered_output(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_control = patched_sprites["control"]
+    op = _FakeOpConn()
+    fake_control.next_ops.append(op)
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    _attach(inner, client=patched_sprites["client"], sprite=sprite)
+
+    started = await inner.pty_exec_start("bash", shell=False, tty=True, yield_time_s=0.001)
+    session_id = started.process_id
+    assert session_id is not None
+
+    # Simulate the server pushing output between writes by delivering a chunk
+    # synchronously through the registered on_stdout callback.
+    assert op.on_stdout is not None
+    op.on_stdout(b"hello\n")
+    update = await inner.pty_write_stdin(session_id=session_id, chars="ls\n", yield_time_s=0.001)
+    assert op.write_calls == [b"ls\n"]
+    assert b"hello" in update.output
+
+
+@pytest.mark.asyncio
+async def test_pty_terminate_all_signals_term_and_kill(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_control = patched_sprites["control"]
+    op = _FakeOpConn()
+    fake_control.next_ops.append(op)
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    _attach(inner, client=patched_sprites["client"], sprite=sprite)
+
+    await inner.pty_exec_start("bash", shell=False, tty=True, yield_time_s=0.001)
+    await inner.pty_terminate_all()
+    # Live op never closed, so terminate sequences TERM then KILL.
+    assert "TERM" in op.signals
+    assert "KILL" in op.signals
+    assert inner._pty_processes == {}
+
+
+@pytest.mark.asyncio
+async def test_pty_finalize_drops_session_when_op_closed(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_control = patched_sprites["control"]
+    op = _FakeOpConn(exit_code=0)
+    # Mark closed so _entry_exit_code returns 0 immediately.
+    op.closed = True
+    op.exit_code = 0
+    fake_control.next_ops.append(op)
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    _attach(inner, client=patched_sprites["client"], sprite=sprite)
+
+    update = await inner.pty_exec_start("bash", shell=False, tty=True, yield_time_s=0.001)
+    assert update.process_id is None
+    assert update.exit_code == 0
+    assert inner._pty_processes == {}
+
+
+# ---------- 8. Exposed ports ----------
+
+
+def test_options_exposed_ports_can_be_empty_or_single() -> None:
+    SpritesSandboxClientOptions(exposed_ports=())
+    SpritesSandboxClientOptions(exposed_ports=(8080,))
+
+
+@pytest.mark.asyncio
+async def test_validate_exposed_ports_rejects_more_than_one(
+    patched_sprites: dict[str, Any],
+) -> None:
+    client = SpritesSandboxClient(token="tok")
+    options = SpritesSandboxClientOptions(exposed_ports=(8080, 9090))
+    with pytest.raises(ConfigurationError):
+        await client.create(options=options)
+
+
+@pytest.mark.asyncio
+async def test_resolve_exposed_port_happy_path(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(
+        name=SPRITE_NAME,
+        url="https://example-sprite-example-org.sprites.dev",
+        services=[_FakeService(http_port=8080)],
+    )
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state(exposed_ports=(8080,))
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    # Inject fakes; bypass _ensure_sprite (which would re-create on the fake).
+    _attach(inner, client=fake_client, sprite=sprite)
+    endpoint = await inner._resolve_exposed_port(8080)
+    assert isinstance(endpoint, ExposedPortEndpoint)
+    assert endpoint.tls is True
+    assert endpoint.host == "example-sprite-example-org.sprites.dev"
+    assert endpoint.port == 443
+
+
+@pytest.mark.asyncio
+async def test_resolve_exposed_port_not_configured_when_no_matching_service(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(
+        name=SPRITE_NAME,
+        url="https://example-sprite-example-org.sprites.dev",
+        services=[_FakeService(http_port=3000)],
+    )
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state(exposed_ports=(8080,))
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+    with pytest.raises(ExposedPortUnavailableError) as excinfo:
+        await inner._resolve_exposed_port(8080)
+    assert excinfo.value.context.get("backend") == "sprites"
+
+
+# ---------- 9. Read / write ----------
+
+
+@pytest.mark.asyncio
+async def test_read_returns_bytesio(patched_sprites: dict[str, Any]) -> None:
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME, files={"/workspace/hi.txt": b"hello"})
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+
+    # Bypass _validate_path_access (uses runtime helper exec) for unit-test isolation.
+    async def _validate_passthrough(path: Path | str, *, for_write: bool = False) -> Path:
+        return Path(str(path))
+
+    with patch.object(inner, "_validate_path_access", _validate_passthrough):
+        stream = await inner.read(Path("/workspace/hi.txt"))
+    assert isinstance(stream, io.IOBase)
+    assert stream.read() == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_read_missing_file_raises_workspace_read_not_found(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME, files={})
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+
+    async def _validate_passthrough(path: Path | str, *, for_write: bool = False) -> Path:
+        return Path(str(path))
+
+    with patch.object(inner, "_validate_path_access", _validate_passthrough):
+        with pytest.raises(WorkspaceReadNotFoundError):
+            await inner.read(Path("/workspace/missing.txt"))
+
+
+@pytest.mark.asyncio
+async def test_write_rejects_string_payload_with_workspace_write_type_error(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+
+    async def _validate_passthrough(path: Path | str, *, for_write: bool = False) -> Path:
+        return Path(str(path))
+
+    class _BadStream(io.IOBase):
+        def read(self, *_args: Any) -> Any:
+            return 42  # not bytes / str
+
+    with patch.object(inner, "_validate_path_access", _validate_passthrough):
+        with pytest.raises(WorkspaceWriteTypeError):
+            await inner.write(Path("/workspace/x"), _BadStream())
+
+
+@pytest.mark.asyncio
+async def test_write_propagates_filesystem_failure_as_archive_write_error(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    sprite._fs.write_failure = RuntimeError("disk full")
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+
+    async def _validate_passthrough(path: Path | str, *, for_write: bool = False) -> Path:
+        return Path(str(path))
+
+    with patch.object(inner, "_validate_path_access", _validate_passthrough):
+        with pytest.raises(WorkspaceArchiveWriteError):
+            await inner.write(Path("/workspace/x"), io.BytesIO(b"data"))
+
+
+@pytest.mark.asyncio
+async def test_read_rejects_user_arg(patched_sprites: dict[str, Any]) -> None:
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=patched_sprites["client"])
+    with pytest.raises(ConfigurationError):
+        await inner.read(Path("/workspace/x"), user="root")
+
+
+@pytest.mark.asyncio
+async def test_write_rejects_user_arg(patched_sprites: dict[str, Any]) -> None:
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=patched_sprites["client"])
+    with pytest.raises(ConfigurationError):
+        await inner.write(Path("/workspace/x"), io.BytesIO(b"x"), user=User(name="r"))
+
+
+@pytest.mark.asyncio
+async def test_exec_rejects_user_arg(patched_sprites: dict[str, Any]) -> None:
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=patched_sprites["client"])
+    with pytest.raises(ConfigurationError):
+        await inner.exec("echo", "x", user="root")
+
+
+# ---------- 11 (subset). Tar-based persistence sanity ----------
+
+
+@pytest.mark.asyncio
+async def test_persist_workspace_uses_tar_via_exec_and_filesystem_read(
+    patched_sprites: dict[str, Any],
+) -> None:
+    import tarfile
+
+    fake_control = patched_sprites["control"]
+    # tar cf, rm cleanup
+    fake_control.next_ops.append(_FakeOpConn(exit_code=0))
+    fake_control.next_ops.append(_FakeOpConn(exit_code=0))
+
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    archive_path = f"/tmp/openai-agents-{SESSION_UUID.hex}.tar"
+    # Build a minimal valid tar so hydrate could read it back.
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        info = tarfile.TarInfo(name="./hello.txt")
+        info.size = 5
+        tar.addfile(info, io.BytesIO(b"hello"))
+    sprite._fs.files[archive_path] = buf.getvalue()
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+    stream = await inner.persist_workspace()
+    assert isinstance(stream, io.IOBase)
+    archive_bytes = stream.read()
+    # Round-trip: validate the tar produced is parseable
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:*") as tar:
+        names = tar.getnames()
+    assert "./hello.txt" in names
+    # First start_op was the tar create (passed shell=False, so verbatim cmd).
+    first_cmd = fake_control.start_op_calls[0]["cmd"]
+    assert first_cmd[0:3] == ["tar", "cf", archive_path]
+    assert "." in first_cmd
+
+
+# ---------- 14. SpritesPlatformContext capability ----------
+
+
+@pytest.mark.asyncio
+async def test_sprites_platform_context_reads_llm_txt(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_control = patched_sprites["control"]
+    fake_control.next_ops.append(
+        _FakeOpConn(stdout=b"# Sprite Environment\nbe nice\n", exit_code=0)
+    )
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+
+    capability = SpritesPlatformContext()
+    capability.bind(inner)
+    text = await capability.instructions(state.manifest)
+    assert text is not None
+    assert "<sprites-platform-context>" in text
+    assert "be nice" in text
+    # First exec call should be the cat — verbatim (shell=False) and absolute path.
+    first_cmd = fake_control.start_op_calls[0]["cmd"]
+    assert first_cmd[0:3] == ["cat", "--", "/.sprite/llm.txt"]
+
+
+@pytest.mark.asyncio
+async def test_sprites_platform_context_caches_after_first_read(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_control = patched_sprites["control"]
+    fake_control.next_ops.append(_FakeOpConn(stdout=b"ctx\n", exit_code=0))
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+
+    capability = SpritesPlatformContext()
+    capability.bind(inner)
+    a = await capability.instructions(state.manifest)
+    b = await capability.instructions(state.manifest)
+    assert a == b
+    # Only one start_op call total (cached on the second invocation).
+    assert len(fake_control.start_op_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_sprites_platform_context_returns_none_when_file_missing(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_control = patched_sprites["control"]
+    fake_control.next_ops.append(
+        _FakeOpConn(stdout=b"", stderr=b"cat: /.sprite/llm.txt: No such file\n", exit_code=1)
+    )
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+
+    capability = SpritesPlatformContext()
+    capability.bind(inner)
+    assert await capability.instructions(state.manifest) is None

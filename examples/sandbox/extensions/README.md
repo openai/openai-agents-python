@@ -7,7 +7,7 @@ They intentionally keep the flow simple:
 
 1. Build a tiny manifest in memory.
 2. Create a `SandboxAgent` that inspects that workspace through one shell tool.
-3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel, or Vercel.
+3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel, Sprites, or Vercel.
 
 All of these examples require `OPENAI_API_KEY`, because they call the model through the normal
 `Runner` path. Each cloud backend also needs its own provider credentials.
@@ -328,6 +328,46 @@ the default home and working directory become `/root`, so the example also uses
 `/root` as its manifest workspace root. If you configure root launch in your
 own code, either rely on that root-mode default or explicitly choose a
 `manifest.root` under `/root`.
+## Sprites
+
+### Setup
+
+Install the repo extra:
+
+```bash
+uv sync --extra sprites
+```
+
+Create a Sprites organization and API token at [sprites.dev](https://sprites.dev/),
+and export the required environment variables:
+
+```bash
+export OPENAI_API_KEY=...
+export SPRITES_API_TOKEN=...
+# Optional, defaults to https://api.sprites.dev:
+# export SPRITES_API_URL=https://api.sprites.dev
+```
+
+### Run
+
+```bash
+uv run python examples/sandbox/extensions/sprites_runner.py --stream
+```
+
+Useful flags:
+
+- `--sprite-name <name>` — attach to an existing sprite instead of creating an
+  ephemeral one. The example skips delete-on-exit when this is set.
+- `--skip-snapshot-check` — skip the tar workspace persistence verification.
+- `--question "..."` — override the default prompt.
+
+The Sprites client resolves the API token from `SPRITES_API_TOKEN` (override via
+`SpritesSandboxClient(token=...)`) and supports exec, filesystem read/write,
+PTY-mode interactive exec, and tar-based workspace snapshots. Sprites exposes
+at most one external HTTP port per sprite — declare it as a service with
+`--http-port` in the sprite image, then reference it via
+`SpritesSandboxClientOptions(exposed_ports=(<port>,))`.
+
 ## Blaxel
 
 ### Setup

@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-04-18T01:54:41.626048905Z"
+exclude-newer = "2026-04-20T10:10:10.48487735Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -2494,6 +2494,9 @@ runloop = [
 s3 = [
     { name = "boto3" },
 ]
+sprites = [
+    { name = "sprites-py" },
+]
 sqlalchemy = [
     { name = "asyncpg" },
     { name = "sqlalchemy" },
@@ -2575,6 +2578,7 @@ requires-dist = [
     { name = "redis", marker = "extra == 'redis'", specifier = ">=7" },
     { name = "requests", specifier = ">=2.0,<3" },
     { name = "runloop-api-client", marker = "extra == 'runloop'", specifier = ">=1.16.0,<2.0.0" },
+    { name = "sprites-py", marker = "extra == 'sprites'", specifier = ">=0.0.1rc37,<0.2" },
     { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0" },
     { name = "temporalio", marker = "extra == 'temporal'", specifier = "==1.26.0" },
     { name = "textual", marker = "extra == 'temporal'", specifier = ">=8.2.3,<8.3" },
@@ -2585,7 +2589,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<17" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<17" },
 ]
-provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "docker", "blaxel", "daytona", "cloudflare", "e2b", "modal", "runloop", "vercel", "s3", "temporal"]
+provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "docker", "blaxel", "daytona", "cloudflare", "e2b", "modal", "runloop", "sprites", "vercel", "s3", "temporal"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3863,6 +3867,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/3f/6f/e3dd751face4fcb5be25e8abba22f25d8e6457ebd7e9ed79068b768dc0e5/sounddevice-0.5.2-py3-none-macosx_10_6_x86_64.macosx_10_6_universal2.whl", hash = "sha256:943f27e66037d41435bdd0293454072cdf657b594c9cde63cd01ee3daaac7ab3", size = 108088, upload-time = "2025-05-16T18:12:23.146Z" },
     { url = "https://files.pythonhosted.org/packages/45/0b/bfad79af0b380aa7c0bfe73e4b03e0af45354a48ad62549489bd7696c5b0/sounddevice-0.5.2-py3-none-win32.whl", hash = "sha256:3a113ce614a2c557f14737cb20123ae6298c91fc9301eb014ada0cba6d248c5f", size = 312665, upload-time = "2025-05-16T18:12:24.726Z" },
     { url = "https://files.pythonhosted.org/packages/e1/3e/61d88e6b0a7383127cdc779195cb9d83ebcf11d39bc961de5777e457075e/sounddevice-0.5.2-py3-none-win_amd64.whl", hash = "sha256:e18944b767d2dac3771a7771bdd7ff7d3acd7d334e72c4bedab17d1aed5dbc22", size = 363808, upload-time = "2025-05-16T18:12:26Z" },
+]
+
+[[package]]
+name = "sprites-py"
+version = "0.0.1rc37"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/88/cd/24bbca8438fdc8a89e3365b927b20f511e1c4529a8574ea252e967f8071c/sprites_py-0.0.1rc37.tar.gz", hash = "sha256:2fc58aa80a9a99c1a12cb17725d13675d5e25dc2a33f245f21486473aede05b9", size = 35226, upload-time = "2026-02-19T21:38:51.643Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b6/8b/87c87887ae3bde72425134efea163fdbdef610765a8db7244c7b4adeab46/sprites_py-0.0.1rc37-py3-none-any.whl", hash = "sha256:d032b0059e2881b16a35349c0f01adafa99143671103a43a79d7e39a0c1ef6c9", size = 39424, upload-time = "2026-02-19T21:38:49.9Z" },
 ]
 
 [[package]]
