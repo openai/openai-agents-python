@@ -257,6 +257,7 @@ class SpritesSandboxSession(BaseSandboxSession):
     _pty_lock: asyncio.Lock
     _pty_processes: dict[int, _SpritePtyProcessEntry]
     _reserved_pty_process_ids: set[int]
+    _warmth_verified: bool
 
     def __init__(
         self,
@@ -276,6 +277,12 @@ class SpritesSandboxSession(BaseSandboxSession):
         self._pty_lock = asyncio.Lock()
         self._pty_processes = {}
         self._reserved_pty_process_ids = set()
+        # ``_warmth_verified`` tracks whether we've already confirmed the sprite
+        # is warm/running. Set when a fresh sprite is provisioned (we have to
+        # poll anyway), or when the first I/O operation drives a successful
+        # control-plane connect. Resetting via ``_invalidate_warmth`` after a
+        # transport error forces a re-check on the next operation.
+        self._warmth_verified = False
 
     @classmethod
     def from_state(
@@ -336,19 +343,47 @@ class SpritesSandboxSession(BaseSandboxSession):
                     cause=exc,
                 ) from exc
             await self._maybe_update_url_settings(sprite)
-        else:
-            sprite = await asyncio.to_thread(client.sprite, self.state.sprite_name)
+            self._sprite = sprite
+            # Fresh sprite: poll until it reaches a ready status, then refresh
+            # its info so ``url`` / ``organization_name`` are populated. We
+            # have to poll regardless because the create call doesn't tell us
+            # when provisioning finishes.
+            await self._wait_for_sprite_running()
+            self._warmth_verified = True
+            refreshed: Sprite
+            try:
+                refreshed = await asyncio.to_thread(client.get_sprite, self.state.sprite_name)
+            except SpriteError:
+                refreshed = sprite
+            self._sprite = refreshed
+            return refreshed
 
+        # Named-attach: skip the readiness poll on attach. The sprite may be
+        # cold (paused) and we don't want to pay wake-up latency just to hand
+        # the agent a session handle. The first I/O operation drives the
+        # wake-up via ``_ensure_warm`` — the platform auto-wakes a paused
+        # sprite when traffic arrives, so this is essentially free.
+        sprite = await asyncio.to_thread(client.sprite, self.state.sprite_name)
         self._sprite = sprite
+        return sprite
+
+    async def _ensure_warm(self) -> None:
+        """Block until the sprite is ready to accept I/O, but only on first use.
+
+        ``_warmth_verified`` is sticky for the life of the session; cached
+        until a transport error invalidates it (e.g., the sprite was deleted
+        out from under us and we have to re-attach in a recovery flow).
+        """
+
+        if self._warmth_verified:
+            return
         await self._wait_for_sprite_running()
-        # Refresh sprite info so url / organization_name / status are populated.
-        refreshed: Sprite
-        try:
-            refreshed = await asyncio.to_thread(client.get_sprite, self.state.sprite_name)
-        except SpriteError:
-            refreshed = sprite
-        self._sprite = refreshed
-        return refreshed
+        self._warmth_verified = True
+
+    def _invalidate_warmth(self) -> None:
+        """Force the next I/O operation to re-poll the sprite's status."""
+
+        self._warmth_verified = False
 
     def _build_sprite_config(self) -> sprites.SpriteConfig | None:
         if (
@@ -586,6 +621,8 @@ class SpritesSandboxSession(BaseSandboxSession):
         if not normalized:
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
 
+        await self._ensure_warm()
+
         control: ControlConnection | None = None
         op_conn: OpConn | None = None
         try:
@@ -656,6 +693,7 @@ class SpritesSandboxSession(BaseSandboxSession):
     ) -> PtyExecUpdate:
         sanitized_command = self._prepare_exec_command(*command, shell=shell, user=user)
         # ``_ensure_control`` will lazily call ``_ensure_sprite``; no extra await here.
+        await self._ensure_warm()
 
         cc: ControlConnection | None = None
         op: OpConn | None = None
@@ -972,6 +1010,7 @@ class SpritesSandboxSession(BaseSandboxSession):
 
         normalized_path = await self._validate_path_access(path)
         sprite = await self._ensure_sprite()
+        await self._ensure_warm()
         try:
             payload = await asyncio.to_thread(
                 lambda: (sprite.filesystem("/") / sandbox_path_str(normalized_path)).read_bytes()
@@ -1003,6 +1042,7 @@ class SpritesSandboxSession(BaseSandboxSession):
             )
 
         sprite = await self._ensure_sprite()
+        await self._ensure_warm()
         try:
             await asyncio.to_thread(
                 lambda: (sprite.filesystem("/") / sandbox_path_str(normalized_path)).write_bytes(
