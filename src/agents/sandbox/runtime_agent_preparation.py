@@ -178,7 +178,12 @@ def build_sandbox_instructions(
                 agent=public_agent,
             )
             if additional:
-                parts.append(additional)
+                # Wrap caller-supplied instructions in a delimited section so
+                # they read as app-specific guidance in the rendered prompt
+                # rather than appearing nested inside the SDK's "Tool
+                # Guidelines > Shell commands" section that comes from the
+                # base prompt above.
+                parts.append(f"# Agent instructions\n\n{additional}")
 
         for capability in capabilities:
             fragment = await capability.instructions(manifest)
