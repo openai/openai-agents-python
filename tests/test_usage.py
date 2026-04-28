@@ -502,6 +502,35 @@ def test_usage_add_without_agent_model_names_stays_none():
     assert entry.model_name is None
 
 
+def test_usage_add_single_request_preserves_prebuilt_entry_attribution():
+    """Single-request Usage with request_usage_entries keeps agent/model when add() has no kwargs."""
+    inner = RequestUsage(
+        input_tokens=20,
+        output_tokens=10,
+        total_tokens=30,
+        input_tokens_details=InputTokensDetails(cached_tokens=0),
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+        agent_name="Prior Run Agent",
+        model_name="prior-model",
+    )
+    child = Usage(
+        requests=1,
+        input_tokens=20,
+        output_tokens=10,
+        total_tokens=30,
+        input_tokens_details=InputTokensDetails(cached_tokens=0),
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+        request_usage_entries=[inner],
+    )
+    parent = Usage()
+    parent.add(child)
+
+    assert len(parent.request_usage_entries) == 1
+    out = parent.request_usage_entries[0]
+    assert out.agent_name == "Prior Run Agent"
+    assert out.model_name == "prior-model"
+
+
 def test_usage_add_merge_existing_entries_applies_agent_model_names():
     """When merging existing request_usage_entries, agent/model names are applied to unset ones."""
     # An existing entry without names

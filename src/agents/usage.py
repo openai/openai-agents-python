@@ -224,18 +224,41 @@ class Usage:
         # Automatically preserve request_usage_entries.
         # If the other Usage represents a single request with tokens, record it.
         if other.requests == 1 and other.total_tokens > 0:
-            input_details = other.input_tokens_details or InputTokensDetails(cached_tokens=0)
-            output_details = other.output_tokens_details or OutputTokensDetails(reasoning_tokens=0)
-            request_usage = RequestUsage(
-                input_tokens=other.input_tokens,
-                output_tokens=other.output_tokens,
-                total_tokens=other.total_tokens,
-                input_tokens_details=input_details,
-                output_tokens_details=output_details,
-                agent_name=agent_name,
-                model_name=model_name,
-            )
-            self.request_usage_entries.append(request_usage)
+            if other.request_usage_entries:
+                # Pre-built entries (e.g. from a prior run) already carry per-request
+                # breakdown and attribution. Merge them with the same annotation
+                # semantics as the multi-entry path instead of replacing them with a
+                # fresh RequestUsage that only reflects add() kwargs.
+                for entry in other.request_usage_entries:
+                    annotated_entry = RequestUsage(
+                        input_tokens=entry.input_tokens,
+                        output_tokens=entry.output_tokens,
+                        total_tokens=entry.total_tokens,
+                        input_tokens_details=entry.input_tokens_details,
+                        output_tokens_details=entry.output_tokens_details,
+                        agent_name=agent_name
+                        if (agent_name is not None and entry.agent_name is None)
+                        else entry.agent_name,
+                        model_name=model_name
+                        if (model_name is not None and entry.model_name is None)
+                        else entry.model_name,
+                    )
+                    self.request_usage_entries.append(annotated_entry)
+            else:
+                input_details = other.input_tokens_details or InputTokensDetails(cached_tokens=0)
+                output_details = other.output_tokens_details or OutputTokensDetails(
+                    reasoning_tokens=0
+                )
+                request_usage = RequestUsage(
+                    input_tokens=other.input_tokens,
+                    output_tokens=other.output_tokens,
+                    total_tokens=other.total_tokens,
+                    input_tokens_details=input_details,
+                    output_tokens_details=output_details,
+                    agent_name=agent_name,
+                    model_name=model_name,
+                )
+                self.request_usage_entries.append(request_usage)
         elif other.request_usage_entries:
             # If the other Usage already has individual request breakdowns, merge them.
             # Apply agent_name/model_name to entries that don't already have them set,
