@@ -100,6 +100,11 @@ UrlAuth = Literal["sprite", "public"]
 DEFAULT_SPRITES_API_URL = "https://api.sprites.dev"
 DEFAULT_SPRITES_WORKSPACE_ROOT = "/workspace"
 DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S = 45.0
+DEFAULT_SPRITES_IDLE_CLOSE_SECONDS = 60.0
+"""Default idle threshold after which control connections are closed so the
+sprite can drop back to ``warm`` and stop accruing running-state cost. The
+next I/O reopens a control connection; the platform auto-wakes the sprite on
+traffic arrival, so the cost is just the WS reconnect (~1s)."""
 
 # The upstream sprite status enum is not exported from sprites-py; values are
 # defined by the API. A sprite that has finished provisioning reports either
@@ -192,6 +197,12 @@ class SpritesSandboxClientOptions(BaseSandboxClientOptions):
     workspace_persistence: WorkspacePersistenceMode = "tar"
     """Workspace persistence mode. v1 supports only ``"tar"``."""
 
+    idle_close_seconds: float = DEFAULT_SPRITES_IDLE_CLOSE_SECONDS
+    """Seconds of inactivity after which the session closes its control
+    connections so the sprite can drop back to ``warm``. Set to ``0`` (or
+    any negative value) to disable — connections stay open until shutdown.
+    Default ``60.0`` matches Sprites' running-state idle billing window."""
+
     def __init__(
         self,
         sprite_name: str | None = None,
@@ -205,6 +216,7 @@ class SpritesSandboxClientOptions(BaseSandboxClientOptions):
         timeout_ms: int | None = None,
         wait_for_running_timeout_s: float = DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S,
         workspace_persistence: WorkspacePersistenceMode = "tar",
+        idle_close_seconds: float = DEFAULT_SPRITES_IDLE_CLOSE_SECONDS,
         *,
         type: Literal["sprites"] = "sprites",
     ) -> None:
@@ -221,6 +233,7 @@ class SpritesSandboxClientOptions(BaseSandboxClientOptions):
             timeout_ms=timeout_ms,
             wait_for_running_timeout_s=wait_for_running_timeout_s,
             workspace_persistence=workspace_persistence,
+            idle_close_seconds=idle_close_seconds,
         )
 
 
@@ -243,6 +256,7 @@ class SpritesSandboxSessionState(SandboxSessionState):
     env: dict[str, str] | None = None
     timeout_ms: int | None = None
     workspace_persistence: WorkspacePersistenceMode = "tar"
+    idle_close_seconds: float = DEFAULT_SPRITES_IDLE_CLOSE_SECONDS
 
 
 class SpritesSandboxSession(BaseSandboxSession):
@@ -258,6 +272,9 @@ class SpritesSandboxSession(BaseSandboxSession):
     _pty_processes: dict[int, _SpritePtyProcessEntry]
     _reserved_pty_process_ids: set[int]
     _warmth_verified: bool
+    _last_activity_at: float
+    _idle_close_seconds: float
+    _idle_watch_task: asyncio.Task[None] | None
 
     def __init__(
         self,
@@ -277,12 +294,15 @@ class SpritesSandboxSession(BaseSandboxSession):
         self._pty_lock = asyncio.Lock()
         self._pty_processes = {}
         self._reserved_pty_process_ids = set()
-        # ``_warmth_verified`` tracks whether we've already confirmed the sprite
-        # is warm/running. Set when a fresh sprite is provisioned (we have to
-        # poll anyway), or when the first I/O operation drives a successful
-        # control-plane connect. Resetting via ``_invalidate_warmth`` after a
-        # transport error forces a re-check on the next operation.
         self._warmth_verified = False
+        # Idle-close: when an I/O operation hasn't run for ``idle_close_seconds``,
+        # the watcher closes the control-connection pool so the sprite can drop
+        # to ``warm`` and stop accruing running-state cost. The next I/O
+        # operation reopens a connection; the platform auto-wakes the sprite on
+        # traffic arrival.
+        self._last_activity_at = time.monotonic()
+        self._idle_close_seconds = float(state.idle_close_seconds)
+        self._idle_watch_task = None
 
     @classmethod
     def from_state(
@@ -370,6 +390,7 @@ class SpritesSandboxSession(BaseSandboxSession):
         out from under us and we have to re-attach in a recovery flow).
         """
 
+        self._touch_activity()
         if self._warmth_verified:
             return
         await self._wait_for_sprite_running()
@@ -379,6 +400,62 @@ class SpritesSandboxSession(BaseSandboxSession):
         """Force the next I/O operation to re-poll the sprite's status."""
 
         self._warmth_verified = False
+
+    def _touch_activity(self) -> None:
+        """Mark this moment as the most recent I/O. Starts the idle watcher
+        if it isn't already running."""
+
+        self._last_activity_at = time.monotonic()
+        self._maybe_start_idle_watch()
+
+    def _maybe_start_idle_watch(self) -> None:
+        if self._idle_close_seconds <= 0:
+            return
+        task = self._idle_watch_task
+        if task is not None and not task.done():
+            return
+        try:
+            self._idle_watch_task = asyncio.create_task(self._idle_watch_loop())
+        except RuntimeError:
+            # No running event loop (e.g. unit-test fixture creating a session
+            # outside an asyncio context). The watcher will start on the next
+            # I/O call from inside an active loop.
+            self._idle_watch_task = None
+
+    async def _idle_watch_loop(self) -> None:
+        try:
+            while True:
+                # Sleep until the configured idle window elapses since the
+                # most-recent activity, re-checking each loop because activity
+                # may have happened during the sleep and reset the deadline.
+                elapsed = time.monotonic() - self._last_activity_at
+                remaining = self._idle_close_seconds - elapsed
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                    continue
+                await self._close_idle_control_connections()
+                # Watcher exits; the next I/O calls ``_touch_activity`` which
+                # will respawn it.
+                return
+        except asyncio.CancelledError:
+            pass
+
+    async def _close_idle_control_connections(self) -> None:
+        """Close pooled control connections so the sprite can drop to ``warm``.
+
+        Skipped when there are active PTY operations — those need their
+        connections kept alive.
+        """
+
+        if self._pty_processes:
+            return
+        sprite = self._sprite
+        if sprite is None:
+            return
+        try:
+            await sprite.close_control_connection()
+        except Exception:
+            pass
 
     def _build_sprite_config(self) -> sprites.SpriteConfig | None:
         if (
@@ -559,6 +636,16 @@ class SpritesSandboxSession(BaseSandboxSession):
         return bool(refreshed.status in _SPRITE_READY_STATUSES)
 
     async def shutdown(self) -> None:
+        # Stop the idle watcher first so it doesn't race with our cleanup.
+        watcher = self._idle_watch_task
+        if watcher is not None and not watcher.done():
+            watcher.cancel()
+            try:
+                await watcher
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._idle_watch_task = None
+
         # Tear down any in-flight PTY operations first so their control connections
         # are released back to the pool before the sprite is deleted.
         try:
