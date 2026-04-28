@@ -47,6 +47,12 @@ def _attach(inner: SpritesSandboxSession, *, client: Any, sprite: Any = None) ->
     ``setattr`` is used to sidestep mypy's invariant attribute typing — the fakes
     duck-type the real ``SpritesClient``/``Sprite`` interface only as far as the
     tests exercise.
+
+    Also marks ``_warmth_verified=True`` so I/O paths skip the lazy
+    wake-up poll — the test has already set up the fake sprite directly,
+    so we can trust it's "warm enough" for the assertions under test.
+    Tests that specifically exercise the wait-for-running poll override
+    this back to False.
     """
 
     # ``setattr`` (instead of plain assignment) silences mypy's invariant attribute
@@ -54,6 +60,7 @@ def _attach(inner: SpritesSandboxSession, *, client: Any, sprite: Any = None) ->
     setattr(inner, "_client", client)  # noqa: B010
     if sprite is not None:
         setattr(inner, "_sprite", sprite)  # noqa: B010
+        setattr(inner, "_warmth_verified", True)  # noqa: B010
 
 
 # ---------- Fakes ----------
@@ -1072,3 +1079,76 @@ def test_sprites_checkpoints_tool_count_depends_on_allow_restore() -> None:
     cap_yes = SpritesCheckpoints(allow_restore=True)
     assert len(cap_no.tools()) == 2  # create + list
     assert len(cap_yes.tools()) == 3  # + restore
+
+
+# ---------- 17. Lazy wake-up ----------
+
+
+@pytest.mark.asyncio
+async def test_named_attach_create_does_not_poll_for_running(
+    patched_sprites: dict[str, Any],
+) -> None:
+    """create() with sprite_name should NOT call get_sprite during attach.
+
+    The platform auto-wakes the sprite on first traffic; polling here would
+    pay wake-up latency just to hand back a session handle. The first I/O
+    operation drives the wake-up via _ensure_warm.
+    """
+
+    fake_client = patched_sprites["client"]
+    fake_client._sprites_by_name["existing"] = _FakeSprite(name="existing")
+    client = SpritesSandboxClient(token="tok")
+    options = SpritesSandboxClientOptions(sprite_name="existing")
+    session = await client.create(options=options)
+    inner = session._inner
+    assert isinstance(inner, SpritesSandboxSession)
+    # No get_sprite calls because we did not poll for warmth.
+    assert fake_client.get_sprite_calls == []
+    # And the warmth flag stays False, so the next I/O will trigger the poll.
+    assert inner._warmth_verified is False
+
+
+@pytest.mark.asyncio
+async def test_lazy_warm_polls_on_first_exec(patched_sprites: dict[str, Any]) -> None:
+    fake_client = patched_sprites["client"]
+    fake_client._sprites_by_name["existing"] = _FakeSprite(name="existing")
+    fake_control = patched_sprites["control"]
+    fake_control.next_ops.append(_FakeOpConn(stdout=b"", exit_code=0))
+
+    client = SpritesSandboxClient(token="tok")
+    session = await client.create(options=SpritesSandboxClientOptions(sprite_name="existing"))
+    inner = session._inner
+    assert isinstance(inner, SpritesSandboxSession)
+    assert inner._warmth_verified is False
+    assert fake_client.get_sprite_calls == []
+
+    # First exec drives the wake-up poll.
+    await inner._exec_internal("echo", "hi")
+    assert fake_client.get_sprite_calls == ["existing"]
+    assert inner._warmth_verified is True
+
+    # Subsequent exec does NOT re-poll.
+    fake_control.next_ops.append(_FakeOpConn(stdout=b"", exit_code=0))
+    await inner._exec_internal("echo", "hi2")
+    # Still just the one poll from the first call.
+    assert fake_client.get_sprite_calls == ["existing"]
+
+
+@pytest.mark.asyncio
+async def test_lazy_warm_invalidate_forces_repoll(patched_sprites: dict[str, Any]) -> None:
+    fake_client = patched_sprites["client"]
+    fake_client._sprites_by_name["existing"] = _FakeSprite(name="existing")
+    fake_control = patched_sprites["control"]
+    fake_control.next_ops.extend([_FakeOpConn(exit_code=0), _FakeOpConn(exit_code=0)])
+
+    client = SpritesSandboxClient(token="tok")
+    session = await client.create(options=SpritesSandboxClientOptions(sprite_name="existing"))
+    inner = session._inner
+    assert isinstance(inner, SpritesSandboxSession)
+
+    await inner._exec_internal("echo", "1")
+    assert len(fake_client.get_sprite_calls) == 1
+
+    inner._invalidate_warmth()
+    await inner._exec_internal("echo", "2")
+    assert len(fake_client.get_sprite_calls) == 2
