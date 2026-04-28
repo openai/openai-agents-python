@@ -6,6 +6,7 @@ from .capabilities import (
     SpritesPlatformContext,
     SpritesUrlAccess,
     UrlVisibility,
+    clear_platform_context_cache,
 )
 from .sandbox import (
     DEFAULT_SPRITES_API_URL,
@@ -30,4 +31,5 @@ __all__ = [
     "SpritesSandboxSessionState",
     "SpritesUrlAccess",
     "UrlVisibility",
+    "clear_platform_context_cache",
 ]

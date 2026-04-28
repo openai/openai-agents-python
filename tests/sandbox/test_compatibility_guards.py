@@ -347,6 +347,7 @@ def test_core_sandbox_public_export_surface_is_stable() -> None:
                 "SpritesSandboxSessionState",
                 "SpritesUrlAccess",
                 "UrlVisibility",
+                "clear_platform_context_cache",
             },
         ),
     ],
