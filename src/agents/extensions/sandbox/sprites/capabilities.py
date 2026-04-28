@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Literal
 
-from pydantic import PrivateAttr
-
 from ....run_context import RunContextWrapper
 from ....sandbox.capabilities.capability import Capability
 from ....sandbox.manifest import Manifest
@@ -18,6 +16,34 @@ DEFAULT_SPRITES_CONTEXT_PATH = "/.sprite/llm.txt"
 UrlVisibility = Literal["public", "sprite"]
 """Sprites URL visibility values. ``"sprite"`` restricts the URL to organization
 members (the platform's default); ``"public"`` opens it to the internet."""
+
+# Module-level cache of the framed platform-context text keyed by sprite name.
+# ``Capability.clone`` runs every agent turn and resets per-instance attribute
+# state, so a per-instance cache would re-exec ``cat /.sprite/llm.txt`` every
+# turn — waking a paused sprite for nothing on turns where the model never
+# calls a tool. Caching at module scope by sprite name lets the file land
+# exactly once per sprite for the life of the process. ``clear_platform_context_cache``
+# below is exposed for applications that want to force a re-fetch (e.g.
+# after a sprite image upgrade).
+_PLATFORM_CONTEXT_CACHE: dict[tuple[str, str], str] = {}
+
+
+def clear_platform_context_cache(sprite_name: str | None = None, path: str | None = None) -> None:
+    """Forget cached platform-context text.
+
+    With no arguments, clears every entry. Pass ``sprite_name`` (and optionally
+    ``path``) to evict a specific entry.
+    """
+
+    if sprite_name is None:
+        _PLATFORM_CONTEXT_CACHE.clear()
+        return
+    if path is None:
+        for key in list(_PLATFORM_CONTEXT_CACHE.keys()):
+            if key[0] == sprite_name:
+                del _PLATFORM_CONTEXT_CACHE[key]
+        return
+    _PLATFORM_CONTEXT_CACHE.pop((sprite_name, path), None)
 
 
 class SpritesPlatformContext(Capability):
@@ -56,24 +82,20 @@ class SpritesPlatformContext(Capability):
     timeout_s: float = 5.0
     """Timeout for the ``cat`` exec call."""
 
-    _cached_text: str | None = PrivateAttr(default=None)
-
-    def bind(self, session: BaseSandboxSession) -> None:
-        super().bind(session)
-        # Reset the cache on rebind so a different session re-reads its own file.
-        self._cached_text = None
-
     async def instructions(self, manifest: Manifest) -> str | None:
         _ = manifest
-        if self._cached_text is not None:
-            return self._cached_text
-        if self.session is None:
+        session = self.session
+        if session is None:
             return None
 
+        sprite_name = _resolve_sprite_name(session)
+        cache_key = (sprite_name or "", self.path)
+        cached = _PLATFORM_CONTEXT_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
         try:
-            result = await self.session.exec(
-                "cat", "--", self.path, shell=False, timeout=self.timeout_s
-            )
+            result = await session.exec("cat", "--", self.path, shell=False, timeout=self.timeout_s)
         except Exception:
             return None
         if not result.ok():
@@ -92,7 +114,8 @@ class SpritesPlatformContext(Capability):
             f"{text}\n"
             "</sprites-platform-context>"
         )
-        self._cached_text = framed
+        if sprite_name:
+            _PLATFORM_CONTEXT_CACHE[cache_key] = framed
         return framed
 
 
@@ -109,6 +132,17 @@ def _resolve_sprite_handle(session: BaseSandboxSession | None) -> Any | None:
     inner = getattr(session, "_inner", session)
     sprite = getattr(inner, "_sprite", None)
     return sprite
+
+
+def _resolve_sprite_name(session: BaseSandboxSession | None) -> str | None:
+    """Return the underlying sprite's name, or None if not yet known."""
+
+    if session is None:
+        return None
+    inner = getattr(session, "_inner", session)
+    state = getattr(inner, "state", None)
+    name = getattr(state, "sprite_name", None) if state is not None else None
+    return name if isinstance(name, str) and name else None
 
 
 class SpritesUrlAccess(Capability):
@@ -357,4 +391,5 @@ __all__ = [
     "SpritesPlatformContext",
     "SpritesUrlAccess",
     "UrlVisibility",
+    "clear_platform_context_cache",
 ]

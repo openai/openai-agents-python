@@ -41,6 +41,17 @@ SPRITE_NAME = "sprite-test-1"
 SESSION_UUID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
 
+@pytest.fixture(autouse=True)
+def _clear_platform_context_cache() -> Any:
+    """Make sure cached platform-context text from one test doesn't leak."""
+
+    from agents.extensions.sandbox.sprites import clear_platform_context_cache
+
+    clear_platform_context_cache()
+    yield
+    clear_platform_context_cache()
+
+
 def _attach(inner: SpritesSandboxSession, *, client: Any, sprite: Any = None) -> None:
     """Inject fake client/sprite into a SpritesSandboxSession.
 
@@ -1243,3 +1254,73 @@ async def test_activity_during_idle_window_keeps_connection_open(
     assert watcher is not None
     await asyncio.wait_for(watcher, timeout=0.2)
     assert sprite.close_control_connection_calls == 1
+
+
+# ---------- 19. Platform-context cache survives cloning ----------
+
+
+@pytest.mark.asyncio
+async def test_sprites_platform_context_cache_survives_clone(
+    patched_sprites: dict[str, Any],
+) -> None:
+    """Each agent turn re-clones capabilities; the cache must survive that.
+
+    Without a module-level cache, a new clone wakes the sprite every turn
+    just to re-read the (unchanged) platform-context file. With it, only
+    the first turn for a given sprite-name pays the exec.
+    """
+
+    fake_control = patched_sprites["control"]
+    fake_control.next_ops.append(_FakeOpConn(stdout=b"# Sprite\n", exit_code=0))
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+
+    # Turn 1: a fresh clone fetches and caches.
+    cap1 = SpritesPlatformContext()
+    cap1.bind(inner)
+    out1 = await cap1.instructions(state.manifest)
+    assert out1 is not None
+    assert "<sprites-platform-context>" in out1
+    assert len(fake_control.start_op_calls) == 1
+
+    # Turn 2: a NEW clone targeting the same sprite hits the module cache.
+    cap2 = SpritesPlatformContext()
+    cap2.bind(inner)
+    out2 = await cap2.instructions(state.manifest)
+    assert out2 == out1
+    # Still just the one exec — turn 2 didn't touch the sprite.
+    assert len(fake_control.start_op_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_sprites_platform_context_cache_clear_forces_refetch(
+    patched_sprites: dict[str, Any],
+) -> None:
+    from agents.extensions.sandbox.sprites import clear_platform_context_cache
+
+    fake_control = patched_sprites["control"]
+    fake_control.next_ops.extend(
+        [_FakeOpConn(stdout=b"v1\n", exit_code=0), _FakeOpConn(stdout=b"v2\n", exit_code=0)]
+    )
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+
+    cap = SpritesPlatformContext()
+    cap.bind(inner)
+    out1 = await cap.instructions(state.manifest)
+    assert out1 is not None and "v1" in out1
+    assert len(fake_control.start_op_calls) == 1
+
+    # Cache invalidation forces a re-fetch.
+    clear_platform_context_cache(SPRITE_NAME)
+    out2 = await cap.instructions(state.manifest)
+    assert out2 is not None and "v2" in out2
+    assert len(fake_control.start_op_calls) == 2
