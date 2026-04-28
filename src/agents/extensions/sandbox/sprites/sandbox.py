@@ -327,6 +327,9 @@ class SpritesSandboxSession(BaseSandboxSession):
         client = self._ensure_client_sync()
         sprite: Sprite
         if self.state.created_by_us:
+            # Provision a fresh sprite. ``create_sprite`` raises eagerly if the
+            # platform rejects the request, so we still surface creation
+            # failures synchronously here.
             config = self._build_sprite_config()
             try:
                 sprite = await asyncio.to_thread(
@@ -344,28 +347,20 @@ class SpritesSandboxSession(BaseSandboxSession):
                 ) from exc
             await self._maybe_update_url_settings(sprite)
             self._sprite = sprite
-            # Fresh sprite: poll until it reaches a ready status, then refresh
-            # its info so ``url`` / ``organization_name`` are populated. We
-            # have to poll regardless because the create call doesn't tell us
-            # when provisioning finishes.
-            await self._wait_for_sprite_running()
-            self._warmth_verified = True
-            refreshed: Sprite
-            try:
-                refreshed = await asyncio.to_thread(client.get_sprite, self.state.sprite_name)
-            except SpriteError:
-                refreshed = sprite
-            self._sprite = refreshed
-            return refreshed
+            return sprite
 
-        # Named-attach: skip the readiness poll on attach. The sprite may be
-        # cold (paused) and we don't want to pay wake-up latency just to hand
-        # the agent a session handle. The first I/O operation drives the
-        # wake-up via ``_ensure_warm`` — the platform auto-wakes a paused
-        # sprite when traffic arrives, so this is essentially free.
+        # Named-attach: just construct the handle.
         sprite = await asyncio.to_thread(client.sprite, self.state.sprite_name)
         self._sprite = sprite
         return sprite
+
+    # Both ephemeral and named-attach paths now defer the wait-for-running poll
+    # (and the URL/org-info refresh that comes with it) until the first I/O
+    # operation runs ``_ensure_warm``. The platform auto-wakes paused sprites
+    # on traffic arrival and the create POST raises eagerly on rejection, so
+    # this purely shifts the warm-up cost from session creation to first use
+    # without losing any safety. Callers that need ``Sprite.url`` (e.g.
+    # ``_resolve_exposed_port``) call ``_ensure_warm`` themselves.
 
     async def _ensure_warm(self) -> None:
         """Block until the sprite is ready to accept I/O, but only on first use.
@@ -952,7 +947,19 @@ class SpritesSandboxSession(BaseSandboxSession):
             self._release_control(entry.control)
 
     async def _resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
-        sprite = await self._ensure_sprite()
+        await self._ensure_sprite()
+        # Make sure the sprite is reachable AND that ``Sprite.url`` /
+        # ``organization_name`` are populated — these come from the post-poll
+        # ``get_sprite`` refresh.
+        await self._ensure_warm()
+        sprite = self._sprite
+        if sprite is None:
+            raise ExposedPortUnavailableError(
+                port=port,
+                exposed_ports=self.state.exposed_ports,
+                reason="backend_unavailable",
+                context={"backend": "sprites", "sprite_name": self.state.sprite_name},
+            )
         url = sprite.url
         if not url:
             raise ExposedPortUnavailableError(

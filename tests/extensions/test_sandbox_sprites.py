@@ -378,8 +378,10 @@ async def test_create_ephemeral_sprite(patched_sprites: dict[str, Any]) -> None:
     assert inner.state.created_by_us is True
     assert len(fake_client.create_sprite_calls) == 1
     assert fake_client.create_sprite_calls[0][0].startswith("openai-agents-")
-    # get_sprite called for status poll + the post-create refresh
-    assert len(fake_client.get_sprite_calls) >= 1
+    # No eager get_sprite poll — ephemeral path is lazy too. The first I/O
+    # operation drives the wait-for-running via ``_ensure_warm``.
+    assert fake_client.get_sprite_calls == []
+    assert inner._warmth_verified is False
     # delete via client.delete deletes the ephemeral sprite
     await client.delete(session)
     assert fake_client.delete_sprite_calls == [fake_client.create_sprite_calls[0][0]]
