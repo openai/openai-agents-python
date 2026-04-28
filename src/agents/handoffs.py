@@ -105,12 +105,6 @@ class Handoff(Generic[TContext]):
     agent and returns whether the handoff is enabled. You can use this to dynamically enable/disable
     a handoff based on your context/state."""
 
-    should_return_control: bool = False
-    """Whether the Agent that receives control during a handoff should return control to the
-    original (previous) Agent upon completion of its work. If False, after the Agent that received
-    the handoff completes its work, the interaction will end.
-    """
-
     def get_transfer_message(self, agent: Agent[Any]) -> str:
         return json.dumps({"assistant": agent.name})
 
@@ -134,7 +128,6 @@ def handoff(
     tool_description_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
-    should_return_control: bool = False,
 ) -> Handoff[TContext]: ...
 
 
@@ -148,7 +141,6 @@ def handoff(
     tool_name_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
-    should_return_control: bool = False,
 ) -> Handoff[TContext]: ...
 
 
@@ -161,7 +153,6 @@ def handoff(
     tool_name_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
-    should_return_control: bool = False,
 ) -> Handoff[TContext]: ...
 
 
@@ -173,7 +164,6 @@ def handoff(
     input_type: type[THandoffInput] | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
-    should_return_control: bool = False,
 ) -> Handoff[TContext]:
     """Create a handoff from an agent.
 
@@ -191,7 +181,7 @@ def handoff(
             hidden from the LLM at runtime.
     """
     assert (on_handoff and input_type) or not (on_handoff and input_type), (
-        "You must provide either both on_input and input_type, or neither"
+        "You must provide either both on_handoff and input_type, or neither"
     )
     type_adapter: TypeAdapter[Any] | None
     if input_type is not None:
@@ -257,5 +247,4 @@ def handoff(
         input_filter=input_filter,
         agent_name=agent.name,
         is_enabled=is_enabled,
-        should_return_control=should_return_control,
     )
