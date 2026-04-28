@@ -1154,3 +1154,92 @@ async def test_lazy_warm_invalidate_forces_repoll(patched_sprites: dict[str, Any
     inner._invalidate_warmth()
     await inner._exec_internal("echo", "2")
     assert len(fake_client.get_sprite_calls) == 2
+
+
+# ---------- 18. Idle-close watcher ----------
+
+
+@pytest.mark.asyncio
+async def test_idle_watch_closes_control_connections_after_threshold(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+    # Make the idle window vanishingly small so the test runs fast.
+    inner._idle_close_seconds = 0.01
+
+    # Touch activity to spawn the watcher, then wait long enough for the
+    # watcher's idle threshold to elapse and close the control connection.
+    inner._touch_activity()
+    assert inner._idle_watch_task is not None
+    await asyncio.wait_for(inner._idle_watch_task, timeout=1.0)
+    assert sprite.close_control_connection_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_idle_watch_disabled_when_seconds_is_zero(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state(idle_close_seconds=0)
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+    inner._idle_close_seconds = 0  # belt-and-braces
+
+    inner._touch_activity()
+    assert inner._idle_watch_task is None
+    # Wait briefly to confirm no close ever fires.
+    await asyncio.sleep(0.05)
+    assert sprite.close_control_connection_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_idle_watch_skipped_when_pty_active(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+    inner._idle_close_seconds = 0.01
+    # Pretend a PTY is active so the watcher should refuse to close.
+    inner._pty_processes[123] = object()  # type: ignore[assignment]
+
+    await inner._close_idle_control_connections()
+    assert sprite.close_control_connection_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_activity_during_idle_window_keeps_connection_open(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+    inner._idle_close_seconds = 0.05
+
+    inner._touch_activity()
+    # Half the window: nudge activity forward so the deadline shifts.
+    await asyncio.sleep(0.025)
+    inner._touch_activity()
+    # Wait long enough for the original deadline to have passed had we not
+    # touched activity, but short of the new deadline.
+    await asyncio.sleep(0.04)
+    # The connection should still be open at this point.
+    assert sprite.close_control_connection_calls == 0
+    # Now actually let it idle out fully.
+    watcher = inner._idle_watch_task
+    assert watcher is not None
+    await asyncio.wait_for(watcher, timeout=0.2)
+    assert sprite.close_control_connection_calls == 1
