@@ -16,10 +16,12 @@ from agents.sandbox.errors import (
     InvalidManifestPathError,
     LocalDirReadError,
     LocalFileReadError,
+    WorkspaceArchiveWriteError,
 )
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.workspace_payloads import coerce_write_payload
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, User
 from tests.utils.factories import TestSessionState
@@ -51,6 +53,16 @@ class _RecordingSession(BaseSandboxSession):
     async def write(self, path: Path, data: io.IOBase, *, user: object = None) -> None:
         _ = user
         self.writes[path] = data.read()
+
+    async def rm(
+        self,
+        path: Path | str,
+        *,
+        recursive: bool = False,
+        user: object = None,
+    ) -> None:
+        _ = recursive, user
+        self.writes.pop(Path(path), None)
 
     async def running(self) -> bool:
         return True
@@ -102,6 +114,114 @@ class _MetadataFailureSession(_RecordingSession):
         if cmd and cmd[0] in self.fail_commands:
             return ExecResult(stdout=b"", stderr=b"metadata failed", exit_code=1)
         return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+
+class _SeekMutatingStream(io.BytesIO):
+    def __init__(
+        self,
+        data: bytes,
+        *,
+        after_seek: bytes,
+        owned_fd: int | None = None,
+    ) -> None:
+        super().__init__(data)
+        self._after_seek = after_seek
+        self._owned_fd = owned_fd
+        self._mutated = False
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if not self._mutated and self.tell() != 0 and offset == 0 and whence == io.SEEK_SET:
+            self._mutated = True
+            super().seek(0)
+            self.truncate(0)
+            self.write(self._after_seek)
+        return super().seek(offset, whence)
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            if self._owned_fd is not None:
+                os.close(self._owned_fd)
+                self._owned_fd = None
+
+
+class _PartialPayloadWrappingWriteSession(_RecordingSession):
+    async def write(self, path: Path, data: io.IOBase, *, user: object = None) -> None:
+        _ = user
+        payload = coerce_write_payload(path=path, data=data)
+        chunks: list[bytes] = []
+        try:
+            while True:
+                chunk = payload.stream.read(4)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                self.writes[path] = b"".join(chunks)
+        except Exception as e:
+            raise WorkspaceArchiveWriteError(path=path, cause=e) from e
+        self.writes[path] = b"".join(chunks)
+
+
+class _PartialDirectWriteSession(_RecordingSession):
+    async def write(self, path: Path, data: io.IOBase, *, user: object = None) -> None:
+        _ = user
+        chunks: list[bytes] = []
+        while True:
+            chunk = data.read(4)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            self.writes[path] = b"".join(chunks)
+        self.writes[path] = b"".join(chunks)
+
+
+class _PartialWorkspaceWriteFailureSession(_RecordingSession):
+    async def write(self, path: Path, data: io.IOBase, *, user: object = None) -> None:
+        _ = user
+        chunk = data.read(4)
+        if isinstance(chunk, bytes):
+            self.writes[path] = chunk
+        raise WorkspaceArchiveWriteError(path=path)
+
+
+class _FailAfterChunkStream(io.BytesIO):
+    def __init__(self, data: bytes, *, owned_fd: int | None = None) -> None:
+        super().__init__(data)
+        self._owned_fd = owned_fd
+        self._read_count = 0
+
+    def read(self, size: int | None = -1) -> bytes:
+        if self._read_count > 0:
+            raise OSError("source read failed")
+        self._read_count += 1
+        return super().read(-1 if size is None else size)
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            if self._owned_fd is not None:
+                os.close(self._owned_fd)
+                self._owned_fd = None
+
+
+class _FailBeforeChunkStream(io.BytesIO):
+    def __init__(self, *, owned_fd: int | None = None) -> None:
+        super().__init__(b"")
+        self._owned_fd = owned_fd
+
+    def read(self, size: int | None = -1) -> bytes:
+        _ = size
+        raise OSError("source read failed")
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            if self._owned_fd is not None:
+                os.close(self._owned_fd)
+                self._owned_fd = None
 
 
 def test_resolve_workspace_path_rejects_windows_drive_absolute_path() -> None:
@@ -185,6 +305,32 @@ async def test_base_sandbox_session_uses_current_working_directory_for_local_fil
 
 
 @pytest.mark.asyncio
+async def test_local_file_checksum_matches_written_bytes_when_source_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"original")
+    session = _RecordingSession()
+
+    def seek_mutating_fdopen(fd: int, *args: object, **kwargs: object) -> io.IOBase:
+        _ = args, kwargs
+        return _SeekMutatingStream(b"original", after_seek=b"mutated", owned_fd=fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.fdopen", seek_mutating_fdopen)
+
+    result = await LocalFile(src=Path("source.txt")).apply(
+        session,
+        Path("/workspace/copied.txt"),
+        tmp_path,
+    )
+
+    written = session.writes[Path("/workspace/copied.txt")]
+    assert written == b"original"
+    assert result[0].sha256 == hashlib.sha256(written).hexdigest()
+
+
+@pytest.mark.asyncio
 async def test_local_file_rejects_symlinked_source_ancestors(tmp_path: Path) -> None:
     target_dir = tmp_path / "secret-dir"
     target_dir.mkdir()
@@ -245,6 +391,56 @@ async def test_local_file_rejects_symlinked_source_before_checksum(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_local_file_fallback_rejects_swapped_source_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    src_root = tmp_path / "src"
+    nested_dir = src_root / "nested"
+    nested_dir.mkdir(parents=True)
+    src_file = nested_dir / "safe.txt"
+    src_file.write_text("safe", encoding="utf-8")
+    secret_dir = tmp_path / "secret-dir"
+    secret_dir.mkdir()
+    (secret_dir / "safe.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+    original_open = os.open
+    swapped = False
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts._OPEN_SUPPORTS_DIR_FD", False)
+    monkeypatch.setattr("agents.sandbox.entries.artifacts._HAS_O_DIRECTORY", False)
+
+    def swap_parent_then_open(
+        path: str | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if Path(path) == src_file and not swapped:
+            nested_dir.rename(src_root / "nested-original")
+            _symlink_or_skip(src_root / "nested", secret_dir, target_is_directory=True)
+            swapped = True
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.open", swap_parent_then_open)
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=Path("src/nested/safe.txt")).apply(
+            session,
+            Path("/workspace/copied.txt"),
+            tmp_path,
+        )
+
+    assert excinfo.value.context["reason"] == "symlink_not_supported"
+    assert excinfo.value.context["child"] == "src/nested"
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
 async def test_local_dir_copy_falls_back_when_safe_dir_fd_open_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -269,6 +465,267 @@ async def test_local_dir_copy_falls_back_when_safe_dir_fd_open_unavailable(
 
     assert result.path == Path("/workspace/copied/safe.txt")
     assert session.writes[Path("/workspace/copied/safe.txt")] == b"safe"
+
+
+@pytest.mark.asyncio
+async def test_local_dir_checksum_matches_written_bytes_when_source_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    src_root = tmp_path / "src"
+    src_root.mkdir()
+    src_file = src_root / "safe.txt"
+    src_file.write_bytes(b"original")
+    session = _RecordingSession()
+
+    def seek_mutating_fdopen(fd: int, *args: object, **kwargs: object) -> io.IOBase:
+        _ = args, kwargs
+        return _SeekMutatingStream(b"original", after_seek=b"mutated", owned_fd=fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.fdopen", seek_mutating_fdopen)
+    local_dir = LocalDir(src=Path("src"))
+
+    result = await local_dir._copy_local_dir_file(
+        base_dir=tmp_path,
+        session=session,
+        src_root=src_root,
+        src=src_file,
+        dest_root=Path("/workspace/copied"),
+    )
+
+    written = session.writes[Path("/workspace/copied/safe.txt")]
+    assert written == b"original"
+    assert result.sha256 == hashlib.sha256(written).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_local_file_preserves_local_read_error_when_write_wraps_stream_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = (tmp_path / "source.txt").resolve()
+    source.write_bytes(b"original")
+    session = _PartialPayloadWrappingWriteSession()
+
+    def failing_fdopen(
+        fd: int,
+        *args: object,
+        **kwargs: object,
+    ) -> io.IOBase:
+        _ = args, kwargs
+        return _FailAfterChunkStream(b"original", owned_fd=fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.fdopen", failing_fdopen)
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=Path("source.txt")).apply(
+            session,
+            Path("/workspace/copied.txt"),
+            tmp_path,
+        )
+
+    assert excinfo.value.context["src"] == str(source)
+    assert isinstance(excinfo.value.cause, OSError)
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_file_cleans_partial_write_when_source_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = (tmp_path / "source.txt").resolve()
+    source.write_bytes(b"original")
+    session = _PartialDirectWriteSession()
+
+    def failing_fdopen(
+        fd: int,
+        *args: object,
+        **kwargs: object,
+    ) -> io.IOBase:
+        _ = args, kwargs
+        return _FailAfterChunkStream(b"original", owned_fd=fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.fdopen", failing_fdopen)
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=Path("source.txt")).apply(
+            session,
+            Path("/workspace/copied.txt"),
+            tmp_path,
+        )
+
+    assert excinfo.value.context["src"] == str(source)
+    assert isinstance(excinfo.value.cause, OSError)
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_file_cleans_partial_write_when_first_source_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = (tmp_path / "source.txt").resolve()
+    source.write_bytes(b"original")
+    session = _PartialDirectWriteSession()
+
+    def failing_fdopen(
+        fd: int,
+        *args: object,
+        **kwargs: object,
+    ) -> io.IOBase:
+        _ = args, kwargs
+        return _FailBeforeChunkStream(owned_fd=fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.fdopen", failing_fdopen)
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=Path("source.txt")).apply(
+            session,
+            Path("/workspace/copied.txt"),
+            tmp_path,
+        )
+
+    assert excinfo.value.context["src"] == str(source)
+    assert isinstance(excinfo.value.cause, OSError)
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_file_cleans_partial_write_when_workspace_write_fails(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"original")
+    session = _PartialWorkspaceWriteFailureSession()
+
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await LocalFile(src=Path("source.txt")).apply(
+            session,
+            Path("/workspace/copied.txt"),
+            tmp_path,
+        )
+
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_dir_copy_preserves_local_read_error_when_write_wraps_stream_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    src_root = tmp_path / "src"
+    src_root.mkdir()
+    src_file = (src_root / "safe.txt").resolve()
+    src_file.write_bytes(b"original")
+    session = _PartialPayloadWrappingWriteSession()
+    local_dir = LocalDir(src=Path("src"))
+
+    def failing_fdopen(fd: int, *args: object, **kwargs: object) -> io.IOBase:
+        _ = args, kwargs
+        return _FailAfterChunkStream(b"original", owned_fd=fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.fdopen", failing_fdopen)
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await local_dir._copy_local_dir_file(
+            base_dir=tmp_path,
+            session=session,
+            src_root=src_root,
+            src=src_file,
+            dest_root=Path("/workspace/copied"),
+        )
+
+    assert excinfo.value.context["src"] == str(src_file)
+    assert isinstance(excinfo.value.cause, OSError)
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_dir_copy_cleans_partial_write_when_source_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    src_root = tmp_path / "src"
+    src_root.mkdir()
+    src_file = (src_root / "safe.txt").resolve()
+    src_file.write_bytes(b"original")
+    session = _PartialDirectWriteSession()
+    local_dir = LocalDir(src=Path("src"))
+
+    def failing_fdopen(fd: int, *args: object, **kwargs: object) -> io.IOBase:
+        _ = args, kwargs
+        return _FailAfterChunkStream(b"original", owned_fd=fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.fdopen", failing_fdopen)
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await local_dir._copy_local_dir_file(
+            base_dir=tmp_path,
+            session=session,
+            src_root=src_root,
+            src=src_file,
+            dest_root=Path("/workspace/copied"),
+        )
+
+    assert excinfo.value.context["src"] == str(src_file)
+    assert isinstance(excinfo.value.cause, OSError)
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_dir_copy_cleans_partial_write_when_first_source_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    src_root = tmp_path / "src"
+    src_root.mkdir()
+    src_file = (src_root / "safe.txt").resolve()
+    src_file.write_bytes(b"original")
+    session = _PartialDirectWriteSession()
+    local_dir = LocalDir(src=Path("src"))
+
+    def failing_fdopen(fd: int, *args: object, **kwargs: object) -> io.IOBase:
+        _ = args, kwargs
+        return _FailBeforeChunkStream(owned_fd=fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.fdopen", failing_fdopen)
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await local_dir._copy_local_dir_file(
+            base_dir=tmp_path,
+            session=session,
+            src_root=src_root,
+            src=src_file,
+            dest_root=Path("/workspace/copied"),
+        )
+
+    assert excinfo.value.context["src"] == str(src_file)
+    assert isinstance(excinfo.value.cause, OSError)
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_dir_copy_cleans_partial_write_when_workspace_write_fails(
+    tmp_path: Path,
+) -> None:
+    src_root = tmp_path / "src"
+    src_root.mkdir()
+    src_file = src_root / "safe.txt"
+    src_file.write_bytes(b"original")
+    session = _PartialWorkspaceWriteFailureSession()
+    local_dir = LocalDir(src=Path("src"))
+
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await local_dir._copy_local_dir_file(
+            base_dir=tmp_path,
+            session=session,
+            src_root=src_root,
+            src=src_file,
+            dest_root=Path("/workspace/copied"),
+        )
+
+    assert session.writes == {}
 
 
 @pytest.mark.asyncio
