@@ -1010,7 +1010,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def _handle_ws_event(self, event: dict[str, Any]):
         await self._emit_event(RealtimeModelRawServerEvent(data=event))
-        # The public interface definedo on this Agents SDK side (e.g., RealtimeMessageItem)
+        # The public interface defined on this Agents SDK side (e.g., RealtimeMessageItem)
         # must be the same even after the GA migration, so this part does the conversion
         if isinstance(event, dict) and event.get("type") in (
             "response.output_item.added",
