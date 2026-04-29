@@ -326,7 +326,7 @@ def test_options_roundtrip_through_polymorphic_registry() -> None:
         timeout_ms=120_000,
     )
     payload = options.model_dump(mode="json")
-    assert payload["type"] == "sprites"
+    assert payload["type"] == "fly"
     restored = BaseSandboxClientOptions.parse(payload)
     assert isinstance(restored, SpritesSandboxClientOptions)
     assert restored.model_dump(mode="json") == payload
@@ -639,7 +639,7 @@ async def test_resolve_exposed_port_not_configured_when_no_matching_service(
     _attach(inner, client=fake_client, sprite=sprite)
     with pytest.raises(ExposedPortUnavailableError) as excinfo:
         await inner._resolve_exposed_port(8080)
-    assert excinfo.value.context.get("backend") == "sprites"
+    assert excinfo.value.context.get("backend") == "fly"
 
 
 # ---------- 9. Read / write ----------
@@ -1324,3 +1324,57 @@ async def test_sprites_platform_context_cache_clear_forces_refetch(
     out2 = await cap.instructions(state.manifest)
     assert out2 is not None and "v2" in out2
     assert len(fake_control.start_op_calls) == 2
+
+
+# ---------- 20. Platform context includes service working-directory hint ----------
+
+
+@pytest.mark.asyncio
+async def test_platform_context_warns_about_service_cwd(
+    patched_sprites: dict[str, Any],
+) -> None:
+    """The framing should warn the model that services run with cwd=$HOME by default.
+
+    Without this warning, agents commonly create `python3 -m http.server` services
+    and serve from the home directory instead of the workspace.
+    """
+
+    fake_control = patched_sprites["control"]
+    fake_control.next_ops.append(_FakeOpConn(stdout=b"# Sprite\n", exit_code=0))
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state(manifest=Manifest(root="/workspace"))
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+
+    cap = SpritesPlatformContext()
+    cap.bind(inner)
+    out = await cap.instructions(state.manifest)
+    assert out is not None
+    assert "/workspace" in out
+    assert "--dir /workspace" in out
+    assert "sprite-env services create" in out
+
+
+@pytest.mark.asyncio
+async def test_platform_context_uses_actual_manifest_root(
+    patched_sprites: dict[str, Any],
+) -> None:
+    """The hint must use the agent's actual manifest.root, not a hardcoded path."""
+
+    fake_control = patched_sprites["control"]
+    fake_control.next_ops.append(_FakeOpConn(stdout=b"# Sprite\n", exit_code=0))
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state(manifest=Manifest(root="/var/agent-home"))
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+
+    cap = SpritesPlatformContext()
+    cap.bind(inner)
+    out = await cap.instructions(state.manifest)
+    assert out is not None
+    assert "/var/agent-home" in out
+    assert "--dir /var/agent-home" in out

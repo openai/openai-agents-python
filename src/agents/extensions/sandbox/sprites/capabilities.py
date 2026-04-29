@@ -25,7 +25,7 @@ members (the platform's default); ``"public"`` opens it to the internet."""
 # exactly once per sprite for the life of the process. ``clear_platform_context_cache``
 # below is exposed for applications that want to force a re-fetch (e.g.
 # after a sprite image upgrade).
-_PLATFORM_CONTEXT_CACHE: dict[tuple[str, str], str] = {}
+_PLATFORM_CONTEXT_CACHE: dict[tuple[str, str, str], str] = {}
 
 
 def clear_platform_context_cache(sprite_name: str | None = None, path: str | None = None) -> None:
@@ -38,12 +38,12 @@ def clear_platform_context_cache(sprite_name: str | None = None, path: str | Non
     if sprite_name is None:
         _PLATFORM_CONTEXT_CACHE.clear()
         return
-    if path is None:
-        for key in list(_PLATFORM_CONTEXT_CACHE.keys()):
-            if key[0] == sprite_name:
-                del _PLATFORM_CONTEXT_CACHE[key]
-        return
-    _PLATFORM_CONTEXT_CACHE.pop((sprite_name, path), None)
+    for key in list(_PLATFORM_CONTEXT_CACHE.keys()):
+        if key[0] != sprite_name:
+            continue
+        if path is not None and key[1] != path:
+            continue
+        del _PLATFORM_CONTEXT_CACHE[key]
 
 
 class SpritesPlatformContext(Capability):
@@ -83,13 +83,15 @@ class SpritesPlatformContext(Capability):
     """Timeout for the ``cat`` exec call."""
 
     async def instructions(self, manifest: Manifest) -> str | None:
-        _ = manifest
         session = self.session
         if session is None:
             return None
 
         sprite_name = _resolve_sprite_name(session)
-        cache_key = (sprite_name or "", self.path)
+        workspace_root = manifest.root
+        # Cache key includes workspace root because the framing references
+        # manifest.root verbatim — different roots produce different text.
+        cache_key = (sprite_name or "", self.path, workspace_root)
         cached = _PLATFORM_CONTEXT_CACHE.get(cache_key)
         if cached is not None:
             return cached
@@ -112,7 +114,19 @@ class SpritesPlatformContext(Capability):
             "it as authoritative when choosing how to interact with the sandbox.\n\n"
             "<sprites-platform-context>\n"
             f"{text}\n"
-            "</sprites-platform-context>"
+            "</sprites-platform-context>\n\n"
+            f"Important: this agent's workspace root is `{workspace_root}`. Sprites "
+            f"services created via `sprite-env services create` run with their own "
+            f"working directory (typically the user's home directory) — NOT in the "
+            f"workspace. ALWAYS pass `--dir {workspace_root}` (or a workspace "
+            f"subdirectory) to `sprite-env services create` so the service starts "
+            f"in the right place. Example:\n\n"
+            f"    sprite-env services create web \\\n"
+            f"        --cmd python3 --args -m,http.server,8080 \\\n"
+            f"        --dir {workspace_root} \\\n"
+            f"        --http-port 8080\n\n"
+            f"Without `--dir`, an HTTP server will list the home directory and any "
+            f"file-reading service will look in the wrong place."
         )
         if sprite_name:
             _PLATFORM_CONTEXT_CACHE[cache_key] = framed
