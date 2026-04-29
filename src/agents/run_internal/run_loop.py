@@ -598,6 +598,7 @@ async def start_streaming(
                 run_config.session_settings,
                 include_history_in_prepared_input=not server_manages_conversation,
                 preserve_dropped_new_items=True,
+                wrapper=context_wrapper,
             )
             streamed_result.input = prepared_input
             streamed_result._original_input = copy_input_items(prepared_input)

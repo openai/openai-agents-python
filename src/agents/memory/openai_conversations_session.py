@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from openai import AsyncOpenAI
 
 from agents.models._openai_shared import get_default_openai_client
@@ -7,6 +9,9 @@ from agents.models._openai_shared import get_default_openai_client
 from ..items import TResponseInputItem
 from .session import SessionABC
 from .session_settings import SessionSettings, resolve_session_limit
+
+if TYPE_CHECKING:
+    from ..run_context import RunContextWrapper
 
 
 async def start_openai_conversations_session(openai_client: AsyncOpenAI | None = None) -> str:
@@ -70,7 +75,11 @@ class OpenAIConversationsSession(SessionABC):
     async def _clear_session_id(self) -> None:
         self._session_id = None
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         session_id = await self._get_session_id()
 
         session_limit = resolve_session_limit(limit, self.session_settings)
@@ -97,7 +106,11 @@ class OpenAIConversationsSession(SessionABC):
 
         return all_items  # type: ignore
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         session_id = await self._get_session_id()
         if not items:
             return
@@ -107,7 +120,10 @@ class OpenAIConversationsSession(SessionABC):
             items=items,
         )
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> TResponseInputItem | None:
         session_id = await self._get_session_id()
         items = await self.get_items(limit=1)
         if not items:
@@ -118,7 +134,10 @@ class OpenAIConversationsSession(SessionABC):
         )
         return items[0]
 
-    async def clear_session(self) -> None:
+    async def clear_session(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         session_id = await self._get_session_id()
         await self._openai_client.conversations.delete(
             conversation_id=session_id,

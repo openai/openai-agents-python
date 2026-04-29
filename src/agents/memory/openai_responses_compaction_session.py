@@ -17,6 +17,7 @@ from .session import (
 )
 
 if TYPE_CHECKING:
+    from ..run_context import RunContextWrapper
     from .session import Session
 
 logger = logging.getLogger("openai-agents.openai.compaction")
@@ -229,8 +230,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             f"candidates={len(self._compaction_candidate_items)})"
         )
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
-        return await self.underlying_session.get_items(limit)
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
+        return await self.underlying_session.get_items(limit, wrapper=wrapper)
 
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         if self._deferred_response_id is not None:
@@ -258,8 +263,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     def _clear_deferred_compaction(self) -> None:
         self._deferred_response_id = None
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
-        await self.underlying_session.add_items(items)
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        await self.underlying_session.add_items(items, wrapper=wrapper)
         if self._compaction_candidate_items is not None:
             new_items = _normalize_compaction_session_items(items)
             new_candidates = select_compaction_candidate_items(new_items)
@@ -268,15 +277,21 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if self._session_items is not None:
             self._session_items.extend(_normalize_compaction_session_items(items))
 
-    async def pop_item(self) -> TResponseInputItem | None:
-        popped = await self.underlying_session.pop_item()
+    async def pop_item(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> TResponseInputItem | None:
+        popped = await self.underlying_session.pop_item(wrapper=wrapper)
         if popped:
             self._compaction_candidate_items = None
             self._session_items = None
         return popped
 
-    async def clear_session(self) -> None:
-        await self.underlying_session.clear_session()
+    async def clear_session(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        await self.underlying_session.clear_session(wrapper=wrapper)
         self._compaction_candidate_items = []
         self._session_items = []
         self._deferred_response_id = None
@@ -288,7 +303,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if self._compaction_candidate_items is not None and self._session_items is not None:
             return (self._compaction_candidate_items[:], self._session_items[:])
 
-        history = _normalize_compaction_session_items(await self.underlying_session.get_items())
+        history = _normalize_compaction_session_items(
+            await self.underlying_session.get_items()
+        )
         candidates = select_compaction_candidate_items(history)
         self._compaction_candidate_items = candidates
         self._session_items = history
