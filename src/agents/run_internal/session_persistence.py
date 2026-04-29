@@ -242,6 +242,7 @@ async def save_result_to_session(
     response_id: str | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
+    wrapper: RunContextWrapper[Any] | None = None,
 ) -> int:
     """
     Persist a turn to the session store, keeping track of what was already saved so retries
@@ -327,7 +328,7 @@ async def save_result_to_session(
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
         return saved_run_items_count
 
-    await session.add_items(items_to_save, wrapper=getattr(run_state, "_context", None) if run_state else None)
+    await session.add_items(items_to_save, wrapper=wrapper)
 
     if run_state:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any, Literal, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeGuard, cast
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
@@ -39,6 +39,9 @@ from typing_extensions import TypedDict
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
 from ...memory.session_settings import SessionSettings
+
+if TYPE_CHECKING:
+    from ...run_context import RunContextWrapper
 
 
 class EncryptedEnvelope(TypedDict):
@@ -170,8 +173,12 @@ class EncryptedSession(SessionABC):
         except (InvalidToken, KeyError):
             return None
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
-        encrypted_items = await self.underlying_session.get_items(limit)
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
+        encrypted_items = await self.underlying_session.get_items(limit, wrapper=wrapper)
         valid_items: list[TResponseInputItem] = []
         for enc in encrypted_items:
             item = self._unwrap(enc)
@@ -179,18 +186,30 @@ class EncryptedSession(SessionABC):
                 valid_items.append(item)
         return valid_items
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         wrapped: list[EncryptedEnvelope] = [self._wrap(it) for it in items]
-        await self.underlying_session.add_items(cast(list[TResponseInputItem], wrapped))
+        await self.underlying_session.add_items(
+            cast(list[TResponseInputItem], wrapped), wrapper=wrapper
+        )
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> TResponseInputItem | None:
         while True:
-            enc = await self.underlying_session.pop_item()
+            enc = await self.underlying_session.pop_item(wrapper=wrapper)
             if not enc:
                 return None
             item = self._unwrap(enc)
             if item is not None:
                 return item
 
-    async def clear_session(self) -> None:
-        await self.underlying_session.clear_session()
+    async def clear_session(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        await self.underlying_session.clear_session(wrapper=wrapper)

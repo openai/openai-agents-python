@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from sqlalchemy import (
     TIMESTAMP,
@@ -51,6 +51,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
 from ...memory.session_settings import SessionSettings, resolve_session_limit
+
+if TYPE_CHECKING:
+    from ...run_context import RunContextWrapper
 
 
 class SQLAlchemySession(SessionABC):
@@ -274,7 +277,10 @@ class SQLAlchemySession(SessionABC):
         finally:
             self._init_lock.release()
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self, limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -326,7 +332,10 @@ class SQLAlchemySession(SessionABC):
                     continue
             return items
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self, items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:
@@ -376,7 +385,10 @@ class SQLAlchemySession(SessionABC):
 
         await self._run_sqlite_write_with_retry(_write_items)
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
 
         Returns:
@@ -413,7 +425,10 @@ class SQLAlchemySession(SessionABC):
                 except json.JSONDecodeError:
                     return None
 
-    async def clear_session(self) -> None:
+    async def clear_session(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Clear all items for this session."""
         await self._ensure_tables()
         async with self._session_factory() as sess:

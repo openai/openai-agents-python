@@ -5,13 +5,16 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, Any, cast
 
 import aiosqlite
 
 from ...items import TResponseInputItem
 from ...memory import SessionABC
 from ...memory.session_settings import SessionSettings
+
+if TYPE_CHECKING:
+    from ...run_context import RunContextWrapper
 
 
 class AsyncSQLiteSession(SessionABC):
@@ -102,7 +105,11 @@ class AsyncSQLiteSession(SessionABC):
             conn = await self._get_connection()
             yield conn
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -150,7 +157,11 @@ class AsyncSQLiteSession(SessionABC):
 
         return items
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:
@@ -186,7 +197,10 @@ class AsyncSQLiteSession(SessionABC):
 
             await conn.commit()
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
 
         Returns:
@@ -220,7 +234,10 @@ class AsyncSQLiteSession(SessionABC):
 
         return None
 
-    async def clear_session(self) -> None:
+    async def clear_session(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Clear all items for this session."""
         async with self._locked_connection() as conn:
             await conn.execute(

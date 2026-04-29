@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 import threading
 import weakref
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 try:
     from importlib.metadata import version as _get_version
@@ -56,6 +56,9 @@ except ImportError as e:
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
 from ...memory.session_settings import SessionSettings, resolve_session_limit
+
+if TYPE_CHECKING:
+    from ...run_context import RunContextWrapper
 
 # Identifies this library in the MongoDB handshake for server-side telemetry.
 _DRIVER_INFO = DriverInfo(name="openai-agents", version=_VERSION)
@@ -241,7 +244,10 @@ class MongoDBSession(SessionABC):
     # Session protocol implementation
     # ------------------------------------------------------------------
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self, limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -283,7 +289,10 @@ class MongoDBSession(SessionABC):
 
         return items
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self, items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:
@@ -319,7 +328,10 @@ class MongoDBSession(SessionABC):
 
         await self._messages.insert_many(payload, ordered=True)
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
 
         Returns:
@@ -340,7 +352,10 @@ class MongoDBSession(SessionABC):
         except (json.JSONDecodeError, KeyError, TypeError):
             return None
 
-    async def clear_session(self) -> None:
+    async def clear_session(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Clear all items for this session."""
         await self._ensure_indexes()
         await self._messages.delete_many({"session_id": self.session_id})
