@@ -8,6 +8,7 @@ from .capabilities import (
     UrlVisibility,
     clear_platform_context_cache,
 )
+from .mounts import SpritesCloudBucketMountStrategy
 from .sandbox import (
     DEFAULT_SPRITES_API_URL,
     DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S,
@@ -24,6 +25,7 @@ __all__ = [
     "DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S",
     "DEFAULT_SPRITES_WORKSPACE_ROOT",
     "SpritesCheckpoints",
+    "SpritesCloudBucketMountStrategy",
     "SpritesPlatformContext",
     "SpritesSandboxClient",
     "SpritesSandboxClientOptions",

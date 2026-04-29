@@ -326,7 +326,7 @@ def test_options_roundtrip_through_polymorphic_registry() -> None:
         timeout_ms=120_000,
     )
     payload = options.model_dump(mode="json")
-    assert payload["type"] == "fly"
+    assert payload["type"] == "sprites"
     restored = BaseSandboxClientOptions.parse(payload)
     assert isinstance(restored, SpritesSandboxClientOptions)
     assert restored.model_dump(mode="json") == payload
@@ -639,7 +639,7 @@ async def test_resolve_exposed_port_not_configured_when_no_matching_service(
     _attach(inner, client=fake_client, sprite=sprite)
     with pytest.raises(ExposedPortUnavailableError) as excinfo:
         await inner._resolve_exposed_port(8080)
-    assert excinfo.value.context.get("backend") == "fly"
+    assert excinfo.value.context.get("backend") == "sprites"
 
 
 # ---------- 9. Read / write ----------
@@ -1378,3 +1378,405 @@ async def test_platform_context_uses_actual_manifest_root(
     assert out is not None
     assert "/var/agent-home" in out
     assert "--dir /var/agent-home" in out
+
+
+# ---------- Cloud bucket mount strategy ----------
+
+
+from agents.extensions.sandbox.sprites.mounts import (  # noqa: E402
+    _MISSING,
+    _MOUNTED,
+    _NOT_MOUNTED,
+    _PRESENT,
+    SpritesCloudBucketMountStrategy,
+    _assert_sprites_session,
+    _ensure_fuse_support,
+    _ensure_rclone,
+    _rclone_pattern_for_session,
+    _verify_mount_active,
+)
+from agents.sandbox.entries import (  # noqa: E402
+    RcloneMountPattern,
+    S3Mount,
+)
+from agents.sandbox.errors import MountConfigError  # noqa: E402
+from agents.sandbox.session.base_sandbox_session import (  # noqa: E402
+    BaseSandboxSession,
+)
+
+
+class _FakeMountSession(BaseSandboxSession):
+    """Minimal SpritesSandboxSession-named fake driving canned exec results."""
+
+    def __init__(self, results: list[ExecResult] | None = None) -> None:
+        self.state = SpritesSandboxSessionState(
+            session_id=SESSION_UUID,
+            manifest=Manifest(root="/workspace"),
+            snapshot=NoopSnapshot(id="snapshot"),
+            sprite_name=SPRITE_NAME,
+        )
+        self._results = list(results or [])
+        self.exec_calls: list[str] = []
+
+    async def _exec_internal(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        _ = timeout
+        cmd_str = " ".join(str(c) for c in command)
+        self.exec_calls.append(cmd_str)
+        if self._results:
+            return self._results.pop(0)
+        return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+    async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
+        _ = (path, user)
+        return io.BytesIO(b"")
+
+    async def write(self, path: Path, data: io.IOBase, *, user: str | User | None = None) -> None:
+        _ = (path, data, user)
+
+    async def persist_workspace(self) -> io.IOBase:
+        raise AssertionError("not expected")
+
+    async def hydrate_workspace(self, data: io.IOBase) -> None:
+        _ = data
+        raise AssertionError("not expected")
+
+    async def running(self) -> bool:
+        return True
+
+
+# The cloud-bucket strategy guards on ``type(session).__name__``; rebrand the fake.
+_FakeMountSession.__name__ = "SpritesSandboxSession"
+
+
+def _ok(stdout: bytes = b"") -> ExecResult:
+    return ExecResult(stdout=stdout, stderr=b"", exit_code=0)
+
+
+def _fail(exit_code: int = 1) -> ExecResult:
+    return ExecResult(stdout=b"", stderr=b"", exit_code=exit_code)
+
+
+def _present() -> ExecResult:
+    """ExecResult mimicking the stdout sentinel for a successful detection."""
+
+    return ExecResult(stdout=f"{_PRESENT}\n".encode("ascii"), stderr=b"", exit_code=0)
+
+
+def _missing() -> ExecResult:
+    """ExecResult mimicking the stdout sentinel for a failed detection."""
+
+    return ExecResult(stdout=f"{_MISSING}\n".encode("ascii"), stderr=b"", exit_code=0)
+
+
+def _mounted() -> ExecResult:
+    return ExecResult(stdout=f"{_MOUNTED}\n".encode("ascii"), stderr=b"", exit_code=0)
+
+
+def _not_mounted() -> ExecResult:
+    return ExecResult(stdout=f"{_NOT_MOUNTED}\n".encode("ascii"), stderr=b"", exit_code=0)
+
+
+def test_sprites_cloud_bucket_strategy_type_and_default_pattern() -> None:
+    strategy = SpritesCloudBucketMountStrategy()
+
+    assert strategy.type == "sprites_cloud_bucket"
+    assert isinstance(strategy.pattern, RcloneMountPattern)
+    assert strategy.pattern.mode == "fuse"
+
+
+def test_sprites_cloud_bucket_strategy_round_trips_through_manifest() -> None:
+    manifest = Manifest.model_validate(
+        {
+            "root": "/workspace",
+            "entries": {
+                "bucket": {
+                    "type": "s3_mount",
+                    "bucket": "my-bucket",
+                    "mount_strategy": {"type": "sprites_cloud_bucket"},
+                }
+            },
+        }
+    )
+
+    mount = manifest.entries["bucket"]
+    assert isinstance(mount, S3Mount)
+    assert isinstance(mount.mount_strategy, SpritesCloudBucketMountStrategy)
+
+
+def test_sprites_cloud_bucket_strategy_round_trips_through_registry() -> None:
+    payload = SpritesCloudBucketMountStrategy().model_dump()
+    parsed = SpritesCloudBucketMountStrategy.model_validate(payload)
+
+    assert isinstance(parsed, SpritesCloudBucketMountStrategy)
+    assert parsed.type == "sprites_cloud_bucket"
+    assert parsed.pattern.mode == "fuse"
+
+
+def test_sprites_session_guard_rejects_wrong_type() -> None:
+    class _NotAFlySession:
+        pass
+
+    with pytest.raises(MountConfigError, match="SpritesSandboxSession"):
+        _assert_sprites_session(_NotAFlySession())  # type: ignore[arg-type]
+
+
+def test_sprites_session_guard_accepts_correct_type() -> None:
+    _assert_sprites_session(_FakeMountSession())
+
+
+def test_sprites_extension_re_exports_cloud_bucket_strategy() -> None:
+    package_module = __import__(
+        "agents.extensions.sandbox",
+        fromlist=["SpritesCloudBucketMountStrategy"],
+    )
+    sprites_module = __import__(
+        "agents.extensions.sandbox.sprites",
+        fromlist=["SpritesCloudBucketMountStrategy"],
+    )
+
+    assert package_module.SpritesCloudBucketMountStrategy is SpritesCloudBucketMountStrategy
+    assert sprites_module.SpritesCloudBucketMountStrategy is SpritesCloudBucketMountStrategy
+
+
+@pytest.mark.asyncio
+async def test_ensure_rclone_returns_quickly_when_already_installed() -> None:
+    session = _FakeMountSession([_present()])
+
+    await _ensure_rclone(session)
+
+    # Single detection call wrapped in an if/then/echo so stdout, not exit code,
+    # is the source of truth.
+    assert session.exec_calls == [
+        "sh -lc if command -v rclone >/dev/null 2>&1 || test -x /usr/local/bin/rclone; "
+        f"then echo {_PRESENT}; else echo {_MISSING}; fi"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ensure_rclone_installs_via_sudo_apt() -> None:
+    session = _FakeMountSession(
+        [
+            _missing(),  # rclone missing
+            _present(),  # apt-get present
+            _ok(),  # apt update
+            _ok(),  # apt install (with fuse package)
+            _ok(),  # rclone install script
+            _present(),  # rclone now present
+        ]
+    )
+
+    await _ensure_rclone(session)
+
+    assert session.exec_calls[0].startswith(
+        "sh -lc if command -v rclone >/dev/null 2>&1 || test -x /usr/local/bin/rclone"
+    )
+    assert session.exec_calls[1].startswith("sh -lc if command -v apt-get >/dev/null 2>&1")
+    assert session.exec_calls[2] == (
+        "sh -lc sudo -n env DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes "
+        "apt-get -o Dpkg::Use-Pty=0 update -qq"
+    )
+    assert session.exec_calls[3] == (
+        "sh -lc sudo -n env DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes "
+        "apt-get -o Dpkg::Use-Pty=0 install -y -qq curl unzip ca-certificates fuse"
+    )
+    assert session.exec_calls[4] == (
+        "sh -lc curl -fsSL https://rclone.org/install.sh | sudo -n bash"
+    )
+    assert session.exec_calls[5].startswith(
+        "sh -lc if command -v rclone >/dev/null 2>&1 || test -x /usr/local/bin/rclone"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_rclone_raises_when_apt_unavailable() -> None:
+    session = _FakeMountSession([_missing(), _missing()])
+
+    with pytest.raises(MountConfigError, match="apt-get is unavailable"):
+        await _ensure_rclone(session)
+
+
+@pytest.mark.asyncio
+async def test_ensure_rclone_raises_when_post_install_recheck_still_missing() -> None:
+    """When the install commands silently no-op, the post-install probe catches it.
+
+    With unreliable exec exit codes the install commands themselves can't tell
+    us whether they actually installed anything; only the stdout sentinel from
+    the recheck does. This is the only install-failure mode we surface.
+    """
+
+    session = _FakeMountSession(
+        [
+            _missing(),  # rclone missing
+            _present(),  # apt-get present
+            _ok(),  # apt update (exit code unused)
+            _ok(),  # apt install (exit code unused)
+            _ok(),  # rclone install script (exit code unused)
+            _missing(),  # rclone STILL missing post-install
+        ]
+    )
+
+    with pytest.raises(MountConfigError, match="install attempt completed but rclone is still"):
+        await _ensure_rclone(session)
+
+
+@pytest.mark.asyncio
+async def test_ensure_fuse_support_passes_when_kernel_and_fusermount_present() -> None:
+    session = _FakeMountSession([_present(), _present(), _ok()])
+
+    await _ensure_fuse_support(session)
+
+    # kernel probe, fusermount probe, allow_other configuration
+    assert len(session.exec_calls) == 3
+    assert session.exec_calls[0].startswith(
+        "sh -lc if test -c /dev/fuse && grep -qw fuse /proc/filesystems"
+    )
+    assert session.exec_calls[1].startswith(
+        "sh -lc if command -v fusermount3 >/dev/null 2>&1 || command -v fusermount >/dev/null 2>&1"
+    )
+    assert "sudo -n chmod a+rw /dev/fuse" in session.exec_calls[2]
+    assert "user_allow_other" in session.exec_calls[2]
+
+
+@pytest.mark.asyncio
+async def test_ensure_fuse_support_lazy_installs_fuse_package() -> None:
+    session = _FakeMountSession(
+        [
+            _present(),  # kernel ok
+            _missing(),  # fusermount missing
+            _present(),  # apt-get present
+            _ok(),  # apt update
+            _ok(),  # apt install fuse
+            _present(),  # fusermount now present
+            _ok(),  # allow_other config
+        ]
+    )
+
+    await _ensure_fuse_support(session)
+
+    assert session.exec_calls[3] == (
+        "sh -lc sudo -n env DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes "
+        "apt-get -o Dpkg::Use-Pty=0 update -qq"
+    )
+    assert session.exec_calls[4] == (
+        "sh -lc sudo -n env DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes "
+        "apt-get -o Dpkg::Use-Pty=0 install -y -qq fuse"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_fuse_support_raises_when_kernel_missing_fuse() -> None:
+    session = _FakeMountSession([_missing()])
+
+    with pytest.raises(MountConfigError, match="FUSE support"):
+        await _ensure_fuse_support(session)
+
+
+@pytest.mark.asyncio
+async def test_ensure_fuse_support_raises_when_post_install_fusermount_still_missing() -> None:
+    session = _FakeMountSession(
+        [
+            _present(),  # kernel ok
+            _missing(),  # fusermount missing
+            _present(),  # apt-get present
+            _ok(),  # apt update
+            _ok(),  # apt install
+            _missing(),  # fusermount STILL missing
+        ]
+    )
+
+    with pytest.raises(MountConfigError, match="install attempt completed but fusermount"):
+        await _ensure_fuse_support(session)
+
+
+@pytest.mark.asyncio
+async def test_verify_mount_active_passes_when_mountpoint_reports_mounted() -> None:
+    session = _FakeMountSession([_mounted(), _ok()])
+
+    await _verify_mount_active(session, Path("/workspace/tigris"))
+
+    # Two calls: the mountpoint probe followed by a directory-listing warm-up
+    # that forces rclone to populate its root readdir cache before the caller
+    # uses the mount.
+    assert len(session.exec_calls) == 2
+    assert "mountpoint -q /workspace/tigris" in session.exec_calls[0]
+    assert _MOUNTED in session.exec_calls[0]
+    assert "ls /workspace/tigris >/dev/null 2>&1" in session.exec_calls[1]
+
+
+@pytest.mark.asyncio
+async def test_verify_mount_active_raises_when_path_is_not_a_mount() -> None:
+    session = _FakeMountSession([_not_mounted()])
+
+    with pytest.raises(MountConfigError, match="not a live mountpoint") as excinfo:
+        await _verify_mount_active(session, Path("/workspace/tigris"))
+    assert excinfo.value.context.get("path") == "/workspace/tigris"
+
+
+@pytest.mark.asyncio
+async def test_verify_mount_active_warmup_runs_after_mountpoint_check() -> None:
+    """The post-mountpoint listing warmup runs even if the directory is empty.
+
+    Confirms the warmup exec is fired regardless of what ``ls`` returns —
+    we only care about the side effect of priming rclone's dir cache.
+    """
+
+    session = _FakeMountSession([_mounted(), _ok()])
+
+    await _verify_mount_active(session, Path("/workspace/some/nested/mount"))
+
+    assert "mountpoint -q /workspace/some/nested/mount" in session.exec_calls[0]
+    assert "ls /workspace/some/nested/mount" in session.exec_calls[1]
+
+
+@pytest.mark.asyncio
+async def test_rclone_pattern_appends_allow_other_and_user_ids() -> None:
+    session = _FakeMountSession([_ok(stdout=b"1001\n1001\n")])
+
+    pattern = await _rclone_pattern_for_session(session, RcloneMountPattern(mode="fuse"))
+
+    assert pattern.extra_args == ["--allow-other", "--uid", "1001", "--gid", "1001"]
+
+
+@pytest.mark.asyncio
+async def test_rclone_pattern_preserves_explicit_extra_args() -> None:
+    session = _FakeMountSession([_ok(stdout=b"1001\n1001\n")])
+    source = RcloneMountPattern(
+        mode="fuse",
+        extra_args=["--allow-other", "--uid", "9999", "--gid", "9999", "--buffer-size", "0"],
+    )
+
+    pattern = await _rclone_pattern_for_session(session, source)
+
+    assert pattern.extra_args == [
+        "--allow-other",
+        "--uid",
+        "9999",
+        "--gid",
+        "9999",
+        "--buffer-size",
+        "0",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rclone_pattern_skips_user_ids_when_id_command_fails() -> None:
+    session = _FakeMountSession([_fail()])
+
+    pattern = await _rclone_pattern_for_session(session, RcloneMountPattern(mode="fuse"))
+
+    assert pattern.extra_args == ["--allow-other"]
+
+
+@pytest.mark.asyncio
+async def test_rclone_pattern_returns_unchanged_for_non_fuse_modes() -> None:
+    session = _FakeMountSession()
+    source = RcloneMountPattern(mode="nfs", nfs_addr="127.0.0.1:2049")
+
+    pattern = await _rclone_pattern_for_session(session, source)
+
+    assert pattern is source
+    assert session.exec_calls == []

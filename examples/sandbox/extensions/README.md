@@ -368,6 +368,12 @@ at most one external HTTP port per sprite — declare it as a service with
 `--http-port` in the sprite image, then reference it via
 `SpritesSandboxClientOptions(exposed_ports=(<port>,))`.
 
+For cloud-bucket mounts, attach `SpritesCloudBucketMountStrategy` from
+`agents.extensions.sandbox.sprites` to any rclone-compatible mount type
+(`S3Mount`, `R2Mount`, `GCSMount`, `AzureBlobMount`, `BoxMount`). The strategy
+lazy-installs `rclone` and the `fuse` package via `sudo apt-get` on first use
+if the sprite image does not preinstall them.
+
 ## Blaxel
 
 ### Setup
