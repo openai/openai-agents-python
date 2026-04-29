@@ -157,7 +157,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             return "input"
         return _resolve_compaction_mode(mode, response_id=response_id, store=store)
 
-    async def run_compaction(self, args: OpenAIResponsesCompactionArgs | None = None) -> None:
+    async def run_compaction(self, args: OpenAIResponsesCompactionArgs | None = None, **kwargs: Any) -> None:
         """Run compaction using responses.compact API."""
         if args and args.get("response_id"):
             self._response_id = args["response_id"]
@@ -182,7 +182,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 "when using previous_response_id compaction."
             )
 
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
+        compaction_candidate_items, session_items = await self._ensure_compaction_candidates(
+            wrapper=kwargs.get("wrapper")
+        )
 
         force = args.get("force", False) if args else False
         should_compact = force or self.should_trigger_compaction(
@@ -237,10 +239,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     ) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit, wrapper=wrapper)
 
-    async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
+    async def _defer_compaction(
+        self, response_id: str, store: bool | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         if self._deferred_response_id is not None:
             return
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
+        compaction_candidate_items, session_items = await self._ensure_compaction_candidates(
+            wrapper=wrapper
+        )
         resolved_mode = self._resolve_compaction_mode_for_response(
             response_id=response_id,
             store=store,
@@ -298,13 +305,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def _ensure_compaction_candidates(
         self,
+        wrapper: RunContextWrapper[Any] | None = None,
     ) -> tuple[list[TResponseInputItem], list[TResponseInputItem]]:
         """Lazy-load and cache compaction candidates."""
         if self._compaction_candidate_items is not None and self._session_items is not None:
             return (self._compaction_candidate_items[:], self._session_items[:])
 
         history = _normalize_compaction_session_items(
-            await self.underlying_session.get_items()
+            await self.underlying_session.get_items(wrapper=wrapper)
         )
         candidates = select_compaction_candidate_items(history)
         self._compaction_candidate_items = candidates

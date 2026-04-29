@@ -162,8 +162,9 @@ class AdvancedSQLiteSession(SQLiteSession):
     async def get_items(  # type: ignore[override]
         self,
         limit: int | None = None,
-        branch_id: str | None = None,
         wrapper: Any = None,
+        *,
+        branch_id: str | None = None,
     ) -> list[TResponseInputItem]:
         """Get items from current or specified branch.
 
