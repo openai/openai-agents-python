@@ -113,9 +113,10 @@ try:
     from .sprites import (
         DEFAULT_SPRITES_API_URL as DEFAULT_SPRITES_API_URL,
         DEFAULT_SPRITES_CONTEXT_PATH as DEFAULT_SPRITES_CONTEXT_PATH,
-        DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S as DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S,
+        DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S as DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S,  # noqa: E501
         DEFAULT_SPRITES_WORKSPACE_ROOT as DEFAULT_SPRITES_WORKSPACE_ROOT,
         SpritesCheckpoints as SpritesCheckpoints,
+        SpritesCloudBucketMountStrategy as SpritesCloudBucketMountStrategy,
         SpritesPlatformContext as SpritesPlatformContext,
         SpritesSandboxClient as SpritesSandboxClient,
         SpritesSandboxClientOptions as SpritesSandboxClientOptions,
@@ -235,6 +236,7 @@ if _HAS_SPRITES:
             "DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S",
             "DEFAULT_SPRITES_WORKSPACE_ROOT",
             "SpritesCheckpoints",
+            "SpritesCloudBucketMountStrategy",
             "SpritesPlatformContext",
             "SpritesSandboxClient",
             "SpritesSandboxClientOptions",

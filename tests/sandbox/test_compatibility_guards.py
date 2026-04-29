@@ -341,6 +341,7 @@ def test_core_sandbox_public_export_surface_is_stable() -> None:
                 "DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S",
                 "DEFAULT_SPRITES_WORKSPACE_ROOT",
                 "SpritesCheckpoints",
+                "SpritesCloudBucketMountStrategy",
                 "SpritesPlatformContext",
                 "SpritesSandboxClient",
                 "SpritesSandboxClientOptions",
@@ -1027,6 +1028,11 @@ def test_mount_strategy_type_strings_round_trip_through_registry(
             "agents.extensions.sandbox.runloop",
             "RunloopCloudBucketMountStrategy",
             "runloop_cloud_bucket",
+        ),
+        (
+            "agents.extensions.sandbox.sprites",
+            "SpritesCloudBucketMountStrategy",
+            "sprites_cloud_bucket",
         ),
     ],
 )
