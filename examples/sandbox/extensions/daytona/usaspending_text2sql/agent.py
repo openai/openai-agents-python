@@ -112,7 +112,7 @@ def build_agent() -> SandboxAgent:
     return SandboxAgent(
         name="NASA Spending Q&A",
         default_manifest=manifest,
-        model="gpt-5.4",
+        model="gpt-5.5",
         instructions=(
             "You are a helpful data analyst that answers questions about NASA federal spending "
             "by writing and executing SQL queries.\n\n" + DEVELOPER_INSTRUCTIONS

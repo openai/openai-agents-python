@@ -1025,9 +1025,10 @@ def test_convert_tools_includes_handoffs():
     assert converted.includes == []
 
 
-def test_convert_tools_accepts_unresolved_computer_initializer():
+@pytest.mark.parametrize("model", ["gpt-5.4", "gpt-5.5"])
+def test_convert_tools_accepts_unresolved_computer_initializer(model: str):
     comp_tool = ComputerTool(computer=lambda **_: DummyComputer())
-    converted = Converter.convert_tools(tools=[comp_tool], handoffs=[], model="gpt-5.4")
+    converted = Converter.convert_tools(tools=[comp_tool], handoffs=[], model=model)
     assert converted.tools == [{"type": "computer"}]
 
 
@@ -1042,13 +1043,14 @@ def test_resolve_computer_tool_model_returns_none_when_request_model_is_omitted(
     assert resolved is None
 
 
-def test_convert_tools_preview_tool_choice_uses_ga_payload_for_ga_model() -> None:
+@pytest.mark.parametrize("model", ["gpt-5.4", "gpt-5.5"])
+def test_convert_tools_preview_tool_choice_uses_ga_payload_for_ga_model(model: str) -> None:
     comp_tool = ComputerTool(computer=lambda **_: DummyComputer())
 
     converted = Converter.convert_tools(
         tools=[comp_tool],
         handoffs=[],
-        model="gpt-5.4",
+        model=model,
         tool_choice="computer_use_preview",
     )
 

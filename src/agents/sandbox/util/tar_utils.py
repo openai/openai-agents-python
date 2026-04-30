@@ -7,7 +7,7 @@ import shutil
 import tarfile
 import tempfile
 from collections.abc import Iterable
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 class UnsafeTarMemberError(ValueError):
@@ -27,6 +27,14 @@ def _validate_archive_root_member(member: tarfile.TarInfo) -> None:
     raise UnsafeTarMemberError(member=member.name, reason="archive root member must be directory")
 
 
+def _raise_if_windows_member_path(member_name: str) -> None:
+    windows_path = PureWindowsPath(member_name)
+    if windows_path.drive:
+        raise UnsafeTarMemberError(member=member_name, reason="windows drive path")
+    if "\\" in member_name:
+        raise UnsafeTarMemberError(member=member_name, reason="windows path separator")
+
+
 def safe_tar_member_rel_path(
     member: tarfile.TarInfo,
     *,
@@ -37,6 +45,7 @@ def safe_tar_member_rel_path(
     if member.name in ("", ".", "./"):
         _validate_archive_root_member(member)
         return None
+    _raise_if_windows_member_path(member.name)
     rel = PurePosixPath(member.name)
     if rel.is_absolute():
         raise UnsafeTarMemberError(member=member.name, reason="absolute path")
@@ -189,6 +198,7 @@ def validate_tarfile(
     reject_symlink_rel_paths: Iterable[str | Path] = (),
     skip_rel_paths: Iterable[str | Path] = (),
     root_name: str | None = None,
+    allow_symlinks: bool = True,
 ) -> None:
     """Validate a workspace tar before handing it to a local or remote extractor.
 
@@ -212,7 +222,7 @@ def validate_tarfile(
             root_name=root_name,
         ):
             continue
-        rel_path = safe_tar_member_rel_path(member, allow_symlinks=True)
+        rel_path = safe_tar_member_rel_path(member, allow_symlinks=allow_symlinks)
         if rel_path is None:
             continue
 
@@ -241,6 +251,12 @@ def validate_tarfile(
                 raise UnsafeTarMemberError(
                     member=member.name,
                     reason=f"archive path descends through symlink: {parent.as_posix()}",
+                )
+            parent_member = members_by_rel_path.get(parent)
+            if parent_member is not None and not parent_member.isdir():
+                raise UnsafeTarMemberError(
+                    member=member.name,
+                    reason=f"archive path descends through non-directory: {parent.as_posix()}",
                 )
 
 

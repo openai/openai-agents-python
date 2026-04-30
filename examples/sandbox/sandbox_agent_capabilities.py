@@ -55,7 +55,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5.5"
 COMPACTION_THRESHOLD = 1_000
 VERIFICATION_FILE = Path("verification/capabilities.txt")
 DELETE_FILE = Path("verification/delete-me.txt")
@@ -211,7 +211,7 @@ def _build_agent(model: RecordingModel, skills_root: Path) -> SandboxAgent:
             f"5. Create `{VERIFICATION_FILE.as_posix()}` with exactly these two lines:\n"
             "   skill_loaded=true\n"
             "   codename=atlas\n"
-            "6. Update that file so it has exactly these four lines:\n"
+            "6. Use the apply_patch tool to update that file so it has exactly these four lines:\n"
             "   skill_loaded=true\n"
             "   codename=atlas\n"
             "   note_source=filesystem\n"

@@ -112,6 +112,35 @@ def test_validate_tar_bytes_rejects_root_symlink() -> None:
         validate_tar_bytes(raw)
 
 
+@pytest.mark.parametrize("member_name", ["C:/tmp/evil.txt", r"C:\tmp\evil.txt"])
+def test_validate_tar_bytes_rejects_windows_drive_member_paths(member_name: str) -> None:
+    raw = _tar_bytes(_file(member_name, b"evil"))
+
+    with pytest.raises(UnsafeTarMemberError, match="windows drive path"):
+        validate_tar_bytes(raw)
+
+
+@pytest.mark.parametrize("member_name", [r"..\evil.txt", r"\evil.txt", r"nested\evil.txt"])
+def test_validate_tar_bytes_rejects_windows_separator_member_paths(member_name: str) -> None:
+    raw = _tar_bytes(_file(member_name, b"evil"))
+
+    with pytest.raises(UnsafeTarMemberError, match="windows path separator"):
+        validate_tar_bytes(raw)
+
+
+def test_validate_tar_bytes_rejects_member_under_non_directory_member() -> None:
+    raw = _tar_bytes(
+        _file("nested/hello.txt", b"hello"),
+        _file("nested", b"not a directory"),
+    )
+
+    with pytest.raises(
+        UnsafeTarMemberError,
+        match="archive path descends through non-directory: nested",
+    ):
+        validate_tar_bytes(raw)
+
+
 def test_strip_tar_member_prefix_returns_workspace_relative_archive() -> None:
     raw = _tar_bytes(
         _dir("workspace"),

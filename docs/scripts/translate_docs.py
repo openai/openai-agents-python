@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 # logging.basicConfig(level=logging.INFO)
 # logging.getLogger("openai").setLevel(logging.DEBUG)
 
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.5")
 
 ENABLE_CODE_SNIPPET_EXCLUSION = True
 # gpt-4.5 needed this for better quality

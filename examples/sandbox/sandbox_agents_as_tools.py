@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from typing import Literal
 
+from openai.types.shared import Reasoning
 from pydantic import BaseModel, Field
 
 from agents import Agent, ModelSettings, Runner, function_tool
@@ -130,7 +131,7 @@ async def main(model: str, question: str) -> None:
         ),
         default_manifest=pricing_manifest,
         capabilities=[WorkspaceShellCapability()],
-        model_settings=ModelSettings(tool_choice="required"),
+        model_settings=ModelSettings(tool_choice="required", reasoning=Reasoning(effort="none")),
         output_type=PricingPacketReview,
     )
     rollout_agent = SandboxAgent(
@@ -146,7 +147,7 @@ async def main(model: str, question: str) -> None:
         ),
         default_manifest=rollout_manifest,
         capabilities=[WorkspaceShellCapability()],
-        model_settings=ModelSettings(tool_choice="required"),
+        model_settings=ModelSettings(tool_choice="required", reasoning=Reasoning(effort="none")),
         output_type=RolloutRiskReview,
     )
 
@@ -165,25 +166,27 @@ async def main(model: str, question: str) -> None:
             "recommendation, use only facts and numbers that appear in the tool outputs, and do "
             "not add any extra incidents, price points, or contract terms."
         ),
-        model_settings=ModelSettings(tool_choice="required"),
+        model_settings=ModelSettings(tool_choice="required", reasoning=Reasoning(effort="none")),
         tools=[
             pricing_agent.as_tool(
                 tool_name="review_pricing_packet",
                 tool_description="Inspect the pricing packet and summarize commercial risk.",
                 custom_output_extractor=_structured_tool_output_extractor,
                 run_config=pricing_run_config,
+                max_turns=6,
             ),
             rollout_agent.as_tool(
                 tool_name="review_rollout_risk",
                 tool_description="Inspect the rollout packet and summarize implementation risk.",
                 custom_output_extractor=_structured_tool_output_extractor,
                 run_config=rollout_run_config,
+                max_turns=6,
             ),
             get_discount_approval_rule,
         ],
     )
 
-    result = await Runner.run(orchestrator, question)
+    result = await Runner.run(orchestrator, question, max_turns=8)
     tool_names = [
         tool_call_name(item.raw_item)
         for item in result.new_items
@@ -196,7 +199,7 @@ async def main(model: str, question: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="gpt-5.4", help="Model name to use.")
+    parser.add_argument("--model", default="gpt-5.5", help="Model name to use.")
     parser.add_argument("--question", default=DEFAULT_QUESTION, help="Prompt to send to the agent.")
     args = parser.parse_args()
 

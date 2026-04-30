@@ -1748,7 +1748,9 @@ class Converter:
 
     @classmethod
     def _is_ga_computer_model(cls, model: str | ChatModel | None) -> bool:
-        return isinstance(model, str) and model.startswith("gpt-5.4")
+        return isinstance(model, str) and (
+            model.startswith("gpt-5.4") or model.startswith("gpt-5.5")
+        )
 
     @classmethod
     def resolve_computer_tool_model(

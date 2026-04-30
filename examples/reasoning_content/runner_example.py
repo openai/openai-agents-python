@@ -6,7 +6,7 @@ the Runner API, which is the most common way users interact with the Agents libr
 
 To run this example, you need to:
 1. Set your OPENAI_API_KEY environment variable
-2. Use a model that supports reasoning content (e.g., gpt-5.4)
+2. Use a model that supports reasoning content (e.g., gpt-5.5)
 """
 
 import asyncio
@@ -17,7 +17,7 @@ from openai.types.shared.reasoning import Reasoning
 from agents import Agent, ModelSettings, Runner, trace
 from agents.items import ReasoningItem
 
-MODEL_NAME = os.getenv("REASONING_MODEL_NAME") or "gpt-5.4"
+MODEL_NAME = os.getenv("REASONING_MODEL_NAME") or "gpt-5.5"
 
 
 async def main():

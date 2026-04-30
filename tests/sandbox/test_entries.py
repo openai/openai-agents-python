@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 from collections.abc import Awaitable, Callable, Sequence
@@ -10,7 +11,12 @@ import pytest
 import agents.sandbox.entries.artifacts as artifacts_module
 from agents.sandbox import SandboxConcurrencyLimits
 from agents.sandbox.entries import Dir, File, GitRepo, LocalDir, LocalFile, resolve_workspace_path
-from agents.sandbox.errors import ExecNonZeroError, InvalidManifestPathError, LocalDirReadError
+from agents.sandbox.errors import (
+    ExecNonZeroError,
+    InvalidManifestPathError,
+    LocalDirReadError,
+    LocalFileReadError,
+)
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
@@ -148,6 +154,15 @@ def test_resolve_workspace_path_rejects_absolute_symlink_escape_for_host_root(
     assert exc_info.value.context == {"rel": escaped.as_posix(), "reason": "absolute"}
 
 
+def _symlink_or_skip(path: Path, target: Path, *, target_is_directory: bool = False) -> None:
+    try:
+        path.symlink_to(target, target_is_directory=target_is_directory)
+    except OSError as e:
+        if os.name == "nt" and getattr(e, "winerror", None) == 1314:
+            pytest.skip("symlink creation requires elevated privileges on Windows")
+        raise
+
+
 @pytest.mark.asyncio
 async def test_base_sandbox_session_uses_current_working_directory_for_local_file_sources(
     monkeypatch: pytest.MonkeyPatch,
@@ -165,7 +180,68 @@ async def test_base_sandbox_session_uses_current_working_directory_for_local_fil
     result = await session.apply_manifest()
 
     assert result.files[0].path == Path("/workspace/copied.txt")
+    assert result.files[0].sha256 == hashlib.sha256(b"hello").hexdigest()
     assert session.writes[Path("/workspace/copied.txt")] == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_local_file_rejects_symlinked_source_ancestors(tmp_path: Path) -> None:
+    target_dir = tmp_path / "secret-dir"
+    target_dir.mkdir()
+    nested_dir = target_dir / "sub"
+    nested_dir.mkdir()
+    (nested_dir / "secret.txt").write_text("secret", encoding="utf-8")
+    _symlink_or_skip(tmp_path / "link", target_dir, target_is_directory=True)
+    session = _RecordingSession()
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=Path("link/sub/secret.txt")).apply(
+            session,
+            Path("/workspace/copied.txt"),
+            tmp_path,
+        )
+
+    assert excinfo.value.context["reason"] == "symlink_not_supported"
+    assert excinfo.value.context["child"] == "link"
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_file_rejects_symlinked_source_leaf(tmp_path: Path) -> None:
+    secret = tmp_path / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    _symlink_or_skip(tmp_path / "link.txt", secret)
+    session = _RecordingSession()
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=Path("link.txt")).apply(
+            session,
+            Path("/workspace/copied.txt"),
+            tmp_path,
+        )
+
+    assert excinfo.value.context["reason"] == "symlink_not_supported"
+    assert excinfo.value.context["child"] == "link.txt"
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_file_rejects_symlinked_source_before_checksum(tmp_path: Path) -> None:
+    target_dir = tmp_path / "secret-dir"
+    target_dir.mkdir()
+    _symlink_or_skip(tmp_path / "link.txt", target_dir, target_is_directory=True)
+    session = _RecordingSession()
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=Path("link.txt")).apply(
+            session,
+            Path("/workspace/copied.txt"),
+            tmp_path,
+        )
+
+    assert excinfo.value.context["reason"] == "symlink_not_supported"
+    assert excinfo.value.context["child"] == "link.txt"
+    assert session.writes == {}
 
 
 @pytest.mark.asyncio
@@ -200,6 +276,9 @@ async def test_local_dir_copy_revalidates_swapped_paths_during_open(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    if not artifacts_module._OPEN_SUPPORTS_DIR_FD or not artifacts_module._HAS_O_DIRECTORY:
+        pytest.skip("safe dir_fd open pinning is unavailable on this platform")
+
     src_root = tmp_path / "src"
     src_root.mkdir()
     src_file = src_root / "safe.txt"
@@ -221,7 +300,7 @@ async def test_local_dir_copy_revalidates_swapped_paths_during_open(
         nonlocal swapped
         if (path == "safe.txt" or Path(path) == src_file) and not swapped:
             src_file.unlink()
-            src_file.symlink_to(secret)
+            _symlink_or_skip(src_file, secret)
             swapped = True
         if dir_fd is None:
             return original_open(path, flags, mode)
@@ -251,6 +330,9 @@ async def test_local_dir_copy_pins_parent_directories_during_open(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    if not artifacts_module._OPEN_SUPPORTS_DIR_FD or not artifacts_module._HAS_O_DIRECTORY:
+        pytest.skip("safe dir_fd open pinning is unavailable on this platform")
+
     src_root = tmp_path / "src"
     src_root.mkdir()
     nested_dir = src_root / "nested"
@@ -275,7 +357,7 @@ async def test_local_dir_copy_pins_parent_directories_during_open(
         nonlocal swapped
         if path == "safe.txt" and not swapped:
             (src_root / "nested").rename(src_root / "nested-original")
-            (src_root / "nested").symlink_to(secret_dir, target_is_directory=True)
+            _symlink_or_skip(src_root / "nested", secret_dir, target_is_directory=True)
             swapped = True
         if dir_fd is None:
             return original_open(path, flags, mode)
@@ -296,10 +378,67 @@ async def test_local_dir_copy_pins_parent_directories_during_open(
 
 
 @pytest.mark.asyncio
+async def test_local_dir_copy_fallback_rejects_swapped_parent_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    src_root = tmp_path / "src"
+    src_root.mkdir()
+    nested_dir = src_root / "nested"
+    nested_dir.mkdir()
+    src_file = nested_dir / "safe.txt"
+    src_file.write_text("safe", encoding="utf-8")
+    secret_dir = tmp_path / "secret-dir"
+    secret_dir.mkdir()
+    (secret_dir / "safe.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+    local_dir = LocalDir(src=Path("src"))
+    original_open = os.open
+    swapped = False
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts._OPEN_SUPPORTS_DIR_FD", False)
+    monkeypatch.setattr("agents.sandbox.entries.artifacts._HAS_O_DIRECTORY", False)
+
+    def swap_parent_then_open(
+        path: str | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if Path(path) == src_file and not swapped:
+            nested_dir.rename(src_root / "nested-original")
+            _symlink_or_skip(src_root / "nested", secret_dir, target_is_directory=True)
+            swapped = True
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.open", swap_parent_then_open)
+
+    with pytest.raises(LocalDirReadError) as excinfo:
+        await local_dir._copy_local_dir_file(
+            base_dir=tmp_path,
+            session=session,
+            src_root=src_root,
+            src=src_file,
+            dest_root=Path("/workspace/copied"),
+        )
+
+    assert excinfo.value.context["reason"] == "symlink_not_supported"
+    assert excinfo.value.context["child"] == "src/nested"
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
 async def test_local_dir_apply_rejects_source_root_swapped_to_symlink_after_validation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    if not artifacts_module._OPEN_SUPPORTS_DIR_FD or not artifacts_module._HAS_O_DIRECTORY:
+        pytest.skip("safe dir_fd open pinning is unavailable on this platform")
+
     src_root = tmp_path / "src"
     src_root.mkdir()
     (src_root / "safe.txt").write_text("safe", encoding="utf-8")
@@ -365,7 +504,7 @@ async def test_local_dir_apply_fallback_rejects_source_root_swapped_to_symlink_a
         nonlocal swapped
         if Path(path) == src_root / "safe.txt" and not swapped:
             src_root.rename(tmp_path / "src-original")
-            (tmp_path / "src").symlink_to(secret_dir, target_is_directory=True)
+            _symlink_or_skip(tmp_path / "src", secret_dir, target_is_directory=True)
             swapped = True
         if dir_fd is None:
             return original_open(path, flags, mode)
@@ -437,7 +576,7 @@ async def test_local_dir_rejects_symlinked_source_ancestors(tmp_path: Path) -> N
     nested_dir = target_dir / "sub"
     nested_dir.mkdir()
     (nested_dir / "secret.txt").write_text("secret", encoding="utf-8")
-    (tmp_path / "link").symlink_to(target_dir, target_is_directory=True)
+    _symlink_or_skip(tmp_path / "link", target_dir, target_is_directory=True)
     session = _RecordingSession()
 
     with pytest.raises(LocalDirReadError) as excinfo:
@@ -453,7 +592,7 @@ async def test_local_dir_rejects_symlinked_source_root(tmp_path: Path) -> None:
     target_dir = tmp_path / "secret-dir"
     target_dir.mkdir()
     (target_dir / "secret.txt").write_text("secret", encoding="utf-8")
-    (tmp_path / "src").symlink_to(target_dir, target_is_directory=True)
+    _symlink_or_skip(tmp_path / "src", target_dir, target_is_directory=True)
     session = _RecordingSession()
 
     with pytest.raises(LocalDirReadError) as excinfo:
@@ -471,7 +610,7 @@ async def test_local_dir_rejects_symlinked_files(tmp_path: Path) -> None:
     (src_root / "safe.txt").write_text("safe", encoding="utf-8")
     secret = tmp_path / "secret.txt"
     secret.write_text("secret", encoding="utf-8")
-    (src_root / "link.txt").symlink_to(secret)
+    _symlink_or_skip(src_root / "link.txt", secret)
     session = _RecordingSession()
 
     with pytest.raises(LocalDirReadError) as excinfo:
@@ -490,7 +629,7 @@ async def test_local_dir_rejects_symlinked_directories(tmp_path: Path) -> None:
     target_dir = tmp_path / "secret-dir"
     target_dir.mkdir()
     (target_dir / "secret.txt").write_text("secret", encoding="utf-8")
-    (src_root / "linked-dir").symlink_to(target_dir, target_is_directory=True)
+    _symlink_or_skip(src_root / "linked-dir", target_dir, target_is_directory=True)
     session = _RecordingSession()
 
     with pytest.raises(LocalDirReadError) as excinfo:
@@ -536,8 +675,9 @@ async def test_git_repo_uses_fetch_checkout_path_for_commit_refs() -> None:
 @pytest.mark.asyncio
 async def test_dir_metadata_strips_file_type_bits_before_chmod() -> None:
     session = _RecordingSession()
+    dest = Path("/workspace/dir")
 
-    await Dir()._apply_metadata(session, Path("/workspace/dir"))
+    await Dir()._apply_metadata(session, dest)
 
     assert ("chmod", "0755", "/workspace/dir") in session.exec_calls
 

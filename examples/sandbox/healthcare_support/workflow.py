@@ -345,6 +345,7 @@ async def run_healthcare_support_workflow(
             workflow_name="Healthcare support sandbox packet",
         ),
         hooks=hooks,
+        max_turns=20,
     )
     orchestrator = build_orchestrator(sandbox_policy_tool=sandbox_policy_tool)
     trace_id = gen_trace_id()

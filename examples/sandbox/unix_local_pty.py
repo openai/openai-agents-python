@@ -26,7 +26,7 @@ if __package__ is None or __package__ == "":
 
 from examples.sandbox.misc.example_support import tool_call_name
 
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_QUESTION = (
     "Start an interactive Python session. In that same session, compute `5 + 5`, then add "
     "5 more to the previous result. Briefly report the outputs and confirm that you stayed "
