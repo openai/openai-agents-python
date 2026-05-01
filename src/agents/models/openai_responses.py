@@ -842,7 +842,8 @@ class OpenAIResponsesModel(Model):
         Only items with truthy provider_data are processed.
         This function handles the following incompatibilities:
         - provider_data: Removes fields specific to other providers (e.g., Gemini, Claude).
-        - Fake IDs: Removes temporary placeholder IDs (detected via is_fake_responses_id) that should not be sent to OpenAI.
+        - Fake IDs: Removes placeholder IDs (detected via is_fake_responses_id)
+          that should not be sent to OpenAI.
         - Reasoning items: Filters out provider-specific reasoning items entirely.
         """
         # Early return optimization: if no item has provider_data, return unchanged.

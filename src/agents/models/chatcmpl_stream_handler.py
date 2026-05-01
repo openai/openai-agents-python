@@ -71,8 +71,8 @@ class StreamingState:
     thinking_signature: str | None = None
     # Store provider data for all output items
     provider_data: dict[str, Any] = field(default_factory=dict)
-    # Pre-generated ID for the assistant message item (shared across all its events).
-    message_item_id: str = field(default_factory=make_fake_responses_id)
+    # Pre-generated ID for the assistant output message item (one per streaming response).
+    output_message_id: str = field(default_factory=make_fake_responses_id)
 
 
 class SequenceNumber:
@@ -332,7 +332,7 @@ class ChatCmplStreamHandler:
                     )
                     # Start a new assistant message stream
                     assistant_item = ResponseOutputMessage(
-                        id=state.message_item_id,
+                        id=state.output_message_id,
                         content=[],
                         role="assistant",
                         type="message",
@@ -350,7 +350,7 @@ class ChatCmplStreamHandler:
                     )
                     yield ResponseContentPartAddedEvent(
                         content_index=state.text_content_index_and_output[0],
-                        item_id=state.message_item_id,
+                        item_id=state.output_message_id,
                         output_index=state.reasoning_content_index_and_output
                         is not None,  # fixed 0 -> 0 or 1
                         part=ResponseOutputText(
@@ -375,7 +375,7 @@ class ChatCmplStreamHandler:
                 yield ResponseTextDeltaEvent(
                     content_index=state.text_content_index_and_output[0],
                     delta=delta.content,
-                    item_id=state.message_item_id,
+                    item_id=state.output_message_id,
                     output_index=state.reasoning_content_index_and_output
                     is not None,  # fixed 0 -> 0 or 1
                     type="response.output_text.delta",
@@ -406,7 +406,7 @@ class ChatCmplStreamHandler:
                     )
                     # Start a new assistant message if one doesn't exist yet (in-progress)
                     assistant_item = ResponseOutputMessage(
-                        id=state.message_item_id,
+                        id=state.output_message_id,
                         content=[],
                         role="assistant",
                         type="message",
@@ -424,7 +424,7 @@ class ChatCmplStreamHandler:
                     )
                     yield ResponseContentPartAddedEvent(
                         content_index=state.refusal_content_index_and_output[0],
-                        item_id=state.message_item_id,
+                        item_id=state.output_message_id,
                         output_index=(1 if state.reasoning_content_index_and_output else 0),
                         part=ResponseOutputRefusal(
                             refusal="",
@@ -437,7 +437,7 @@ class ChatCmplStreamHandler:
                 yield ResponseRefusalDeltaEvent(
                     content_index=state.refusal_content_index_and_output[0],
                     delta=delta.refusal,
-                    item_id=state.message_item_id,
+                    item_id=state.output_message_id,
                     output_index=state.reasoning_content_index_and_output
                     is not None,  # fixed 0 -> 0 or 1
                     type="response.refusal.delta",
@@ -604,7 +604,7 @@ class ChatCmplStreamHandler:
             # Send end event for this content part
             yield ResponseContentPartDoneEvent(
                 content_index=state.text_content_index_and_output[0],
-                item_id=state.message_item_id,
+                item_id=state.output_message_id,
                 output_index=state.reasoning_content_index_and_output
                 is not None,  # fixed 0 -> 0 or 1
                 part=state.text_content_index_and_output[1],
@@ -617,7 +617,7 @@ class ChatCmplStreamHandler:
             # Send end event for this content part
             yield ResponseContentPartDoneEvent(
                 content_index=state.refusal_content_index_and_output[0],
-                item_id=state.message_item_id,
+                item_id=state.output_message_id,
                 output_index=state.reasoning_content_index_and_output
                 is not None,  # fixed 0 -> 0 or 1
                 part=state.refusal_content_index_and_output[1],
@@ -732,7 +732,7 @@ class ChatCmplStreamHandler:
         # include text or refusal content if they exist
         if state.text_content_index_and_output or state.refusal_content_index_and_output:
             assistant_msg = ResponseOutputMessage(
-                id=state.message_item_id,
+                id=state.output_message_id,
                 content=[],
                 role="assistant",
                 type="message",
