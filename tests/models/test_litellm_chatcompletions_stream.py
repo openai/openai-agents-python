@@ -24,6 +24,7 @@ from openai.types.responses import (
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.extensions.models.litellm_provider import LitellmProvider
 from agents.model_settings import ModelSettings
+from agents.models.fake_id import is_fake_responses_id
 from agents.models.interface import ModelTracing
 
 
@@ -127,6 +128,18 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
     assert completed_resp.usage.input_tokens_details.cached_tokens == 6
     assert completed_resp.usage.output_tokens_details.reasoning_tokens == 2
 
+    # Verify all events reference the same synthetic output message ID.
+    msg_id = output_events[1].item.id  # response.output_item.added
+    assert is_fake_responses_id(msg_id)
+    assert output_events[2].item_id == msg_id  # response.content_part.added
+    assert output_events[3].item_id == msg_id  # first response.output_text.delta
+    assert output_events[4].item_id == msg_id  # second response.output_text.delta
+    assert output_events[5].item_id == msg_id  # response.content_part.done
+    assert output_events[6].item.id == msg_id  # response.output_item.done
+    # Exactly one output message in the completed response, carrying the same ID.
+    assert len(completed_resp.output) == 1
+    assert completed_resp.output[0].id == msg_id
+
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
@@ -206,6 +219,18 @@ async def test_stream_response_yields_events_for_refusal_content(monkeypatch) ->
     refusal_part = completed_resp.output[0].content[0]
     assert isinstance(refusal_part, ResponseOutputRefusal)
     assert refusal_part.refusal == "NoThanks"
+
+    # Verify all events reference the same synthetic output message ID.
+    msg_id = output_events[1].item.id  # response.output_item.added
+    assert is_fake_responses_id(msg_id)
+    assert output_events[2].item_id == msg_id  # response.content_part.added
+    assert output_events[3].item_id == msg_id  # first response.refusal.delta
+    assert output_events[4].item_id == msg_id  # second response.refusal.delta
+    assert output_events[5].item_id == msg_id  # response.content_part.done
+    assert output_events[6].item.id == msg_id  # response.output_item.done
+    # Exactly one output message in the completed response, carrying the same ID.
+    assert len(completed_resp.output) == 1
+    assert completed_resp.output[0].id == msg_id
 
 
 @pytest.mark.allow_call_model_methods
@@ -301,6 +326,16 @@ async def test_stream_response_yields_events_for_tool_call(monkeypatch) -> None:
     assert isinstance(final_fn, ResponseFunctionToolCall)
     assert final_fn.name == "my_func"
     assert final_fn.arguments == "arg1arg2"
+
+    # Verify all function-call events share the same synthetic item ID.
+    fn_id = output_events[1].item.id  # response.output_item.added
+    assert is_fake_responses_id(fn_id)
+    assert output_events[2].item_id == fn_id  # first response.function_call_arguments.delta
+    assert output_events[3].item_id == fn_id  # second response.function_call_arguments.delta
+    assert output_events[4].item.id == fn_id  # response.output_item.done
+    # The completed response also carries the same ID.
+    completed_resp = output_events[5].response
+    assert completed_resp.output[0].id == fn_id
 
 
 @pytest.mark.allow_call_model_methods
@@ -417,3 +452,13 @@ async def test_stream_response_yields_real_time_function_call_arguments(monkeypa
     assert isinstance(added_event.item, ResponseFunctionToolCall)
     assert added_event.item.name == "generate_code"
     assert added_event.item.call_id == "litellm-call-456"
+
+    # Verify all events reference the same synthetic item ID.
+    fn_id = added_event.item.id
+    assert is_fake_responses_id(fn_id)
+    for delta_event in function_args_delta_events:
+        assert delta_event.item_id == fn_id
+    done_events = [e for e in output_events if e.type == "response.output_item.done"]
+    assert done_events[0].item.id == fn_id
+    completed_event = next(e for e in output_events if e.type == "response.completed")
+    assert completed_event.response.output[0].id == fn_id
