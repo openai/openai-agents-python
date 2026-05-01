@@ -16,7 +16,7 @@ from ..items import (
     RunItem,
     TResponseInputItem,
 )
-from ..models.fake_id import FAKE_RESPONSES_ID
+from ..models.fake_id import make_fake_responses_id
 from ..run_context import RunContextWrapper, TContext
 from ..run_error_handlers import (
     RunErrorData,
@@ -109,7 +109,7 @@ def validate_handler_final_output(agent: Agent[Any], final_output: Any) -> Any:
 
 def create_message_output_item(agent: Agent[Any], output_text: str) -> MessageOutputItem:
     message = ResponseOutputMessage(
-        id=FAKE_RESPONSES_ID,
+        id=make_fake_responses_id(),
         type="message",
         role="assistant",
         content=[

@@ -54,7 +54,7 @@ from ..tool import (
     ensure_function_tool_supports_responses_only_features,
     ensure_tool_choice_supports_backend,
 )
-from .fake_id import FAKE_RESPONSES_ID
+from .fake_id import make_fake_responses_id
 from .reasoning_content_replay import (
     ReasoningContentReplayContext,
     ReasoningContentSource,
@@ -132,7 +132,7 @@ class Converter:
         # So we use hasattr to check for reasoning_content and thinking_blocks
         if hasattr(message, "reasoning_content") and message.reasoning_content:
             reasoning_kwargs: dict[str, Any] = {
-                "id": FAKE_RESPONSES_ID,
+                "id": make_fake_responses_id(),
                 "summary": [Summary(text=message.reasoning_content, type="summary_text")],
                 "type": "reasoning",
             }
@@ -166,7 +166,7 @@ class Converter:
             items.append(reasoning_item)
 
         message_kwargs: dict[str, Any] = {
-            "id": FAKE_RESPONSES_ID,
+            "id": make_fake_responses_id(),
             "content": [],
             "role": "assistant",
             "type": "message",
@@ -199,7 +199,7 @@ class Converter:
                 if tool_call.type == "function":
                     # Create base function call item
                     func_call_kwargs: dict[str, Any] = {
-                        "id": FAKE_RESPONSES_ID,
+                        "id": make_fake_responses_id(),
                         "call_id": tool_call.id,
                         "arguments": tool_call.function.arguments,
                         "name": tool_call.function.name,

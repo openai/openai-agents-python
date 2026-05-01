@@ -20,7 +20,7 @@ from agents.items import (
     TResponseInputItem,
     coerce_tool_search_output_raw_item,
 )
-from agents.models.fake_id import FAKE_RESPONSES_ID
+from agents.models.fake_id import make_fake_responses_id
 from agents.result import RunResult
 from agents.run_context import RunContextWrapper
 from agents.run_internal import items as run_items
@@ -272,7 +272,7 @@ def test_deduplicate_input_items_handles_fake_ids_and_approval_request_ids() -> 
             TResponseInputItem,
             {
                 "type": "function_call_output",
-                "id": FAKE_RESPONSES_ID,
+                "id": make_fake_responses_id(),
                 "call_id": "call-1",
                 "output": "first",
             },
@@ -281,7 +281,7 @@ def test_deduplicate_input_items_handles_fake_ids_and_approval_request_ids() -> 
             TResponseInputItem,
             {
                 "type": "function_call_output",
-                "id": FAKE_RESPONSES_ID,
+                "id": make_fake_responses_id(),
                 "call_id": "call-1",
                 "output": "latest",
             },

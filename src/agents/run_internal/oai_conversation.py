@@ -17,7 +17,7 @@ from ..items import (
     _output_item_to_input_item,
 )
 from ..logger import logger
-from ..models.fake_id import FAKE_RESPONSES_ID
+from ..models.fake_id import is_fake_responses_id
 from .items import (
     ReasoningItemIdPolicy,
     drop_orphan_function_calls,
@@ -34,7 +34,7 @@ from .items import (
 
 def _normalize_server_item_id(value: Any) -> str | None:
     """Return a stable server item id, ignoring placeholder IDs."""
-    if value == FAKE_RESPONSES_ID:
+    if is_fake_responses_id(value):
         # Fake IDs are placeholders from non-Responses providers; ignore them for dedupe.
         return None
     return value if isinstance(value, str) else None

@@ -36,7 +36,7 @@ from ._retry_runtime import should_disable_provider_managed_retries
 from .chatcmpl_converter import Converter
 from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
-from .fake_id import FAKE_RESPONSES_ID
+from .fake_id import make_fake_responses_id
 from .interface import Model, ModelTracing
 from .openai_responses import Converter as OpenAIResponsesConverter
 from .reasoning_content_replay import ShouldReplayReasoningContent
@@ -457,7 +457,7 @@ class OpenAIChatCompletionsModel(Model):
             responses_tool_choice = "auto"
 
         response = Response(
-            id=FAKE_RESPONSES_ID,
+            id=make_fake_responses_id(),
             created_at=time.time(),
             model=self.model,
             object="response",

@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from ..agent_tool_state import drop_agent_tool_run_result
 from ..items import ItemHelpers, RunItem, ToolCallOutputItem, TResponseInputItem
-from ..models.fake_id import FAKE_RESPONSES_ID
+from ..models.fake_id import is_fake_responses_id
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE
 
 REJECTION_MESSAGE = DEFAULT_APPROVAL_REJECTION_MESSAGE
@@ -234,7 +234,7 @@ def _dedupe_key(item: TResponseInputItem) -> str | None:
     if role is not None or item_type == "message":
         return None
     item_id = payload.get("id")
-    if item_id == FAKE_RESPONSES_ID:
+    if is_fake_responses_id(item_id):
         # Ignore placeholder IDs so call_id-based dedupe remains possible.
         item_id = None
     if isinstance(item_id, str):

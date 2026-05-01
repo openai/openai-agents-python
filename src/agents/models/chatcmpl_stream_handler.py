@@ -44,7 +44,7 @@ from openai.types.responses.response_usage import InputTokensDetails, OutputToke
 
 from ..items import TResponseStreamEvent
 from .chatcmpl_helpers import ChatCmplHelpers
-from .fake_id import FAKE_RESPONSES_ID
+from .fake_id import make_fake_responses_id
 
 
 # Define a Part class for internal use
@@ -71,6 +71,8 @@ class StreamingState:
     thinking_signature: str | None = None
     # Store provider data for all output items
     provider_data: dict[str, Any] = field(default_factory=dict)
+    # Pre-generated ID for the assistant message item (shared across all its events).
+    message_item_id: str = field(default_factory=make_fake_responses_id)
 
 
 class SequenceNumber:
@@ -103,7 +105,7 @@ class ChatCmplStreamHandler:
             return
 
         yield ResponseReasoningSummaryPartDoneEvent(
-            item_id=FAKE_RESPONSES_ID,
+            item_id=reasoning_item.id,
             output_index=0,
             summary_index=summary_index,
             part=DoneEventPart(
@@ -129,7 +131,7 @@ class ChatCmplStreamHandler:
             yield from cls._finish_reasoning_summary_part(state, sequence_number)
         elif reasoning_item.content is not None:
             yield ResponseReasoningTextDoneEvent(
-                item_id=FAKE_RESPONSES_ID,
+                item_id=reasoning_item.id,
                 output_index=0,
                 content_index=0,
                 text=reasoning_item.content[0].text,
@@ -211,7 +213,7 @@ class ChatCmplStreamHandler:
                 reasoning_content = delta.reasoning_content
                 if reasoning_content and not state.reasoning_content_index_and_output:
                     reasoning_item = ResponseReasoningItem(
-                        id=FAKE_RESPONSES_ID,
+                        id=make_fake_responses_id(),
                         summary=[],
                         type="reasoning",
                     )
@@ -233,7 +235,7 @@ class ChatCmplStreamHandler:
                         state.active_reasoning_summary_index = summary_index
 
                         yield ResponseReasoningSummaryPartAddedEvent(
-                            item_id=FAKE_RESPONSES_ID,
+                            item_id=reasoning_item.id,
                             output_index=0,
                             summary_index=summary_index,
                             part=AddedEventPart(text="", type="summary_text"),
@@ -245,7 +247,7 @@ class ChatCmplStreamHandler:
 
                     yield ResponseReasoningSummaryTextDeltaEvent(
                         delta=reasoning_content,
-                        item_id=FAKE_RESPONSES_ID,
+                        item_id=reasoning_item.id,
                         output_index=0,
                         summary_index=summary_index,
                         type="response.reasoning_summary_text.delta",
@@ -262,7 +264,7 @@ class ChatCmplStreamHandler:
                 reasoning_text = delta.reasoning
                 if reasoning_text and not state.reasoning_content_index_and_output:
                     reasoning_item = ResponseReasoningItem(
-                        id=FAKE_RESPONSES_ID,
+                        id=make_fake_responses_id(),
                         summary=[],
                         content=[Content(text="", type="reasoning_text")],
                         type="reasoning",
@@ -280,7 +282,7 @@ class ChatCmplStreamHandler:
                 if reasoning_text and state.reasoning_content_index_and_output:
                     yield ResponseReasoningTextDeltaEvent(
                         delta=reasoning_text,
-                        item_id=FAKE_RESPONSES_ID,
+                        item_id=state.reasoning_content_index_and_output[1].id,
                         output_index=0,
                         content_index=0,
                         type="response.reasoning_text.delta",
@@ -330,7 +332,7 @@ class ChatCmplStreamHandler:
                     )
                     # Start a new assistant message stream
                     assistant_item = ResponseOutputMessage(
-                        id=FAKE_RESPONSES_ID,
+                        id=state.message_item_id,
                         content=[],
                         role="assistant",
                         type="message",
@@ -348,7 +350,7 @@ class ChatCmplStreamHandler:
                     )
                     yield ResponseContentPartAddedEvent(
                         content_index=state.text_content_index_and_output[0],
-                        item_id=FAKE_RESPONSES_ID,
+                        item_id=state.message_item_id,
                         output_index=state.reasoning_content_index_and_output
                         is not None,  # fixed 0 -> 0 or 1
                         part=ResponseOutputText(
@@ -373,7 +375,7 @@ class ChatCmplStreamHandler:
                 yield ResponseTextDeltaEvent(
                     content_index=state.text_content_index_and_output[0],
                     delta=delta.content,
-                    item_id=FAKE_RESPONSES_ID,
+                    item_id=state.message_item_id,
                     output_index=state.reasoning_content_index_and_output
                     is not None,  # fixed 0 -> 0 or 1
                     type="response.output_text.delta",
@@ -404,7 +406,7 @@ class ChatCmplStreamHandler:
                     )
                     # Start a new assistant message if one doesn't exist yet (in-progress)
                     assistant_item = ResponseOutputMessage(
-                        id=FAKE_RESPONSES_ID,
+                        id=state.message_item_id,
                         content=[],
                         role="assistant",
                         type="message",
@@ -422,7 +424,7 @@ class ChatCmplStreamHandler:
                     )
                     yield ResponseContentPartAddedEvent(
                         content_index=state.refusal_content_index_and_output[0],
-                        item_id=FAKE_RESPONSES_ID,
+                        item_id=state.message_item_id,
                         output_index=(1 if state.reasoning_content_index_and_output else 0),
                         part=ResponseOutputRefusal(
                             refusal="",
@@ -435,7 +437,7 @@ class ChatCmplStreamHandler:
                 yield ResponseRefusalDeltaEvent(
                     content_index=state.refusal_content_index_and_output[0],
                     delta=delta.refusal,
-                    item_id=FAKE_RESPONSES_ID,
+                    item_id=state.message_item_id,
                     output_index=state.reasoning_content_index_and_output
                     is not None,  # fixed 0 -> 0 or 1
                     type="response.refusal.delta",
@@ -449,7 +451,7 @@ class ChatCmplStreamHandler:
                 for tc_delta in delta.tool_calls:
                     if tc_delta.index not in state.function_calls:
                         state.function_calls[tc_delta.index] = ResponseFunctionToolCall(
-                            id=FAKE_RESPONSES_ID,
+                            id=make_fake_responses_id(),
                             arguments="",
                             name="",
                             type="function_call",
@@ -549,7 +551,7 @@ class ChatCmplStreamHandler:
 
                         # Send initial function call added event
                         func_call_item = ResponseFunctionToolCall(
-                            id=FAKE_RESPONSES_ID,
+                            id=function_call.id,
                             call_id=function_call.call_id,
                             arguments="",  # Start with empty arguments
                             name=function_call.name,
@@ -584,7 +586,7 @@ class ChatCmplStreamHandler:
                         output_index = state.function_call_output_idx[tc_delta.index]
                         yield ResponseFunctionCallArgumentsDeltaEvent(
                             delta=tc_function.arguments,
-                            item_id=FAKE_RESPONSES_ID,
+                            item_id=function_call.id,
                             output_index=output_index,
                             type="response.function_call_arguments.delta",
                             sequence_number=sequence_number.get_and_increment(),
@@ -602,7 +604,7 @@ class ChatCmplStreamHandler:
             # Send end event for this content part
             yield ResponseContentPartDoneEvent(
                 content_index=state.text_content_index_and_output[0],
-                item_id=FAKE_RESPONSES_ID,
+                item_id=state.message_item_id,
                 output_index=state.reasoning_content_index_and_output
                 is not None,  # fixed 0 -> 0 or 1
                 part=state.text_content_index_and_output[1],
@@ -615,7 +617,7 @@ class ChatCmplStreamHandler:
             # Send end event for this content part
             yield ResponseContentPartDoneEvent(
                 content_index=state.refusal_content_index_and_output[0],
-                item_id=FAKE_RESPONSES_ID,
+                item_id=state.message_item_id,
                 output_index=state.reasoning_content_index_and_output
                 is not None,  # fixed 0 -> 0 or 1
                 part=state.refusal_content_index_and_output[1],
@@ -631,7 +633,7 @@ class ChatCmplStreamHandler:
 
                 # Build function call kwargs, include provider_data if present
                 func_call_kwargs: dict[str, Any] = {
-                    "id": FAKE_RESPONSES_ID,
+                    "id": function_call.id,
                     "call_id": function_call.call_id,
                     "arguments": function_call.arguments,
                     "name": function_call.name,
@@ -671,7 +673,7 @@ class ChatCmplStreamHandler:
 
                 # Build function call kwargs, include provider_data if present
                 fallback_func_call_kwargs: dict[str, Any] = {
-                    "id": FAKE_RESPONSES_ID,
+                    "id": function_call.id,
                     "call_id": function_call.call_id,
                     "arguments": function_call.arguments,
                     "name": function_call.name,
@@ -696,7 +698,7 @@ class ChatCmplStreamHandler:
                 )
                 yield ResponseFunctionCallArgumentsDeltaEvent(
                     delta=function_call.arguments,
-                    item_id=FAKE_RESPONSES_ID,
+                    item_id=function_call.id,
                     output_index=fallback_starting_index,
                     type="response.function_call_arguments.delta",
                     sequence_number=sequence_number.get_and_increment(),
@@ -730,7 +732,7 @@ class ChatCmplStreamHandler:
         # include text or refusal content if they exist
         if state.text_content_index_and_output or state.refusal_content_index_and_output:
             assistant_msg = ResponseOutputMessage(
-                id=FAKE_RESPONSES_ID,
+                id=state.message_item_id,
                 content=[],
                 role="assistant",
                 type="message",

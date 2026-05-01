@@ -46,7 +46,7 @@ from ...models._retry_runtime import should_disable_provider_managed_retries
 from ...models.chatcmpl_converter import Converter
 from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
-from ...models.fake_id import FAKE_RESPONSES_ID
+from ...models.fake_id import make_fake_responses_id
 from ...models.interface import Model, ModelTracing
 from ...models.openai_responses import Converter as OpenAIResponsesConverter
 from ...models.reasoning_content_replay import ShouldReplayReasoningContent
@@ -560,7 +560,7 @@ class LitellmModel(Model):
             responses_tool_choice = "auto"
 
         response = Response(
-            id=FAKE_RESPONSES_ID,
+            id=make_fake_responses_id(),
             created_at=time.time(),
             model=self.model,
             object="response",

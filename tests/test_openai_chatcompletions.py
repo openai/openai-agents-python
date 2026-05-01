@@ -43,7 +43,7 @@ from agents import (
 )
 from agents.models._retry_runtime import provider_managed_retries_disabled
 from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE, ChatCmplHelpers
-from agents.models.fake_id import FAKE_RESPONSES_ID
+from agents.models.fake_id import is_fake_responses_id
 
 
 async def _run_chat_completions_model_with_custom_base_url(
@@ -568,7 +568,7 @@ async def test_fetch_response_stream(monkeypatch) -> None:
     assert completions.kwargs["stream_options"] is omit
     # Response is a proper openai Response
     assert isinstance(response, Response)
-    assert response.id == FAKE_RESPONSES_ID
+    assert is_fake_responses_id(response.id)
     assert response.model == "gpt-4"
     assert response.object == "response"
     assert response.output == []

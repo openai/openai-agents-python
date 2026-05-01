@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agents.models.fake_id import FAKE_RESPONSES_ID
+from agents.models.fake_id import make_fake_responses_id
 from agents.models.openai_responses import OpenAIResponsesModel
 
 
@@ -75,11 +75,11 @@ class TestRemoveOpenAIResponsesAPIIncompatibleFields:
         assert "provider_data" not in result[1]
 
     def test_removes_fake_responses_id(self, model: OpenAIResponsesModel):
-        """Items with id equal to FAKE_RESPONSES_ID should have their id removed."""
+        """Items with a placeholder fake ID should have their id removed."""
         list_input = [
             {
                 "type": "message",
-                "id": FAKE_RESPONSES_ID,
+                "id": make_fake_responses_id(),
                 "content": "hello",
                 "provider_data": {"model": "gemini/gemini-3"},
             },
@@ -92,7 +92,7 @@ class TestRemoveOpenAIResponsesAPIIncompatibleFields:
         assert result[0]["content"] == "hello"
 
     def test_preserves_real_ids(self, model: OpenAIResponsesModel):
-        """Real IDs (not FAKE_RESPONSES_ID) should be preserved."""
+        """Real IDs (not placeholder fake IDs) should be preserved."""
         list_input = [
             {
                 "type": "message",
@@ -132,7 +132,7 @@ class TestRemoveOpenAIResponsesAPIIncompatibleFields:
             },
             {
                 "type": "message",
-                "id": FAKE_RESPONSES_ID,
+                "id": make_fake_responses_id(),
                 "content": "The weather is 72F",
                 "provider_data": {"model": "gemini/gemini-3"},
             },

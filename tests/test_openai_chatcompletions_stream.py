@@ -28,6 +28,7 @@ from openai.types.responses import (
 )
 
 from agents.model_settings import ModelSettings
+from agents.models.fake_id import is_fake_responses_id
 from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_provider import OpenAIProvider
@@ -538,7 +539,7 @@ async def test_stream_response_yields_real_time_function_call_arguments(monkeypa
     expected_deltas = ['{"filename": "', 'test.py", "content": "', 'print(hello)"}']
     for i, delta_event in enumerate(function_args_delta_events):
         assert delta_event.delta == expected_deltas[i]
-        assert delta_event.item_id == "__fake_id__"  # FAKE_RESPONSES_ID
+        assert is_fake_responses_id(delta_event.item_id)  # synthetic per-item UUID
         assert delta_event.output_index == 0
 
     # Verify completion event has full arguments

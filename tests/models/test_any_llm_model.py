@@ -36,7 +36,7 @@ from agents import (
 )
 from agents.exceptions import UserError
 from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE
-from agents.models.fake_id import FAKE_RESPONSES_ID
+from agents.models.fake_id import make_fake_responses_id
 
 
 class FakeAnyLLMProvider:
@@ -668,7 +668,7 @@ async def test_any_llm_responses_path_sanitizes_replayed_items_before_validation
         [
             {"role": "user", "content": "What's the weather in Tokyo?"},
             {
-                "id": FAKE_RESPONSES_ID,
+                "id": make_fake_responses_id(),
                 "summary": [
                     {"text": "I should call the weather tool first.", "type": "summary_text"}
                 ],
@@ -678,7 +678,7 @@ async def test_any_llm_responses_path_sanitizes_replayed_items_before_validation
                 "provider_data": {"model": "anthropic/fake-responses-model"},
             },
             {
-                "id": FAKE_RESPONSES_ID,
+                "id": make_fake_responses_id(),
                 "arguments": '{"city": "Tokyo"}',
                 "call_id": "call_weather_123",
                 "name": "get_weather",

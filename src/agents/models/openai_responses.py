@@ -71,7 +71,7 @@ from ._retry_runtime import (
     should_disable_provider_managed_retries,
     should_disable_websocket_pre_event_retries,
 )
-from .fake_id import FAKE_RESPONSES_ID
+from .fake_id import is_fake_responses_id
 from .interface import Model, ModelTracing
 from .openai_client_utils import is_official_openai_base_url, is_official_openai_client
 
@@ -842,7 +842,7 @@ class OpenAIResponsesModel(Model):
         Only items with truthy provider_data are processed.
         This function handles the following incompatibilities:
         - provider_data: Removes fields specific to other providers (e.g., Gemini, Claude).
-        - Fake IDs: Removes temporary IDs (FAKE_RESPONSES_ID) that should not be sent to OpenAI.
+        - Fake IDs: Removes temporary placeholder IDs (detected via is_fake_responses_id) that should not be sent to OpenAI.
         - Reasoning items: Filters out provider-specific reasoning items entirely.
         """
         # Early return optimization: if no item has provider_data, return unchanged.
@@ -869,7 +869,7 @@ class OpenAIResponsesModel(Model):
             return None
 
         # Remove fake response ID.
-        if item.get("id") == FAKE_RESPONSES_ID:
+        if is_fake_responses_id(item.get("id")):
             del item["id"]
 
         # Remove provider_data field.

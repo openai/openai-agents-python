@@ -44,7 +44,7 @@ from agents.agent_output import AgentOutputSchema
 from agents.exceptions import UserError
 from agents.items import TResponseInputItem
 from agents.models.chatcmpl_converter import Converter
-from agents.models.fake_id import FAKE_RESPONSES_ID
+from agents.models.fake_id import is_fake_responses_id
 
 
 def test_message_to_output_items_with_text_only():
@@ -57,7 +57,7 @@ def test_message_to_output_items_with_text_only():
     # Expect exactly one output item (the message)
     assert len(items) == 1
     message_item = cast(ResponseOutputMessage, items[0])
-    assert message_item.id == FAKE_RESPONSES_ID
+    assert is_fake_responses_id(message_item.id)
     assert message_item.role == "assistant"
     assert message_item.type == "message"
     assert message_item.status == "completed"
@@ -101,7 +101,7 @@ def test_message_to_output_items_with_tool_call():
     message_item = cast(ResponseOutputMessage, items[0])
     assert isinstance(message_item, ResponseOutputMessage)
     fn_call_item = cast(ResponseFunctionToolCall, items[1])
-    assert fn_call_item.id == FAKE_RESPONSES_ID
+    assert is_fake_responses_id(fn_call_item.id)
     assert fn_call_item.call_id == tool_call.id
     assert fn_call_item.name == tool_call.function.name
     assert fn_call_item.arguments == tool_call.function.arguments
