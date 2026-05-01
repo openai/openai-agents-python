@@ -74,7 +74,44 @@ def test_prepare_sandbox_agent_passes_session_manifest_to_capability_instruction
 
     assert result == (
         "base instructions\n\n"
+        "# Agent instructions\n\n"
         "additional instructions\n\n"
+        "# Sandbox capability instructions\n\n"
+        "capability fragment\n\n"
+        f"{sandbox_prep._filesystem_instructions(manifest)}"
+    )
+    assert capability.manifests == [manifest]
+
+
+def test_prepare_sandbox_agent_wraps_capabilities_without_agent_instructions():
+    manifest = Manifest(root="/workspace")
+    capability = _Capability("capability fragment")
+    prepared = sandbox_prep.prepare_sandbox_agent(
+        agent=SandboxAgent(
+            name="sandbox",
+            base_instructions="base instructions",
+        ),
+        session=cast(BaseSandboxSession, _session_with_manifest(manifest)),
+        capabilities=cast(list[Capability], [capability]),
+    )
+    instructions = cast(
+        Callable[[RunContextWrapper[object], SandboxAgent[object]], Awaitable[str | None]],
+        prepared.instructions,
+    )
+
+    result: str | None = asyncio.run(
+        cast(
+            Coroutine[Any, Any, str | None],
+            instructions(
+                cast(RunContextWrapper[object], None),
+                cast(SandboxAgent[object], prepared),
+            ),
+        )
+    )
+
+    assert result == (
+        "base instructions\n\n"
+        "# Sandbox capability instructions\n\n"
         "capability fragment\n\n"
         f"{sandbox_prep._filesystem_instructions(manifest)}"
     )
@@ -145,7 +182,9 @@ def test_prepare_sandbox_agent_uses_default_sandbox_instructions_when_base_missi
     assert default_instructions is not None
     assert result == (
         f"{default_instructions}\n\n"
+        "# Agent instructions\n\n"
         "additional instructions\n\n"
+        "# Sandbox capability instructions\n\n"
         "capability fragment\n\n"
         f"{sandbox_prep._filesystem_instructions(manifest)}"
     )

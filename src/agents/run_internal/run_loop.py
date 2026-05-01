@@ -1030,6 +1030,7 @@ async def start_streaming(
                         ),
                         reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                         prompt_cache_key_resolver=prompt_cache_key_resolver,
+                        error_handlers=error_handlers,
                     )
                 finally:
                     attach_usage_to_span(
@@ -1248,6 +1249,7 @@ async def run_single_turn_streamed(
     pending_server_items: list[RunItem] | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
+    error_handlers: RunErrorHandlers[TContext] | None = None,
 ) -> SingleStepResult:
     """Run a single streamed turn and emit events as results arrive."""
     public_agent = bindings.public_agent
@@ -1643,6 +1645,7 @@ async def run_single_turn_streamed(
         hooks=hooks,
         context_wrapper=context_wrapper,
         run_config=run_config,
+        error_handlers=error_handlers,
         tool_use_tracker=tool_use_tracker,
         server_manages_conversation=server_conversation_tracker is not None,
         event_queue=streamed_result._event_queue,
@@ -1708,6 +1711,7 @@ async def run_single_turn(
     session_items_to_rewind: list[TResponseInputItem] | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
+    error_handlers: RunErrorHandlers[TContext] | None = None,
 ) -> SingleStepResult:
     """Run a single non-streaming turn of the agent loop."""
     public_agent = bindings.public_agent
@@ -1775,6 +1779,7 @@ async def run_single_turn(
         hooks=hooks,
         context_wrapper=context_wrapper,
         run_config=run_config,
+        error_handlers=error_handlers,
         tool_use_tracker=tool_use_tracker,
         server_manages_conversation=server_conversation_tracker is not None,
     )

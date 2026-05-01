@@ -975,7 +975,9 @@ async def test_runner_merges_sandbox_instructions_and_tools() -> None:
     assert model.first_turn_args is not None
     assert model.first_turn_args["system_instructions"] == (
         f"{get_default_sandbox_instructions()}\n\n"
+        "# Agent instructions\n\n"
         "Additional instructions.\n\n"
+        "# Sandbox capability instructions\n\n"
         "Capability instructions.\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(manifest)}"
     )
@@ -1055,6 +1057,7 @@ async def test_runner_uses_default_sandbox_prompt_when_instructions_missing() ->
     assert model.first_turn_args is not None
     expected_instructions = (
         f"{get_default_sandbox_instructions()}\n\n"
+        "# Sandbox capability instructions\n\n"
         "Capability instructions.\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(session.state.manifest)}"
     )
@@ -1093,7 +1096,9 @@ async def test_runner_handles_missing_default_sandbox_prompt_resource(
     assert result.final_output == "done"
     assert model.first_turn_args is not None
     assert model.first_turn_args["system_instructions"] == (
+        "# Agent instructions\n\n"
         "Additional instructions.\n\n"
+        "# Sandbox capability instructions\n\n"
         "Capability instructions.\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(session.state.manifest)}"
     )
@@ -1129,6 +1134,7 @@ async def test_runner_dynamic_instructions_do_not_override_default_sandbox_promp
     assert model.first_turn_args is not None
     assert model.first_turn_args["system_instructions"] == (
         f"{get_default_sandbox_instructions()}\n\n"
+        "# Sandbox capability instructions\n\n"
         "Capability instructions.\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(session.state.manifest)}"
     )
@@ -1158,7 +1164,9 @@ async def test_runner_base_instructions_override_default_sandbox_prompt() -> Non
     assert model.first_turn_args is not None
     assert model.first_turn_args["system_instructions"] == (
         "Custom base instructions.\n\n"
+        "# Agent instructions\n\n"
         "Additional instructions.\n\n"
+        "# Sandbox capability instructions\n\n"
         "Capability instructions.\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(session.state.manifest)}"
     )
@@ -1212,6 +1220,11 @@ async def test_runner_adds_remote_mount_policy_instructions() -> None:
         ),
     )
     assert isinstance(re.search(expected_policy_pattern, system_instructions), re.Match)
+    agent_index = system_instructions.index("# Agent instructions")
+    capability_index = system_instructions.index("# Sandbox capability instructions")
+    remote_policy_index = system_instructions.index("# Sandbox remote mount policy")
+    filesystem_index = system_instructions.index("# Filesystem")
+    assert agent_index < capability_index < remote_policy_index < filesystem_index
 
 
 @pytest.mark.asyncio
@@ -1619,7 +1632,9 @@ async def test_runner_uses_public_sandbox_agent_for_dynamic_instructions() -> No
     assert model.first_turn_args is not None
     assert model.first_turn_args["system_instructions"] == (
         f"{get_default_sandbox_instructions()}\n\n"
+        "# Agent instructions\n\n"
         "Saw public agent.\n\n"
+        "# Sandbox capability instructions\n\n"
         "Capability instructions.\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(Manifest())}"
     )
@@ -1800,7 +1815,9 @@ async def test_runner_rebuilds_sandbox_resources_for_handoff_target_agent() -> N
     assert worker_model.first_turn_args is not None
     assert worker_model.first_turn_args["system_instructions"] == (
         f"{get_default_sandbox_instructions()}\n\n"
+        "# Agent instructions\n\n"
         "Worker instructions.\n\n"
+        "# Sandbox capability instructions\n\n"
         "Worker workspace\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(worker_manifest)}"
     )
@@ -1863,7 +1880,9 @@ async def test_runner_resumed_handoff_materializes_manifest_for_new_sandbox_agen
     assert worker_model.first_turn_args is not None
     assert worker_model.first_turn_args["system_instructions"] == (
         f"{get_default_sandbox_instructions()}\n\n"
+        "# Agent instructions\n\n"
         "Worker instructions.\n\n"
+        "# Sandbox capability instructions\n\n"
         "Worker workspace\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(worker_manifest)}"
     )
@@ -4533,7 +4552,9 @@ async def test_runner_reapplies_sandbox_prep_on_handoff() -> None:
     assert worker_model.first_turn_args is not None
     assert worker_model.first_turn_args["system_instructions"] == (
         f"{get_default_sandbox_instructions()}\n\n"
+        "# Agent instructions\n\n"
         "Worker instructions.\n\n"
+        "# Sandbox capability instructions\n\n"
         "Worker capability.\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(session.state.manifest)}"
     )
@@ -4738,13 +4759,17 @@ async def test_runner_isolates_shared_capabilities_per_run() -> None:
     assert model_two.first_turn_args is not None
     assert model_one.first_turn_args["system_instructions"] == (
         f"{get_default_sandbox_instructions()}\n\n"
+        "# Agent instructions\n\n"
         "Base instructions.\n\n"
+        "# Sandbox capability instructions\n\n"
         "Session one instructions.\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(session_one.state.manifest)}"
     )
     assert model_two.first_turn_args["system_instructions"] == (
         f"{get_default_sandbox_instructions()}\n\n"
+        "# Agent instructions\n\n"
         "Base instructions.\n\n"
+        "# Sandbox capability instructions\n\n"
         "Session two instructions.\n\n"
         f"{runtime_agent_preparation_module._filesystem_instructions(session_two.state.manifest)}"
     )

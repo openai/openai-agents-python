@@ -233,7 +233,7 @@ class MCPServer(abc.ABC):
         """
         Args:
             use_structured_content: Whether to use `tool_result.structured_content` when calling an
-                MCP tool.Defaults to False for backwards compatibility - most MCP servers still
+                MCP tool. Defaults to False for backwards compatibility - most MCP servers still
                 include the structured content in the `tool_result.content`, and using it by
                 default will cause duplicate content. You can set this to True if you know the
                 server will not duplicate the structured content in the `tool_result.content`.
