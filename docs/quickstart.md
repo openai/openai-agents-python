@@ -15,7 +15,7 @@ python -m venv .venv
 Do this every time you start a new terminal session.
 
 ```bash
-source .venv/bin/activate
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
 ### Install the Agents SDK
