@@ -228,6 +228,7 @@ async def test_input_guardrail_decorators():
     )
     assert not result.output.tripwire_triggered
     assert result.output.output_info == "test_1"
+    assert guardrail.get_name() == "decorated_input_guardrail"
 
     guardrail = decorated_named_input_guardrail
     result = await guardrail.run(
@@ -266,6 +267,7 @@ async def test_output_guardrail_decorators():
     )
     assert not result.output.tripwire_triggered
     assert result.output.output_info == "test_3"
+    assert guardrail.get_name() == "decorated_output_guardrail"
 
     guardrail = decorated_named_output_guardrail
     result = await guardrail.run(
