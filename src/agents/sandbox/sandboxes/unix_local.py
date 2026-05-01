@@ -283,6 +283,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             def _preexec() -> None:
                 os.setsid()
                 fcntl.ioctl(secondary_fd, termios.TIOCSCTTY, 0)
+                # PTY children should always treat Ctrl-C as an interrupt even if the parent
+                # process temporarily ignores SIGINT under the test runner.
+                signal.signal(signal.SIGINT, signal.SIG_DFL)
 
             try:
                 process = await asyncio.create_subprocess_exec(
