@@ -21,6 +21,7 @@ from openai.types.chat.chat_completion_chunk import (
 from openai.types.responses import Response
 
 from agents.models.chatcmpl_stream_handler import ChatCmplStreamHandler
+from agents.models.fake_id import is_fake_responses_id
 
 # ========== Helper Functions ==========
 
@@ -168,6 +169,20 @@ async def test_stream_captures_litellmprovider_specific_fields_thought_signature
     assert provider_data["model"] == "gemini/gemini-3-pro"
     assert provider_data["response_id"] == "chunk-id-123"
 
+    # Verify the added event and done event share the same synthetic item ID.
+    added_events = [e for e in events if e.type == "response.output_item.added"]
+    func_added = [
+        e for e in added_events if hasattr(e.item, "type") and e.item.type == "function_call"
+    ]
+    assert len(func_added) == 1
+    assert is_fake_responses_id(func_added[0].item.id)
+    assert func_added[0].item.id == func_done[0].item.id
+
+    # All argument delta events reference that same ID.
+    delta_events = [e for e in events if e.type == "response.function_call_arguments.delta"]
+    for e in delta_events:
+        assert e.item_id == func_done[0].item.id
+
 
 @pytest.mark.asyncio
 async def test_stream_captures_google_extra_content_thought_signature():
@@ -208,3 +223,17 @@ async def test_stream_captures_google_extra_content_thought_signature():
     assert provider_data.get("thought_signature") == "google_sig_456"
     assert provider_data["model"] == "gemini/gemini-3-pro"
     assert provider_data["response_id"] == "chunk-id-123"
+
+    # Verify the added event and done event share the same synthetic item ID.
+    added_events = [e for e in events if e.type == "response.output_item.added"]
+    func_added = [
+        e for e in added_events if hasattr(e.item, "type") and e.item.type == "function_call"
+    ]
+    assert len(func_added) == 1
+    assert is_fake_responses_id(func_added[0].item.id)
+    assert func_added[0].item.id == func_done[0].item.id
+
+    # All argument delta events reference that same ID.
+    delta_events = [e for e in events if e.type == "response.function_call_arguments.delta"]
+    for e in delta_events:
+        assert e.item_id == func_done[0].item.id

@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from typing import Any, cast
 
 import pytest
 from openai.types.chat.chat_completion_chunk import (
@@ -25,9 +26,11 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputRefusal,
     ResponseOutputText,
+    ResponseReasoningItem,
 )
 
 from agents.model_settings import ModelSettings
+from agents.models.chatcmpl_stream_handler import ChatCmplStreamHandler
 from agents.models.fake_id import is_fake_responses_id
 from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
@@ -133,6 +136,18 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
     assert completed_resp.usage.total_tokens == 12
     assert completed_resp.usage.input_tokens_details.cached_tokens == 2
     assert completed_resp.usage.output_tokens_details.reasoning_tokens == 3
+
+    # Verify all events reference the same synthetic output message ID.
+    msg_id = output_events[1].item.id  # response.output_item.added
+    assert is_fake_responses_id(msg_id)
+    assert output_events[2].item_id == msg_id  # response.content_part.added
+    assert output_events[3].item_id == msg_id  # first response.output_text.delta
+    assert output_events[4].item_id == msg_id  # second response.output_text.delta
+    assert output_events[5].item_id == msg_id  # response.content_part.done
+    assert output_events[6].item.id == msg_id  # response.output_item.done
+    # Exactly one output message in the completed response, carrying the same ID.
+    assert len(completed_resp.output) == 1
+    assert completed_resp.output[0].id == msg_id
 
 
 @pytest.mark.allow_call_model_methods
@@ -321,6 +336,18 @@ async def test_stream_response_yields_events_for_refusal_content(monkeypatch) ->
     assert isinstance(refusal_part, ResponseOutputRefusal)
     assert refusal_part.refusal == "NoThanks"
 
+    # Verify all events reference the same synthetic output message ID.
+    msg_id = output_events[1].item.id  # response.output_item.added
+    assert is_fake_responses_id(msg_id)
+    assert output_events[2].item_id == msg_id  # response.content_part.added
+    assert output_events[3].item_id == msg_id  # first response.refusal.delta
+    assert output_events[4].item_id == msg_id  # second response.refusal.delta
+    assert output_events[5].item_id == msg_id  # response.content_part.done
+    assert output_events[6].item.id == msg_id  # response.output_item.done
+    # Exactly one output message in the completed response, carrying the same ID.
+    assert len(completed_resp.output) == 1
+    assert completed_resp.output[0].id == msg_id
+
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
@@ -415,6 +442,16 @@ async def test_stream_response_yields_events_for_tool_call(monkeypatch) -> None:
     assert isinstance(final_fn, ResponseFunctionToolCall)
     assert final_fn.name == "my_func"
     assert final_fn.arguments == "arg1arg2"
+
+    # Verify all function-call events share the same synthetic item ID.
+    fn_id = output_events[1].item.id  # response.output_item.added
+    assert is_fake_responses_id(fn_id)
+    assert output_events[2].item_id == fn_id  # first response.function_call_arguments.delta
+    assert output_events[3].item_id == fn_id  # second response.function_call_arguments.delta
+    assert output_events[4].item.id == fn_id  # response.output_item.done
+    # The single completed output also carries the same ID.
+    completed_resp = output_events[5].response
+    assert completed_resp.output[0].id == fn_id
 
 
 @pytest.mark.allow_call_model_methods
@@ -535,22 +572,244 @@ async def test_stream_response_yields_real_time_function_call_arguments(monkeypa
     assert added_event.item.call_id == "tool-call-123"
     assert added_event.item.arguments == ""  # Should be empty at start
 
-    # Verify real-time argument streaming
+    # Verify real-time argument streaming with a consistent ID across all events.
+    fn_id = added_event.item.id
+    assert is_fake_responses_id(fn_id)
     expected_deltas = ['{"filename": "', 'test.py", "content": "', 'print(hello)"}']
     for i, delta_event in enumerate(function_args_delta_events):
         assert delta_event.delta == expected_deltas[i]
-        assert is_fake_responses_id(delta_event.item_id)  # synthetic per-item UUID
+        assert delta_event.item_id == fn_id  # every delta references the same item ID
         assert delta_event.output_index == 0
 
-    # Verify completion event has full arguments
+    # Verify completion event has full arguments and consistent ID.
     done_event = output_item_done_events[0]
     assert isinstance(done_event.item, ResponseFunctionToolCall)
     assert done_event.item.name == "write_file"
     assert done_event.item.arguments == '{"filename": "test.py", "content": "print(hello)"}'
+    assert done_event.item.id == fn_id  # done event carries the same item ID
 
-    # Verify final response
+    # Verify final response and consistent ID.
     completed_event = completed_events[0]
     function_call_output = completed_event.response.output[0]
     assert isinstance(function_call_output, ResponseFunctionToolCall)
     assert function_call_output.name == "write_file"
     assert function_call_output.arguments == '{"filename": "test.py", "content": "print(hello)"}'
+    assert function_call_output.id == fn_id  # completed response carries the same ID
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_multiple_tool_calls_have_distinct_ids(monkeypatch) -> None:
+    """
+    Validate that two parallel tool calls each receive their own unique synthetic ID,
+    and that events for different calls never share an ID.
+    """
+    tool_call_0_chunk1 = ChoiceDeltaToolCall(
+        index=0,
+        id="call-id-0",
+        function=ChoiceDeltaToolCallFunction(name="func_a", arguments=""),
+        type="function",
+    )
+    tool_call_0_chunk2 = ChoiceDeltaToolCall(
+        index=0,
+        function=ChoiceDeltaToolCallFunction(arguments='{"x": 1}'),
+        type="function",
+    )
+    tool_call_1_chunk1 = ChoiceDeltaToolCall(
+        index=1,
+        id="call-id-1",
+        function=ChoiceDeltaToolCallFunction(name="func_b", arguments=""),
+        type="function",
+    )
+    tool_call_1_chunk2 = ChoiceDeltaToolCall(
+        index=1,
+        function=ChoiceDeltaToolCallFunction(arguments='{"y": 2}'),
+        type="function",
+    )
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[
+            Choice(
+                index=0,
+                delta=ChoiceDelta(tool_calls=[tool_call_0_chunk1, tool_call_1_chunk1]),
+            )
+        ],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[
+            Choice(
+                index=0,
+                delta=ChoiceDelta(tool_calls=[tool_call_0_chunk2, tool_call_1_chunk2]),
+            )
+        ],
+        usage=CompletionUsage(completion_tokens=2, prompt_tokens=2, total_tokens=4),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for c in (chunk1, chunk2):
+            yield c
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    output_events = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        output_events.append(event)
+
+    added_events = [e for e in output_events if e.type == "response.output_item.added"]
+    done_events = [e for e in output_events if e.type == "response.output_item.done"]
+    delta_events = [e for e in output_events if e.type == "response.function_call_arguments.delta"]
+
+    assert len(added_events) == 2
+    assert len(done_events) == 2
+    assert len(delta_events) == 2
+
+    # Map function name → synthetic item ID from the added events.
+    id_by_name: dict[str, str] = {e.item.name: e.item.id for e in added_events}
+    assert set(id_by_name.keys()) == {"func_a", "func_b"}
+    fn_a_id = id_by_name["func_a"]
+    fn_b_id = id_by_name["func_b"]
+
+    # Both IDs must be synthetic and distinct from each other.
+    assert is_fake_responses_id(fn_a_id)
+    assert is_fake_responses_id(fn_b_id)
+    assert fn_a_id != fn_b_id
+
+    # Each done event must carry its own call's ID.
+    done_by_name: dict[str, str] = {e.item.name: e.item.id for e in done_events}
+    assert done_by_name["func_a"] == fn_a_id
+    assert done_by_name["func_b"] == fn_b_id
+
+    # All argument deltas must reference one of the two call IDs (both must appear).
+    delta_item_ids = {e.item_id for e in delta_events}
+    assert delta_item_ids == {fn_a_id, fn_b_id}
+
+    # The completed response output carries both IDs.
+    completed_resp = next(e for e in output_events if e.type == "response.completed").response
+    completed_ids = {
+        item.id for item in completed_resp.output if isinstance(item, ResponseFunctionToolCall)
+    }
+    assert completed_ids == {fn_a_id, fn_b_id}
+
+
+@pytest.mark.asyncio
+async def test_stream_response_reasoning_and_text_have_distinct_ids() -> None:
+    """
+    Validate that a stream containing both a reasoning item and a text message assigns
+    distinct synthetic IDs to each, and that all events for each item consistently
+    use that item's ID.
+    """
+    # Chunk 1: reasoning content delta (provider extension field).
+    delta1 = ChoiceDelta()
+    cast(Any, delta1).reasoning_content = "thinking about it"
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=delta1)],
+    )
+    # Chunk 2: regular text content delta.
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content="Hello"))],
+        usage=CompletionUsage(completion_tokens=2, prompt_tokens=2, total_tokens=4),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for c in (chunk1, chunk2):
+            yield c
+
+    response = Response(
+        id="resp-id",
+        created_at=0,
+        model="fake-model",
+        object="response",
+        output=[],
+        tool_choice="none",
+        tools=[],
+        parallel_tool_calls=False,
+    )
+    events = []
+    async for event in ChatCmplStreamHandler.handle_stream(
+        response,
+        fake_stream(),  # type: ignore[arg-type]
+    ):
+        events.append(event)
+
+    added_events = [e for e in events if e.type == "response.output_item.added"]
+    reasoning_added = next(e for e in added_events if e.item.type == "reasoning")
+    message_added = next(e for e in added_events if e.item.type == "message")
+
+    reasoning_id = reasoning_added.item.id
+    message_id = message_added.item.id
+
+    # Both IDs must be synthetic and distinct from each other.
+    assert is_fake_responses_id(reasoning_id)
+    assert is_fake_responses_id(message_id)
+    assert reasoning_id != message_id
+
+    # All reasoning delta events reference reasoning_id.
+    reasoning_delta_events = [
+        e
+        for e in events
+        if e.type in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta")
+    ]
+    assert reasoning_delta_events, "expected at least one reasoning delta"
+    for e in reasoning_delta_events:
+        assert e.item_id == reasoning_id
+
+    # All text delta events reference message_id.
+    text_delta_events = [e for e in events if e.type == "response.output_text.delta"]
+    assert text_delta_events
+    for e in text_delta_events:
+        assert e.item_id == message_id
+
+    # Content part added/done events reference message_id.
+    content_part_events = [
+        e for e in events if e.type in ("response.content_part.added", "response.content_part.done")
+    ]
+    for e in content_part_events:
+        assert e.item_id == message_id
+
+    # The completed response carries both items with matching IDs.
+    completed = next(e for e in events if e.type == "response.completed").response
+    reasoning_out = next(
+        item for item in completed.output if isinstance(item, ResponseReasoningItem)
+    )
+    message_out = next(item for item in completed.output if isinstance(item, ResponseOutputMessage))
+    assert reasoning_out.id == reasoning_id
+    assert message_out.id == message_id
