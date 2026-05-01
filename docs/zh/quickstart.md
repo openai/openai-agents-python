@@ -4,9 +4,9 @@ search:
 ---
 # 快速入门
 
-## 创建项目和虚拟环境
+## 项目和虚拟环境的创建
 
-你只需要做一次。
+你只需执行一次。
 
 ```bash
 mkdir my_project
@@ -14,31 +14,55 @@ cd my_project
 python -m venv .venv
 ```
 
-### 激活虚拟环境
+### 虚拟环境的激活
 
-每次开启新的终端会话时都要执行此操作。
+每次启动新的终端会话时都要执行此操作。
+
+在 macOS 或 Linux 上：
 
 ```bash
 source .venv/bin/activate
 ```
 
-### 安装 Agents SDK
+在 Windows 上：
+
+```cmd
+.venv\Scripts\activate
+```
+
+### Agents SDK 的安装
 
 ```bash
 pip install openai-agents # or `uv add openai-agents`, etc
 ```
 
-### 设置 OpenAI API 密钥
+### OpenAI API 密钥的设置
 
-如果你还没有，请按照[这些说明](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)创建 OpenAI API 密钥。
+如果你还没有密钥，请按照[这些说明](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)创建 OpenAI API 密钥。
+
+这些命令会为当前终端会话设置密钥。
+
+在 macOS 或 Linux 上：
 
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
 
-## 创建你的第一个智能体
+在 Windows PowerShell 上：
 
-智能体由 instructions、名称以及可选配置（如特定模型）定义。
+```powershell
+$env:OPENAI_API_KEY = "sk-..."
+```
+
+在 Windows 命令提示符上：
+
+```cmd
+set "OPENAI_API_KEY=sk-..."
+```
+
+## 第一个智能体的创建
+
+智能体通过 instructions、名称以及可选配置（例如特定模型）来定义。
 
 ```python
 from agents import Agent
@@ -49,7 +73,7 @@ agent = Agent(
 )
 ```
 
-## 运行你的第一个智能体
+## 第一个智能体的运行
 
 使用 [`Runner`][agents.run.Runner] 执行智能体，并获取返回的 [`RunResult`][agents.result.RunResult]。
 
@@ -70,23 +94,23 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-在第二轮中，你可以将 `result.to_input_list()` 传回 `Runner.run(...)`，也可以附加一个[会话](sessions/index.md)，或者通过 `conversation_id` / `previous_response_id` 复用 OpenAI 服务端托管状态。[运行智能体](running_agents.md)指南对这些方法进行了比较。
+对于第二轮，你可以将 `result.to_input_list()` 传回 `Runner.run(...)`，附加一个 [session](sessions/index.md)，或使用 `conversation_id` / `previous_response_id` 复用 OpenAI 服务管理的状态。[运行智能体](running_agents.md)指南对这些方法进行了比较。
 
-使用这个经验法则：
+可使用以下经验法则：
 
-| 如果你想要... | 从这里开始... |
+| 如果你想要... | 从以下方式开始... |
 | --- | --- |
-| 完全手动控制且与提供方无关的历史记录 | `result.to_input_list()` |
-| 让 SDK 为你加载和保存历史记录 | [`session=...`](sessions/index.md) |
-| OpenAI 托管的服务端延续 | `previous_response_id` 或 `conversation_id` |
+| 完全手动控制且与提供商无关的历史记录 | `result.to_input_list()` |
+| 由 SDK 为你加载和保存历史记录 | [`session=...`](sessions/index.md) |
+| OpenAI 管理的服务端延续 | `previous_response_id` 或 `conversation_id` |
 
-关于权衡和精确行为，请参阅[运行智能体](running_agents.md#choose-a-memory-strategy)。
+有关取舍和确切行为，请参阅[运行智能体](running_agents.md#choose-a-memory-strategy)。
 
-当任务主要依赖提示词、tools 和对话状态时，使用普通 `Agent` 加 `Runner`。如果智能体需要在隔离工作空间中检查或修改真实文件，请跳转到[Sandbox 智能体快速入门](sandbox_agents.md)。
+当任务主要依赖提示词、工具和对话状态时，请使用普通的 `Agent` 加 `Runner`。如果智能体应在隔离工作区中检查或修改真实文件，请转到 [Sandbox agents 快速入门](sandbox_agents.md)。
 
 ## 为智能体提供工具
 
-你可以为智能体提供工具来查询信息或执行操作。
+你可以为智能体提供工具来查找信息或执行操作。
 
 ```python
 import asyncio
@@ -118,16 +142,16 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## 再添加几个智能体
+## 添加更多智能体
 
-在你选择多智能体模式之前，先决定谁应负责最终回答：
+在选择多智能体模式之前，先决定谁应拥有最终答案：
 
--   **任务转移**：某位专家接管该轮对话中的这部分内容。
+-   **任务转移**：专家接管本轮中该部分的对话。
 -   **Agents as tools**：编排器保持控制，并将专家作为工具调用。
 
-本快速入门继续使用**任务转移**，因为它是最简短的第一个示例。对于管理者风格模式，请参阅[智能体编排](multi_agent.md)和[工具：Agents as tools](tools.md#agents-as-tools)。
+本快速入门继续使用**任务转移**，因为它是最简短的第一个示例。有关管理器风格的模式，请参阅[智能体编排](multi_agent.md)和[工具：agents as tools](tools.md#agents-as-tools)。
 
-其他智能体也可以用同样方式定义。`handoff_description` 为路由智能体提供额外上下文，说明何时应委派。
+可以用同样的方式定义其他智能体。`handoff_description` 会为路由智能体提供有关何时委派的额外上下文。
 
 ```python
 from agents import Agent
@@ -145,9 +169,9 @@ math_tutor_agent = Agent(
 )
 ```
 
-## 定义你的任务转移
+## 任务转移的定义
 
-在智能体上，你可以定义一个可对外任务转移选项清单，它在解决任务时可从中进行选择。
+在智能体上，你可以定义一组可选的传出任务转移选项，供其在解决任务时选择。
 
 ```python
 triage_agent = Agent(
@@ -157,9 +181,9 @@ triage_agent = Agent(
 )
 ```
 
-## 运行智能体编排
+## 智能体编排的运行
 
-Runner 会处理执行各个智能体、任何任务转移以及任何工具调用。
+运行器会处理各个智能体的执行、任何任务转移以及任何工具调用。
 
 ```python
 import asyncio
@@ -179,9 +203,9 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## 参考示例
+## 参考代码示例
 
-仓库包含了相同核心模式的完整脚本：
+该仓库包含相同核心模式的完整脚本：
 
 -   [`examples/basic/hello_world.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/hello_world.py) 用于首次运行。
 -   [`examples/basic/tools.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/tools.py) 用于工具调用。
@@ -189,13 +213,13 @@ if __name__ == "__main__":
 
 ## 查看追踪
 
-要查看智能体运行期间发生了什么，请前往 [OpenAI Dashboard 中的 Trace viewer](https://platform.openai.com/traces) 查看智能体运行的追踪。
+要回顾智能体运行期间发生的情况，请前往 [OpenAI Dashboard 中的 Trace viewer](https://platform.openai.com/traces)查看智能体运行的追踪。
 
 ## 后续步骤
 
-了解如何构建更复杂的智能体流程：
+学习如何构建更复杂的智能体式流程：
 
 -   了解如何配置[智能体](agents.md)。
--   了解[运行智能体](running_agents.md)和[会话](sessions/index.md)。
--   如果工作应在真实工作空间内进行，了解[Sandbox 智能体](sandbox_agents.md)。
+-   了解[运行智能体](running_agents.md)和 [sessions](sessions/index.md)。
+-   如果工作应在真实工作区内进行，请了解 [Sandbox agents](sandbox_agents.md)。
 -   了解[工具](tools.md)、[安全防护措施](guardrails.md)和[模型](models/index.md)。
