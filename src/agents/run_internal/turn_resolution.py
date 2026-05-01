@@ -42,7 +42,7 @@ from .._tool_identity import (
 from ..agent import Agent, ToolsToFinalOutputResult
 from ..agent_output import AgentOutputSchemaBase
 from ..agent_tool_state import get_agent_tool_state_scope, peek_agent_tool_run_result
-from ..exceptions import ModelBehaviorError, UserError
+from ..exceptions import ModelBehaviorError, ModelRefusalError, UserError
 from ..handoffs import Handoff, HandoffInputData, HandoffInputFilter, nest_handoff_history
 from ..items import (
     CompactionItem,
@@ -68,6 +68,7 @@ from ..lifecycle import RunHooks
 from ..logger import logger
 from ..run_config import RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
+from ..run_error_handlers import RunErrorHandlers
 from ..run_state import RunState
 from ..stream_events import StreamEvent
 from ..tool import (
@@ -89,6 +90,13 @@ from ..tracing import SpanError, handoff_span
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
 from .agent_bindings import AgentBindings
+from .error_handlers import (
+    build_run_error_data,
+    create_message_output_item,
+    format_final_output_text,
+    resolve_run_error_handler_result,
+    validate_handler_final_output,
+)
 from .items import (
     REJECTION_MESSAGE,
     apply_patch_rejection_item,
@@ -555,6 +563,7 @@ async def execute_tools_and_side_effects(
     hooks: RunHooks[TContext],
     context_wrapper: RunContextWrapper[TContext],
     run_config: RunConfig,
+    error_handlers: RunErrorHandlers[TContext] | None = None,
     server_manages_conversation: bool = False,
 ) -> SingleStepResult:
     """Run one turn of the loop, coordinating tools, approvals, guardrails, and handoffs."""
@@ -668,6 +677,7 @@ async def execute_tools_and_side_effects(
         return tool_final_output
 
     message_items = [item for item in new_step_items if isinstance(item, MessageOutputItem)]
+    refusal = ItemHelpers.extract_refusal(message_items[-1].raw_item) if message_items else None
     potential_final_output_text = (
         ItemHelpers.extract_text(message_items[-1].raw_item) if message_items else None
     )
@@ -677,6 +687,41 @@ async def execute_tools_and_side_effects(
             processed_response.tools_used
         )
         if not has_tool_activity_without_message:
+            if refusal:
+                refusal_error = ModelRefusalError(refusal)
+                run_error_data = build_run_error_data(
+                    input=original_input,
+                    new_items=pre_step_items + new_step_items,
+                    raw_responses=[new_response],
+                    last_agent=public_agent,
+                )
+                handler_result = await resolve_run_error_handler_result(
+                    error_handlers=error_handlers,
+                    error=refusal_error,
+                    context_wrapper=context_wrapper,
+                    run_data=run_error_data,
+                )
+                if handler_result is None:
+                    raise refusal_error
+
+                final_output = validate_handler_final_output(
+                    public_agent, handler_result.final_output
+                )
+                if handler_result.include_in_history:
+                    output_text = format_final_output_text(public_agent, final_output)
+                    new_step_items.append(create_message_output_item(public_agent, output_text))
+                return await execute_final_output_call(
+                    public_agent=public_agent,
+                    original_input=original_input,
+                    new_response=new_response,
+                    pre_step_items=pre_step_items,
+                    new_step_items=new_step_items,
+                    final_output=final_output,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    tool_input_guardrail_results=tool_input_guardrail_results,
+                    tool_output_guardrail_results=tool_output_guardrail_results,
+                )
             if output_schema and not output_schema.is_plain_text() and potential_final_output_text:
                 final_output = output_schema.validate_json(potential_final_output_text)
                 return await execute_final_output_call(
@@ -1871,6 +1916,7 @@ async def get_single_step_result_from_response(
     context_wrapper: RunContextWrapper[TContext],
     run_config: RunConfig,
     tool_use_tracker,
+    error_handlers: RunErrorHandlers[TContext] | None = None,
     server_manages_conversation: bool = False,
     event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] | None = None,
     before_side_effects: Callable[[], Awaitable[None]] | None = None,
@@ -1907,5 +1953,6 @@ async def get_single_step_result_from_response(
         hooks=hooks,
         context_wrapper=context_wrapper,
         run_config=run_config,
+        error_handlers=error_handlers,
         server_manages_conversation=server_manages_conversation,
     )

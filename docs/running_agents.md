@@ -410,7 +410,7 @@ Set the hook per run via `run_config` to redact sensitive data, trim long histor
 
 ### Error handlers
 
-All `Runner` entry points accept `error_handlers`, a dict keyed by error kind. Today, the supported key is `"max_turns"`. Use it when you want to return a controlled final output instead of raising `MaxTurnsExceeded`.
+All `Runner` entry points accept `error_handlers`, a dict keyed by error kind. The supported keys are `"max_turns"` and `"model_refusal"`. Use them when you want to return a controlled final output instead of raising `MaxTurnsExceeded` or `ModelRefusalError`.
 
 ```python
 from agents import (
@@ -440,6 +440,38 @@ print(result.final_output)
 ```
 
 Set `include_in_history=False` when you do not want the fallback output appended to conversation history.
+
+Use `"model_refusal"` when a model refusal should produce an application-specific fallback instead of ending the run with `ModelRefusalError`.
+
+```python
+from pydantic import BaseModel
+
+from agents import Agent, ModelRefusalError, RunErrorHandlerInput, Runner
+
+
+class Recipe(BaseModel):
+    ingredients: list[str]
+    refusal_reason: str | None = None
+
+
+def on_model_refusal(data: RunErrorHandlerInput[None]) -> Recipe:
+    assert isinstance(data.error, ModelRefusalError)
+    return Recipe(ingredients=[], refusal_reason=data.error.refusal)
+
+
+agent = Agent(
+    name="Recipe assistant",
+    instructions="Return a structured recipe.",
+    output_type=Recipe,
+)
+
+result = Runner.run_sync(
+    agent,
+    "Make me something unsafe.",
+    error_handlers={"model_refusal": on_model_refusal},
+)
+print(result.final_output)
+```
 
 ## Durable execution integrations and human-in-the-loop
 

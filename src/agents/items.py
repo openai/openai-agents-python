@@ -723,6 +723,19 @@ class ItemHelpers:
         return text or None
 
     @classmethod
+    def extract_refusal(cls, message: TResponseOutputItem) -> str | None:
+        """Extracts refusal content from a message, if any."""
+        if not isinstance(message, ResponseOutputMessage):
+            return None
+
+        refusal = ""
+        for content_item in message.content:
+            if isinstance(content_item, ResponseOutputRefusal):
+                refusal += content_item.refusal or ""
+
+        return refusal or None
+
+    @classmethod
     def input_to_new_input_list(
         cls, input: str | list[TResponseInputItem]
     ) -> list[TResponseInputItem]:

@@ -26,6 +26,7 @@ from agents import (
     MCPApprovalResponseItem,
     MessageOutputItem,
     ModelBehaviorError,
+    ModelRefusalError,
     ModelResponse,
     RunConfig,
     RunContextWrapper,
@@ -363,7 +364,7 @@ async def test_plaintext_agent_client_tool_search_requires_manual_handling() -> 
 
 
 @pytest.mark.asyncio
-async def test_plaintext_agent_hosted_shell_with_refusal_message_is_final_output():
+async def test_plaintext_agent_hosted_shell_with_refusal_message_raises_refusal_error():
     shell_tool = ShellTool(environment={"type": "container_auto"})
     agent = Agent(name="test", tools=[shell_tool])
     refusal_message = ResponseOutputMessage(
@@ -402,14 +403,10 @@ async def test_plaintext_agent_hosted_shell_with_refusal_message_is_final_output
         response_id=None,
     )
 
-    result = await get_execute_result(agent, response)
+    with pytest.raises(ModelRefusalError) as exc_info:
+        await get_execute_result(agent, response)
 
-    assert len(result.generated_items) == 3
-    assert isinstance(result.generated_items[0], ToolCallItem)
-    assert isinstance(result.generated_items[1], ToolCallOutputItem)
-    assert isinstance(result.generated_items[2], MessageOutputItem)
-    assert isinstance(result.next_step, NextStepFinalOutput)
-    assert result.next_step.output == ""
+    assert exc_info.value.refusal == "I cannot help with that."
 
 
 @pytest.mark.asyncio

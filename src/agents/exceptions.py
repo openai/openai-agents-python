@@ -65,6 +65,17 @@ class ModelBehaviorError(AgentsException):
         super().__init__(message)
 
 
+class ModelRefusalError(AgentsException):
+    """Exception raised when the model refuses to produce the requested output."""
+
+    refusal: str
+    """The refusal text returned by the model."""
+
+    def __init__(self, refusal: str):
+        self.refusal = refusal
+        super().__init__(f"Model refused to produce output: {refusal}")
+
+
 class UserError(AgentsException):
     """Exception raised when the user makes an error using the SDK."""
 
