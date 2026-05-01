@@ -342,7 +342,7 @@ agent = Agent(
 The `tool_use_behavior` parameter in the `Agent` configuration controls how tool outputs are handled:
 
 - `"run_llm_again"`: The default. Tools are run, and the LLM processes the results to produce a final response.
-- `"stop_on_first_tool"`: The output of the first tool call is used as the final response, without further LLM processing.
+- `"stop_on_first_tool"`: The output of the first tool call is used as the final response, without further LLM processing. This is useful when you want the tool output to be the final answer.
 
 ```python
 from agents import Agent, Runner, function_tool, ModelSettings
