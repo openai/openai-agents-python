@@ -27,7 +27,7 @@ import asyncio
 import json
 import random
 import time
-from typing import Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 try:
     from dapr.aio.clients import DaprClient
@@ -41,6 +41,9 @@ from ...items import TResponseInputItem
 from ...logger import logger
 from ...memory.session import SessionABC
 from ...memory.session_settings import SessionSettings, resolve_session_limit
+
+if TYPE_CHECKING:
+    from ...run_context import RunContextWrapper
 
 # Type alias for consistency levels
 ConsistencyLevel = Literal["eventual", "strong"]
@@ -232,7 +235,10 @@ class DaprSession(SessionABC):
     # Session protocol implementation
     # ------------------------------------------------------------------
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self, limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -271,7 +277,10 @@ class DaprSession(SessionABC):
                     continue
             return items
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self, items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:
@@ -324,7 +333,10 @@ class DaprSession(SessionABC):
                 options=self._get_state_options(),
             )
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
 
         Returns:
@@ -368,7 +380,10 @@ class DaprSession(SessionABC):
             except (json.JSONDecodeError, TypeError):
                 return None
 
-    async def clear_session(self) -> None:
+    async def clear_session(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Clear all items for this session."""
         async with self._lock:
             # Delete messages and metadata keys

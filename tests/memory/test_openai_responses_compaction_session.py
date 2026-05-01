@@ -125,7 +125,7 @@ class TestOpenAIResponsesCompactionSession:
         ]
         await session.add_items(items)
 
-        mock_session.add_items.assert_called_once_with(items)
+        mock_session.add_items.assert_called_once_with(items, wrapper=None)
 
     @pytest.mark.asyncio
     async def test_get_items_delegates(self) -> None:

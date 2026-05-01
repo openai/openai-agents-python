@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Literal, Protocol, TypeGuard, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeGuard, runtime_checkable
 
 from typing_extensions import TypedDict
 
 if TYPE_CHECKING:
     from ..items import TResponseInputItem
+    from ..run_context import RunContextWrapper
     from .session_settings import SessionSettings
 
 
@@ -21,36 +22,59 @@ class Session(Protocol):
     session_id: str
     session_settings: SessionSettings | None = None
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, retrieves all items.
                    When specified, returns the latest N items in chronological order.
+            wrapper: Optional run context wrapper providing context and usage info.
 
         Returns:
             List of input items representing the conversation history
         """
         ...
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:
             items: List of input items to add to the history
+            wrapper: Optional run context wrapper providing context and usage info.
         """
         ...
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
+
+        Args:
+            wrapper: Optional run context wrapper providing context and usage info.
 
         Returns:
             The most recent item if it exists, None if the session is empty
         """
         ...
 
-    async def clear_session(self) -> None:
-        """Clear all items for this session."""
+    async def clear_session(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        """Clear all items for this session.
+
+        Args:
+            wrapper: Optional run context wrapper providing context and usage info.
+        """
         ...
 
 
@@ -68,12 +92,17 @@ class SessionABC(ABC):
     session_settings: SessionSettings | None = None
 
     @abstractmethod
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, retrieves all items.
                    When specified, returns the latest N items in chronological order.
+            wrapper: Optional run context wrapper providing context and usage info.
 
         Returns:
             List of input items representing the conversation history
@@ -81,17 +110,28 @@ class SessionABC(ABC):
         ...
 
     @abstractmethod
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:
             items: List of input items to add to the history
+            wrapper: Optional run context wrapper providing context and usage info.
         """
         ...
 
     @abstractmethod
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
+
+        Args:
+            wrapper: Optional run context wrapper providing context and usage info.
 
         Returns:
             The most recent item if it exists, None if the session is empty
@@ -99,8 +139,15 @@ class SessionABC(ABC):
         ...
 
     @abstractmethod
-    async def clear_session(self) -> None:
-        """Clear all items for this session."""
+    async def clear_session(
+        self,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        """Clear all items for this session.
+
+        Args:
+            wrapper: Optional run context wrapper providing context and usage info.
+        """
         ...
 
 

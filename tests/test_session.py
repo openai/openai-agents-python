@@ -598,7 +598,7 @@ async def test_session_add_items_exception_propagates_in_streamed():
     """
     session = SQLiteSession("test_exception_session")
 
-    async def _failing_add_items(_items):
+    async def _failing_add_items(_items, **kwargs):
         raise RuntimeError("Simulated session.add_items failure")
 
     session.add_items = _failing_add_items  # type: ignore[method-assign]

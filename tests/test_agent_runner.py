@@ -2433,16 +2433,16 @@ async def test_save_result_to_session_counts_sanitized_openai_items() -> None:
         async def _get_session_id(self) -> str:
             return "conv_test"
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(self, items, **kwargs):
             self.saved_items.extend(items)
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(self, limit=None, **kwargs):
             return []
 
-        async def pop_item(self) -> TResponseInputItem | None:
+        async def pop_item(self, **kwargs):
             return None
 
-        async def clear_session(self) -> None:
+        async def clear_session(self, **kwargs):
             return None
 
     session = DummyOpenAIConversationsSession()
@@ -3970,15 +3970,18 @@ async def test_session_add_items_called_multiple_times_for_multi_turn_completion
 
             expected_calls = [
                 # First call is the initial input
-                (([expected_items[0]],),),
+                [expected_items[0]],
                 # Second call is the first tool call and its result
-                (([expected_items[1], expected_items[2]],),),
+                [expected_items[1], expected_items[2]],
                 # Third call is the second tool call and its result
-                (([expected_items[3], expected_items[4]],),),
+                [expected_items[3], expected_items[4]],
                 # Fourth call is the final output
-                (([expected_items[5]],),),
+                [expected_items[5]],
             ]
-            assert mock_add_items.call_args_list == expected_calls
+            assert mock_add_items.call_count == len(expected_calls)
+            for i, expected_items_call in enumerate(expected_calls):
+                actual_call = mock_add_items.call_args_list[i]
+                assert list(actual_call[0][0]) == expected_items_call
             assert result.final_output == "Summary: Echoed foo and bar"
             assert (await session.get_items()) == expected_items
 

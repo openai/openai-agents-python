@@ -494,6 +494,8 @@ class AgentRunner:
             raw_input = cast(str | list[TResponseInputItem], input)
             original_user_input = raw_input
 
+            context_wrapper = ensure_context_wrapper(context)
+
             validate_session_conversation_settings(
                 session,
                 conversation_id=conversation_id,
@@ -515,6 +517,7 @@ class AgentRunner:
                     run_config.session_settings,
                     include_history_in_prepared_input=False,
                     preserve_dropped_new_items=True,
+                    wrapper=context_wrapper,
                 )
                 original_input_for_state = raw_input
                 session_input_items_for_persistence = []
@@ -527,6 +530,7 @@ class AgentRunner:
                     session,
                     run_config.session_input_callback,
                     run_config.session_settings,
+                    wrapper=context_wrapper,
                 )
                 original_input_for_state = prepared_input
 

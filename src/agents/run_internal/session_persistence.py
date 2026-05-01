@@ -10,7 +10,7 @@ import copy
 import inspect
 import json
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from ..exceptions import UserError
 from ..items import HandoffOutputItem, ItemHelpers, RunItem, ToolCallOutputItem, TResponseInputItem
@@ -24,6 +24,10 @@ from ..memory import (
 )
 from ..memory.openai_conversations_session import OpenAIConversationsSession
 from ..run_state import RunState
+
+if TYPE_CHECKING:
+    from ..run_context import RunContextWrapper
+
 from .items import (
     ReasoningItemIdPolicy,
     copy_input_items,
@@ -59,6 +63,7 @@ async def prepare_input_with_session(
     *,
     include_history_in_prepared_input: bool = True,
     preserve_dropped_new_items: bool = False,
+    wrapper: RunContextWrapper[Any] | None = None,
 ) -> tuple[str | list[TResponseInputItem], list[TResponseInputItem]]:
     """Prepare model input from session history plus the new turn input.
 
@@ -83,9 +88,9 @@ async def prepare_input_with_session(
         resolved_settings = resolved_settings.resolve(session_settings)
 
     if resolved_settings.limit is not None:
-        history = await session.get_items(limit=resolved_settings.limit)
+        history = await session.get_items(limit=resolved_settings.limit, wrapper=wrapper)
     else:
-        history = await session.get_items()
+        history = await session.get_items(wrapper=wrapper)
     converted_history = [
         strip_internal_input_item_metadata(ensure_input_item_format(item)) for item in history
     ]
@@ -237,6 +242,7 @@ async def save_result_to_session(
     response_id: str | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
+    wrapper: RunContextWrapper[Any] | None = None,
 ) -> int:
     """
     Persist a turn to the session store, keeping track of what was already saved so retries
@@ -322,7 +328,7 @@ async def save_result_to_session(
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
         return saved_run_items_count
 
-    await session.add_items(items_to_save)
+    await session.add_items(items_to_save, wrapper=wrapper)
 
     if run_state:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
@@ -334,7 +340,7 @@ async def save_result_to_session(
         if has_local_tool_outputs:
             defer_compaction = getattr(session, "_defer_compaction", None)
             if callable(defer_compaction):
-                result = defer_compaction(response_id, store=store)
+                result = defer_compaction(response_id, store=store, wrapper=wrapper)
                 if inspect.isawaitable(result):
                     await result
             logger.debug(
@@ -360,7 +366,7 @@ async def save_result_to_session(
         }
         if store is not None:
             compaction_args["store"] = store
-        await session.run_compaction(compaction_args)
+        await session.run_compaction(compaction_args, wrapper=wrapper)
 
     return saved_run_items_count
 
