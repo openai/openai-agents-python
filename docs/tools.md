@@ -2,7 +2,7 @@
 
 Tools let agents take actions: things like fetching data, running code, calling external APIs, and even using a computer. The SDK supports five categories:
 
--   Hosted OpenAI tools: run alongside the model on OpenAI servers.
+-   **Hosted OpenAI tools:** run alongside the model on OpenAI servers.
 -   Local/runtime execution tools: `ComputerTool` and `ApplyPatchTool` always run in your environment, while `ShellTool` can run locally or in a hosted container.
 -   Function calling: wrap any Python function as a tool.
 -   Agents as tools: expose an agent as a callable tool without a full handoff.
