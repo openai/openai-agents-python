@@ -671,6 +671,9 @@ async def execute_tools_and_side_effects(
     potential_final_output_text = (
         ItemHelpers.extract_text(message_items[-1].raw_item) if message_items else None
     )
+    potential_final_output_refusal = (
+        ItemHelpers.extract_refusal(message_items[-1].raw_item) if message_items else None
+    )
 
     if not processed_response.has_tools_or_approvals_to_run():
         has_tool_activity_without_message = not message_items and bool(
@@ -691,6 +694,23 @@ async def execute_tools_and_side_effects(
                     tool_input_guardrail_results=tool_input_guardrail_results,
                     tool_output_guardrail_results=tool_output_guardrail_results,
                 )
+            if (
+                output_schema
+                and not output_schema.is_plain_text()
+                and potential_final_output_refusal
+            ):
+                return await execute_final_output_call(
+                    public_agent=public_agent,
+                    original_input=original_input,
+                    new_response=new_response,
+                    pre_step_items=pre_step_items,
+                    new_step_items=new_step_items,
+                    final_output=potential_final_output_refusal,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    tool_input_guardrail_results=tool_input_guardrail_results,
+                    tool_output_guardrail_results=tool_output_guardrail_results,
+                )
             if not output_schema or output_schema.is_plain_text():
                 return await execute_final_output_call(
                     public_agent=public_agent,
@@ -698,7 +718,9 @@ async def execute_tools_and_side_effects(
                     new_response=new_response,
                     pre_step_items=pre_step_items,
                     new_step_items=new_step_items,
-                    final_output=potential_final_output_text or "",
+                    final_output=potential_final_output_text
+                    or potential_final_output_refusal
+                    or "",
                     hooks=hooks,
                     context_wrapper=context_wrapper,
                     tool_input_guardrail_results=tool_input_guardrail_results,

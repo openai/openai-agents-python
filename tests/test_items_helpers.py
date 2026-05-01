@@ -128,6 +128,27 @@ def test_extract_text_concatenates_all_text_segments() -> None:
     )
 
 
+def test_extract_refusal_concatenates_all_refusal_segments() -> None:
+    first_refusal = ResponseOutputRefusal(refusal="no", type="refusal")
+    text = ResponseOutputText(annotations=[], text="ignored", type="output_text", logprobs=[])
+    second_refusal = ResponseOutputRefusal(refusal=" way", type="refusal")
+    message = make_message([first_refusal, text, second_refusal])
+
+    assert ItemHelpers.extract_refusal(message) == "no way"
+    assert (
+        ItemHelpers.extract_refusal(
+            ResponseFunctionToolCall(
+                id="tool123",
+                arguments="{}",
+                call_id="call123",
+                name="func",
+                type="function_call",
+            )
+        )
+        is None
+    )
+
+
 def test_extract_text_tolerates_none_text_content() -> None:
     """Regression: ``content_item.text`` can be ``None`` when output items
     are assembled via ``model_construct`` (e.g. partial streaming responses)

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 
 import pytest
+from openai.types.responses.response_output_message import ResponseOutputMessage
+from openai.types.responses.response_output_refusal import ResponseOutputRefusal
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
@@ -19,6 +21,16 @@ from agents.stream_events import RunItemStreamEvent
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool, get_function_tool_call, get_text_message
+
+
+def get_refusal_message(refusal: str) -> ResponseOutputMessage:
+    return ResponseOutputMessage(
+        id="1",
+        type="message",
+        role="assistant",
+        content=[ResponseOutputRefusal(type="refusal", refusal=refusal)],
+        status="completed",
+    )
 
 
 @pytest.mark.asyncio
@@ -139,6 +151,57 @@ async def test_structured_output_streamed_max_turns():
         output = Runner.run_streamed(agent, input="user_message", max_turns=3)
         async for _ in output.stream_events():
             pass
+
+
+@pytest.mark.asyncio
+async def test_structured_output_refusal_finishes_without_retries():
+    refusal = "I can't help with that request."
+    model = FakeModel(initial_output=[get_refusal_message(refusal)])
+    agent = Agent(
+        name="test_1",
+        model=model,
+        output_type=Foo,
+    )
+
+    result = await Runner.run(agent, input="user_message", max_turns=3)
+
+    assert result.final_output == refusal
+    assert len(result.raw_responses) == 1
+    assert ItemHelpers.extract_refusal(result.raw_responses[0].output[0]) == refusal
+
+
+@pytest.mark.asyncio
+async def test_structured_output_refusal_streamed_finishes_without_retries():
+    refusal = "I can't help with that request."
+    model = FakeModel(initial_output=[get_refusal_message(refusal)])
+    agent = Agent(
+        name="test_1",
+        model=model,
+        output_type=Foo,
+    )
+
+    result = Runner.run_streamed(agent, input="user_message", max_turns=3)
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == refusal
+    assert len(result.raw_responses) == 1
+    assert ItemHelpers.extract_refusal(result.raw_responses[0].output[0]) == refusal
+
+
+@pytest.mark.asyncio
+async def test_plain_text_refusal_finishes_as_final_output():
+    refusal = "I can't help with that request."
+    model = FakeModel(initial_output=[get_refusal_message(refusal)])
+    agent = Agent(
+        name="test_1",
+        model=model,
+    )
+
+    result = await Runner.run(agent, input="user_message", max_turns=3)
+
+    assert result.final_output == refusal
+    assert len(result.raw_responses) == 1
 
 
 @pytest.mark.asyncio

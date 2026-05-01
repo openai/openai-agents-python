@@ -409,7 +409,7 @@ async def test_plaintext_agent_hosted_shell_with_refusal_message_is_final_output
     assert isinstance(result.generated_items[1], ToolCallOutputItem)
     assert isinstance(result.generated_items[2], MessageOutputItem)
     assert isinstance(result.next_step, NextStepFinalOutput)
-    assert result.next_step.output == ""
+    assert result.next_step.output == "I cannot help with that."
 
 
 @pytest.mark.asyncio
