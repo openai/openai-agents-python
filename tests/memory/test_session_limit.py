@@ -8,8 +8,8 @@ import pytest
 from agents import Agent, RunConfig, SQLiteSession
 from agents.memory import SessionSettings
 from tests.fake_model import FakeModel
+from tests.memory.test_session import run_agent_async
 from tests.test_responses import get_text_message
-from tests.test_session import run_agent_async
 
 
 @pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
