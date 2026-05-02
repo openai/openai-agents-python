@@ -30,6 +30,7 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.tool_param import LocalShell
+from typing_extensions import NotRequired
 
 from .. import _debug
 from .._tool_identity import (
@@ -189,6 +190,24 @@ class _WebsocketRequestTimeouts:
     connect: float | None
     send: float | None
     recv: float | None
+
+
+class OpenAIResponsesWebSocketOptions(TypedDict):
+    """Low-level OpenAI Responses websocket connection options."""
+
+    ping_interval: NotRequired[float | None]
+    """Time in seconds between keepalive pings sent by the client.
+
+    The underlying ``websockets`` library usually defaults to 20.0. Set to ``None`` to
+    disable keepalive pings.
+    """
+
+    ping_timeout: NotRequired[float | None]
+    """Time in seconds to wait for a pong response before disconnecting.
+
+    Set to ``None`` to keep pings enabled but disable heartbeat timeouts during large latency
+    spikes.
+    """
 
 
 class _ResponseStreamWithRequestId:
@@ -911,9 +930,13 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
         openai_client: AsyncOpenAI,
         *,
         model_is_explicit: bool = True,
+        websocket_options: OpenAIResponsesWebSocketOptions | None = None,
     ) -> None:
         super().__init__(
             model=model, openai_client=openai_client, model_is_explicit=model_is_explicit
+        )
+        self._websocket_options = cast(
+            OpenAIResponsesWebSocketOptions, dict(websocket_options or {})
         )
         self._ws_connection: Any | None = None
         self._ws_connection_identity: tuple[str, tuple[tuple[str, str], ...]] | None = None
@@ -1531,12 +1554,20 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                 "Install `websockets` or `openai[realtime]`."
             ) from exc
 
+        connect_kwargs: dict[str, Any] = {
+            "user_agent_header": None,
+            "additional_headers": dict(headers),
+            "max_size": None,
+            "open_timeout": connect_timeout,
+        }
+        if "ping_interval" in self._websocket_options:
+            connect_kwargs["ping_interval"] = self._websocket_options["ping_interval"]
+        if "ping_timeout" in self._websocket_options:
+            connect_kwargs["ping_timeout"] = self._websocket_options["ping_timeout"]
+
         return await connect(
             ws_url,
-            user_agent_header=None,
-            additional_headers=dict(headers),
-            max_size=None,
-            open_timeout=connect_timeout,
+            **connect_kwargs,
         )
 
 

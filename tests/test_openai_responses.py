@@ -1580,6 +1580,40 @@ async def test_websocket_model_reuses_connection_and_sends_response_create_frame
     assert ws.sent_messages[1]["previous_response_id"] == "resp-1"
 
 
+@pytest.mark.asyncio
+async def test_websocket_model_passes_keepalive_options_to_connect(monkeypatch):
+    import websockets.asyncio.client as websockets_client
+
+    client = DummyWSClient()
+    model = OpenAIResponsesWSModel(
+        model="gpt-4",
+        openai_client=client,  # type: ignore[arg-type]
+        websocket_options={"ping_interval": 45.0, "ping_timeout": None},
+    )
+    ws = DummyWSConnection([])
+    captured_kwargs: dict[str, Any] = {}
+
+    async def fake_connect(ws_url: str, **kwargs: Any) -> DummyWSConnection:
+        captured_kwargs["ws_url"] = ws_url
+        captured_kwargs.update(kwargs)
+        return ws
+
+    monkeypatch.setattr(websockets_client, "connect", fake_connect)
+
+    opened = await model._open_websocket_connection(
+        "wss://example.test/v1/responses",
+        {"Authorization": "Bearer test-key"},
+        connect_timeout=10.0,
+    )
+
+    assert opened is ws
+    assert captured_kwargs["ws_url"] == "wss://example.test/v1/responses"
+    assert captured_kwargs["additional_headers"] == {"Authorization": "Bearer test-key"}
+    assert captured_kwargs["open_timeout"] == 10.0
+    assert captured_kwargs["ping_interval"] == 45.0
+    assert captured_kwargs["ping_timeout"] is None
+
+
 @pytest.mark.allow_call_model_methods
 def test_websocket_model_reconnects_when_reused_from_different_event_loop(monkeypatch):
     client = DummyWSClient()
