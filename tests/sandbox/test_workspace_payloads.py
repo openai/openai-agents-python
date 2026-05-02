@@ -89,8 +89,9 @@ def test_coerce_write_payload_supports_readinto_seek_and_tell() -> None:
 
 
 def test_coerce_write_payload_rejects_text_chunks() -> None:
+    path = Path("/workspace/file.txt")
     payload = coerce_write_payload(
-        path=Path("/workspace/file.txt"),
+        path=path,
         data=cast(io.IOBase, _TextReadStream()),
     )
 
@@ -99,7 +100,7 @@ def test_coerce_write_payload_rejects_text_chunks() -> None:
 
     assert exc_info.value.error_code is ErrorCode.WORKSPACE_WRITE_TYPE_ERROR
     assert exc_info.value.context == {
-        "path": "/workspace/file.txt",
+        "path": str(path),
         "actual_type": "str",
     }
 
