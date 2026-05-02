@@ -599,9 +599,7 @@ class TestEventHandling:
 
         events = [await session._event_queue.get() for _ in range(2)]
         assert any(isinstance(e, RealtimeRawModelEvent) for e in events)
-        history_updated = next(
-            (e for e in events if isinstance(e, RealtimeHistoryUpdated)), None
-        )
+        history_updated = next((e for e in events if isinstance(e, RealtimeHistoryUpdated)), None)
         assert history_updated is not None
         assert history_updated.history == session._history
 
