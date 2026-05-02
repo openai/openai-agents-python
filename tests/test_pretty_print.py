@@ -4,9 +4,13 @@ import pytest
 from inline_snapshot import snapshot
 from pydantic import BaseModel
 
-from agents import Agent, Runner
+from agents import Agent, RunContextWrapper, RunErrorDetails, Runner, RunResult
 from agents.agent_output import _WRAPPER_DICT_KEY
-from agents.util._pretty_print import pretty_print_result, pretty_print_run_result_streaming
+from agents.util._pretty_print import (
+    pretty_print_result,
+    pretty_print_run_error_details,
+    pretty_print_run_result_streaming,
+)
 from tests.fake_model import FakeModel
 
 from .test_responses import get_final_output_message, get_text_message
@@ -30,6 +34,56 @@ RunResult:
 - 0 input guardrail result(s)
 - 0 output guardrail result(s)
 (See `RunResult` for more details)\
+""")
+
+
+def test_pretty_result_handles_none_final_output():
+    agent = Agent(name="none_agent")
+    result = RunResult(
+        input="Hello",
+        new_items=[],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=RunContextWrapper(context=None),
+        _last_agent=agent,
+    )
+
+    assert pretty_print_result(result) == snapshot("""\
+RunResult:
+- Last agent: Agent(name="none_agent", ...)
+- Final output (NoneType):
+    None
+- 0 new item(s)
+- 0 raw response(s)
+- 0 input guardrail result(s)
+- 0 output guardrail result(s)
+(See `RunResult` for more details)\
+""")
+
+
+def test_pretty_run_error_details():
+    agent = Agent(name="error_agent")
+    details = RunErrorDetails(
+        input="Hello",
+        new_items=[],
+        raw_responses=[],
+        last_agent=agent,
+        context_wrapper=RunContextWrapper(context=None),
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+    )
+
+    assert pretty_print_run_error_details(details) == snapshot("""\
+RunErrorDetails:
+- Last agent: Agent(name="error_agent", ...)
+- 0 new item(s)
+- 0 raw response(s)
+- 0 input guardrail result(s)
+(See `RunErrorDetails` for more details)\
 """)
 
 
