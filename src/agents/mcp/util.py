@@ -379,13 +379,13 @@ class MCPUtil:
         try:
             json_data: dict[str, Any] = json.loads(input_json) if input_json else {}
         except Exception as e:
+            error_message = f"Invalid JSON input for tool {tool.name}"
             if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"Invalid JSON input for tool {tool.name}")
+                logger.debug(error_message)
             else:
-                logger.debug(f"Invalid JSON input for tool {tool.name}: {input_json}")
-            raise ModelBehaviorError(
-                f"Invalid JSON input for tool {tool.name}: {input_json}"
-            ) from e
+                error_message = f"{error_message}: {input_json}"
+                logger.debug(error_message)
+            raise ModelBehaviorError(error_message) from e
 
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug(f"Invoking MCP tool {tool.name}")
