@@ -70,6 +70,7 @@ from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
 from agents.run_internal.run_loop import get_new_response
 from agents.run_internal.run_steps import NextStepFinalOutput, SingleStepResult
 from agents.run_internal.session_persistence import (
+    _collect_retry_owned_tail_serializations,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     rewind_session_items,
@@ -2422,6 +2423,19 @@ async def test_rewind_strips_only_retry_owned_tail_items_before_known_server_ite
 
     assert session.pop_calls == 2
     assert session.saved_items == [known_server_item]
+
+
+def test_collect_retry_owned_tail_serializations_returns_empty_for_empty_session() -> None:
+    tracker = OpenAIServerConversationTracker()
+
+    assert (
+        _collect_retry_owned_tail_serializations(
+            [],
+            server_tracker=tracker,
+            ignore_ids_for_matching=False,
+        )
+        == []
+    )
 
 
 @pytest.mark.asyncio
