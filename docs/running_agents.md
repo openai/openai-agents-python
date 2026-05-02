@@ -96,7 +96,9 @@ from agents import Agent, responses_websocket_session
 async def main():
     agent = Agent(name="Assistant", instructions="Be concise.")
 
-    async with responses_websocket_session() as ws:
+    async with responses_websocket_session(
+        responses_websocket_options={"ping_interval": 20.0, "ping_timeout": 60.0},
+    ) as ws:
         first = ws.run_streamed(agent, "Say hello in one short sentence.")
         async for _event in first.stream_events():
             pass
@@ -114,6 +116,8 @@ asyncio.run(main())
 ```
 
 Finish consuming streamed results before the context exits. Exiting the context while a websocket request is still in flight may force-close the shared connection.
+
+If long reasoning turns hit websocket keepalive timeouts, increase `ping_timeout` or set `ping_timeout=None` to disable heartbeat timeouts. Use HTTP/SSE transport for runs where reliability matters more than websocket latency.
 
 ### Run config
 
