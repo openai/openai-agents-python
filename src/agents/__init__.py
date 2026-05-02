@@ -83,7 +83,11 @@ from .models.multi_provider import MultiProvider
 from .models.openai_agent_registration import OpenAIAgentRegistrationConfig
 from .models.openai_chatcompletions import OpenAIChatCompletionsModel
 from .models.openai_provider import OpenAIProvider
-from .models.openai_responses import OpenAIResponsesModel, OpenAIResponsesWSModel
+from .models.openai_responses import (
+    OpenAIResponsesModel,
+    OpenAIResponsesWebSocketOptions,
+    OpenAIResponsesWSModel,
+)
 from .prompts import DynamicPromptFunction, GenerateDynamicPromptData, Prompt
 from .repl import run_demo_loop
 from .responses_websocket_session import ResponsesWebSocketSession, responses_websocket_session
@@ -527,6 +531,7 @@ __all__ = [
     "set_default_openai_client",
     "set_default_openai_api",
     "set_default_openai_responses_transport",
+    "OpenAIResponsesWebSocketOptions",
     "set_default_openai_harness",
     "set_default_openai_agent_registration",
     "responses_websocket_session",

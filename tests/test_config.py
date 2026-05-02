@@ -7,6 +7,7 @@ import openai
 import pytest
 
 from agents import (
+    responses_websocket_session,
     set_default_openai_api,
     set_default_openai_client,
     set_default_openai_key,
@@ -168,6 +169,36 @@ async def test_openai_provider_reuses_websocket_model_instance_for_same_model_na
 
     assert isinstance(model1, OpenAIResponsesWSModel)
     assert model1 is model2
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_passes_responses_websocket_options_to_model():
+    class DummyAsyncOpenAI:
+        pass
+
+    provider = OpenAIProvider(
+        use_responses=True,
+        use_responses_websocket=True,
+        openai_client=DummyAsyncOpenAI(),  # type: ignore[arg-type]
+        responses_websocket_options={"ping_interval": 30.0, "ping_timeout": None},
+    )
+
+    model = provider.get_model("gpt-4")
+
+    assert isinstance(model, OpenAIResponsesWSModel)
+    assert model._websocket_options == {"ping_interval": 30.0, "ping_timeout": None}
+
+
+@pytest.mark.asyncio
+async def test_responses_websocket_session_passes_keepalive_options_to_provider():
+    async with responses_websocket_session(
+        api_key="test-key",
+        responses_websocket_options={"ping_interval": None, "ping_timeout": None},
+    ) as session:
+        assert session.provider._responses_websocket_options == {
+            "ping_interval": None,
+            "ping_timeout": None,
+        }
 
 
 def test_openai_provider_does_not_reuse_non_websocket_model_instances():
