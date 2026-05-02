@@ -1505,26 +1505,30 @@ class TestToolCallExecution:
 
         assert _serialize_tool_output(BrokenDataclass(lock=threading.Lock())) == "broken-dataclass"
 
-    def test_serialize_tool_output_serializes_none_as_json_null(self) -> None:
-        assert _serialize_tool_output(None) == "null"
+    @dataclasses.dataclass
+    class ToolResult:
+        label: str
+        values: list[int]
 
-    def test_serialize_tool_output_serializes_lists_as_json(self) -> None:
-        value = ["hello", 1, True, None]
-
-        assert _serialize_tool_output(value) == json.dumps(value)
-
-    def test_serialize_tool_output_serializes_dataclass_instances(self) -> None:
-        @dataclasses.dataclass
-        class ToolResult:
-            label: str
-            values: list[int]
-
-        assert _serialize_tool_output(ToolResult(label="demo", values=[1, 2])) == json.dumps(
-            {"label": "demo", "values": [1, 2]}
-        )
-
-    def test_serialize_tool_output_returns_string_for_bytes(self) -> None:
-        assert _serialize_tool_output(b"abc") == "b'abc'"
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            pytest.param(None, "null", id="none"),
+            pytest.param(
+                ["hello", 1, True, None],
+                json.dumps(["hello", 1, True, None]),
+                id="list",
+            ),
+            pytest.param(
+                ToolResult(label="demo", values=[1, 2]),
+                json.dumps({"label": "demo", "values": [1, 2]}),
+                id="dataclass",
+            ),
+            pytest.param(b"abc", "b'abc'", id="bytes"),
+        ],
+    )
+    def test_serialize_tool_output_edge_cases(self, value: Any, expected: str) -> None:
+        assert _serialize_tool_output(value) == expected
 
     @pytest.mark.asyncio
     async def test_mixed_tool_types_filtering(self, mock_model, mock_agent):
