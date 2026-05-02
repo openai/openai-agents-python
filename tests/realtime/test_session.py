@@ -60,6 +60,7 @@ from agents.realtime.model_inputs import (
     RealtimeModelSendUserInput,
 )
 from agents.realtime.session import REJECTION_MESSAGE, RealtimeSession, _serialize_tool_output
+from agents.run_context import RunContextWrapper
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
 
@@ -1100,8 +1101,9 @@ class TestToolCallExecution:
             await asyncio.sleep(0.2)
             return "done"
 
-        async def format_timeout_error(ctx: ToolContext[Any], error: Exception) -> str:
+        async def format_timeout_error(ctx: RunContextWrapper[Any], error: Exception) -> str:
             assert isinstance(error, ToolTimeoutError)
+            assert isinstance(ctx, ToolContext)
             assert ctx.tool_name == "slow_tool"
             assert ctx.tool_call_id == "call_timeout_custom"
             return f"async-timeout:{error.tool_name}:{error.timeout_seconds:g}"
@@ -1168,18 +1170,16 @@ class TestToolCallExecution:
         assert len(tool_call_tasks) == 1
         await asyncio.gather(*tool_call_tasks, return_exceptions=True)
 
-        for _ in range(10):
-            if session._event_queue.qsize() >= 3:
-                break
-            await asyncio.sleep(0.01)
-
         assert isinstance(session._stored_exception, ToolTimeoutError)
         assert session._stored_exception.tool_name == "slow_tool"
         assert len(mock_model.sent_tool_outputs) == 0
 
         events = []
-        while not session._event_queue.empty():
-            events.append(await session._event_queue.get())
+        while True:
+            event = await asyncio.wait_for(session._event_queue.get(), timeout=1)
+            events.append(event)
+            if isinstance(event, RealtimeError):
+                break
 
         assert any(
             isinstance(event, RealtimeRawModelEvent) and event.data == tool_call_event
