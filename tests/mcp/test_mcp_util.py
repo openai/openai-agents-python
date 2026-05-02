@@ -241,6 +241,7 @@ async def test_mcp_invoke_bad_json_redacts_payload_when_dont_log_tool_data(
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, bad_json)
 
     assert str(exc_info.value) == "Invalid JSON input for tool test_tool_1"
+    assert exc_info.value.__cause__ is None
     assert "SECRET_TOKEN_123" not in str(exc_info.value)
     assert "SECRET_TOKEN_123" not in caplog.text
 
@@ -263,6 +264,8 @@ async def test_mcp_invoke_bad_json_includes_payload_when_tool_logging_enabled(
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, bad_json)
 
     assert str(exc_info.value) == f"Invalid JSON input for tool test_tool_1: {bad_json}"
+    assert isinstance(exc_info.value.__cause__, json.JSONDecodeError)
+    assert exc_info.value.__cause__.doc == bad_json
     assert "SECRET_TOKEN_123" in str(exc_info.value)
     assert "SECRET_TOKEN_123" in caplog.text
 
