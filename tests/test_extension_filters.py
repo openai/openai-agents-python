@@ -1041,6 +1041,8 @@ def test_removes_hosted_tool_types_from_input_history() -> None:
         "shell_call_output",
         "apply_patch_call",
         "apply_patch_call_output",
+        "custom_tool_call",
+        "custom_tool_call_output",
     ]
     input_items: list[TResponseInputItem] = [_get_message_input_item("Hello")]
     for t in hosted_types:
