@@ -2365,6 +2365,66 @@ async def test_rewind_handles_id_stripped_sessions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rewind_skips_mismatched_tail_suffix() -> None:
+    target = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "target"})
+    unrelated = cast(
+        TResponseInputItem,
+        {"type": "message", "role": "user", "content": "unrelated tail item"},
+    )
+    session = CountingSession(history=[target, unrelated])
+
+    await rewind_session_items(session, [target])
+
+    assert session.pop_calls == 0
+    assert session.saved_items == [target, unrelated]
+
+
+@pytest.mark.asyncio
+async def test_rewind_preserves_unrelated_tail_items_when_server_tracker_cleanup_runs() -> None:
+    known_server_item = cast(
+        TResponseInputItem,
+        {"id": "msg_server_1", "type": "message", "role": "assistant", "content": "server item"},
+    )
+    unrelated = cast(
+        TResponseInputItem,
+        {"type": "message", "role": "user", "content": "unrelated tail item"},
+    )
+    target = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "target"})
+    session = CountingSession(history=[known_server_item, unrelated, target])
+    tracker = OpenAIServerConversationTracker()
+    tracker.server_item_ids.add("msg_server_1")
+
+    await rewind_session_items(session, [target], tracker)
+
+    assert session.pop_calls == 1
+    assert session.saved_items == [known_server_item, unrelated]
+
+
+@pytest.mark.asyncio
+async def test_rewind_strips_only_retry_owned_tail_items_before_known_server_item() -> None:
+    known_server_item = cast(
+        TResponseInputItem,
+        {"id": "msg_server_1", "type": "message", "role": "assistant", "content": "server item"},
+    )
+    retry_owned_tail = cast(
+        TResponseInputItem,
+        {"type": "message", "role": "user", "content": "retry-owned local item"},
+    )
+    target = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "target"})
+    session = CountingSession(history=[known_server_item, retry_owned_tail, target])
+    tracker = OpenAIServerConversationTracker()
+    tracker.server_item_ids.add("msg_server_1")
+    retry_owned_fingerprint = fingerprint_input_item(retry_owned_tail)
+    assert retry_owned_fingerprint is not None
+    tracker.sent_item_fingerprints.add(retry_owned_fingerprint)
+
+    await rewind_session_items(session, [target], tracker)
+
+    assert session.pop_calls == 2
+    assert session.saved_items == [known_server_item]
+
+
+@pytest.mark.asyncio
 async def test_save_result_to_session_does_not_increment_counter_when_nothing_saved() -> None:
     session = SimpleListSession()
     agent = Agent(name="agent", model=FakeModel())
