@@ -1037,7 +1037,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         try:
             root.mkdir(parents=True, exist_ok=True)
             with tarfile.open(fileobj=data, mode="r:*") as tar:
-                safe_extract_tarfile(tar, root=root)
+                safe_extract_tarfile(
+                    tar,
+                    root=root,
+                    allow_external_symlink_targets=False,
+                )
         except UnsafeTarMemberError as e:
             raise WorkspaceArchiveWriteError(
                 path=root, context={"reason": e.reason, "member": e.member}, cause=e

@@ -323,6 +323,33 @@ async def test_extract_zip_rejects_symlinked_parent_paths(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_unix_local_hydrate_workspace_rejects_external_symlink_targets(
+    tmp_path: Path,
+) -> None:
+    session = _build_session(tmp_path)
+    await session.start()
+    try:
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as tar:
+            info = tarfile.TarInfo(name="leak")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc/passwd"
+            tar.addfile(info)
+        archive.seek(0)
+
+        with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+            await session.hydrate_workspace(archive)
+
+        assert exc_info.value.context["member"] == "leak"
+        assert (
+            exc_info.value.context["reason"] == "absolute symlink target not allowed: /etc/passwd"
+        )
+        assert not (Path(session.state.manifest.root) / "leak").exists()
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_extract_tar_rejects_windows_drive_member_paths(tmp_path: Path) -> None:
     await _assert_extract_rejects_member(
         tmp_path,

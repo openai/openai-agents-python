@@ -1496,7 +1496,10 @@ class E2BSandboxSession(BaseSandboxSession):
                 ) from e
 
         try:
-            validate_tar_bytes(bytes(raw))
+            validate_tar_bytes(
+                bytes(raw),
+                allow_external_symlink_targets=False,
+            )
         except UnsafeTarMemberError as e:
             raise WorkspaceArchiveWriteError(
                 path=error_root,

@@ -1085,6 +1085,38 @@ async def test_vercel_hydrate_workspace_rejects_unsafe_tar_before_upload(
 
 
 @pytest.mark.asyncio
+async def test_vercel_hydrate_workspace_rejects_external_symlink_target_before_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    state = vercel_module.VercelSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000105",
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sandbox-hydrate-external-link",
+        workspace_persistence="tar",
+    )
+    sandbox = _FakeAsyncSandbox(sandbox_id="sandbox-hydrate-external-link")
+    session = vercel_module.VercelSandboxSession.from_state(state, sandbox=sandbox)
+
+    unsafe_buf = io.BytesIO()
+    with tarfile.open(fileobj=unsafe_buf, mode="w") as archive:
+        info = tarfile.TarInfo(name="leak")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        archive.addfile(info)
+
+    with pytest.raises(vercel_module.WorkspaceArchiveWriteError) as exc_info:
+        await session.hydrate_workspace(io.BytesIO(unsafe_buf.getvalue()))
+
+    assert "absolute symlink target not allowed" in str(exc_info.value.__cause__)
+    assert sandbox.write_files_calls == []
+    assert not any(
+        call for call in sandbox.run_command_calls if call[0] == "tar" and call[1][0] == "xf"
+    )
+
+
+@pytest.mark.asyncio
 async def test_vercel_hydrate_workspace_raises_archive_error_on_nonzero_tar_exec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1001,7 +1001,10 @@ class DaytonaSandboxSession(BaseSandboxSession):
             raise WorkspaceWriteTypeError(path=Path(tar_path), actual_type=type(payload).__name__)
 
         try:
-            validate_tar_bytes(bytes(payload))
+            validate_tar_bytes(
+                bytes(payload),
+                allow_external_symlink_targets=False,
+            )
         except UnsafeTarMemberError as e:
             raise WorkspaceArchiveWriteError(
                 path=root,
