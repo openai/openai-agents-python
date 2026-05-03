@@ -29,6 +29,13 @@ def test_coerce_shell_call_requires_commands() -> None:
         run_loop.coerce_shell_call(tool_call)
 
 
+def test_coerce_shell_call_rejects_string_like_commands() -> None:
+    for commands in ("echo hi", b"echo hi", bytearray(b"echo hi")):
+        tool_call = {"call_id": "shell-3", "action": {"commands": commands}}
+        with pytest.raises(ModelBehaviorError, match="list of strings"):
+            run_loop.coerce_shell_call(tool_call)
+
+
 def test_normalize_shell_output_handles_timeout() -> None:
     entry = {
         "stdout": "",
