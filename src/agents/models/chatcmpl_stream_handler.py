@@ -84,6 +84,10 @@ class SequenceNumber:
 
 
 class ChatCmplStreamHandler:
+    @staticmethod
+    def _assistant_message_output_index(state: StreamingState) -> int:
+        return 1 if state.reasoning_content_index_and_output is not None else 0
+
     @classmethod
     def _finish_reasoning_summary_part(
         cls,
@@ -341,16 +345,14 @@ class ChatCmplStreamHandler:
                     # Notify consumers of the start of a new output message + first content part
                     yield ResponseOutputItemAddedEvent(
                         item=assistant_item,
-                        output_index=state.reasoning_content_index_and_output
-                        is not None,  # fixed 0 -> 0 or 1
+                        output_index=cls._assistant_message_output_index(state),
                         type="response.output_item.added",
                         sequence_number=sequence_number.get_and_increment(),
                     )
                     yield ResponseContentPartAddedEvent(
                         content_index=state.text_content_index_and_output[0],
                         item_id=FAKE_RESPONSES_ID,
-                        output_index=state.reasoning_content_index_and_output
-                        is not None,  # fixed 0 -> 0 or 1
+                        output_index=cls._assistant_message_output_index(state),
                         part=ResponseOutputText(
                             text="",
                             type="output_text",
@@ -374,8 +376,7 @@ class ChatCmplStreamHandler:
                     content_index=state.text_content_index_and_output[0],
                     delta=delta.content,
                     item_id=FAKE_RESPONSES_ID,
-                    output_index=state.reasoning_content_index_and_output
-                    is not None,  # fixed 0 -> 0 or 1
+                    output_index=cls._assistant_message_output_index(state),
                     type="response.output_text.delta",
                     sequence_number=sequence_number.get_and_increment(),
                     logprobs=delta_logprobs,
@@ -415,15 +416,14 @@ class ChatCmplStreamHandler:
                     # Notify downstream that assistant message + first content part are starting
                     yield ResponseOutputItemAddedEvent(
                         item=assistant_item,
-                        output_index=state.reasoning_content_index_and_output
-                        is not None,  # fixed 0 -> 0 or 1
+                        output_index=cls._assistant_message_output_index(state),
                         type="response.output_item.added",
                         sequence_number=sequence_number.get_and_increment(),
                     )
                     yield ResponseContentPartAddedEvent(
                         content_index=state.refusal_content_index_and_output[0],
                         item_id=FAKE_RESPONSES_ID,
-                        output_index=(1 if state.reasoning_content_index_and_output else 0),
+                        output_index=cls._assistant_message_output_index(state),
                         part=ResponseOutputRefusal(
                             refusal="",
                             type="refusal",
@@ -436,8 +436,7 @@ class ChatCmplStreamHandler:
                     content_index=state.refusal_content_index_and_output[0],
                     delta=delta.refusal,
                     item_id=FAKE_RESPONSES_ID,
-                    output_index=state.reasoning_content_index_and_output
-                    is not None,  # fixed 0 -> 0 or 1
+                    output_index=cls._assistant_message_output_index(state),
                     type="response.refusal.delta",
                     sequence_number=sequence_number.get_and_increment(),
                 )
@@ -603,8 +602,7 @@ class ChatCmplStreamHandler:
             yield ResponseContentPartDoneEvent(
                 content_index=state.text_content_index_and_output[0],
                 item_id=FAKE_RESPONSES_ID,
-                output_index=state.reasoning_content_index_and_output
-                is not None,  # fixed 0 -> 0 or 1
+                output_index=cls._assistant_message_output_index(state),
                 part=state.text_content_index_and_output[1],
                 type="response.content_part.done",
                 sequence_number=sequence_number.get_and_increment(),
@@ -616,8 +614,7 @@ class ChatCmplStreamHandler:
             yield ResponseContentPartDoneEvent(
                 content_index=state.refusal_content_index_and_output[0],
                 item_id=FAKE_RESPONSES_ID,
-                output_index=state.reasoning_content_index_and_output
-                is not None,  # fixed 0 -> 0 or 1
+                output_index=cls._assistant_message_output_index(state),
                 part=state.refusal_content_index_and_output[1],
                 type="response.content_part.done",
                 sequence_number=sequence_number.get_and_increment(),
@@ -750,8 +747,7 @@ class ChatCmplStreamHandler:
             # send a ResponseOutputItemDone for the assistant message
             yield ResponseOutputItemDoneEvent(
                 item=assistant_msg,
-                output_index=state.reasoning_content_index_and_output
-                is not None,  # fixed 0 -> 0 or 1
+                output_index=cls._assistant_message_output_index(state),
                 type="response.output_item.done",
                 sequence_number=sequence_number.get_and_increment(),
             )
