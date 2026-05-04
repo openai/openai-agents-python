@@ -619,8 +619,12 @@ def coerce_shell_call(tool_call: Any) -> ShellCallData:
         raise ModelBehaviorError("Shell call is missing an action payload.")
 
     commands_value = get_mapping_or_attr(action_payload, "commands")
-    if not isinstance(commands_value, Sequence):
-        raise ModelBehaviorError("Shell call action is missing commands.")
+    if isinstance(commands_value, str | bytes | bytearray) or not isinstance(
+        commands_value, Sequence
+    ):
+        raise ModelBehaviorError(
+            "Shell call action commands must be a sequence of command strings."
+        )
     commands: list[str] = []
     for entry in commands_value:
         if entry is None:

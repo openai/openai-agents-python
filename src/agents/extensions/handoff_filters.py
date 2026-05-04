@@ -96,6 +96,8 @@ def _remove_tool_types_from_input(
         "shell_call_output",
         "apply_patch_call",
         "apply_patch_call_output",
+        "custom_tool_call",
+        "custom_tool_call_output",
     ]
 
     filtered_items: list[TResponseInputItem] = []
