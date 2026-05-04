@@ -213,12 +213,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         compacted = await self.client.responses.compact(**compact_kwargs)
 
-        output_items = _normalize_compaction_output_items(compacted.output or [])
-        await self.underlying_session.clear_session()
-        output_items = _strip_orphaned_assistant_ids(output_items)
+        output_items = _strip_orphaned_assistant_ids(
+            _normalize_compaction_output_items(compacted.output or [])
+        )
 
-        if output_items:
-            await self.underlying_session.add_items(output_items)
+        previous_items = await self.underlying_session.get_items()
+        await self._replace_underlying_session_items(
+            output_items=output_items,
+            previous_items=previous_items,
+        )
 
         self._compaction_candidate_items = select_compaction_candidate_items(output_items)
         self._session_items = output_items
@@ -231,6 +234,41 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit)
+
+    async def _replace_underlying_session_items(
+        self,
+        *,
+        output_items: list[TResponseInputItem],
+        previous_items: list[TResponseInputItem],
+    ) -> None:
+        try:
+            await self.underlying_session.clear_session()
+            if output_items:
+                await self.underlying_session.add_items(output_items)
+        except Exception as replacement_error:
+            await self._restore_underlying_session_items(previous_items, replacement_error)
+            raise
+
+    async def _restore_underlying_session_items(
+        self,
+        previous_items: list[TResponseInputItem],
+        replacement_error: Exception,
+    ) -> None:
+        try:
+            await self.underlying_session.clear_session()
+            if previous_items:
+                await self.underlying_session.add_items(list(previous_items))
+        except Exception:
+            logger.warning(
+                "Failed to restore session history after compaction replacement failed.",
+                exc_info=True,
+            )
+            return
+
+        logger.warning(
+            "Restored previous session history after compaction replacement failed: %s",
+            replacement_error,
+        )
 
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         if self._deferred_response_id is not None:

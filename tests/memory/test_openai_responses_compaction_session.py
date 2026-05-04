@@ -481,6 +481,67 @@ class TestOpenAIResponsesCompactionSession:
         mock_session.add_items.assert_called()
 
     @pytest.mark.asyncio
+    async def test_run_compaction_restores_history_when_replacement_add_fails(self) -> None:
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "original"}),
+            cast(
+                TResponseInputItem,
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "lookup",
+                    "arguments": "{}",
+                    TOOL_CALL_SESSION_DESCRIPTION_KEY: "Lookup private records.",
+                },
+            ),
+        ]
+        compacted_items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "compacted"},
+            )
+        ]
+
+        class PartiallyFailingReplacementSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.add_calls = 0
+                self.clear_calls = 0
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                self.add_calls += 1
+                if self.add_calls == 1:
+                    await super().add_items(items[:1])
+                    raise RuntimeError("replacement failed")
+                await super().add_items(items)
+
+            async def clear_session(self) -> None:
+                self.clear_calls += 1
+                await super().clear_session()
+
+        failing_session = PartiallyFailingReplacementSession(history=history)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = compacted_items
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=failing_session,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        with pytest.raises(RuntimeError, match="replacement failed"):
+            await session.run_compaction({"force": True})
+
+        assert await failing_session.get_items() == history
+        assert failing_session.clear_calls == 2
+        assert failing_session.add_calls == 2
+
+    @pytest.mark.asyncio
     async def test_run_compaction_force_bypasses_threshold(self) -> None:
         mock_session = self.create_mock_session()
         mock_session.get_items.return_value = []
