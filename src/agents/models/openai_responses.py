@@ -39,7 +39,7 @@ from .._tool_identity import (
 )
 from ..agent_output import AgentOutputSchemaBase
 from ..computer import AsyncComputer, Computer
-from ..exceptions import UserError
+from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import logger
@@ -68,6 +68,7 @@ from ..usage import Usage, model_usage_to_span_usage
 from ..util._json import _to_dump_compatible
 from ..version import __version__
 from ._openai_retry import get_openai_retry_advice
+from ._response_terminal import response_error_event_failure_error, response_terminal_failure_error
 from ._retry_runtime import (
     should_disable_provider_managed_retries,
     should_disable_websocket_pre_event_retries,
@@ -555,6 +556,7 @@ class OpenAIResponsesModel(Model):
                 )
 
                 final_response: Response | None = None
+                terminal_failure_error: ModelBehaviorError | None = None
                 yielded_terminal_event = False
                 close_stream_in_background = False
                 try:
@@ -567,12 +569,22 @@ class OpenAIResponsesModel(Model):
                             "response.incomplete",
                         }:
                             terminal_response = getattr(chunk, "response", None)
-                            if isinstance(terminal_response, Response):
-                                final_response = terminal_response
+                            terminal_failure_error = response_terminal_failure_error(
+                                cast(str, chunk_type),
+                                terminal_response
+                                if isinstance(terminal_response, Response)
+                                else None,
+                            )
+                        elif chunk_type in {"error", "response.error"}:
+                            terminal_failure_error = response_error_event_failure_error(
+                                cast(str, chunk_type),
+                                chunk,
+                            )
                         if chunk_type in {
                             "response.completed",
                             "response.failed",
                             "response.incomplete",
+                            "error",
                             "response.error",
                         }:
                             yielded_terminal_event = True
@@ -592,6 +604,8 @@ class OpenAIResponsesModel(Model):
                                 )
                             else:
                                 raise
+                if terminal_failure_error is not None:
+                    raise terminal_failure_error
 
                 if final_response and tracing.include_data():
                     span_response.span_data.response = final_response
@@ -1089,8 +1103,10 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
             elif event_type in {"response.incomplete", "response.failed"}:
                 terminal_event_type = cast(str, event_type)
                 terminal_response = getattr(event, "response", None)
-                if isinstance(terminal_response, Response):
-                    final_response = terminal_response
+                raise response_terminal_failure_error(
+                    terminal_event_type,
+                    terminal_response if isinstance(terminal_response, Response) else None,
+                )
 
         if final_response is None:
             terminal_event_hint = (
