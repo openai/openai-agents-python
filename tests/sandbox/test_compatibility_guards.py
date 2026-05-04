@@ -798,6 +798,7 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
                 "timeout_ms",
                 "workspace_persistence",
                 "idle_close_seconds",
+                "wait_for_running_timeout_s",
             ),
         ),
     ],
