@@ -624,6 +624,7 @@ class ChatCmplStreamHandler:
             )
 
         # Send completion events for function calls
+        fallback_emitted_count = 0
         for index, function_call in state.function_calls.items():
             if state.function_call_streaming.get(index, False):
                 # Function call was streamed, just send the completion event
@@ -668,6 +669,7 @@ class ChatCmplStreamHandler:
                 fallback_starting_index += sum(
                     1 for streaming in state.function_call_streaming.values() if streaming
                 )
+                fallback_output_index = fallback_starting_index + fallback_emitted_count
 
                 # Build function call kwargs, include provider_data if present
                 fallback_func_call_kwargs: dict[str, Any] = {
@@ -690,23 +692,24 @@ class ChatCmplStreamHandler:
                 # Send all events at once (backward compatibility)
                 yield ResponseOutputItemAddedEvent(
                     item=ResponseFunctionToolCall(**fallback_func_call_kwargs),
-                    output_index=fallback_starting_index,
+                    output_index=fallback_output_index,
                     type="response.output_item.added",
                     sequence_number=sequence_number.get_and_increment(),
                 )
                 yield ResponseFunctionCallArgumentsDeltaEvent(
                     delta=function_call.arguments,
                     item_id=FAKE_RESPONSES_ID,
-                    output_index=fallback_starting_index,
+                    output_index=fallback_output_index,
                     type="response.function_call_arguments.delta",
                     sequence_number=sequence_number.get_and_increment(),
                 )
                 yield ResponseOutputItemDoneEvent(
                     item=ResponseFunctionToolCall(**fallback_func_call_kwargs),
-                    output_index=fallback_starting_index,
+                    output_index=fallback_output_index,
                     type="response.output_item.done",
                     sequence_number=sequence_number.get_and_increment(),
                 )
+                fallback_emitted_count += 1
 
         # Finally, send the Response completed event
         outputs: list[ResponseOutputItem] = []
