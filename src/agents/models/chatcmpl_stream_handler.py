@@ -98,8 +98,12 @@ class ChatCmplStreamHandler:
         return output_index
 
     @classmethod
-    def _next_function_call_output_index(cls, state: StreamingState) -> int:
-        return cls._function_call_output_base(state) + len(state.function_calls)
+    def _function_call_output_index(cls, state: StreamingState, function_call_index: int) -> int:
+        for offset, index in enumerate(state.function_calls):
+            if index == function_call_index:
+                return cls._function_call_output_base(state) + offset
+
+        raise KeyError(f"Function call index {function_call_index} has not been tracked")
 
     @classmethod
     def _finish_reasoning_summary_part(
@@ -460,9 +464,6 @@ class ChatCmplStreamHandler:
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
                     if tc_delta.index not in state.function_calls:
-                        state.function_call_output_idx[tc_delta.index] = (
-                            cls._next_function_call_output_index(state)
-                        )
                         state.function_calls[tc_delta.index] = ResponseFunctionToolCall(
                             id=FAKE_RESPONSES_ID,
                             arguments="",
@@ -544,7 +545,11 @@ class ChatCmplStreamHandler:
                     ):
                         # Mark this function call as streaming and store its output index
                         state.function_call_streaming[tc_delta.index] = True
-                        function_call_output_index = state.function_call_output_idx[tc_delta.index]
+                        function_call_output_index = cls._function_call_output_index(
+                            state,
+                            tc_delta.index,
+                        )
+                        state.function_call_output_idx[tc_delta.index] = function_call_output_index
 
                         # Send initial function call added event
                         func_call_item = ResponseFunctionToolCall(
@@ -647,7 +652,7 @@ class ChatCmplStreamHandler:
             else:
                 # Function call was not streamed (fallback to old behavior)
                 # This handles edge cases where function name never arrived
-                fallback_output_index = state.function_call_output_idx[index]
+                fallback_output_index = cls._function_call_output_index(state, index)
 
                 # Build function call kwargs, include provider_data if present
                 fallback_func_call_kwargs: dict[str, Any] = {
