@@ -1570,10 +1570,14 @@ class _FunctionToolBatchExecutor:
                         agent_hooks=agent_hooks,
                     )
             except Exception as e:
+                trace_error = get_trace_tool_error(
+                    trace_include_sensitive_data=self.config.trace_include_sensitive_data,
+                    error_message=str(e),
+                )
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Error running tool",
-                        data={"tool_name": func_tool.name, "error": str(e)},
+                        data={"tool_name": func_tool.name, "error": trace_error},
                     )
                 )
                 if isinstance(e, AgentsException):

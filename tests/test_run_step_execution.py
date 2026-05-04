@@ -510,6 +510,48 @@ async def test_multiple_tool_calls_still_raise_when_sibling_failure_error_functi
 
 
 @pytest.mark.asyncio
+async def test_function_tool_error_trace_respects_sensitive_data_setting():
+    async def _error_tool() -> str:
+        raise ValueError("secret-token-123")
+
+    error_tool = function_tool(
+        _error_tool,
+        name_override="error_tool",
+        failure_error_function=None,
+    )
+    agent = Agent(name="test", tools=[error_tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("error_tool", "{}", call_id="1")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with trace("test"):
+        with pytest.raises(UserError, match="Error running tool error_tool: secret-token-123"):
+            await get_execute_result(
+                agent,
+                response,
+                run_config=RunConfig(trace_include_sensitive_data=False),
+            )
+
+    function_spans = []
+    for span in SPAN_PROCESSOR_TESTING.get_ordered_spans(including_empty=True):
+        exported = span.export()
+        if not exported:
+            continue
+        span_data = exported.get("span_data")
+        if isinstance(span_data, dict) and span_data.get("type") == "function":
+            function_spans.append(exported)
+
+    assert len(function_spans) == 1
+    error = function_spans[0]["error"]
+    assert error["message"] == "Error running tool"
+    assert error["data"]["tool_name"] == "error_tool"
+    assert error["data"]["error"] == "Tool execution failed. Error details are redacted."
+    assert "secret-token-123" not in str(error)
+
+
+@pytest.mark.asyncio
 async def test_multiple_tool_calls_still_raise_when_sibling_cancelled():
     async def _ok_tool() -> str:
         return "ok"
