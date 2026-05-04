@@ -88,6 +88,19 @@ class ChatCmplStreamHandler:
     def _assistant_message_output_index(state: StreamingState) -> int:
         return 1 if state.reasoning_content_index_and_output is not None else 0
 
+    @staticmethod
+    def _function_call_output_base(state: StreamingState) -> int:
+        output_index = 0
+        if state.reasoning_content_index_and_output:
+            output_index += 1
+        if state.text_content_index_and_output or state.refusal_content_index_and_output:
+            output_index += 1
+        return output_index
+
+    @classmethod
+    def _next_function_call_output_index(cls, state: StreamingState) -> int:
+        return cls._function_call_output_base(state) + len(state.function_calls)
+
     @classmethod
     def _finish_reasoning_summary_part(
         cls,
@@ -447,6 +460,9 @@ class ChatCmplStreamHandler:
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
                     if tc_delta.index not in state.function_calls:
+                        state.function_call_output_idx[tc_delta.index] = (
+                            cls._next_function_call_output_index(state)
+                        )
                         state.function_calls[tc_delta.index] = ResponseFunctionToolCall(
                             id=FAKE_RESPONSES_ID,
                             arguments="",
@@ -526,25 +542,9 @@ class ChatCmplStreamHandler:
                         and function_call.name
                         and function_call.call_id
                     ):
-                        # Calculate the output index for this function call
-                        function_call_starting_index = 0
-                        if state.reasoning_content_index_and_output:
-                            function_call_starting_index += 1
-                        if state.text_content_index_and_output:
-                            function_call_starting_index += 1
-                        if state.refusal_content_index_and_output:
-                            function_call_starting_index += 1
-
-                        # Add offset for already started function calls
-                        function_call_starting_index += sum(
-                            1 for streaming in state.function_call_streaming.values() if streaming
-                        )
-
                         # Mark this function call as streaming and store its output index
                         state.function_call_streaming[tc_delta.index] = True
-                        state.function_call_output_idx[tc_delta.index] = (
-                            function_call_starting_index
-                        )
+                        function_call_output_index = state.function_call_output_idx[tc_delta.index]
 
                         # Send initial function call added event
                         func_call_item = ResponseFunctionToolCall(
@@ -569,7 +569,7 @@ class ChatCmplStreamHandler:
                             func_call_item.provider_data = merged_provider_data  # type: ignore[attr-defined]
                         yield ResponseOutputItemAddedEvent(
                             item=func_call_item,
-                            output_index=function_call_starting_index,
+                            output_index=function_call_output_index,
                             type="response.output_item.added",
                             sequence_number=sequence_number.get_and_increment(),
                         )
@@ -592,12 +592,7 @@ class ChatCmplStreamHandler:
         for event in cls._finish_reasoning_item(state, sequence_number):
             yield event
 
-        function_call_starting_index = 0
-        if state.reasoning_content_index_and_output:
-            function_call_starting_index += 1
-
         if state.text_content_index_and_output:
-            function_call_starting_index += 1
             # Send end event for this content part
             yield ResponseContentPartDoneEvent(
                 content_index=state.text_content_index_and_output[0],
@@ -609,7 +604,6 @@ class ChatCmplStreamHandler:
             )
 
         if state.refusal_content_index_and_output:
-            function_call_starting_index += 1
             # Send end event for this content part
             yield ResponseContentPartDoneEvent(
                 content_index=state.refusal_content_index_and_output[0],
@@ -621,7 +615,6 @@ class ChatCmplStreamHandler:
             )
 
         # Send completion events for function calls
-        fallback_emitted_count = 0
         for index, function_call in state.function_calls.items():
             if state.function_call_streaming.get(index, False):
                 # Function call was streamed, just send the completion event
@@ -654,19 +647,7 @@ class ChatCmplStreamHandler:
             else:
                 # Function call was not streamed (fallback to old behavior)
                 # This handles edge cases where function name never arrived
-                fallback_starting_index = 0
-                if state.reasoning_content_index_and_output:
-                    fallback_starting_index += 1
-                if state.text_content_index_and_output:
-                    fallback_starting_index += 1
-                if state.refusal_content_index_and_output:
-                    fallback_starting_index += 1
-
-                # Add offset for already started function calls
-                fallback_starting_index += sum(
-                    1 for streaming in state.function_call_streaming.values() if streaming
-                )
-                fallback_output_index = fallback_starting_index + fallback_emitted_count
+                fallback_output_index = state.function_call_output_idx[index]
 
                 # Build function call kwargs, include provider_data if present
                 fallback_func_call_kwargs: dict[str, Any] = {
@@ -706,7 +687,6 @@ class ChatCmplStreamHandler:
                     type="response.output_item.done",
                     sequence_number=sequence_number.get_and_increment(),
                 )
-                fallback_emitted_count += 1
 
         # Finally, send the Response completed event
         outputs: list[ResponseOutputItem] = []
