@@ -24,6 +24,7 @@ from agents import (
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
+    ModelBehaviorError,
     ModelRetrySettings,
     ModelSettings,
     OpenAIResponsesWSModel,
@@ -144,7 +145,7 @@ async def test_simple_first_run():
         ("response.failed", ResponseFailedEvent),
     ],
 )
-async def test_streamed_run_accepts_terminal_response_payload_events(
+async def test_streamed_run_rejects_failed_terminal_response_payload_events(
     terminal_event_type: str, terminal_event_cls: type[Any]
 ) -> None:
     class TerminalPayloadFakeModel(FakeModel):
@@ -187,12 +188,12 @@ async def test_streamed_run_accepts_terminal_response_payload_events(
     agent = Agent(name="test", model=model)
 
     result = Runner.run_streamed(agent, input="test")
-    async for _ in result.stream_events():
-        pass
+    with pytest.raises(ModelBehaviorError, match=terminal_event_type):
+        async for _ in result.stream_events():
+            pass
 
-    assert result.final_output == "partial final"
-    assert len(result.raw_responses) == 1
-    assert result.raw_responses[0].response_id == "resp-partial"
+    assert result.final_output is None
+    assert result.raw_responses == []
 
 
 @pytest.mark.asyncio
@@ -323,7 +324,7 @@ async def test_streamed_run_preserves_request_usage_entries_after_conversation_l
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal_event_type", ["response.incomplete", "response.failed"])
-async def test_streamed_run_accepts_terminal_response_payload_events_from_ws_model(
+async def test_streamed_run_rejects_failed_terminal_response_payload_events_from_ws_model(
     monkeypatch, terminal_event_type: str
 ) -> None:
     class DummyWSConnection:
@@ -372,12 +373,12 @@ async def test_streamed_run_accepts_terminal_response_payload_events_from_ws_mod
 
     agent = Agent(name="test", model=model)
     result = Runner.run_streamed(agent, input="test")
-    async for _ in result.stream_events():
-        pass
+    with pytest.raises(ModelBehaviorError, match=terminal_event_type):
+        async for _ in result.stream_events():
+            pass
 
-    assert result.final_output == "partial final"
-    assert len(result.raw_responses) == 1
-    assert result.raw_responses[0].response_id == "resp-ws"
+    assert result.final_output is None
+    assert result.raw_responses == []
 
 
 @pytest.mark.asyncio

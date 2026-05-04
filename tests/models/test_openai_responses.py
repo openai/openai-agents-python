@@ -23,7 +23,7 @@ from agents import (
     __version__,
     trace,
 )
-from agents.exceptions import UserError
+from agents.exceptions import ModelBehaviorError, UserError
 from agents.models._retry_runtime import (
     provider_managed_retries_disabled,
     websocket_pre_event_retries_disabled,
@@ -1709,7 +1709,7 @@ async def test_websocket_model_stream_response_yields_typed_events(monkeypatch):
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal_event_type", ["response.incomplete", "response.failed"])
-async def test_websocket_model_get_response_accepts_terminal_response_payload_events(
+async def test_websocket_model_get_response_rejects_failed_terminal_response_payload_events(
     monkeypatch, terminal_event_type: str
 ):
     client = DummyWSClient()
@@ -1723,23 +1723,22 @@ async def test_websocket_model_get_response_accepts_terminal_response_payload_ev
 
     monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
 
-    response = await model.get_response(
-        system_instructions=None,
-        input="hi",
-        model_settings=ModelSettings(),
-        tools=[],
-        output_schema=None,
-        handoffs=[],
-        tracing=ModelTracing.DISABLED,
-    )
-
-    assert response.response_id == "resp-terminal"
+    with pytest.raises(ModelBehaviorError, match=terminal_event_type):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
 
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal_event_type", ["response.incomplete", "response.failed"])
-async def test_websocket_model_stream_response_accepts_terminal_response_payload_events(
+async def test_websocket_model_stream_response_rejects_failed_terminal_response_payload_events(
     monkeypatch, terminal_event_type: str
 ):
     client = DummyWSClient()
@@ -1754,16 +1753,17 @@ async def test_websocket_model_stream_response_accepts_terminal_response_payload
     monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
 
     events = []
-    async for event in model.stream_response(
-        system_instructions=None,
-        input="hi",
-        model_settings=ModelSettings(),
-        tools=[],
-        output_schema=None,
-        handoffs=[],
-        tracing=ModelTracing.DISABLED,
-    ):
-        events.append(event)
+    with pytest.raises(ModelBehaviorError, match=terminal_event_type):
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        ):
+            events.append(event)
 
     assert len(events) == 1
     assert events[0].type == terminal_event_type

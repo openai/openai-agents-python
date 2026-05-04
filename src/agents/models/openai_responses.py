@@ -39,7 +39,7 @@ from .._tool_identity import (
 )
 from ..agent_output import AgentOutputSchemaBase
 from ..computer import AsyncComputer, Computer
-from ..exceptions import UserError
+from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import logger
@@ -182,6 +182,30 @@ def _construct_response_stream_event_from_payload(
         ResponseStreamEvent,
         construct_type(type_=ResponseStreamEvent, value=dict(payload)),
     )
+
+
+def format_response_terminal_failure(
+    event_type: str,
+    response: Response | None,
+) -> str:
+    message = f"Responses stream ended with terminal event `{event_type}`."
+    if response is None:
+        return message
+
+    details: list[str] = []
+    status = getattr(response, "status", None)
+    if status:
+        details.append(f"status={status}")
+    error = getattr(response, "error", None)
+    if error:
+        details.append(f"error={error}")
+    incomplete_details = getattr(response, "incomplete_details", None)
+    if incomplete_details:
+        details.append(f"incomplete_details={incomplete_details}")
+
+    if details:
+        message = f"{message} {'; '.join(details)}."
+    return message
 
 
 @dataclass(frozen=True)
@@ -555,6 +579,7 @@ class OpenAIResponsesModel(Model):
                 )
 
                 final_response: Response | None = None
+                terminal_failure_error: ModelBehaviorError | None = None
                 yielded_terminal_event = False
                 close_stream_in_background = False
                 try:
@@ -567,8 +592,14 @@ class OpenAIResponsesModel(Model):
                             "response.incomplete",
                         }:
                             terminal_response = getattr(chunk, "response", None)
-                            if isinstance(terminal_response, Response):
-                                final_response = terminal_response
+                            terminal_failure_error = ModelBehaviorError(
+                                format_response_terminal_failure(
+                                    cast(str, chunk_type),
+                                    terminal_response
+                                    if isinstance(terminal_response, Response)
+                                    else None,
+                                )
+                            )
                         if chunk_type in {
                             "response.completed",
                             "response.failed",
@@ -592,6 +623,8 @@ class OpenAIResponsesModel(Model):
                                 )
                             else:
                                 raise
+                if terminal_failure_error is not None:
+                    raise terminal_failure_error
 
                 if final_response and tracing.include_data():
                     span_response.span_data.response = final_response
@@ -1089,8 +1122,12 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
             elif event_type in {"response.incomplete", "response.failed"}:
                 terminal_event_type = cast(str, event_type)
                 terminal_response = getattr(event, "response", None)
-                if isinstance(terminal_response, Response):
-                    final_response = terminal_response
+                raise ModelBehaviorError(
+                    format_response_terminal_failure(
+                        terminal_event_type,
+                        terminal_response if isinstance(terminal_response, Response) else None,
+                    )
+                )
 
         if final_response is None:
             terminal_event_hint = (
