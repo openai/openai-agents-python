@@ -24,6 +24,7 @@ import io
 import logging
 import os
 import posixpath
+import shlex
 import tarfile
 import time
 import uuid
@@ -115,6 +116,14 @@ traffic arrival, so the cost is just the WS reconnect (~1s)."""
 _SPRITE_READY_STATUSES = frozenset({"warm", "running"})
 _SPRITE_READY_POLL_INTERVAL_S = 1.0
 _DEFAULT_MANIFEST_ROOT = cast(str, Manifest.model_fields["root"].default)
+
+# Stdout sentinels used by ``hydrate_workspace`` to detect a partial tar
+# extract. Until sprite-env's WS layer reliably round-trips exit codes,
+# ``ExecResult.exit_code`` cannot be the only signal — a remote failure may
+# still surface as exit 0 over the wire. Anchoring the decision on stdout
+# (which the local shell controls before the WS hop) closes that gap.
+_HYDRATE_OK_SENTINEL = "__SPRITES_HYDRATE_OK__"
+_HYDRATE_FAIL_SENTINEL = "__SPRITES_HYDRATE_FAIL__"
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +266,7 @@ class SpritesSandboxSessionState(SandboxSessionState):
     timeout_ms: int | None = None
     workspace_persistence: WorkspacePersistenceMode = "tar"
     idle_close_seconds: float = DEFAULT_SPRITES_IDLE_CLOSE_SECONDS
+    wait_for_running_timeout_s: float = DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S
 
 
 class SpritesSandboxSession(BaseSandboxSession):
@@ -275,6 +285,7 @@ class SpritesSandboxSession(BaseSandboxSession):
     _last_activity_at: float
     _idle_close_seconds: float
     _idle_watch_task: asyncio.Task[None] | None
+    _inflight_op_count: int
 
     def __init__(
         self,
@@ -303,6 +314,11 @@ class SpritesSandboxSession(BaseSandboxSession):
         self._last_activity_at = time.monotonic()
         self._idle_close_seconds = float(state.idle_close_seconds)
         self._idle_watch_task = None
+        # Tracks non-PTY exec/read/write operations currently using the control
+        # connection. The idle watcher must skip closure while any are in-flight
+        # so a long-running command (e.g. ``apt-get install``) is not cut off
+        # mid-execution when it crosses the idle threshold.
+        self._inflight_op_count = 0
 
     @classmethod
     def from_state(
@@ -374,6 +390,34 @@ class SpritesSandboxSession(BaseSandboxSession):
         self._sprite = sprite
         return sprite
 
+    async def _try_attach_existing_sprite(self) -> Sprite | None:
+        """Look up the recorded sprite name and bind it without provisioning.
+
+        Used by ``resume()`` for both ``created_by_us=True`` and named-attach
+        sessions to differentiate "the original sprite is still there" from
+        "the original is gone and we need to fall through to a fresh create".
+        Returns ``None`` only when the platform reports the sprite missing —
+        any other error propagates so the caller can decide whether to retry
+        or surface the failure.
+        """
+
+        if self._sprite is not None:
+            return self._sprite
+
+        client = self._ensure_client_sync()
+        try:
+            sprite: Sprite = await asyncio.to_thread(
+                client.get_sprite, self.state.sprite_name
+            )
+        except NotFoundError:
+            return None
+        # Re-bind a Sprite handle with the live status snapshot as ``_sprite``;
+        # ``client.sprite(name)`` builds the same handle but doesn't touch the
+        # platform, so the get_sprite round-trip above is what proves
+        # existence.
+        self._sprite = sprite
+        return sprite
+
     # Both ephemeral and named-attach paths now defer the wait-for-running poll
     # (and the URL/org-info refresh that comes with it) until the first I/O
     # operation runs ``_ensure_warm``. The platform auto-wakes paused sprites
@@ -423,39 +467,49 @@ class SpritesSandboxSession(BaseSandboxSession):
             self._idle_watch_task = None
 
     async def _idle_watch_loop(self) -> None:
+        # Loop forever, only exiting on cancel. Sleeping for the remaining
+        # window each iteration keeps the watcher cheap, and looping (rather
+        # than returning after a close-attempt) ensures we stay alive across
+        # PTY/active-op skips so the next idle window still gets serviced
+        # without depending on subsequent I/O to respawn us.
         try:
             while True:
-                # Sleep until the configured idle window elapses since the
-                # most-recent activity, re-checking each loop because activity
-                # may have happened during the sleep and reset the deadline.
                 elapsed = time.monotonic() - self._last_activity_at
                 remaining = self._idle_close_seconds - elapsed
                 if remaining > 0:
                     await asyncio.sleep(remaining)
                     continue
-                await self._close_idle_control_connections()
-                # Watcher exits; the next I/O calls ``_touch_activity`` which
-                # will respawn it.
-                return
+                closed = await self._close_idle_control_connections()
+                if closed:
+                    # Connections are closed; nothing to watch until a future
+                    # I/O call touches activity and respawns the watcher.
+                    return
+                # Skipped (PTY active or non-PTY op in flight). Re-check after
+                # one idle window — by then the active work may have finished.
+                await asyncio.sleep(self._idle_close_seconds)
         except asyncio.CancelledError:
             pass
 
-    async def _close_idle_control_connections(self) -> None:
+    async def _close_idle_control_connections(self) -> bool:
         """Close pooled control connections so the sprite can drop to ``warm``.
 
-        Skipped when there are active PTY operations — those need their
-        connections kept alive.
+        Skipped when there are active PTY operations or non-PTY exec/read/write
+        operations in flight — those need their connections kept alive.
+
+        Returns ``True`` if connections were closed (or there was nothing to
+        close), ``False`` if closure was skipped because work was active.
         """
 
-        if self._pty_processes:
-            return
+        if self._pty_processes or self._inflight_op_count > 0:
+            return False
         sprite = self._sprite
         if sprite is None:
-            return
+            return True
         try:
             await sprite.close_control_connection()
         except Exception:
             pass
+        return True
 
     def _build_sprite_config(self) -> sprites.SpriteConfig | None:
         if (
@@ -492,7 +546,7 @@ class SpritesSandboxSession(BaseSandboxSession):
 
     async def _wait_for_sprite_running(self) -> None:
         client = self._ensure_client_sync()
-        deadline_s = max(0.0, float(self.state.timeout_ms or 0) / 1000.0) or float(
+        deadline_s = max(0.0, float(self.state.wait_for_running_timeout_s)) or float(
             DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S
         )
         loop = asyncio.get_event_loop()
@@ -610,7 +664,10 @@ class SpritesSandboxSession(BaseSandboxSession):
         # try to ``chdir`` into it.
         root = PurePosixPath(posixpath.normpath(self.state.manifest.root))
         result = await self._exec_with_cwd(
-            ["mkdir", "-p", "--", root.as_posix()], cwd=None, timeout=30.0
+            ["mkdir", "-p", "--", root.as_posix()],
+            cwd=None,
+            timeout=30.0,
+            apply_env=False,
         )
         if not result.ok():
             raise WorkspaceStartError(
@@ -684,6 +741,32 @@ class SpritesSandboxSession(BaseSandboxSession):
                 pass
         self._client = None
 
+    async def _resolved_envs(self) -> dict[str, str]:
+        """Merge per-session env (from options) with manifest-declared env vars.
+
+        Manifest values win on conflict because they are the more explicit
+        configuration surface. Returned dict has only ``str`` values; any
+        deferred ``EnvValue`` resolutions are awaited here.
+        """
+
+        manifest_envs = await self.state.manifest.environment.resolve()
+        session_envs = self.state.env or {}
+        return {**session_envs, **manifest_envs}
+
+    @staticmethod
+    def _wrap_with_env(command: list[str], envs: dict[str, str]) -> list[str]:
+        """Prepend an ``env --`` invocation so the remote process inherits ``envs``.
+
+        Uses argv-form so we don't depend on a shell — the WS exec path runs
+        ``execvp`` directly. ``env --`` ensures the following ``NAME=VALUE``
+        tokens are parsed as env, not as the program name.
+        """
+
+        if not envs:
+            return command
+        prefix = ["env", "--", *(f"{k}={v}" for k, v in envs.items())]
+        return [*prefix, *command]
+
     async def _exec_internal(
         self,
         *command: str | Path,
@@ -698,15 +781,25 @@ class SpritesSandboxSession(BaseSandboxSession):
         *,
         cwd: str | None,
         timeout: float | None,
+        apply_env: bool = True,
     ) -> ExecResult:
         normalized = [str(part) for part in command]
         if not normalized:
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
 
+        if apply_env:
+            envs = await self._resolved_envs()
+            if envs:
+                normalized = self._wrap_with_env(normalized, envs)
+
         await self._ensure_warm()
 
         control: ControlConnection | None = None
         op_conn: OpConn | None = None
+        # Mark this op as in-flight so the idle watcher won't close the
+        # control connection mid-execution (e.g., long-running ``apt-get
+        # install`` from the lazy-mount path crossing ``idle_close_seconds``).
+        self._inflight_op_count += 1
         try:
             control = await self._ensure_control()
             try:
@@ -747,6 +840,8 @@ class SpritesSandboxSession(BaseSandboxSession):
                 cause=exc,
             ) from exc
         finally:
+            self._inflight_op_count -= 1
+            self._touch_activity()
             if control is not None:
                 self._release_control(control)
 
@@ -774,6 +869,9 @@ class SpritesSandboxSession(BaseSandboxSession):
         max_output_tokens: int | None = None,
     ) -> PtyExecUpdate:
         sanitized_command = self._prepare_exec_command(*command, shell=shell, user=user)
+        envs = await self._resolved_envs()
+        if envs:
+            sanitized_command = self._wrap_with_env(sanitized_command, envs)
         # ``_ensure_control`` will lazily call ``_ensure_sprite``; no extra await here.
         await self._ensure_warm()
 
@@ -1213,16 +1311,28 @@ class SpritesSandboxSession(BaseSandboxSession):
             await asyncio.to_thread(
                 lambda: (sprite.filesystem("/") / archive_path.as_posix()).write_bytes(bytes(raw))
             )
-            extract_cmd = ("tar", "xf", archive_path.as_posix(), "-C", root.as_posix())
-            result = await self.exec(*extract_cmd, shell=False)
-            if not result.ok():
+            # Wrap the extract in a stdout-sentinel so a partial extract is
+            # detectable even when the WS exit-code wire drops failures (see
+            # ``mounts.py`` for the matching pattern). The sentinel runs on
+            # the remote shell, so the success/failure decision is driven by
+            # the actual ``tar`` exit status, not the round-tripped one.
+            extract_script = (
+                f"tar xf {shlex.quote(archive_path.as_posix())} "
+                f"-C {shlex.quote(root.as_posix())} "
+                f"&& printf %s {_HYDRATE_OK_SENTINEL} "
+                f"|| (rc=$?; printf %s {_HYDRATE_FAIL_SENTINEL}; exit $rc)"
+            )
+            result = await self.exec("sh", "-c", extract_script, shell=False)
+            stdout_text = result.stdout.decode("utf-8", errors="replace")
+            extract_succeeded = _HYDRATE_OK_SENTINEL in stdout_text
+            if not extract_succeeded or not result.ok():
                 raise WorkspaceArchiveWriteError(
                     path=root,
                     context={
                         "backend": "sprites",
                         "sprite_name": self.state.sprite_name,
                         "exit_code": result.exit_code,
-                        "stdout": result.stdout.decode("utf-8", errors="replace"),
+                        "stdout": stdout_text,
                         "stderr": result.stderr.decode("utf-8", errors="replace"),
                     },
                 )
@@ -1304,6 +1414,8 @@ class SpritesSandboxClient(BaseSandboxClient[SpritesSandboxClientOptions]):
             env=dict(options.env or {}) or None,
             timeout_ms=options.timeout_ms,
             workspace_persistence=options.workspace_persistence,
+            idle_close_seconds=options.idle_close_seconds,
+            wait_for_running_timeout_s=options.wait_for_running_timeout_s,
         )
 
         inner = SpritesSandboxSession.from_state(state, token=self._token, base_url=self._base_url)
@@ -1326,16 +1438,48 @@ class SpritesSandboxClient(BaseSandboxClient[SpritesSandboxClientOptions]):
             raise TypeError("SpritesSandboxClient.resume expects a SpritesSandboxSessionState")
 
         inner = SpritesSandboxSession.from_state(state, token=self._token, base_url=self._base_url)
+
+        # Always try to reattach to the recorded sprite first, regardless of
+        # ``created_by_us``. A successful reattach preserves the live
+        # workspace and avoids duplicating resources; only a true reattach
+        # warrants ``_set_start_state_preserved(True)``.
         try:
-            await inner._ensure_sprite()
+            attached = await inner._try_attach_existing_sprite()
+        except (NetworkError, AuthenticationError, SpriteError) as exc:
+            # Treat platform errors here as fatal even for ephemeral sessions:
+            # we have no signal that the sprite is gone, just that the call
+            # failed, and silently recreating risks orphaning the original.
+            raise WorkspaceStartError(
+                path=posix_path_as_path(coerce_posix_path(state.manifest.root)),
+                context={
+                    "backend": "sprites",
+                    "sprite_name": state.sprite_name,
+                    "reason": "reattach_failed",
+                },
+                cause=exc,
+            ) from exc
+
+        if attached is not None:
             inner._set_start_state_preserved(True)
-        except WorkspaceStartError:
-            if not state.created_by_us:
-                raise
-            # Fall through to fresh start; ``_ensure_sprite`` will be retried by the
-            # session's own ``start()`` lifecycle and will recreate the sprite.
-            inner._sprite = None
-            state.workspace_root_ready = False
+            return self._wrap_session(inner, instrumentation=self._instrumentation)
+
+        # The recorded sprite is gone. Named-attach sessions cannot be
+        # silently replaced — the caller asked for a specific sprite by name.
+        if not state.created_by_us:
+            raise WorkspaceStartError(
+                path=posix_path_as_path(coerce_posix_path(state.manifest.root)),
+                context={
+                    "backend": "sprites",
+                    "sprite_name": state.sprite_name,
+                    "reason": "sprite_not_found",
+                },
+            )
+
+        # Ephemeral session whose original sprite was deleted: replace it with
+        # a fresh provision. Workspace continuity is lost, so clear the
+        # readiness flag and do NOT mark start state as preserved — the
+        # session's ``start()`` lifecycle must run a full manifest apply.
+        state.workspace_root_ready = False
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:

@@ -424,7 +424,7 @@ async def test_wait_for_running_raises_workspace_start_error(
     monkeypatch.setattr(sprites_sandbox, "_SPRITE_READY_POLL_INTERVAL_S", 0.0)
     fake_client = patched_sprites["client"]
     fake_client._sprites_by_name[SPRITE_NAME] = _FakeSprite(name=SPRITE_NAME, status="starting")
-    state = _make_state(timeout_ms=1)  # 1ms deadline
+    state = _make_state(wait_for_running_timeout_s=0.001)
     inner = SpritesSandboxSession.from_state(state, token="tok")
     _attach(inner, client=fake_client)
     with pytest.raises(WorkspaceStartError) as excinfo:
@@ -1256,6 +1256,93 @@ async def test_activity_during_idle_window_keeps_connection_open(
     assert sprite.close_control_connection_calls == 1
 
 
+@pytest.mark.asyncio
+async def test_idle_watch_skips_close_when_non_pty_op_in_flight(
+    patched_sprites: dict[str, Any],
+) -> None:
+    """A long-running exec must not have its control connection yanked mid-flight."""
+
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+    inner._idle_close_seconds = 0.01
+    inner._inflight_op_count = 1  # simulate an exec in progress
+
+    closed = await inner._close_idle_control_connections()
+    assert closed is False
+    assert sprite.close_control_connection_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_idle_watch_keeps_running_after_pty_skip(
+    patched_sprites: dict[str, Any],
+) -> None:
+    """After a PTY-skipped close attempt the watcher must keep looping —
+    otherwise a long PTY session leaves a dangling control connection
+    until the next I/O event nudges activity again."""
+
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+    inner._idle_close_seconds = 0.02
+    # Pretend a PTY is active so the first close attempt is skipped.
+    inner._pty_processes[123] = object()  # type: ignore[assignment]
+
+    inner._touch_activity()
+    watcher = inner._idle_watch_task
+    assert watcher is not None
+    # After ~one window the watcher should still be alive (skipped first close).
+    await asyncio.sleep(0.05)
+    assert not watcher.done()
+    assert sprite.close_control_connection_calls == 0
+
+    # Now release the PTY and let the watcher's next attempt close cleanly.
+    inner._pty_processes.clear()
+    await asyncio.wait_for(watcher, timeout=0.5)
+    assert sprite.close_control_connection_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_exec_inflight_blocks_idle_close_until_completion(
+    patched_sprites: dict[str, Any],
+) -> None:
+    """End-to-end check: a real exec call bumps the inflight counter and the
+    idle watcher refuses to close the control connection while it's running."""
+
+    fake_control = patched_sprites["control"]
+    wait_event = asyncio.Event()
+    fake_control.next_ops.append(_FakeOpConn(exit_code=0, wait_event=wait_event))
+
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+    inner._idle_close_seconds = 0.01
+
+    exec_task = asyncio.create_task(inner.exec("sleep", "1", shell=False))
+    # Give the exec a moment to enter the inflight section.
+    await asyncio.sleep(0.05)
+    # The watcher must refuse to close while we're in flight.
+    closed = await inner._close_idle_control_connections()
+    assert closed is False
+    assert sprite.close_control_connection_calls == 0
+
+    # Let the exec finish; afterward closure becomes legal again.
+    wait_event.set()
+    await exec_task
+    closed_again = await inner._close_idle_control_connections()
+    assert closed_again is True
+    assert sprite.close_control_connection_calls == 1
+
+
 # ---------- 19. Platform-context cache survives cloning ----------
 
 
@@ -1780,3 +1867,302 @@ async def test_rclone_pattern_returns_unchanged_for_non_fuse_modes() -> None:
 
     assert pattern is source
     assert session.exec_calls == []
+
+
+# ---------- 21. Options thread through to state and behavior ----------
+
+
+def test_create_threads_wait_and_idle_options_into_state() -> None:
+    """``SpritesSandboxClientOptions`` exposes both knobs publicly; the
+    matching state fields must receive them so callers can actually tune
+    the documented poll window and idle-close window."""
+
+    options = SpritesSandboxClientOptions(
+        wait_for_running_timeout_s=12.5,
+        idle_close_seconds=7.0,
+    )
+    payload = options.model_dump(mode="json")
+    restored = BaseSandboxClientOptions.parse(payload)
+    assert isinstance(restored, SpritesSandboxClientOptions)
+    assert restored.wait_for_running_timeout_s == 12.5
+    assert restored.idle_close_seconds == 7.0
+
+
+@pytest.mark.asyncio
+async def test_create_propagates_option_knobs_into_session_state(
+    patched_sprites: dict[str, Any],
+) -> None:
+    client = SpritesSandboxClient(token="tok")
+    options = SpritesSandboxClientOptions(wait_for_running_timeout_s=3.5, idle_close_seconds=4.5)
+    session = await client.create(options=options)
+    inner = session._inner
+    assert isinstance(inner, SpritesSandboxSession)
+    assert inner.state.wait_for_running_timeout_s == 3.5
+    assert inner.state.idle_close_seconds == 4.5
+    # Idle watcher initializes from state, not from the default.
+    assert inner._idle_close_seconds == 4.5
+    await client.delete(session)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_running_uses_state_timeout(
+    patched_sprites: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The state field, not ``timeout_ms``, must drive the deadline so the
+    advertised options knob is reachable."""
+
+    monkeypatch.setattr(sprites_sandbox, "_SPRITE_READY_POLL_INTERVAL_S", 0.0)
+    fake_client = patched_sprites["client"]
+    fake_client._sprites_by_name[SPRITE_NAME] = _FakeSprite(name=SPRITE_NAME, status="starting")
+    state = _make_state(wait_for_running_timeout_s=0.001, timeout_ms=10_000_000)
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client)
+    with pytest.raises(WorkspaceStartError) as excinfo:
+        await inner._wait_for_sprite_running()
+    # If the new field weren't honored we'd still be polling because
+    # ``timeout_ms`` is huge — the test would hang or the timeout would
+    # surface a different deadline value.
+    assert excinfo.value.context.get("reason") == "wait_for_running_timeout"
+    timeout_s = excinfo.value.context["timeout_s"]
+    assert isinstance(timeout_s, float)
+    assert timeout_s == pytest.approx(0.001, rel=1e-3)
+
+
+# ---------- 22. Hydrate uses stdout sentinel ----------
+
+
+def _build_minimal_tar() -> bytes:
+    import tarfile as _tarfile
+
+    buf = io.BytesIO()
+    with _tarfile.open(fileobj=buf, mode="w") as tar:
+        info = _tarfile.TarInfo(name="./hello.txt")
+        info.size = 5
+        tar.addfile(info, io.BytesIO(b"hello"))
+    return buf.getvalue()
+
+
+async def _stub_mkdir(_path: Any, *, parents: bool = False, **_: Any) -> None:
+    """Bypass mkdir's path-validation exec chain so hydrate tests can focus
+    purely on the tar+sentinel branch."""
+
+    return None
+
+
+@pytest.mark.asyncio
+async def test_hydrate_workspace_succeeds_when_sentinel_present(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_control = patched_sprites["control"]
+    # Order: tar xf (sentinel printed), rm cleanup. mkdir is stubbed.
+    fake_control.next_ops.append(_FakeOpConn(stdout=b"__SPRITES_HYDRATE_OK__", exit_code=0))
+    fake_control.next_ops.append(_FakeOpConn(exit_code=0))
+
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+    inner.mkdir = _stub_mkdir  # type: ignore[method-assign,assignment]
+
+    await inner.hydrate_workspace(io.BytesIO(_build_minimal_tar()))
+    # Confirm the extract command was wrapped in a shell with the sentinel.
+    sh_calls = [c for c in fake_control.start_op_calls if c["cmd"][:2] == ["sh", "-c"]]
+    assert sh_calls, "expected hydrate to use sh -c sentinel wrapper"
+    assert "__SPRITES_HYDRATE_OK__" in sh_calls[0]["cmd"][2]
+
+
+@pytest.mark.asyncio
+async def test_hydrate_workspace_fails_when_sentinel_missing(
+    patched_sprites: dict[str, Any],
+) -> None:
+    """Even when the WS layer reports exit 0 (the dropped-exit-code bug),
+    a missing OK sentinel in stdout must surface as an archive write error
+    so callers don't silently get a half-extracted workspace."""
+
+    fake_control = patched_sprites["control"]
+    # tar xf reports exit 0 over the wire (the bug) but its stdout is empty
+    # because the local shell short-circuited before printf %s OK ran.
+    fake_control.next_ops.append(_FakeOpConn(stdout=b"", exit_code=0))
+    fake_control.next_ops.append(_FakeOpConn(exit_code=0))  # rm
+
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+    inner.mkdir = _stub_mkdir  # type: ignore[method-assign,assignment]
+
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await inner.hydrate_workspace(io.BytesIO(_build_minimal_tar()))
+
+
+# ---------- 23. Resume reattach vs replacement ----------
+
+
+@pytest.mark.asyncio
+async def test_resume_reattaches_when_sprite_still_exists(
+    patched_sprites: dict[str, Any],
+) -> None:
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state(created_by_us=True, workspace_root_ready=True)
+    client = SpritesSandboxClient(token="tok")
+
+    session = await client.resume(state)
+    inner = session._inner
+    assert isinstance(inner, SpritesSandboxSession)
+    # Reattached: get_sprite was called, create_sprite was NOT.
+    assert fake_client.get_sprite_calls == [SPRITE_NAME]
+    assert fake_client.create_sprite_calls == []
+    assert inner._start_workspace_state_preserved is True
+    # The preserved-readiness flag should be left alone on a true reattach.
+    assert inner.state.workspace_root_ready is True
+
+
+@pytest.mark.asyncio
+async def test_resume_recreates_ephemeral_when_sprite_missing(
+    patched_sprites: dict[str, Any],
+) -> None:
+    """If our owned sprite was deleted out from under us, resume should
+    silently recreate but flag the workspace as needing a full apply."""
+
+    fake_client = patched_sprites["client"]
+    # Note: SPRITE_NAME is NOT in sprites_by_name, so get_sprite raises NotFoundError.
+    state = _make_state(created_by_us=True, workspace_root_ready=True)
+    client = SpritesSandboxClient(token="tok")
+
+    session = await client.resume(state)
+    inner = session._inner
+    assert isinstance(inner, SpritesSandboxSession)
+    # Reattach was attempted, then we fell through to a fresh create on start.
+    assert fake_client.get_sprite_calls == [SPRITE_NAME]
+    # create_sprite has NOT happened yet — resume() leaves provisioning to start().
+    assert fake_client.create_sprite_calls == []
+    # Replacement must NOT be marked as preserved, and readiness was cleared
+    # so the session's start() will run a full manifest apply.
+    assert inner._start_workspace_state_preserved is False
+    assert state.workspace_root_ready is False
+
+
+@pytest.mark.asyncio
+async def test_resume_named_attach_raises_when_sprite_missing(
+    patched_sprites: dict[str, Any],
+) -> None:
+    """Named-attach sessions cannot be silently replaced — caller asked for
+    a specific sprite by name."""
+
+    fake_client = patched_sprites["client"]  # noqa: F841 — fixture wires the patch
+    state = _make_state(created_by_us=False, workspace_root_ready=True)
+    client = SpritesSandboxClient(token="tok")
+
+    with pytest.raises(WorkspaceStartError) as excinfo:
+        await client.resume(state)
+    assert excinfo.value.context.get("reason") == "sprite_not_found"
+
+
+@pytest.mark.asyncio
+async def test_resume_propagates_platform_errors_during_reattach(
+    patched_sprites: dict[str, Any],
+) -> None:
+    """A transient platform error during get_sprite must NOT silently
+    recreate — that would orphan the original sprite."""
+
+    from sprites.exceptions import NetworkError as _NetworkError
+
+    fake_client = patched_sprites["client"]
+    fake_client.get_failures.append(_NetworkError("transient"))
+    state = _make_state(created_by_us=True, workspace_root_ready=True)
+    client = SpritesSandboxClient(token="tok")
+
+    with pytest.raises(WorkspaceStartError) as excinfo:
+        await client.resume(state)
+    assert excinfo.value.context.get("reason") == "reattach_failed"
+    assert fake_client.create_sprite_calls == []
+
+
+# ---------- 24. manifest.environment is applied to exec ----------
+
+
+@pytest.mark.asyncio
+async def test_exec_wraps_command_with_resolved_manifest_environment(
+    patched_sprites: dict[str, Any],
+) -> None:
+    """Manifest-declared env vars must reach the remote process. Other
+    backends (daytona, runloop, e2b, modal, …) wire this; sprites should too."""
+
+    from agents.sandbox.manifest import Environment
+
+    fake_control = patched_sprites["control"]
+    fake_control.next_ops.append(_FakeOpConn(exit_code=0))
+
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+
+    manifest = Manifest(
+        root="/workspace",
+        environment=Environment(value={"FOO": "bar", "BAZ": "qux"}),
+    )
+    state = _make_state(manifest=manifest)
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+
+    await inner.exec("printenv", "FOO", shell=False)
+    cmd = fake_control.start_op_calls[0]["cmd"]
+    # Argv-form wrapping: env -- FOO=bar BAZ=qux printenv FOO
+    assert cmd[0] == "env"
+    assert cmd[1] == "--"
+    assert "FOO=bar" in cmd
+    assert "BAZ=qux" in cmd
+    assert cmd[-2:] == ["printenv", "FOO"]
+
+
+@pytest.mark.asyncio
+async def test_exec_skips_env_wrapper_when_manifest_environment_empty(
+    patched_sprites: dict[str, Any],
+) -> None:
+    """No spurious env -- prefix when there's nothing to inject."""
+
+    fake_control = patched_sprites["control"]
+    fake_control.next_ops.append(_FakeOpConn(exit_code=0))
+
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+    state = _make_state()
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+
+    await inner.exec("true", shell=False)
+    cmd = fake_control.start_op_calls[0]["cmd"]
+    assert cmd == ["true"]
+
+
+@pytest.mark.asyncio
+async def test_pty_exec_start_wraps_with_manifest_environment(
+    patched_sprites: dict[str, Any],
+) -> None:
+    """PTY commands must inherit manifest env vars too."""
+
+    from agents.sandbox.manifest import Environment
+
+    fake_control = patched_sprites["control"]
+    fake_control.next_ops.append(_FakeOpConn(stdout=b"", exit_code=0))
+
+    fake_client = patched_sprites["client"]
+    sprite = _FakeSprite(name=SPRITE_NAME)
+    fake_client._sprites_by_name[SPRITE_NAME] = sprite
+
+    manifest = Manifest(root="/workspace", environment=Environment(value={"PTY_VAR": "1"}))
+    state = _make_state(manifest=manifest)
+    inner = SpritesSandboxSession.from_state(state, token="tok")
+    _attach(inner, client=fake_client, sprite=sprite)
+
+    await inner.pty_exec_start("echo", "hi", shell=False)
+    cmd = fake_control.start_op_calls[0]["cmd"]
+    assert cmd[:2] == ["env", "--"]
+    assert "PTY_VAR=1" in cmd
