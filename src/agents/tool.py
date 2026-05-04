@@ -60,6 +60,7 @@ from .tool_context import ToolContext
 from .tool_guardrails import ToolInputGuardrail, ToolOutputGuardrail
 from .tracing import SpanError
 from .util import _error_tracing
+from .util._tool_errors import get_trace_tool_error
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
@@ -422,7 +423,7 @@ class _FailureHandlingFunctionToolInvoker:
     def __init__(
         self,
         invoke_tool_impl: Callable[[ToolContext[Any], str], Awaitable[Any]],
-        on_handled_error: Callable[[FunctionTool, Exception, str], None],
+        on_handled_error: Callable[[FunctionTool, Exception, str, ToolContext[Any]], None],
         *,
         function_tool: FunctionTool | None = None,
     ) -> None:
@@ -457,7 +458,7 @@ class _FailureHandlingFunctionToolInvoker:
             if result is None:
                 raise
 
-            self._on_handled_error(self._function_tool, e, input)
+            self._on_handled_error(self._function_tool, e, input, ctx)
             return result
 
 
@@ -466,6 +467,26 @@ def with_function_tool_failure_error_handler(
     on_handled_error: Callable[[FunctionTool, Exception, str], None],
 ) -> Callable[[ToolContext[Any], str], Awaitable[Any]]:
     """Wrap a tool invoker so copied FunctionTools resolve failure policy against themselves."""
+
+    def _on_handled_error_with_context(
+        function_tool: FunctionTool,
+        error: Exception,
+        input_json: str,
+        _context: ToolContext[Any],
+    ) -> None:
+        on_handled_error(function_tool, error, input_json)
+
+    return _with_context_function_tool_failure_error_handler(
+        invoke_tool_impl,
+        _on_handled_error_with_context,
+    )
+
+
+def _with_context_function_tool_failure_error_handler(
+    invoke_tool_impl: Callable[[ToolContext[Any], str], Awaitable[Any]],
+    on_handled_error: Callable[[FunctionTool, Exception, str, ToolContext[Any]], None],
+) -> Callable[[ToolContext[Any], str], Awaitable[Any]]:
+    """Wrap a tool invoker with context-aware handled-error reporting."""
     return _FailureHandlingFunctionToolInvoker(invoke_tool_impl, on_handled_error)
 
 
@@ -475,7 +496,7 @@ def _build_wrapped_function_tool(
     description: str,
     params_json_schema: dict[str, Any],
     invoke_tool_impl: Callable[[ToolContext[Any], str], Awaitable[Any]],
-    on_handled_error: Callable[[FunctionTool, Exception, str], None],
+    on_handled_error: Callable[[FunctionTool, Exception, str, ToolContext[Any]], None],
     failure_error_function: ToolErrorFunction | None | object = _UNSET_FAILURE_ERROR_FUNCTION,
     strict_json_schema: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
@@ -493,7 +514,7 @@ def _build_wrapped_function_tool(
     tool_origin: ToolOrigin | None = None,
 ) -> FunctionTool:
     """Create a FunctionTool with copied-tool-aware failure handling bound in one place."""
-    on_invoke_tool = with_function_tool_failure_error_handler(
+    on_invoke_tool = _with_context_function_tool_failure_error_handler(
         invoke_tool_impl,
         on_handled_error,
     )
@@ -1377,10 +1398,15 @@ def _build_handled_function_tool_error_handler(
     span_message_for_json_decode_error: str | None = None,
     include_input_json_in_logs: bool = True,
     include_tool_name_in_log_messages: bool = True,
-) -> Callable[[FunctionTool, Exception, str], None]:
+) -> Callable[[FunctionTool, Exception, str, ToolContext[Any]], None]:
     """Create a consistent handled-error reporter for wrapped FunctionTools."""
 
-    def _on_handled_error(function_tool: FunctionTool, error: Exception, input_json: str) -> None:
+    def _on_handled_error(
+        function_tool: FunctionTool,
+        error: Exception,
+        input_json: str,
+        context: ToolContext[Any],
+    ) -> None:
         json_decode_error = _extract_tool_argument_json_error(error)
         if json_decode_error is not None and span_message_for_json_decode_error is not None:
             resolved_span_message = span_message_for_json_decode_error
@@ -1388,13 +1414,20 @@ def _build_handled_function_tool_error_handler(
         else:
             resolved_span_message = span_message
             span_error_detail = str(error)
+        trace_include_sensitive_data = (
+            context.run_config is None or context.run_config.trace_include_sensitive_data
+        )
+        trace_error = get_trace_tool_error(
+            trace_include_sensitive_data=trace_include_sensitive_data,
+            error_message=span_error_detail,
+        )
 
         _error_tracing.attach_error_to_current_span(
             SpanError(
                 message=resolved_span_message,
                 data={
                     "tool_name": function_tool.name,
-                    "error": span_error_detail,
+                    "error": trace_error,
                 },
             )
         )
