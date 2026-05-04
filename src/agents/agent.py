@@ -152,6 +152,11 @@ class MCPConfig(TypedDict):
     default_tool_error_function.
     """
 
+    include_server_in_tool_names: NotRequired[bool]
+    """If True, local MCP tools are exposed with server-prefixed public names to avoid name
+    collisions across multiple MCP servers. Defaults to False.
+    """
+
 
 @dataclass
 class AgentBase(Generic[TContext]):
@@ -182,11 +187,24 @@ class AgentBase(Generic[TContext]):
     mcp_config: MCPConfig = field(default_factory=lambda: MCPConfig())
     """Configuration for MCP servers."""
 
+    def _get_mcp_tool_reserved_names(self) -> set[str]:
+        reserved_tool_names = {tool.name for tool in self.tools if isinstance(tool, FunctionTool)}
+        for handoff_item in getattr(self, "handoffs", ()):
+            if isinstance(handoff_item, Handoff):
+                reserved_tool_names.add(handoff_item.tool_name)
+            elif isinstance(handoff_item, AgentBase):
+                reserved_tool_names.add(Handoff.default_tool_name(handoff_item))
+        return reserved_tool_names
+
     async def get_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
         """Fetches the available tools from the MCP servers."""
         convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
         failure_error_function = self.mcp_config.get(
             "failure_error_function", default_tool_error_function
+        )
+        include_server_in_tool_names = self.mcp_config.get("include_server_in_tool_names", False)
+        reserved_tool_names = (
+            self._get_mcp_tool_reserved_names() if include_server_in_tool_names else None
         )
         return await MCPUtil.get_all_function_tools(
             self.mcp_servers,
@@ -194,6 +212,8 @@ class AgentBase(Generic[TContext]):
             run_context,
             self,
             failure_error_function=failure_error_function,
+            include_server_in_tool_names=include_server_in_tool_names,
+            reserved_tool_names=reserved_tool_names,
         )
 
     async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
