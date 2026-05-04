@@ -577,12 +577,12 @@ async def test_fetch_response_stream(monkeypatch) -> None:
 
 
 def test_store_param():
-    """Should default to True for OpenAI API calls, and False otherwise."""
+    """Should omit store unless it is explicitly set."""
 
     model_settings = ModelSettings()
     client = AsyncOpenAI()
-    assert ChatCmplHelpers.get_store_param(client, model_settings) is True, (
-        "Should default to True for OpenAI API calls"
+    assert ChatCmplHelpers.get_store_param(client, model_settings) is None, (
+        "Should omit store when not specified for Chat Completions"
     )
 
     model_settings = ModelSettings(store=False)
