@@ -376,17 +376,21 @@ class MCPUtil:
         meta: dict[str, Any] | None = None,
     ) -> ToolOutput:
         """Invoke an MCP tool and return the result as ToolOutput."""
+        json_decode_error: Exception | None = None
         try:
             json_data: dict[str, Any] = json.loads(input_json) if input_json else {}
         except Exception as e:
+            json_decode_error = e
+
+        if json_decode_error is not None:
             error_message = f"Invalid JSON input for tool {tool.name}"
             if _debug.DONT_LOG_TOOL_DATA:
                 logger.debug(error_message)
-                raise ModelBehaviorError(error_message) from None
+                raise ModelBehaviorError(error_message)
             else:
                 error_message = f"{error_message}: {input_json}"
                 logger.debug(error_message)
-            raise ModelBehaviorError(error_message) from e
+            raise ModelBehaviorError(error_message) from json_decode_error
 
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug(f"Invoking MCP tool {tool.name}")

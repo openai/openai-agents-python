@@ -242,6 +242,7 @@ async def test_mcp_invoke_bad_json_redacts_payload_when_dont_log_tool_data(
 
     assert str(exc_info.value) == "Invalid JSON input for tool test_tool_1"
     assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
     assert "SECRET_TOKEN_123" not in str(exc_info.value)
     assert "SECRET_TOKEN_123" not in caplog.text
 
