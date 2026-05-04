@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import warnings as warnings_module
 from types import SimpleNamespace
 from typing import Any, cast
@@ -538,6 +539,62 @@ class TestOpenAIResponsesCompactionSession:
             await session.run_compaction({"force": True})
 
         assert await failing_session.get_items() == history
+        assert failing_session.clear_calls == 2
+        assert failing_session.add_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_reraises_replacement_error_when_restore_fails(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "original"}),
+        ]
+        compacted_items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "compacted"},
+            )
+        ]
+
+        class FailingRestoreSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.add_calls = 0
+                self.clear_calls = 0
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                self.add_calls += 1
+                if self.add_calls == 1:
+                    await super().add_items(items[:1])
+                    raise RuntimeError("replacement failed")
+                raise RuntimeError("restore failed")
+
+            async def clear_session(self) -> None:
+                self.clear_calls += 1
+                await super().clear_session()
+
+        failing_session = FailingRestoreSession(history=history)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = compacted_items
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=failing_session,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            with pytest.raises(RuntimeError, match="replacement failed"):
+                await session.run_compaction({"force": True})
+
+        assert (
+            "Failed to restore session history after compaction replacement failed." in caplog.text
+        )
         assert failing_session.clear_calls == 2
         assert failing_session.add_calls == 2
 
