@@ -58,7 +58,7 @@ from ..items import (
 from ..lifecycle import RunHooks
 from ..logger import logger
 from ..memory import Session
-from ..models.openai_responses import format_response_terminal_failure
+from ..models._response_terminal import format_response_terminal_failure
 from ..result import RunResultStreaming
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext

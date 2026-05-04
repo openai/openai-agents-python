@@ -68,6 +68,7 @@ from ..usage import Usage, model_usage_to_span_usage
 from ..util._json import _to_dump_compatible
 from ..version import __version__
 from ._openai_retry import get_openai_retry_advice
+from ._response_terminal import format_response_terminal_failure
 from ._retry_runtime import (
     should_disable_provider_managed_retries,
     should_disable_websocket_pre_event_retries,
@@ -182,30 +183,6 @@ def _construct_response_stream_event_from_payload(
         ResponseStreamEvent,
         construct_type(type_=ResponseStreamEvent, value=dict(payload)),
     )
-
-
-def format_response_terminal_failure(
-    event_type: str,
-    response: Response | None,
-) -> str:
-    message = f"Responses stream ended with terminal event `{event_type}`."
-    if response is None:
-        return message
-
-    details: list[str] = []
-    status = getattr(response, "status", None)
-    if status:
-        details.append(f"status={status}")
-    error = getattr(response, "error", None)
-    if error:
-        details.append(f"error={error}")
-    incomplete_details = getattr(response, "incomplete_details", None)
-    if incomplete_details:
-        details.append(f"incomplete_details={incomplete_details}")
-
-    if details:
-        message = f"{message} {'; '.join(details)}."
-    return message
 
 
 @dataclass(frozen=True)
