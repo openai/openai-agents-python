@@ -12,6 +12,23 @@ from agents.usage import Usage
 from tests.utils.hitl import make_context_wrapper
 
 
+def test_tool_context_is_hashable_like_run_context_wrapper() -> None:
+    # RunContextWrapper is declared with @dataclass(eq=False) so instances remain
+    # hashable by identity. ToolContext inherits from it and must preserve that
+    # contract; a bare @dataclass on the subclass would set __hash__ = None.
+    parent: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    child: ToolContext[dict[str, object]] = ToolContext(
+        context={},
+        tool_name="t",
+        tool_call_id="call-hash",
+        tool_arguments="{}",
+    )
+
+    assert hash(parent) == hash(parent)
+    assert hash(child) == hash(child)
+    assert {child: "value"}[child] == "value"
+
+
 def test_tool_context_requires_fields() -> None:
     ctx: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
     with pytest.raises(ValueError):
