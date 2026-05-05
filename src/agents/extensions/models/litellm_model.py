@@ -41,12 +41,16 @@ from ...handoffs import Handoff
 from ...items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ...logger import logger
 from ...model_settings import ModelSettings
+from ...models._openai_retry import get_openai_retry_advice
+from ...models._retry_runtime import should_disable_provider_managed_retries
 from ...models.chatcmpl_converter import Converter
 from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
 from ...models.fake_id import FAKE_RESPONSES_ID
 from ...models.interface import Model, ModelTracing
 from ...models.openai_responses import Converter as OpenAIResponsesConverter
+from ...models.reasoning_content_replay import ShouldReplayReasoningContent
+from ...retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ...tool import Tool
 from ...tracing import generation_span
 from ...tracing.span_data import GenerationSpanData
@@ -133,7 +137,7 @@ class InternalToolCall(ChatCompletionMessageFunctionToolCall):
 
 
 class LitellmModel(Model):
-    """This class enables using any model via LiteLLM. LiteLLM allows you to acess OpenAPI,
+    """This class enables using any model via LiteLLM. LiteLLM allows you to access OpenAPI,
     Anthropic, Gemini, Mistral, and many other models.
     See supported models here: [litellm models](https://docs.litellm.ai/docs/providers).
     """
@@ -143,10 +147,56 @@ class LitellmModel(Model):
         model: str,
         base_url: str | None = None,
         api_key: str | None = None,
+        should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
     ):
         self.model = model
         self.base_url = base_url
         self.api_key = api_key
+        self.should_replay_reasoning_content = should_replay_reasoning_content
+
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
+        # LiteLLM exceptions mirror OpenAI-style status/header fields.
+        # Reuse the same normalization to expose retry-after and explicit retry/no-retry hints.
+        return get_openai_retry_advice(request)
+
+    def _get_reasoning_effort(self, model_settings: ModelSettings) -> Any | None:
+        """
+        Resolve the top-level LiteLLM reasoning_effort argument for the chat-completions path.
+
+        LiteLLM's public acompletion() surface accepts a scalar reasoning_effort value. Keep the
+        ModelSettings.reasoning path aligned with that contract and leave extra_body / extra_args as
+        the explicit escape hatches for advanced provider-specific overrides.
+        """
+        reasoning_effort: Any | None = None
+
+        if model_settings.reasoning:
+            reasoning_effort = model_settings.reasoning.effort
+            if model_settings.reasoning.summary is not None:
+                logger.warning(
+                    "LitellmModel does not forward Reasoning.summary on the LiteLLM "
+                    "chat-completions path; ignoring summary and passing reasoning_effort only."
+                )
+
+        # Enable developers to pass non-OpenAI compatible reasoning_effort data like "none".
+        # Priority order:
+        #  1. model_settings.reasoning.effort
+        #  2. model_settings.extra_body["reasoning_effort"]
+        #  3. model_settings.extra_args["reasoning_effort"]
+        if (
+            reasoning_effort is None
+            and isinstance(model_settings.extra_body, dict)
+            and "reasoning_effort" in model_settings.extra_body
+        ):
+            reasoning_effort = model_settings.extra_body["reasoning_effort"]
+
+        if (
+            reasoning_effort is None
+            and model_settings.extra_args
+            and "reasoning_effort" in model_settings.extra_args
+        ):
+            reasoning_effort = model_settings.extra_args["reasoning_effort"]
+
+        return reasoning_effort
 
     async def get_response(
         self,
@@ -186,7 +236,7 @@ class LitellmModel(Model):
                 choice = response.choices[0]
                 if isinstance(choice, litellm.types.utils.Choices):
                     first_choice = choice
-                    message = first_choice.message
+                    message = choice.message
 
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.debug("Received model response")
@@ -375,9 +425,11 @@ class LitellmModel(Model):
 
         converted_messages = Converter.items_to_messages(
             input,
+            base_url=self.base_url,
             preserve_thinking_blocks=preserve_thinking_blocks,
             preserve_tool_output_all_content=True,
             model=self.model,
+            should_replay_reasoning_content=self.should_replay_reasoning_content,
         )
 
         # Fix message ordering: reorder to ensure tool_use comes before tool_result.
@@ -443,53 +495,35 @@ class LitellmModel(Model):
                 f"Response format: {response_format}\n"
             )
 
-        # Build reasoning_effort - use dict only when summary is present (OpenAI feature)
-        # Otherwise pass string for backward compatibility with all providers
-        reasoning_effort: dict[str, Any] | str | None = None
-        if model_settings.reasoning:
-            if model_settings.reasoning.summary is not None:
-                # Dict format when summary is needed (OpenAI only)
-                reasoning_effort = {
-                    "effort": model_settings.reasoning.effort,
-                    "summary": model_settings.reasoning.summary,
-                }
-            elif model_settings.reasoning.effort is not None:
-                # String format for compatibility with all providers
-                reasoning_effort = model_settings.reasoning.effort
-
-        # Enable developers to pass non-OpenAI compatible reasoning_effort data like "none"
-        # Priority order:
-        #  1. model_settings.reasoning (effort + summary)
-        #  2. model_settings.extra_body["reasoning_effort"]
-        #  3. model_settings.extra_args["reasoning_effort"]
-        if (
-            reasoning_effort is None  # Unset in model_settings
-            and isinstance(model_settings.extra_body, dict)
-            and "reasoning_effort" in model_settings.extra_body
-        ):
-            reasoning_effort = model_settings.extra_body["reasoning_effort"]
-        if (
-            reasoning_effort is None  # Unset in both model_settings and model_settings.extra_body
-            and model_settings.extra_args
-            and "reasoning_effort" in model_settings.extra_args
-        ):
-            reasoning_effort = model_settings.extra_args["reasoning_effort"]
+        reasoning_effort = self._get_reasoning_effort(model_settings)
 
         stream_options = None
         if stream and model_settings.include_usage is not None:
             stream_options = {"include_usage": model_settings.include_usage}
 
-        extra_kwargs = {}
+        extra_kwargs: dict[str, Any] = {}
         if model_settings.extra_query:
             extra_kwargs["extra_query"] = copy(model_settings.extra_query)
         if model_settings.metadata:
             extra_kwargs["metadata"] = copy(model_settings.metadata)
-        if model_settings.extra_body and isinstance(model_settings.extra_body, dict):
-            extra_kwargs.update(model_settings.extra_body)
+        if model_settings.extra_body is not None:
+            extra_body = copy(model_settings.extra_body)
+            if isinstance(extra_body, dict) and reasoning_effort is not None:
+                extra_body.pop("reasoning_effort", None)
+                if not extra_body:
+                    extra_body = None
+            if extra_body is not None:
+                extra_kwargs["extra_body"] = extra_body
 
         # Add kwargs from model_settings.extra_args, filtering out None values
         if model_settings.extra_args:
             extra_kwargs.update(model_settings.extra_args)
+
+        if should_disable_provider_managed_retries():
+            # Preserve provider-managed retries on the first attempt, but make runner retries the
+            # sole retry layer by forcing LiteLLM's retry knobs off on replay attempts.
+            extra_kwargs["num_retries"] = 0
+            extra_kwargs["max_retries"] = 0
 
         # Prevent duplicate reasoning_effort kwargs when it was promoted to a top-level argument.
         extra_kwargs.pop("reasoning_effort", None)

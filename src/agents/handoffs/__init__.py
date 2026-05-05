@@ -3,12 +3,12 @@ from __future__ import annotations
 import inspect
 import json
 import weakref
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace as dataclasses_replace
-from typing import TYPE_CHECKING, Any, Callable, Generic, cast, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeAlias, cast, overload
 
 from pydantic import TypeAdapter
-from typing_extensions import TypeAlias, TypeVar
+from typing_extensions import TypeVar
 
 from ..exceptions import ModelBehaviorError, UserError
 from ..items import RunItem, TResponseInputItem
@@ -106,7 +106,12 @@ class Handoff(Generic[TContext, TAgent]):
     """The description of the tool that represents the handoff."""
 
     input_json_schema: dict[str, Any]
-    """The JSON schema for the handoff input. Can be empty if the handoff does not take an input."""
+    """The JSON schema for the handoff tool-call arguments.
+
+    This schema is exposed to the model as the handoff tool's ``parameters``. It only describes the
+    structured payload passed to ``on_invoke_handoff`` and does not replace the next agent's main
+    input.
+    """
 
     on_invoke_handoff: Callable[[RunContextWrapper[Any], str], Awaitable[TAgent]]
     """The function that invokes the handoff.
@@ -129,11 +134,17 @@ class Handoff(Generic[TContext, TAgent]):
     input history plus ``input_items`` when provided, otherwise it receives ``new_items``. Use
     ``input_items`` to filter model input while keeping ``new_items`` intact for session history.
     IMPORTANT: in streaming mode, we will not stream anything as a result of this function. The
-    items generated before will already have been streamed.
+    items generated before will already have been streamed. Server-managed conversations
+    (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) do not support
+    handoff input filters.
     """
 
     nest_handoff_history: bool | None = None
-    """Override the run-level ``nest_handoff_history`` behavior for this handoff only."""
+    """Override the run-level ``nest_handoff_history`` behavior for this handoff only.
+
+    Server-managed conversations (`conversation_id`, `previous_response_id`, or
+    `auto_previous_response_id`) automatically disable nested handoff history with a warning.
+    """
 
     strict_json_schema: bool = True
     """Whether the input JSON schema is in strict mode. We strongly recommend setting this to True
@@ -226,9 +237,13 @@ def handoff(
         tool_name_override: Optional override for the name of the tool that represents the handoff.
         tool_description_override: Optional override for the description of the tool that
             represents the handoff.
-        on_handoff: A function that runs when the handoff is invoked.
-        input_type: The type of the input to the handoff. If provided, the input will be validated
-            against this type. Only relevant if you pass a function that takes an input.
+        on_handoff: A function that runs when the handoff is invoked. The ``handoff()`` helper
+            always returns the specific ``agent`` captured here, so use ``on_handoff`` for side
+            effects or bookkeeping rather than dynamic destination selection.
+        input_type: The type of the handoff tool-call arguments. If provided, the model-generated
+            JSON arguments are validated against this type and the parsed value is passed to
+            ``on_handoff``. This only affects the handoff tool payload, not the next agent's main
+            input.
         input_filter: A function that filters the inputs that are passed to the next agent.
         nest_handoff_history: Optional override for the RunConfig-level ``nest_handoff_history``
             flag. If ``None`` we fall back to the run's configuration.

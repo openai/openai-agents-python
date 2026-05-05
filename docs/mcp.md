@@ -102,6 +102,8 @@ asyncio.run(main())
 
 The hosted server exposes its tools automatically; you do not add it to `mcp_servers`.
 
+If you want hosted tool search to load a hosted MCP server lazily, set `tool_config["defer_loading"] = True` and add [`ToolSearchTool`][agents.tool.ToolSearchTool] to the agent. This is supported only on OpenAI Responses models. See [Tools](tools.md#hosted-tool-search) for the complete tool-search setup and constraints.
+
 ### Streaming hosted MCP results
 
 Hosted tools support streaming results in exactly the same way as function tools. Use `Runner.run_streamed` to
@@ -339,6 +341,7 @@ async with MCPServerStdio(
 ## 5. MCP server manager
 
 When you have multiple MCP servers, use `MCPServerManager` to connect them up front and expose the connected subset to your agents.
+See the [MCPServerManager API reference](ref/mcp/manager.md) for constructor options and reconnect behavior.
 
 ```python
 from agents import Agent, Runner

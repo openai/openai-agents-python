@@ -54,6 +54,8 @@ If you enable the OpenAI Responses websocket transport, you can keep using the n
 
 This is the Responses API over websocket transport, not the [Realtime API](realtime/guide.md).
 
+For transport-selection rules and caveats around concrete model objects or custom providers, see [Models](models/index.md#responses-websocket-transport).
+
 ##### Pattern 1: No session helper (works)
 
 Use this when you just want websocket transport and do not need the SDK to manage a shared provider/session for you.
@@ -94,7 +96,9 @@ from agents import Agent, responses_websocket_session
 async def main():
     agent = Agent(name="Assistant", instructions="Be concise.")
 
-    async with responses_websocket_session() as ws:
+    async with responses_websocket_session(
+        responses_websocket_options={"ping_interval": 20.0, "ping_timeout": 60.0},
+    ) as ws:
         first = ws.run_streamed(agent, "Say hello in one short sentence.")
         async for _event in first.stream_events():
             pass
@@ -112,6 +116,8 @@ asyncio.run(main())
 ```
 
 Finish consuming streamed results before the context exits. Exiting the context while a websocket request is still in flight may force-close the shared connection.
+
+If long reasoning turns hit websocket keepalive timeouts, increase `ping_timeout` or set `ping_timeout=None` to disable heartbeat timeouts. Use HTTP/SSE transport for runs where reliability matters more than websocket latency.
 
 ### Run config
 
@@ -141,7 +147,7 @@ Use `RunConfig` to override behavior for a single run without changing each agen
 ##### Tracing and observability
 
 -   [`tracing_disabled`][agents.run.RunConfig.tracing_disabled]: Allows you to disable [tracing](tracing.md) for the entire run.
--   [`tracing`][agents.run.RunConfig.tracing]: Pass a [`TracingConfig`][agents.tracing.TracingConfig] to override exporters, processors, or tracing metadata for this run.
+-   [`tracing`][agents.run.RunConfig.tracing]: Pass a [`TracingConfig`][agents.tracing.TracingConfig] to override trace export settings such as the per-run tracing API key.
 -   [`trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data]: Configures whether traces will include potentially sensitive data, such as LLM and tool call inputs/outputs.
 -   [`workflow_name`][agents.run.RunConfig.workflow_name], [`trace_id`][agents.run.RunConfig.trace_id], [`group_id`][agents.run.RunConfig.group_id]: Sets the tracing workflow name, trace ID and trace group ID for the run. We recommend at least setting `workflow_name`. The group ID is an optional field that lets you link traces across multiple runs.
 -   [`trace_metadata`][agents.run.RunConfig.trace_metadata]: Metadata to include on all traces.
@@ -161,7 +167,7 @@ Use `tool_error_formatter` to customize the message that is returned to the mode
 The formatter receives [`ToolErrorFormatterArgs`][agents.run_config.ToolErrorFormatterArgs] with:
 
 -   `kind`: The error category. Today this is `"approval_rejected"`.
--   `tool_type`: The tool runtime (`"function"`, `"computer"`, `"shell"`, or `"apply_patch"`).
+-   `tool_type`: The tool runtime (`"function"`, `"computer"`, `"shell"`, `"apply_patch"`, or `"custom"`).
 -   `tool_name`: The tool name.
 -   `call_id`: The tool call ID.
 -   `default_message`: The SDK's default model-visible message.
@@ -211,6 +217,25 @@ Scope notes:
 
 ## State and conversation management
 
+### Choose a memory strategy
+
+There are four common ways to carry state into the next turn:
+
+| Strategy | Where state lives | Best for | What you pass on the next turn |
+| --- | --- | --- | --- |
+| `result.to_input_list()` | Your app memory | Small chat loops, full manual control, any provider | The list from `result.to_input_list()` plus the next user message |
+| `session` | Your storage plus the SDK | Persistent chat state, resumable runs, custom stores | The same `session` instance or another instance pointed at the same store |
+| `conversation_id` | OpenAI Conversations API | A named server-side conversation you want to share across workers or services | The same `conversation_id` plus only the new user turn |
+| `previous_response_id` | OpenAI Responses API | Lightweight server-managed continuation without creating a conversation resource | `result.last_response_id` plus only the new user turn |
+
+`result.to_input_list()` and `session` are client-managed. `conversation_id` and `previous_response_id` are OpenAI-managed and only apply when you are using the OpenAI Responses API. In most applications, pick one persistence strategy per conversation. Mixing client-managed history with OpenAI-managed state can duplicate context unless you are deliberately reconciling both layers.
+
+!!! note
+
+    Session persistence cannot be combined with server-managed conversation settings
+    (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) in the
+    same run. Choose one approach per call.
+
 ### Conversations/chat threads
 
 Calling any of the run methods can result in one or more agents running (and hence one or more LLM calls), but it represents a single logical turn in a chat conversation. For example:
@@ -219,22 +244,6 @@ Calling any of the run methods can result in one or more agents running (and hen
 2. Runner run: first agent calls LLM, runs tools, does a handoff to a second agent, second agent runs more tools, and then produces an output.
 
 At the end of the agent run, you can choose what to show to the user. For example, you might show the user every new item generated by the agents, or just the final output. Either way, the user might then ask a followup question, in which case you can call the run method again.
-
-#### Choosing a conversation state strategy
-
-Use one of these approaches per run:
-
-| Approach | Best for | What you manage |
-| --- | --- | --- |
-| Manual (`result.to_input_list()`) | Full control over history shaping | You construct and resend prior input items |
-| Sessions (`session=...`) | App-managed multi-turn chat state | The SDK loads/saves history in your chosen backend |
-| Server-managed (`conversation_id` / `previous_response_id`) | Letting OpenAI manage turn state | You store IDs only; the server stores conversation state |
-
-!!! note
-
-    Session persistence cannot be combined with server-managed conversation settings
-    (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) in the
-    same run. Choose one approach per call.
 
 #### Manual conversation management
 
@@ -258,7 +267,7 @@ async def main():
         # California
 ```
 
-#### Automatic conversation management with Sessions
+#### Automatic conversation management with sessions
 
 For a simpler approach, you can use [Sessions](sessions/index.md) to automatically handle conversation history without manually calling `.to_input_list()`:
 
@@ -295,7 +304,7 @@ See the [Sessions documentation](sessions/index.md) for more details.
 
 #### Server-managed conversations
 
-You can also let the OpenAI conversation state feature manage conversation state on the server side, instead of handling it locally with `to_input_list()` or `Sessions`. This allows you to preserve conversation history without manually resending all past messages. See the [OpenAI Conversation state guide](https://platform.openai.com/docs/guides/conversation-state?api-mode=responses) for more details.
+You can also let the OpenAI conversation state feature manage conversation state on the server side, instead of handling it locally with `to_input_list()` or `Sessions`. This allows you to preserve conversation history without manually resending all past messages. With either server-managed approach below, pass only the new turn's input on each request and reuse the saved ID. See the [OpenAI Conversation state guide](https://platform.openai.com/docs/guides/conversation-state?api-mode=responses) for more details.
 
 OpenAI provides two ways to track state across turns:
 
@@ -353,6 +362,8 @@ If a run pauses for approval and you resume from a [`RunState`][agents.run_state
 SDK keeps the saved `conversation_id` / `previous_response_id` / `auto_previous_response_id`
 settings so the resumed turn continues in the same server-managed conversation.
 
+`conversation_id` and `previous_response_id` are mutually exclusive. Use `conversation_id` when you want a named conversation resource that can be shared across systems. Use `previous_response_id` when you want the lightest Responses API continuation primitive from one turn to the next.
+
 !!! note
 
     The SDK automatically retries `conversation_locked` errors with backoff. In server-managed
@@ -363,11 +374,16 @@ settings so the resumed turn continues in the same server-managed conversation.
     `previous_response_id`, or `auto_previous_response_id`), the SDK also performs a best-effort
     rollback of recently persisted input items to reduce duplicate history entries after a retry.
 
+    This compatibility retry happens even if you do not configure `ModelSettings.retry`. For
+    broader opt-in retry behavior on model requests, see [Runner-managed retries](models/index.md#runner-managed-retries).
+
 ## Hooks and customization
 
 ### Call model input filter
 
 Use `call_model_input_filter` to edit the model input right before the model call. The hook receives the current agent, context, and the combined input items (including session history when present) and returns a new `ModelInputData`.
+
+The return value must be a [`ModelInputData`][agents.run.ModelInputData] object. Its `input` field is required and must be a list of input items. Returning any other shape raises a `UserError`.
 
 ```python
 from agents import Agent, Runner, RunConfig
@@ -386,13 +402,19 @@ result = Runner.run_sync(
 )
 ```
 
+The runner passes a copy of the prepared input list to the hook, so you can trim, replace, or reorder it without mutating the caller's original list in place.
+
+If you are using a session, `call_model_input_filter` runs after session history has already been loaded and merged with the current turn. Use [`session_input_callback`][agents.run.RunConfig.session_input_callback] when you want to customize that earlier merge step itself.
+
+If you are using OpenAI server-managed conversation state with `conversation_id`, `previous_response_id`, or `auto_previous_response_id`, the hook runs on the prepared payload for the next Responses API call. That payload may already represent only the new-turn delta rather than a full replay of earlier history. Only the items you return are marked as sent for that server-managed continuation.
+
 Set the hook per run via `run_config` to redact sensitive data, trim long histories, or inject additional system guidance.
 
 ## Errors and recovery
 
 ### Error handlers
 
-All `Runner` entry points accept `error_handlers`, a dict keyed by error kind. Today, the supported key is `"max_turns"`. Use it when you want to return a controlled final output instead of raising `MaxTurnsExceeded`.
+All `Runner` entry points accept `error_handlers`, a dict keyed by error kind. The supported keys are `"max_turns"` and `"model_refusal"`. Use them when you want to return a controlled final output instead of raising `MaxTurnsExceeded` or `ModelRefusalError`.
 
 ```python
 from agents import (
@@ -422,6 +444,38 @@ print(result.final_output)
 ```
 
 Set `include_in_history=False` when you do not want the fallback output appended to conversation history.
+
+Use `"model_refusal"` when a model refusal should produce an application-specific fallback instead of ending the run with `ModelRefusalError`.
+
+```python
+from pydantic import BaseModel
+
+from agents import Agent, ModelRefusalError, RunErrorHandlerInput, Runner
+
+
+class Recipe(BaseModel):
+    ingredients: list[str]
+    refusal_reason: str | None = None
+
+
+def on_model_refusal(data: RunErrorHandlerInput[None]) -> Recipe:
+    assert isinstance(data.error, ModelRefusalError)
+    return Recipe(ingredients=[], refusal_reason=data.error.refusal)
+
+
+agent = Agent(
+    name="Recipe assistant",
+    instructions="Return a structured recipe.",
+    output_type=Recipe,
+)
+
+result = Runner.run_sync(
+    agent,
+    "Make me something unsafe.",
+    error_handlers={"model_refusal": on_model_refusal},
+)
+print(result.final_output)
+```
 
 ## Durable execution integrations and human-in-the-loop
 

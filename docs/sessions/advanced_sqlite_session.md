@@ -1,4 +1,4 @@
-# Advanced SQLite Sessions
+# Advanced SQLite sessions
 
 `AdvancedSQLiteSession` is an enhanced version of the basic `SQLiteSession` that provides advanced conversation management capabilities including conversation branching, detailed usage analytics, and structured conversation queries.
 
@@ -297,7 +297,7 @@ CREATE TABLE turn_usage (
 Check out the [complete example](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py) for a comprehensive demonstration of all features.
 
 
-## API Reference
+## API reference
 
 - [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - Main class
 - [`Session`][agents.memory.session.Session] - Base session protocol

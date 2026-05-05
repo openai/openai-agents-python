@@ -4,9 +4,9 @@ import asyncio
 import contextlib
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, Union, cast
+from typing import Any, Literal, TypeAlias, cast
 
-from typing_extensions import Literal, TypeAlias, TypedDict
+from typing_extensions import TypedDict
 
 from .codex_options import CodexOptions
 from .events import (
@@ -47,8 +47,8 @@ class LocalImageInput(TypedDict):
     path: str
 
 
-UserInput: TypeAlias = Union[TextInput, LocalImageInput]
-Input: TypeAlias = Union[str, list[UserInput]]
+UserInput: TypeAlias = TextInput | LocalImageInput
+Input: TypeAlias = str | list[UserInput]
 
 
 @dataclass(frozen=True)

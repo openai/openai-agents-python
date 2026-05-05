@@ -10,10 +10,19 @@ from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from . import _openai_shared
 from .default_models import get_default_model
 from .interface import Model, ModelProvider
+from .openai_agent_registration import (
+    OpenAIAgentRegistrationConfig,
+    ResolvedOpenAIAgentRegistrationConfig,
+    resolve_openai_agent_registration_config,
+)
 from .openai_chatcompletions import OpenAIChatCompletionsModel
-from .openai_responses import OpenAIResponsesModel, OpenAIResponsesWSModel
+from .openai_responses import (
+    OpenAIResponsesModel,
+    OpenAIResponsesWebSocketOptions,
+    OpenAIResponsesWSModel,
+)
 
-# This is kept for backward compatiblity but using get_default_model() method is recommended.
+# This is kept for backward compatibility but using get_default_model() method is recommended.
 DEFAULT_MODEL: str = "gpt-4o"
 
 
@@ -43,6 +52,8 @@ class OpenAIProvider(ModelProvider):
         project: str | None = None,
         use_responses: bool | None = None,
         use_responses_websocket: bool | None = None,
+        agent_registration: OpenAIAgentRegistrationConfig | None = None,
+        responses_websocket_options: OpenAIResponsesWebSocketOptions | None = None,
     ) -> None:
         """Create a new OpenAI provider.
 
@@ -60,6 +71,9 @@ class OpenAIProvider(ModelProvider):
             use_responses: Whether to use the OpenAI responses API.
             use_responses_websocket: Whether to use websocket transport for the OpenAI responses
                 API.
+            agent_registration: Optional agent registration configuration.
+            responses_websocket_options: Optional low-level websocket keepalive options for the
+                OpenAI Responses websocket transport.
         """
         if openai_client is not None:
             assert api_key is None and base_url is None and websocket_base_url is None, (
@@ -88,12 +102,18 @@ class OpenAIProvider(ModelProvider):
             self._responses_transport = _openai_shared.get_default_openai_responses_transport()
         # Backward-compatibility shim for internal tests/diagnostics that inspect the legacy flag.
         self._use_responses_websocket = self._responses_transport == "websocket"
+        self._responses_websocket_options = responses_websocket_options
 
         # Reuse websocket model wrappers so websocket transport can keep a persistent connection
         # when callers pass model names as strings through a shared provider.
         self._ws_model_cache_by_loop: weakref.WeakKeyDictionary[
             asyncio.AbstractEventLoop, _WSLoopModelCache
         ] = weakref.WeakKeyDictionary()
+        self._agent_registration = resolve_openai_agent_registration_config(agent_registration)
+
+    @property
+    def agent_registration(self) -> ResolvedOpenAIAgentRegistrationConfig | None:
+        return self._agent_registration
 
     # We lazy load the client in case you never actually use OpenAIProvider(). Otherwise
     # AsyncOpenAI() raises an error if you don't have an API key set.
@@ -202,17 +222,22 @@ class OpenAIProvider(ModelProvider):
         if not self._use_responses:
             return OpenAIChatCompletionsModel(model=resolved_model_name, openai_client=client)
 
-        responses_model_type = (
-            OpenAIResponsesWSModel if use_websocket_transport else OpenAIResponsesModel
-        )
-        model = responses_model_type(
+        if use_websocket_transport:
+            model = OpenAIResponsesWSModel(
+                model=resolved_model_name,
+                openai_client=client,
+                model_is_explicit=model_is_explicit,
+                websocket_options=self._responses_websocket_options,
+            )
+            if loop_cache is not None:
+                loop_cache[cache_key] = model
+            return model
+
+        model = OpenAIResponsesModel(
             model=resolved_model_name,
             openai_client=client,
             model_is_explicit=model_is_explicit,
         )
-        if use_websocket_transport:
-            if loop_cache is not None:
-                loop_cache[cache_key] = model
         return model
 
     async def aclose(self) -> None:

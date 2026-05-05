@@ -4,10 +4,11 @@ The Agents SDK includes built-in tracing, collecting a comprehensive record of e
 
 !!!note
 
-    Tracing is enabled by default. There are two ways to disable tracing:
+    Tracing is enabled by default. You can disable it in three common ways:
 
-    1. You can globally disable tracing by setting the env var `OPENAI_AGENTS_DISABLE_TRACING=1`. This disables trace creation entirely, so no processors (including custom processors such as MLflow) will receive traces/spans.
-    2. You can disable tracing for a single run by setting [`agents.run.RunConfig.tracing_disabled`][] to `True`
+    1. You can globally disable tracing by setting the env var `OPENAI_AGENTS_DISABLE_TRACING=1`
+    2. You can globally disable tracing in code with [`set_tracing_disabled(True)`][agents.set_tracing_disabled]
+    3. You can disable tracing for a single run by setting [`agents.run.RunConfig.tracing_disabled`][] to `True`
 
 ***For organizations operating under a Zero Data Retention (ZDR) policy using OpenAI's APIs, tracing is unavailable.***
 
@@ -42,6 +43,57 @@ By default, the SDK traces the following:
 By default, the trace is named "Agent workflow". You can set this name if you use `trace`, or you can configure the name and other properties with the [`RunConfig`][agents.run.RunConfig].
 
 In addition, you can set up [custom trace processors](#custom-tracing-processors) to push traces to other destinations (as a replacement, or secondary destination).
+
+## Long-running workers and immediate exports
+
+The default [`BatchTraceProcessor`][agents.tracing.processors.BatchTraceProcessor] exports traces
+in the background every few seconds, or sooner when the in-memory queue reaches its size trigger,
+and also performs a final flush when the process exits. In long-running workers such as Celery,
+RQ, Dramatiq, or FastAPI background tasks, this means traces are usually exported automatically
+without any extra code, but they may not appear in the Traces dashboard immediately after each job
+finishes.
+
+If you need an immediate delivery guarantee at the end of a unit of work, call
+[`flush_traces()`][agents.tracing.flush_traces] after the trace context exits.
+
+```python
+from agents import Runner, flush_traces, trace
+
+
+@celery_app.task
+def run_agent_task(prompt: str):
+    try:
+        with trace("celery_task"):
+            result = Runner.run_sync(agent, prompt)
+        return result.final_output
+    finally:
+        flush_traces()
+```
+
+```python
+from fastapi import BackgroundTasks, FastAPI
+from agents import Runner, flush_traces, trace
+
+app = FastAPI()
+
+
+def process_in_background(prompt: str) -> None:
+    try:
+        with trace("background_job"):
+            Runner.run_sync(agent, prompt)
+    finally:
+        flush_traces()
+
+
+@app.post("/run")
+async def run(prompt: str, background_tasks: BackgroundTasks):
+    background_tasks.add_task(process_in_background, prompt)
+    return {"status": "queued"}
+```
+
+[`flush_traces()`][agents.tracing.flush_traces] blocks until currently buffered traces and spans are
+exported, so call it after `trace()` closes to avoid flushing a partially built trace. You can skip
+this call when the default export latency is acceptable.
 
 ## Higher level traces
 
@@ -117,18 +169,18 @@ If you always want explicit replacement behavior, use [`set_trace_processors()`]
 
 ## Tracing with non-OpenAI models
 
-You can use an OpenAI API key with non-OpenAI Models to enable free tracing in the OpenAI Traces dashboard without needing to disable tracing.
+You can use an OpenAI API key with non-OpenAI models to enable free tracing in the OpenAI Traces dashboard without needing to disable tracing. See the [Third-party adapters](models/index.md#third-party-adapters) section in the Models guide for adapter selection and setup caveats.
 
 ```python
 import os
 from agents import set_tracing_export_api_key, Agent, Runner
-from agents.extensions.models.litellm_model import LitellmModel
+from agents.extensions.models.any_llm_model import AnyLLMModel
 
 tracing_api_key = os.environ["OPENAI_API_KEY"]
 set_tracing_export_api_key(tracing_api_key)
 
-model = LitellmModel(
-    model="your-model-name",
+model = AnyLLMModel(
+    model="your-provider/your-model-name",
     api_key="your-api-key",
 )
 
@@ -169,7 +221,7 @@ The following community and vendor integrations support the OpenAI Agents SDK tr
 -   [Pydantic Logfire](https://logfire.pydantic.dev/docs/integrations/llms/openai/#openai-agents)
 -   [AgentOps](https://docs.agentops.ai/v1/integrations/agentssdk)
 -   [Scorecard](https://docs.scorecard.io/docs/documentation/features/tracing#openai-agents-sdk-integration)
--   [Keywords AI](https://docs.keywordsai.co/integration/development-frameworks/openai-agent)
+-   [Respan](https://respan.ai/docs/integrations/tracing/openai-agents-sdk)
 -   [LangSmith](https://docs.smith.langchain.com/observability/how_to_guides/trace_with_openai_agents_sdk)
 -   [Maxim AI](https://www.getmaxim.ai/docs/observe/integrations/openai-agents-sdk)
 -   [Comet Opik](https://www.comet.com/docs/opik/tracing/integrations/openai_agents)
@@ -182,3 +234,7 @@ The following community and vendor integrations support the OpenAI Agents SDK tr
 -   [Agenta](https://docs.agenta.ai/observability/integrations/openai-agents)
 -   [PostHog](https://posthog.com/docs/llm-analytics/installation/openai-agents)
 -   [Traccia](https://traccia.ai/docs/integrations/openai-agents)
+-   [PromptLayer](https://docs.promptlayer.com/languages/integrations#openai-agents-sdk)
+-   [HoneyHive](https://docs.honeyhive.ai/v2/integrations/openai-agents)
+-   [Asqav](https://www.asqav.com/docs/integrations#openai-agents)
+-   [Datadog](https://docs.datadoghq.com/llm_observability/instrumentation/auto_instrumentation/?tab=python#openai-agents)

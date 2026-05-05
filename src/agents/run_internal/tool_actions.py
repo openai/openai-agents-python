@@ -12,22 +12,12 @@ import json
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from openai.types.responses import ResponseComputerToolCall
-from openai.types.responses.response_computer_tool_call import (
-    ActionClick,
-    ActionDoubleClick,
-    ActionDrag,
-    ActionKeypress,
-    ActionMove,
-    ActionScreenshot,
-    ActionScroll,
-    ActionType,
-    ActionWait,
-)
 from openai.types.responses.response_input_item_param import (
     ComputerCallOutputAcknowledgedSafetyCheck,
 )
 from openai.types.responses.response_input_param import ComputerCallOutput
 
+from .._tool_identity import get_mapping_or_attr, get_tool_trace_name_for_tool
 from ..agent import Agent
 from ..exceptions import ModelBehaviorError
 from ..items import RunItem, ToolCallOutputItem
@@ -36,17 +26,19 @@ from ..run_config import RunConfig
 from ..run_context import RunContextWrapper
 from ..tool import (
     ApplyPatchTool,
+    CustomTool,
     LocalShellCommandRequest,
     ShellCommandRequest,
     ShellResult,
     resolve_computer,
 )
+from ..tool_context import ToolContext
 from ..tracing import SpanError
 from ..util import _coro
 from ..util._approvals import evaluate_needs_approval_setting
 from .items import apply_patch_rejection_item, shell_rejection_item
 from .tool_execution import (
-    coerce_apply_patch_operation,
+    coerce_apply_patch_operations,
     coerce_shell_call,
     extract_apply_patch_call_id,
     format_shell_error,
@@ -68,6 +60,7 @@ if TYPE_CHECKING:
     from .run_steps import (
         ToolRunApplyPatchCall,
         ToolRunComputerAction,
+        ToolRunCustom,
         ToolRunLocalShellCall,
         ToolRunShellCall,
     )
@@ -76,6 +69,7 @@ __all__ = [
     "ComputerAction",
     "LocalShellAction",
     "ShellAction",
+    "CustomToolAction",
     "ApplyPatchAction",
 ]
 
@@ -99,6 +93,9 @@ def _serialize_trace_payload(payload: Any) -> str:
 class ComputerAction:
     """Execute computer tool actions and emit screenshot outputs with hooks fired."""
 
+    TRACE_TOOL_NAME = "computer"
+    """Tracing should expose the GA computer tool alias."""
+
     @classmethod
     async def execute(
         cls,
@@ -111,10 +108,13 @@ class ComputerAction:
         acknowledged_safety_checks: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None,
     ) -> RunItem:
         """Run a computer action, capturing a screenshot and notifying hooks."""
+        trace_tool_name = get_tool_trace_name_for_tool(action.computer_tool) or cls.TRACE_TOOL_NAME
 
         async def _run_action(span: Any | None) -> RunItem:
             if span and config.trace_include_sensitive_data:
-                span.span_data.input = _serialize_trace_payload(action.tool_call.action)
+                span.span_data.input = _serialize_trace_payload(
+                    cls._get_trace_input_payload(action.tool_call)
+                )
 
             computer = await resolve_computer(
                 tool=action.computer_tool, run_context=context_wrapper
@@ -142,7 +142,7 @@ class ComputerAction:
                         SpanError(
                             message="Error running tool",
                             data={
-                                "tool_name": action.computer_tool.name,
+                                "tool_name": trace_tool_name,
                                 "error": trace_error,
                             },
                         )
@@ -179,7 +179,7 @@ class ComputerAction:
 
         return await with_tool_function_span(
             config=config,
-            tool_name=action.computer_tool.name,
+            tool_name=trace_tool_name,
             fn=_run_action,
         )
 
@@ -187,37 +187,176 @@ class ComputerAction:
     async def _execute_action_and_capture(
         cls, computer: Any, tool_call: ResponseComputerToolCall
     ) -> str:
-        """Execute the computer action (sync or async drivers) and return the screenshot."""
+        """Execute computer actions (sync or async drivers) and return the final screenshot."""
 
-        async def maybe_call(method_name: str, *args: Any) -> Any:
+        async def maybe_call(method_name: str, *args: Any, **kwargs: Any) -> Any:
             method = getattr(computer, method_name, None)
             if method is None or not callable(method):
                 raise ModelBehaviorError(f"Computer driver missing method {method_name}")
-            result = method(*args)
+            filtered_kwargs = cls._filter_supported_kwargs(
+                method_name=method_name,
+                method=method,
+                kwargs=kwargs,
+            )
+            result = method(*args, **filtered_kwargs)
             return await result if inspect.isawaitable(result) else result
 
-        action = tool_call.action
-        if isinstance(action, ActionClick):
-            await maybe_call("click", action.x, action.y, action.button)
-        elif isinstance(action, ActionDoubleClick):
-            await maybe_call("double_click", action.x, action.y)
-        elif isinstance(action, ActionDrag):
-            await maybe_call("drag", [(p.x, p.y) for p in action.path])
-        elif isinstance(action, ActionKeypress):
-            await maybe_call("keypress", action.keys)
-        elif isinstance(action, ActionMove):
-            await maybe_call("move", action.x, action.y)
-        elif isinstance(action, ActionScreenshot):
-            await maybe_call("screenshot")
-        elif isinstance(action, ActionScroll):
-            await maybe_call("scroll", action.x, action.y, action.scroll_x, action.scroll_y)
-        elif isinstance(action, ActionType):
-            await maybe_call("type", action.text)
-        elif isinstance(action, ActionWait):
-            await maybe_call("wait")
+        last_action_was_screenshot = False
+        last_screenshot_result: Any = None
+        for action in cls._iter_actions(tool_call):
+            action_type = get_mapping_or_attr(action, "type")
+            action_keys = cls._normalize_modifier_keys(get_mapping_or_attr(action, "keys"))
+            last_action_was_screenshot = False
+            if action_type == "click":
+                await maybe_call(
+                    "click",
+                    get_mapping_or_attr(action, "x"),
+                    get_mapping_or_attr(action, "y"),
+                    get_mapping_or_attr(action, "button"),
+                    keys=action_keys,
+                )
+            elif action_type == "double_click":
+                await maybe_call(
+                    "double_click",
+                    get_mapping_or_attr(action, "x"),
+                    get_mapping_or_attr(action, "y"),
+                    keys=action_keys,
+                )
+            elif action_type == "drag":
+                path = get_mapping_or_attr(action, "path") or []
+                await maybe_call(
+                    "drag",
+                    [
+                        (
+                            cast(int, get_mapping_or_attr(point, "x")),
+                            cast(int, get_mapping_or_attr(point, "y")),
+                        )
+                        for point in path
+                    ],
+                    keys=action_keys,
+                )
+            elif action_type == "keypress":
+                await maybe_call("keypress", get_mapping_or_attr(action, "keys"))
+            elif action_type == "move":
+                await maybe_call(
+                    "move",
+                    get_mapping_or_attr(action, "x"),
+                    get_mapping_or_attr(action, "y"),
+                    keys=action_keys,
+                )
+            elif action_type == "screenshot":
+                last_screenshot_result = await maybe_call("screenshot")
+                last_action_was_screenshot = True
+            elif action_type == "scroll":
+                await maybe_call(
+                    "scroll",
+                    get_mapping_or_attr(action, "x"),
+                    get_mapping_or_attr(action, "y"),
+                    get_mapping_or_attr(action, "scroll_x"),
+                    get_mapping_or_attr(action, "scroll_y"),
+                    keys=action_keys,
+                )
+            elif action_type == "type":
+                await maybe_call("type", get_mapping_or_attr(action, "text"))
+            elif action_type == "wait":
+                await maybe_call("wait")
+            else:
+                raise ModelBehaviorError(
+                    f"Computer tool returned unknown action type {action_type!r}"
+                )
 
+        # Reuse the last screenshot action result when the batch already ended in a capture.
+        if last_action_was_screenshot:
+            return cast(str, last_screenshot_result)
         screenshot_result = await maybe_call("screenshot")
         return cast(str, screenshot_result)
+
+    @staticmethod
+    def _iter_actions(tool_call: ResponseComputerToolCall) -> list[Any]:
+        if tool_call.actions:
+            return list(tool_call.actions)
+        if tool_call.action is not None:
+            # The GA tool returns batched actions[], but released preview snapshots and older
+            # Responses payloads may still carry a single action field.
+            return [tool_call.action]
+        return []
+
+    @classmethod
+    def _get_trace_input_payload(cls, tool_call: ResponseComputerToolCall) -> Any:
+        actions = cls._iter_actions(tool_call)
+        if tool_call.actions:
+            return [cls._serialize_action_payload(action) for action in actions]
+        if actions:
+            return cls._serialize_action_payload(actions[0])
+        return None
+
+    @staticmethod
+    def _serialize_action_payload(action: Any) -> Any:
+        if hasattr(action, "model_dump") and callable(action.model_dump):
+            return action.model_dump(exclude_none=True)
+        if isinstance(action, dict):
+            return dict(action)
+        if dataclasses.is_dataclass(action) and not isinstance(action, type):
+            return dataclasses.asdict(action)
+        return action
+
+    @staticmethod
+    def _normalize_modifier_keys(keys: Any) -> list[str] | None:
+        if not keys:
+            return None
+        return cast(list[str], keys)
+
+    @classmethod
+    def _filter_supported_kwargs(
+        cls,
+        *,
+        method_name: str,
+        method: Any,
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        filtered_kwargs = {key: value for key, value in kwargs.items() if value is not None}
+        if not filtered_kwargs:
+            return {}
+
+        supported_kwargs = cls._supported_keyword_arguments(method)
+        unsupported_kwargs = [
+            key
+            for key in filtered_kwargs
+            if key not in supported_kwargs and None not in supported_kwargs
+        ]
+        if unsupported_kwargs:
+            logger.warning(
+                "Computer driver method %r does not accept keyword argument(s) %s; "
+                "dropping them and continuing.",
+                method_name,
+                ", ".join(sorted(unsupported_kwargs)),
+            )
+            for key in unsupported_kwargs:
+                filtered_kwargs.pop(key, None)
+
+        return filtered_kwargs
+
+    @staticmethod
+    def _supported_keyword_arguments(method: Any) -> set[str | None]:
+        try:
+            signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            return set()
+        supported: set[str | None] = {
+            parameter.name
+            for parameter in signature.parameters.values()
+            if parameter.kind
+            in {
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            }
+        }
+        if any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        ):
+            supported.add(None)
+        return supported
 
 
 class LocalShellAction:
@@ -454,6 +593,139 @@ class ShellAction:
         )
 
 
+class CustomToolAction:
+    """Execute Responses custom tool calls and return custom_tool_call_output items."""
+
+    @classmethod
+    async def execute(
+        cls,
+        *,
+        agent: Agent[Any],
+        call: ToolRunCustom,
+        hooks: RunHooks[Any],
+        context_wrapper: RunContextWrapper[Any],
+        config: RunConfig,
+    ) -> RunItem:
+        custom_tool: CustomTool = call.custom_tool
+        agent_hooks = agent.hooks
+        call_id = get_mapping_or_attr(call.tool_call, "call_id")
+        tool_input = get_mapping_or_attr(call.tool_call, "input")
+        if not isinstance(call_id, str):
+            raise ModelBehaviorError("Custom tool call is missing call_id.")
+        if not isinstance(tool_input, str):
+            raise ModelBehaviorError("Custom tool call is missing input.")
+
+        tool_context = ToolContext.from_agent_context(
+            context_wrapper,
+            call_id,
+            tool_name=custom_tool.name,
+            tool_arguments=tool_input,
+            agent=agent,
+            run_config=config,
+        )
+
+        async def _run_call(span: Any | None) -> RunItem:
+            if span and config.trace_include_sensitive_data:
+                span.span_data.input = tool_input
+
+            needs_approval_result = await evaluate_needs_approval_setting(
+                custom_tool.runtime_needs_approval(), context_wrapper, tool_input, call_id
+            )
+
+            if needs_approval_result:
+                approval_status, approval_item = await resolve_approval_status(
+                    tool_name=custom_tool.name,
+                    call_id=call_id,
+                    raw_item=call.tool_call,
+                    agent=agent,
+                    context_wrapper=context_wrapper,
+                    on_approval=custom_tool.runtime_on_approval(),
+                )
+
+                if approval_status is False:
+                    rejection_message = await resolve_approval_rejection_message(
+                        context_wrapper=context_wrapper,
+                        run_config=config,
+                        tool_type="custom",
+                        tool_name=custom_tool.name,
+                        call_id=call_id,
+                    )
+                    return cls._tool_output_item(agent, call_id, rejection_message)
+
+                if approval_status is not True:
+                    return approval_item
+
+            await asyncio.gather(
+                hooks.on_tool_start(tool_context, agent, custom_tool),
+                (
+                    agent_hooks.on_tool_start(tool_context, agent, custom_tool)
+                    if agent_hooks
+                    else _coro.noop_coroutine()
+                ),
+            )
+
+            try:
+                result = custom_tool.on_invoke_tool(tool_context, tool_input)
+                result = await result if inspect.isawaitable(result) else result
+                output_text = cls._normalize_output(result)
+            except Exception as exc:
+                output_text = format_shell_error(exc)
+                trace_error = get_trace_tool_error(
+                    trace_include_sensitive_data=config.trace_include_sensitive_data,
+                    error_message=output_text,
+                )
+                if span:
+                    span.set_error(
+                        SpanError(
+                            message="Error running tool",
+                            data={
+                                "tool_name": custom_tool.name,
+                                "error": trace_error,
+                            },
+                        )
+                    )
+                logger.error("Custom tool failed: %s", exc, exc_info=True)
+
+            await asyncio.gather(
+                hooks.on_tool_end(tool_context, agent, custom_tool, output_text),
+                (
+                    agent_hooks.on_tool_end(tool_context, agent, custom_tool, output_text)
+                    if agent_hooks
+                    else _coro.noop_coroutine()
+                ),
+            )
+
+            if span and config.trace_include_sensitive_data:
+                span.span_data.output = output_text
+
+            return cls._tool_output_item(agent, call_id, output_text)
+
+        return await with_tool_function_span(
+            config=config,
+            tool_name=custom_tool.name,
+            fn=_run_call,
+        )
+
+    @staticmethod
+    def _normalize_output(output: Any) -> str:
+        return output if isinstance(output, str) else str(output)
+
+    @staticmethod
+    def _tool_output_item(agent: Agent[Any], call_id: str, output: str) -> ToolCallOutputItem:
+        return ToolCallOutputItem(
+            agent=agent,
+            output=output,
+            raw_item=cast(
+                Any,
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": call_id,
+                    "output": output,
+                },
+            ),
+        )
+
+
 class ApplyPatchAction:
     """Execute apply_patch operations with approvals and editor integration."""
 
@@ -470,7 +742,7 @@ class ApplyPatchAction:
         """Run an apply_patch call and serialize the editor result for the model."""
         apply_patch_tool: ApplyPatchTool = call.apply_patch_tool
         agent_hooks = agent.hooks
-        operation = coerce_apply_patch_operation(
+        operations = coerce_apply_patch_operations(
             call.tool_call,
             context_wrapper=context_wrapper,
         )
@@ -479,16 +751,23 @@ class ApplyPatchAction:
         async def _run_call(span: Any | None) -> RunItem:
             if span and config.trace_include_sensitive_data:
                 span.span_data.input = _serialize_trace_payload(
-                    {
-                        "type": operation.type,
-                        "path": operation.path,
-                        "diff": operation.diff,
-                    }
+                    [
+                        {
+                            "type": operation.type,
+                            "path": operation.path,
+                            "diff": operation.diff,
+                        }
+                        for operation in operations
+                    ]
                 )
 
-            needs_approval_result = await evaluate_needs_approval_setting(
-                apply_patch_tool.needs_approval, context_wrapper, operation, call_id
-            )
+            needs_approval_result = False
+            for operation in operations:
+                if await evaluate_needs_approval_setting(
+                    apply_patch_tool.needs_approval, context_wrapper, operation, call_id
+                ):
+                    needs_approval_result = True
+                    break
 
             if needs_approval_result:
                 approval_status, approval_item = await resolve_approval_status(
@@ -511,6 +790,7 @@ class ApplyPatchAction:
                     return apply_patch_rejection_item(
                         agent,
                         call_id,
+                        output_type="apply_patch_call_output",
                         rejection_message=rejection_message,
                     )
 
@@ -530,23 +810,28 @@ class ApplyPatchAction:
             output_text = ""
 
             try:
+                operation_outputs: list[str] = []
                 editor = apply_patch_tool.editor
-                if operation.type == "create_file":
-                    result = editor.create_file(operation)
-                elif operation.type == "update_file":
-                    result = editor.update_file(operation)
-                elif operation.type == "delete_file":
-                    result = editor.delete_file(operation)
-                else:  # pragma: no cover - validated in coerce_apply_patch_operation
-                    raise ModelBehaviorError(f"Unsupported apply_patch operation: {operation.type}")
+                for operation in operations:
+                    if operation.type == "create_file":
+                        result = editor.create_file(operation)
+                    elif operation.type == "update_file":
+                        result = editor.update_file(operation)
+                    elif operation.type == "delete_file":
+                        result = editor.delete_file(operation)
+                    else:  # pragma: no cover - validated in coerce_apply_patch_operations
+                        raise ModelBehaviorError(
+                            f"Unsupported apply_patch operation: {operation.type}"
+                        )
 
-                awaited = await result if inspect.isawaitable(result) else result
-                normalized = normalize_apply_patch_result(awaited)
-                if normalized:
-                    if normalized.status in {"completed", "failed"}:
-                        status = normalized.status
-                    if normalized.output:
-                        output_text = normalized.output
+                    awaited = await result if inspect.isawaitable(result) else result
+                    normalized = normalize_apply_patch_result(awaited)
+                    if normalized:
+                        if normalized.status in {"completed", "failed"}:
+                            status = normalized.status
+                        if normalized.output:
+                            operation_outputs.append(normalized.output)
+                output_text = "\n".join(operation_outputs)
             except Exception as exc:
                 status = "failed"
                 output_text = format_shell_error(exc)
@@ -603,5 +888,6 @@ __all__ = [
     "ComputerAction",
     "LocalShellAction",
     "ShellAction",
+    "CustomToolAction",
     "ApplyPatchAction",
 ]

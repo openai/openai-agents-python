@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, TypeGuard, runtime_checkable
 
-from typing_extensions import TypedDict, TypeGuard
+from typing_extensions import TypedDict
 
 if TYPE_CHECKING:
     from ..items import TResponseInputItem

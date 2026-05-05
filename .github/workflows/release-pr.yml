@@ -21,8 +21,9 @@ jobs:
           fetch-depth: 0
           ref: main
       - name: Setup uv
-        uses: astral-sh/setup-uv@803947b9bd8e9f986429fa0c5a41c367cd732b41
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # setup-uv v8.1.0; uv 0.11.7
         with:
+          version: "0.11.7"
           enable-cache: true
       - name: Fetch tags
         run: git fetch origin --tags --prune
@@ -101,11 +102,14 @@ jobs:
           mkdir -p "$output_dir"
           echo "output_file=${output_file}" >> "$GITHUB_OUTPUT"
       - name: Run Codex release review
-        uses: openai/codex-action@086169432f1d2ab2f4057540b1754d550f6a1189
+        uses: openai/codex-action@e0fdf01220eb9a88167c4898839d273e3f2609d1
         with:
           openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
           prompt-file: .github/codex/prompts/release-review.md
           output-file: ${{ steps.codex-output.outputs.output_file }}
+          # Keep the legacy Linux sandbox path until the default bubblewrap path
+          # works reliably on GitHub-hosted Ubuntu runners.
+          codex-args: '["--enable","use_legacy_landlock"]'
           safety-strategy: drop-sudo
           sandbox: read-only
       - name: Build PR body

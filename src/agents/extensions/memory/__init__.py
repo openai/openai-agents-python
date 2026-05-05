@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         DaprSession,
     )
     from .encrypt_session import EncryptedSession
+    from .mongodb_session import MongoDBSession
     from .redis_session import RedisSession
     from .sqlalchemy_session import SQLAlchemySession
 
@@ -29,6 +30,7 @@ __all__: list[str] = [
     "DAPR_CONSISTENCY_STRONG",
     "DaprSession",
     "EncryptedSession",
+    "MongoDBSession",
     "RedisSession",
     "SQLAlchemySession",
 ]
@@ -115,6 +117,17 @@ def __getattr__(name: str) -> Any:
             raise ImportError(
                 "DAPR_CONSISTENCY_STRONG requires the 'dapr' extra. "
                 "Install it with: pip install openai-agents[dapr]"
+            ) from e
+
+    if name == "MongoDBSession":
+        try:
+            from .mongodb_session import MongoDBSession  # noqa: F401
+
+            return MongoDBSession
+        except ModuleNotFoundError as e:
+            raise ImportError(
+                "MongoDBSession requires the 'mongodb' extra. "
+                "Install it with: pip install openai-agents[mongodb]"
             ) from e
 
     raise AttributeError(f"module {__name__} has no attribute {name}")

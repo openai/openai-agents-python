@@ -14,6 +14,8 @@ from ..items import (
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
 )
 from ..logger import logger
 from ..stream_events import RunItemStreamEvent, StreamEvent
@@ -36,6 +38,10 @@ def stream_step_items_to_queue(
             event = RunItemStreamEvent(item=item, name="handoff_occured")
         elif isinstance(item, ToolCallItem):
             event = RunItemStreamEvent(item=item, name="tool_called")
+        elif isinstance(item, ToolSearchCallItem):
+            event = RunItemStreamEvent(item=item, name="tool_search_called")
+        elif isinstance(item, ToolSearchOutputItem):
+            event = RunItemStreamEvent(item=item, name="tool_search_output_created")
         elif isinstance(item, ToolCallOutputItem):
             event = RunItemStreamEvent(item=item, name="tool_output")
         elif isinstance(item, ReasoningItem):

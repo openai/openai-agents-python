@@ -9,7 +9,6 @@ Usage:
 """
 
 from pathlib import Path
-from string import capwords
 
 # ---- Paths -----------------------------------------------------------
 
@@ -38,7 +37,7 @@ def pretty_title(last_segment: str) -> str:
     Handles underscores and hyphens; leaves camelCase as‑is except first‑letter cap.
     """
     cleaned = last_segment.replace("_", " ").replace("-", " ")
-    return capwords(cleaned)
+    return cleaned.title()
 
 
 # ---- Main ------------------------------------------------------------

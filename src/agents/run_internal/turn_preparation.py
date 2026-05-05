@@ -101,7 +101,7 @@ async def get_handoffs(agent: Agent[Any], context_wrapper: RunContextWrapper[Any
         return bool(res)
 
     results = await asyncio.gather(*(check_handoff_enabled(h) for h in handoffs))
-    enabled: list[Handoff] = [h for h, ok in zip(handoffs, results) if ok]
+    enabled: list[Handoff] = [h for h, ok in zip(handoffs, results, strict=False) if ok]
     return enabled
 
 

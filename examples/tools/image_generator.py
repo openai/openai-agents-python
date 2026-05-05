@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from agents import Agent, ImageGenerationTool, Runner, trace
+from examples.auto_mode import is_auto_mode
 
 
 def _get_field(obj: Any, key: str) -> Any:
@@ -30,7 +31,7 @@ def open_file(path: str) -> None:
 async def main():
     agent = Agent(
         name="Image generator",
-        instructions="You are a helpful agent.",
+        instructions="Always use the image generation tool when the user asks for a new image.",
         tools=[
             ImageGenerationTool(
                 tool_config={"type": "image_generation", "quality": "low"},
@@ -44,6 +45,7 @@ async def main():
             agent, "Create an image of a frog eating a pizza, comic book style."
         )
         print(result.final_output)
+        generated_image = False
         for item in result.new_items:
             if item.type != "tool_call_item":
                 continue
@@ -57,11 +59,19 @@ async def main():
             if not isinstance(img_result, str):
                 continue
 
+            generated_image = True
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                 tmp.write(base64.b64decode(img_result))
                 temp_path = tmp.name
 
-            open_file(temp_path)
+            print(f"Saved generated image to: {temp_path}")
+            if is_auto_mode():
+                print("Auto mode leaves the image on disk instead of opening it.")
+            else:
+                open_file(temp_path)
+
+        if not generated_image:
+            print("No image_generation_call item was returned.")
 
 
 if __name__ == "__main__":

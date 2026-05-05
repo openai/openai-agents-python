@@ -1,7 +1,7 @@
 import asyncio
 import inspect
 import json
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 from inline_snapshot import snapshot
@@ -149,8 +149,17 @@ async def test_no_error_on_invalid_json_async():
     assert result == "error_ModelBehaviorError"
 
 
+@function_tool(defer_loading=True)
+def deferred_lookup(customer_id: str) -> str:
+    return customer_id
+
+
+def test_function_tool_defer_loading():
+    assert deferred_lookup.defer_loading is True
+
+
 @function_tool(strict_mode=False)
-def optional_param_function(a: int, b: Optional[int] = None) -> str:
+def optional_param_function(a: int, b: int | None = None) -> str:
     if b is None:
         return f"{a}_no_b"
     return f"{a}_{b}"
@@ -177,7 +186,7 @@ async def test_non_strict_mode_function():
 def all_optional_params_function(
     x: int = 42,
     y: str = "hello",
-    z: Optional[int] = None,
+    z: int | None = None,
 ) -> str:
     if z is None:
         return f"{x}_{y}_no_z"

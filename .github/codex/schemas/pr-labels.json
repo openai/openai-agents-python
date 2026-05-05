@@ -1,0 +1,29 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["labels"],
+  "properties": {
+    "labels": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "documentation",
+          "project",
+          "bug",
+          "enhancement",
+          "dependencies",
+          "feature:chat-completions",
+          "feature:core",
+          "feature:extensions",
+          "feature:mcp",
+          "feature:realtime",
+          "feature:sandboxes",
+          "feature:sessions",
+          "feature:tracing",
+          "feature:voice"
+        ]
+      }
+    }
+  }
+}

@@ -261,6 +261,7 @@ async def test_tool_input_guardrail_decorators():
     result = await guardrail.run(data)
     assert result.behavior["type"] == "allow"
     assert result.output_info == "test_1"
+    assert guardrail.get_name() == "decorated_input_guardrail"
 
     # Test named decorator
     guardrail = decorated_named_input_guardrail
@@ -294,6 +295,7 @@ async def test_tool_output_guardrail_decorators():
     result = await guardrail.run(data)
     assert result.behavior["type"] == "allow"
     assert result.output_info == "test_3"
+    assert guardrail.get_name() == "decorated_output_guardrail"
 
     # Test named decorator
     guardrail = decorated_named_output_guardrail

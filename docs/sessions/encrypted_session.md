@@ -1,4 +1,4 @@
-# Encrypted Sessions
+# Encrypted sessions
 
 `EncryptedSession` provides transparent encryption for any session implementation, securing conversation data with automatic expiration of old items.
 
@@ -75,7 +75,7 @@ session = EncryptedSession(
 )
 ```
 
-### TTL (Time To Live)
+### TTL (time to live)
 
 Set how long encrypted items remain valid:
 
@@ -169,7 +169,7 @@ items = await session.get_items()  # Only returns non-expired items
 result = await Runner.run(agent, "Continue conversation", session=session)
 ```
 
-## API Reference
+## API reference
 
 - [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - Main class
 - [`Session`][agents.memory.session.Session] - Base session protocol

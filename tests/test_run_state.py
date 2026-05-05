@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import gc
+import io
 import json
 import logging
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, TypeVar, cast
+from pathlib import Path
+from typing import Any, TypeVar, cast
 
 import pytest
 from openai.types.responses import (
@@ -16,6 +18,8 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseReasoningItem,
+    ResponseToolSearchCall,
+    ResponseToolSearchOutputItem,
 )
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
@@ -46,6 +50,8 @@ from agents.items import (
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
     TResponseInputItem,
     TResponseStreamEvent,
 )
@@ -64,14 +70,23 @@ from agents.run_internal.run_loop import (
 )
 from agents.run_state import (
     CURRENT_SCHEMA_VERSION,
+    SCHEMA_VERSION_SUMMARIES,
     SUPPORTED_SCHEMA_VERSIONS,
     RunState,
+    _build_agent_identity_map,
     _build_agent_map,
+    _capability_identity_signature,
     _deserialize_items,
     _deserialize_processed_response,
     _serialize_guardrail_results,
     _serialize_tool_action_groups,
 )
+from agents.sandbox import Manifest
+from agents.sandbox.capabilities.capability import Capability
+from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient, UnixLocalSandboxSessionState
+from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.snapshot import LocalSnapshot, NoopSnapshot
+from agents.sandbox.types import ExecResult
 from agents.tool import (
     ApplyPatchTool,
     ComputerTool,
@@ -80,6 +95,7 @@ from agents.tool import (
     LocalShellTool,
     ShellTool,
     function_tool,
+    tool_namespace,
 )
 from agents.tool_context import ToolContext
 from agents.tool_guardrails import (
@@ -91,11 +107,13 @@ from agents.tool_guardrails import (
     ToolOutputGuardrailResult,
 )
 from agents.usage import Usage
+from tests.utils.factories import TestSessionState
 
 from .fake_model import FakeModel
 from .test_responses import (
     get_final_output_message,
     get_function_tool_call,
+    get_handoff_tool_call,
     get_text_message,
 )
 from .utils.factories import (
@@ -113,7 +131,61 @@ from .utils.hitl import (
     run_and_resume_with_mutation,
 )
 
+_CURRENT_SCHEMA_MAJOR, _CURRENT_SCHEMA_MINOR = CURRENT_SCHEMA_VERSION.split(".")
+_NEXT_UNSUPPORTED_SCHEMA_VERSION = f"{_CURRENT_SCHEMA_MAJOR}.{int(_CURRENT_SCHEMA_MINOR) + 1}"
+
 TContext = TypeVar("TContext")
+
+
+class _IdentitySandboxSession(BaseSandboxSession):
+    def __init__(self, root: str) -> None:
+        self.state = TestSessionState(
+            manifest=Manifest(root=root),
+            snapshot=NoopSnapshot(id=f"snapshot:{root}"),
+        )
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def shutdown(self) -> None:
+        return None
+
+    async def running(self) -> bool:
+        return True
+
+    async def read(self, path: Path, *, user: object = None) -> Any:
+        _ = (path, user)
+        raise AssertionError("read() should not be called")
+
+    async def write(self, path: Path, data: io.IOBase, *, user: object = None) -> None:
+        _ = (path, data, user)
+        raise AssertionError("write() should not be called")
+
+    async def _exec_internal(
+        self,
+        *command: Any,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        _ = (command, timeout)
+        raise AssertionError("_exec_internal() should not be called")
+
+    async def persist_workspace(self) -> Any:
+        raise AssertionError("persist_workspace() should not be called")
+
+    async def hydrate_workspace(self, data: Any) -> None:
+        _ = data
+        raise AssertionError("hydrate_workspace() should not be called")
+
+
+class _IdentityCapability(Capability):
+    type: str = "identity"
+    setting: str
+
+    def __init__(self, *, setting: str) -> None:
+        super().__init__(type="identity", **cast(Any, {"setting": setting}))
 
 
 def make_processed_response(
@@ -236,6 +308,326 @@ class TestRunState:
         str_data = state.to_string()
         assert isinstance(str_data, str)
         assert json.loads(str_data) == json_data
+
+    @pytest.mark.asyncio
+    async def test_from_json_restores_duplicate_name_current_agent_by_identity(self):
+        """Duplicate agent names should round-trip through the serialized identity key."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        second = Agent(name="duplicate")
+        first = Agent(name="duplicate", handoffs=[second])
+        second.handoffs = [first]
+        state = make_state(first, context=context, original_input="input1", max_turns=2)
+        state._current_agent = second
+
+        json_data = state.to_json()
+        assert json_data["current_agent"] == {"name": "duplicate", "identity": "duplicate#2"}
+
+        restored = await RunState.from_json(first, json_data)
+        assert restored._current_agent is second
+
+    def test_build_agent_identity_map_avoids_literal_suffix_collisions(self) -> None:
+        """Literal `#<n>` names should not collide with generated duplicate identities."""
+        first = Agent(name="sandbox")
+        literal_suffix = Agent(name="sandbox#2")
+        second = Agent(name="sandbox")
+        first.handoffs = [literal_suffix, second]
+        literal_suffix.handoffs = [first, second]
+        second.handoffs = [first, literal_suffix]
+
+        identity_map = _build_agent_identity_map(first)
+
+        assert identity_map == {
+            "sandbox": first,
+            "sandbox#2": literal_suffix,
+            "sandbox#3": second,
+        }
+
+    def test_build_agent_identity_map_is_stable_across_reordered_duplicate_agents(self) -> None:
+        """Duplicate-name identities should not change when reachable order changes."""
+
+        @function_tool(name_override="alpha_tool")
+        def alpha_tool() -> str:
+            return "alpha"
+
+        @function_tool(name_override="beta_tool")
+        def beta_tool() -> str:
+            return "beta"
+
+        def _identity_for(
+            identity_map: Mapping[str, Agent[Any]],
+            target: Agent[Any],
+        ) -> str:
+            return next(identity for identity, agent in identity_map.items() if agent is target)
+
+        first_alpha = Agent(name="sandbox", instructions="Alpha", tools=[alpha_tool])
+        first_beta = Agent(name="sandbox", instructions="Beta", tools=[beta_tool])
+        first_root = Agent(name="triage", handoffs=[first_beta, first_alpha])
+        first_alpha.handoffs = [first_root]
+        first_beta.handoffs = [first_root]
+
+        second_alpha = Agent(name="sandbox", instructions="Alpha", tools=[alpha_tool])
+        second_beta = Agent(name="sandbox", instructions="Beta", tools=[beta_tool])
+        second_root = Agent(name="triage", handoffs=[second_alpha, second_beta])
+        second_alpha.handoffs = [second_root]
+        second_beta.handoffs = [second_root]
+
+        first_identity_map = _build_agent_identity_map(first_root)
+        second_identity_map = _build_agent_identity_map(second_root)
+
+        assert _identity_for(first_identity_map, first_alpha) == _identity_for(
+            second_identity_map, second_alpha
+        )
+        assert _identity_for(first_identity_map, first_beta) == _identity_for(
+            second_identity_map, second_beta
+        )
+
+    @pytest.mark.asyncio
+    async def test_from_json_restores_duplicate_name_current_agent_with_reordered_graph(self):
+        """Restore should keep the same logical duplicate agent after graph reordering."""
+
+        @function_tool(name_override="alpha_tool")
+        def alpha_tool() -> str:
+            return "alpha"
+
+        @function_tool(name_override="beta_tool")
+        def beta_tool() -> str:
+            return "beta"
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        first_alpha = Agent(name="sandbox", instructions="Alpha", tools=[alpha_tool])
+        first_beta = Agent(name="sandbox", instructions="Beta", tools=[beta_tool])
+        first_root = Agent(name="triage", handoffs=[first_beta, first_alpha])
+        first_alpha.handoffs = [first_root]
+        first_beta.handoffs = [first_root]
+
+        state = make_state(first_root, context=context, original_input="input1", max_turns=2)
+        state._current_agent = first_beta
+        json_data = state.to_json()
+
+        restored_alpha = Agent(name="sandbox", instructions="Alpha", tools=[alpha_tool])
+        restored_beta = Agent(name="sandbox", instructions="Beta", tools=[beta_tool])
+        restored_root = Agent(name="triage", handoffs=[restored_alpha, restored_beta])
+        restored_alpha.handoffs = [restored_root]
+        restored_beta.handoffs = [restored_root]
+
+        restored = await RunState.from_json(restored_root, json_data)
+        assert restored._current_agent is restored_beta
+
+    @pytest.mark.asyncio
+    async def test_from_json_restores_bare_duplicate_name_current_agent_via_identity_map(self):
+        """Bare duplicate names should resolve through the identity map, not traversal order."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        first = Agent(name="duplicate", instructions="zeta")
+        second = Agent(name="duplicate", instructions="alpha")
+        root = Agent(name="triage", handoffs=[first, second])
+        first.handoffs = [root]
+        second.handoffs = [root]
+
+        state = make_state(root, context=context, original_input="input1", max_turns=2)
+        state._current_agent = second
+
+        json_data = state.to_json()
+        assert json_data["current_agent"] == {"name": "duplicate"}
+
+        restored = await RunState.from_json(root, json_data)
+        assert restored._current_agent is second
+
+    def test_build_agent_identity_map_uses_tool_use_behavior_for_duplicate_names(self) -> None:
+        """Duplicate-name identities should stay stable when only tool_use_behavior differs."""
+
+        def _identity_for(
+            identity_map: Mapping[str, Agent[Any]],
+            target: Agent[Any],
+        ) -> str:
+            return next(identity for identity, agent in identity_map.items() if agent is target)
+
+        first_default = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="run_llm_again",
+        )
+        first_stop = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="stop_on_first_tool",
+        )
+        first_root = Agent(name="triage", handoffs=[first_default, first_stop])
+        first_default.handoffs = [first_root]
+        first_stop.handoffs = [first_root]
+
+        second_default = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="run_llm_again",
+        )
+        second_stop = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="stop_on_first_tool",
+        )
+        second_root = Agent(name="triage", handoffs=[second_stop, second_default])
+        second_default.handoffs = [second_root]
+        second_stop.handoffs = [second_root]
+
+        first_identity_map = _build_agent_identity_map(first_root)
+        second_identity_map = _build_agent_identity_map(second_root)
+
+        assert _identity_for(first_identity_map, first_default) == _identity_for(
+            second_identity_map, second_default
+        )
+        assert _identity_for(first_identity_map, first_stop) == _identity_for(
+            second_identity_map, second_stop
+        )
+
+    def test_capability_identity_uses_config_but_not_bound_session(self) -> None:
+        """Capability identity should consider config and ignore bound sessions."""
+
+        first_alpha_capability = _IdentityCapability(setting="alpha")
+        first_beta_capability = _IdentityCapability(setting="beta")
+        first_alpha_capability.bind(_IdentitySandboxSession("/workspace/first-alpha"))
+        first_beta_capability.bind(_IdentitySandboxSession("/workspace/first-beta"))
+
+        second_alpha_capability = _IdentityCapability(setting="alpha")
+        second_beta_capability = _IdentityCapability(setting="beta")
+        second_alpha_capability.bind(_IdentitySandboxSession("/workspace/second-alpha"))
+        second_beta_capability.bind(_IdentitySandboxSession("/workspace/second-beta"))
+
+        first_alpha_signature = _capability_identity_signature(first_alpha_capability)
+        first_beta_signature = _capability_identity_signature(first_beta_capability)
+        second_alpha_signature = _capability_identity_signature(second_alpha_capability)
+        second_beta_signature = _capability_identity_signature(second_beta_capability)
+
+        assert first_alpha_signature == second_alpha_signature
+        assert first_beta_signature == second_beta_signature
+        assert first_alpha_signature != first_beta_signature
+
+    @pytest.mark.asyncio
+    async def test_from_json_restores_duplicate_name_current_agent_when_tool_use_behavior_differs(
+        self,
+    ) -> None:
+        """Duplicate-name restore should stay stable when tool_use_behavior is the only delta."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        first_default = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="run_llm_again",
+        )
+        first_stop = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="stop_on_first_tool",
+        )
+        first_root = Agent(name="triage", handoffs=[first_default, first_stop])
+        first_default.handoffs = [first_root]
+        first_stop.handoffs = [first_root]
+
+        state = make_state(first_root, context=context, original_input="input1", max_turns=2)
+        state._current_agent = first_stop
+        json_data = state.to_json()
+
+        restored_default = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="run_llm_again",
+        )
+        restored_stop = Agent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            tool_use_behavior="stop_on_first_tool",
+        )
+        restored_root = Agent(name="triage", handoffs=[restored_stop, restored_default])
+        restored_default.handoffs = [restored_root]
+        restored_stop.handoffs = [restored_root]
+
+        restored = await RunState.from_json(restored_root, json_data)
+        assert restored._current_agent is restored_stop
+
+    @pytest.mark.asyncio
+    async def test_from_json_rejects_missing_saved_duplicate_identity(self):
+        """Identity-aware snapshots should fail when the saved duplicate no longer exists."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        second = Agent(name="duplicate", instructions="Second")
+        first = Agent(name="duplicate", instructions="First", handoffs=[second])
+        second.handoffs = [first]
+        state = make_state(first, context=context, original_input="input1", max_turns=2)
+        state._current_agent = second
+
+        json_data = state.to_json()
+        restored_root = Agent(name="duplicate", instructions="First")
+
+        with pytest.raises(UserError, match="agent identity"):
+            await RunState.from_json(restored_root, json_data)
+
+    @pytest.mark.asyncio
+    async def test_result_to_state_preserves_duplicate_name_root_and_owned_state(self):
+        """RunResult.to_state should keep the root graph while preserving the active duplicate."""
+
+        @function_tool(name_override="approval_tool", needs_approval=True)
+        def approval_tool() -> str:
+            return "approved"
+
+        first_model = FakeModel()
+        second_model = FakeModel()
+        first = Agent(name="duplicate", model=first_model)
+        second = Agent(
+            name="duplicate",
+            model=second_model,
+            tools=[approval_tool],
+            model_settings=ModelSettings(tool_choice="required"),
+        )
+        first.handoffs = [second]
+        second.handoffs = [first]
+
+        first_model.add_multiple_turn_outputs([[get_handoff_tool_call(second)]])
+        second_model.add_multiple_turn_outputs(
+            [[get_function_tool_call("approval_tool", json.dumps({}), call_id="call_approval")]]
+        )
+
+        result = await Runner.run(first, "start")
+        assert result.interruptions
+
+        state = result.to_state()
+        assert state._starting_agent is first
+        assert state._current_agent is second
+
+        json_data = state.to_json()
+        assert json_data["current_agent"] == {"name": "duplicate", "identity": "duplicate#2"}
+        assert json_data["tool_use_tracker"]["duplicate#2"] == ["approval_tool"]
+        assert json_data["current_step"] is not None
+        assert json_data["current_step"]["data"]["interruptions"][0]["agent"] == {
+            "name": "duplicate",
+            "identity": "duplicate#2",
+        }
+
+        approval_tool_items = [
+            item
+            for item in json_data["generated_items"]
+            if item["type"] == "tool_call_item"
+            and item["raw_item"].get("call_id") == "call_approval"
+        ]
+        assert len(approval_tool_items) == 1
+        assert approval_tool_items[0]["agent"] == {
+            "name": "duplicate",
+            "identity": "duplicate#2",
+        }
+        assert approval_tool_items[0]["raw_item"] == {
+            "arguments": "{}",
+            "call_id": "call_approval",
+            "id": "1",
+            "name": "approval_tool",
+            "type": "function_call",
+        }
+
+        restored = await RunState.from_json(first, json_data)
+        assert restored._starting_agent is first
+        assert restored._current_agent is second
+        assert restored.get_interruptions()[0].agent is second
+        assert any(
+            isinstance(item, ToolCallItem)
+            and item.agent is second
+            and getattr(item.raw_item, "call_id", None) == "call_approval"
+            for item in restored._generated_items
+        )
 
     async def test_reasoning_item_id_policy_survives_serialization(self):
         """RunState should preserve reasoning item input policy across serialization."""
@@ -378,6 +770,21 @@ class TestRunState:
 
         assert state._context is not None
         assert state._context.is_tool_approved(tool_name="toolY", call_id="cid456") is False
+
+    def test_reject_stores_rejection_message(self):
+        """Test that reject() stores the explicit rejection message."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="AgentRejectMessage")
+        state = make_state(agent, context=context, original_input="", max_turns=1)
+
+        approval_item = make_tool_approval_item(
+            agent, call_id="cid456", name="toolY", arguments="arguments"
+        )
+
+        state.reject(approval_item, rejection_message="Denied by reviewer")
+
+        assert state._context is not None
+        assert state._context.get_rejection_message("toolY", "cid456") == "Denied by reviewer"
 
     def test_to_json_non_mapping_context_warns_and_omits(self, caplog):
         """Ensure non-mapping contexts are omitted with a warning during serialization."""
@@ -694,6 +1101,23 @@ class TestRunState:
         assert state._context is not None
         assert state._context.is_tool_approved(tool_name="toolZ", call_id="cid789") is False
         assert state._context.is_tool_approved(tool_name="toolZ", call_id="cid999") is None
+        assert state._context.get_rejection_message("toolZ", "cid999") is None
+
+    def test_always_reject_reuses_rejection_message_for_future_calls(self):
+        """Test that always_reject stores a sticky rejection message."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="AgentStickyReject")
+        state = make_state(agent, context=context, original_input="", max_turns=1)
+
+        approval_item = make_tool_approval_item(
+            agent, call_id="cid789", name="toolZ", arguments="arguments"
+        )
+
+        state.reject(approval_item, always_reject=True, rejection_message="")
+
+        assert state._context is not None
+        assert state._context.get_rejection_message("toolZ", "cid789") == ""
+        assert state._context.get_rejection_message("toolZ", "cid999") == ""
 
     def test_approve_raises_when_context_is_none(self):
         """Test that approve raises UserError when context is None."""
@@ -751,6 +1175,128 @@ class TestRunState:
         else:
             call_id = getattr(raw_item, "call_id", None)
         assert call_id == "call_1"
+
+    @pytest.mark.asyncio
+    async def test_anonymous_tool_search_items_keep_later_same_content_snapshot(self):
+        """Ensure later anonymous tool_search snapshots survive the generated-item merge."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="AgentToolSearchMerge")
+        state = make_state(agent, context=context, original_input="input", max_turns=2)
+
+        first_tool_search_call_item = ToolSearchCallItem(
+            raw_item={
+                "type": "tool_search_call",
+                "arguments": {"query": "account balance"},
+                "execution": "server",
+                "status": "completed",
+            },
+            agent=agent,
+        )
+        first_tool_search_output_item = ToolSearchOutputItem(
+            raw_item={
+                "type": "tool_search_output",
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+            },
+            agent=agent,
+        )
+
+        state._generated_items = [
+            first_tool_search_call_item,
+            first_tool_search_output_item,
+        ]
+        state._last_processed_response = make_processed_response(
+            new_items=[
+                ToolSearchCallItem(
+                    raw_item=dict(cast(dict[str, Any], first_tool_search_call_item.raw_item)),
+                    agent=agent,
+                ),
+                ToolSearchOutputItem(
+                    raw_item=dict(cast(dict[str, Any], first_tool_search_output_item.raw_item)),
+                    agent=agent,
+                ),
+            ]
+        )
+
+        json_data = state.to_json()
+        assert [item["type"] for item in json_data["generated_items"]] == [
+            "tool_search_call_item",
+            "tool_search_output_item",
+            "tool_search_call_item",
+            "tool_search_output_item",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_anonymous_tool_search_items_not_duplicated_across_round_trip(self):
+        """Ensure already-merged anonymous tool_search items do not grow across round-trips."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="AgentToolSearchDedup")
+        state = make_state(agent, context=context, original_input="input", max_turns=2)
+
+        first_tool_search_call_item = ToolSearchCallItem(
+            raw_item={
+                "type": "tool_search_call",
+                "arguments": {"query": "account balance"},
+                "execution": "server",
+                "status": "completed",
+            },
+            agent=agent,
+        )
+        first_tool_search_output_item = ToolSearchOutputItem(
+            raw_item={
+                "type": "tool_search_output",
+                "execution": "server",
+                "status": "completed",
+                "tools": [],
+            },
+            agent=agent,
+        )
+        later_tool_search_call_item = ToolSearchCallItem(
+            raw_item=dict(cast(dict[str, Any], first_tool_search_call_item.raw_item)),
+            agent=agent,
+        )
+        later_tool_search_output_item = ToolSearchOutputItem(
+            raw_item=dict(cast(dict[str, Any], first_tool_search_output_item.raw_item)),
+            agent=agent,
+        )
+
+        state._generated_items = [
+            first_tool_search_call_item,
+            first_tool_search_output_item,
+            later_tool_search_call_item,
+            later_tool_search_output_item,
+        ]
+        state._last_processed_response = make_processed_response(
+            new_items=[
+                ToolSearchCallItem(
+                    raw_item=dict(cast(dict[str, Any], later_tool_search_call_item.raw_item)),
+                    agent=agent,
+                ),
+                ToolSearchOutputItem(
+                    raw_item=dict(cast(dict[str, Any], later_tool_search_output_item.raw_item)),
+                    agent=agent,
+                ),
+            ]
+        )
+        state._mark_generated_items_merged_with_last_processed()
+
+        json_data = state.to_json()
+        assert [item["type"] for item in json_data["generated_items"]] == [
+            "tool_search_call_item",
+            "tool_search_output_item",
+            "tool_search_call_item",
+            "tool_search_output_item",
+        ]
+
+        restored = await RunState.from_json(agent, json_data)
+        restored_json = restored.to_json()
+        assert [item["type"] for item in restored_json["generated_items"]] == [
+            "tool_search_call_item",
+            "tool_search_output_item",
+            "tool_search_call_item",
+            "tool_search_output_item",
+        ]
 
     @pytest.mark.asyncio
     async def test_to_json_deduplicates_items_with_direct_id_type_attributes(self):
@@ -887,6 +1433,94 @@ class TestRunState:
         assert new_state._context is not None
         assert new_state._context.is_tool_approved(tool_name="tool1", call_id="cid1") is True
         assert new_state._context.is_tool_approved(tool_name="tool2", call_id="cid2") is False
+        assert new_state._context.get_rejection_message("tool2", "cid2") is None
+
+    async def test_serializes_and_restores_rejection_messages(self):
+        """Test that rejection messages are preserved through serialization."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ApprovalMessageAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        raw_item = ResponseFunctionToolCall(
+            type="function_call",
+            name="tool2",
+            call_id="cid2",
+            status="completed",
+            arguments="",
+        )
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+        state.reject(approval_item, always_reject=True, rejection_message="Denied by reviewer")
+
+        new_state = await RunState.from_string(agent, state.to_string())
+
+        assert new_state._context is not None
+        assert new_state._context.get_rejection_message("tool2", "cid2") == "Denied by reviewer"
+        assert new_state._context.get_rejection_message("tool2", "cid3") == "Denied by reviewer"
+
+    async def test_from_json_accepts_previous_schema_version_without_rejection_messages(self):
+        """Test that 1.5 snapshots restore even without rejection message fields."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ApprovalLegacyAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        raw_item = ResponseFunctionToolCall(
+            type="function_call",
+            name="tool2",
+            call_id="cid2",
+            status="completed",
+            arguments="",
+        )
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+        state.reject(approval_item, rejection_message="Denied by reviewer")
+
+        json_data = state.to_json()
+        json_data["$schemaVersion"] = "1.5"
+        del json_data["context"]["approvals"]["tool2"]["rejection_messages"]
+
+        restored = await RunState.from_json(agent, json_data)
+
+        assert restored._context is not None
+        assert restored._context.is_tool_approved("tool2", "cid2") is False
+        assert restored._context.get_rejection_message("tool2", "cid2") is None
+
+    async def test_from_json_with_context_override_uses_serialized_rejection_messages(self):
+        """Test that serialized approvals rebuild onto the override context."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={"source": "saved"})
+        agent = Agent(name="ApprovalOverrideAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        approval_item = ToolApprovalItem(
+            agent=agent,
+            raw_item=ResponseFunctionToolCall(
+                type="function_call",
+                name="tool2",
+                call_id="cid2",
+                status="completed",
+                arguments="",
+            ),
+        )
+        state.reject(approval_item, always_reject=True, rejection_message="Denied by reviewer")
+
+        override_context: RunContextWrapper[dict[str, str]] = RunContextWrapper(
+            context={"source": "override"}
+        )
+        override_context.reject_tool(
+            approval_item,
+            always_reject=True,
+            rejection_message="override denial",
+        )
+
+        restored = await RunState.from_json(
+            agent,
+            state.to_json(),
+            context_override=override_context,
+        )
+
+        assert restored._context is override_context
+        assert restored._context is not None
+        assert restored._context.context == {"source": "override"}
+        assert restored._context.get_rejection_message("tool2", "cid2") == "Denied by reviewer"
+        assert restored._context.get_rejection_message("tool2", "cid3") == "Denied by reviewer"
 
 
 class TestBuildAgentMap:
@@ -1084,7 +1718,12 @@ class TestSerializationRoundTrip:
             arguments='{"arg": "val"}',
         )
         state._generated_items.append(
-            ToolCallItem(agent=agent, raw_item=tool_call, description="My tool description")
+            ToolCallItem(
+                agent=agent,
+                raw_item=tool_call,
+                description="My tool description",
+                title="My tool title",
+            )
         )
 
         # 3. Tool call item without description
@@ -1118,9 +1757,39 @@ class TestSerializationRoundTrip:
         assert isinstance(new_state._generated_items[2], ToolCallItem)
         assert isinstance(new_state._generated_items[3], ToolCallOutputItem)
 
-        # Verify description field is preserved
+        # Verify display metadata is preserved
         assert new_state._generated_items[1].description == "My tool description"
+        assert new_state._generated_items[1].title == "My tool title"
         assert new_state._generated_items[2].description is None
+        assert new_state._generated_items[2].title is None
+
+    async def test_deserializes_custom_tool_call_output_items(self):
+        """Custom tool call outputs should survive RunState roundtrips."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ItemAgent")
+        state = make_state(agent, context=context, original_input="test", max_turns=5)
+
+        custom_tool_output = {
+            "type": "custom_tool_call_output",
+            "call_id": "call_custom_1",
+            "output": "custom result",
+        }
+        state._generated_items.append(
+            ToolCallOutputItem(
+                agent=agent,
+                raw_item=custom_tool_output,
+                output="custom result",
+            )
+        )
+
+        json_data = state.to_json()
+        new_state = await RunState.from_json(agent, json_data)
+
+        assert len(new_state._generated_items) == 1
+        restored_item = new_state._generated_items[0]
+        assert isinstance(restored_item, ToolCallOutputItem)
+        assert restored_item.raw_item == custom_tool_output
+        assert restored_item.output == "custom result"
 
     async def test_serializes_original_input_with_function_call_output(self):
         """Test that original_input with function_call_output items is preserved."""
@@ -1662,6 +2331,64 @@ class TestDeserializeHelpers:
         restored = await RunState.from_string(agent_a, state.to_string())
         assert len(restored._generated_items) == 1
         assert restored._generated_items[0].type == "handoff_output_item"
+
+    @pytest.mark.asyncio
+    async def test_serialization_uses_duplicate_identities_for_handoff_and_output_guardrails(self):
+        """Duplicate-name item ownership should round-trip with identity keys."""
+        first = Agent(name="duplicate")
+        second = Agent(name="duplicate")
+        third = Agent(name="duplicate")
+        first.handoffs = [second, third]
+        second.handoffs = [third]
+        third.handoffs = [first]
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        state = make_state(first, context=context, original_input="test handoff", max_turns=2)
+        state._current_agent = second
+        state._generated_items = [
+            HandoffOutputItem(
+                agent=second,
+                raw_item={"type": "handoff_output", "status": "completed"},  # type: ignore[arg-type]
+                source_agent=second,
+                target_agent=third,
+            )
+        ]
+
+        output_guardrail = OutputGuardrail(
+            guardrail_function=lambda _ctx, _agent, _output: GuardrailFunctionOutput(
+                output_info={"guardrail": "ok"},
+                tripwire_triggered=False,
+            ),
+            name="duplicate_output_guardrail",
+        )
+        state._output_guardrail_results = [
+            OutputGuardrailResult(
+                guardrail=output_guardrail,
+                agent_output="done",
+                agent=third,
+                output=GuardrailFunctionOutput(
+                    output_info={"guardrail": "ok"},
+                    tripwire_triggered=False,
+                ),
+            )
+        ]
+
+        json_data = state.to_json()
+        item_data = json_data["generated_items"][0]
+        assert item_data["agent"] == {"name": "duplicate", "identity": "duplicate#2"}
+        assert item_data["source_agent"] == {"name": "duplicate", "identity": "duplicate#2"}
+        assert item_data["target_agent"] == {"name": "duplicate", "identity": "duplicate#3"}
+        assert json_data["output_guardrail_results"][0]["agent"] == {
+            "name": "duplicate",
+            "identity": "duplicate#3",
+        }
+
+        restored = await RunState.from_json(first, json_data)
+        restored_item = cast(HandoffOutputItem, restored._generated_items[0])
+        assert restored_item.agent is second
+        assert restored_item.source_agent is second
+        assert restored_item.target_agent is third
+        assert restored._output_guardrail_results[0].agent is third
 
     async def test_model_response_serialization_roundtrip(self):
         """Test that model responses serialize and deserialize correctly."""
@@ -2383,6 +3110,7 @@ class TestRunStateSerializationEdgeCases:
         assert set(serialized.keys()) == {
             "functions",
             "computer_actions",
+            "custom_tool_actions",
             "local_shell_actions",
             "shell_actions",
             "apply_patch_actions",
@@ -2393,6 +3121,51 @@ class TestRunStateSerializationEdgeCases:
         assert serialized["functions"][0]["tool_call"]["call_id"] == "func-call"
         assert serialized["handoffs"][0]["handoff"]["tool_name"] == "handoff_tool"
         assert serialized["mcp_approval_requests"][0]["mcp_tool"]["name"] == "mcp_tool"
+
+    def test_serialize_tool_action_groups_preserves_synthetic_namespace_for_deferred_tools(self):
+        """Deferred top-level function tool calls should keep their synthetic namespace."""
+        deferred_tool = function_tool(
+            lambda city: city,
+            name_override="get_weather",
+            defer_loading=True,
+        )
+
+        processed_response = ProcessedResponse(
+            new_items=[],
+            handoffs=[],
+            functions=[
+                ToolRunFunction(
+                    tool_call=cast(
+                        ResponseFunctionToolCall,
+                        get_function_tool_call(
+                            "get_weather",
+                            '{"city": "Tokyo"}',
+                            call_id="weather-call",
+                            namespace="get_weather",
+                        ),
+                    ),
+                    function_tool=deferred_tool,
+                )
+            ],
+            computer_actions=[],
+            local_shell_calls=[],
+            shell_calls=[],
+            apply_patch_calls=[],
+            tools_used=[],
+            mcp_approval_requests=[],
+            interruptions=[],
+        )
+
+        serialized = _serialize_tool_action_groups(processed_response)
+
+        assert serialized["functions"][0]["tool"]["name"] == "get_weather"
+        assert "namespace" not in serialized["functions"][0]["tool"]
+        assert "qualifiedName" not in serialized["functions"][0]["tool"]
+        assert serialized["functions"][0]["tool"]["lookupKey"] == {
+            "kind": "deferred_top_level",
+            "name": "get_weather",
+        }
+        assert serialized["functions"][0]["tool_call"]["namespace"] == "get_weather"
 
     def test_serialize_guardrail_results(self):
         """Serialize both input and output guardrail results with agent data."""
@@ -2562,6 +3335,7 @@ class TestRunStateSerializationEdgeCases:
         # The computer action should have a computer field with description
         assert "computer" in computer_actions[0]
         computer_dict = computer_actions[0]["computer"]
+        assert computer_dict["name"] == "computer_use_preview"
         assert "description" in computer_dict
         assert computer_dict["description"] == "Computer tool description"
 
@@ -3053,6 +3827,244 @@ class TestRunStateSerializationEdgeCases:
         assert result is not None
         assert len(result.functions) == 1
 
+    async def test_deserialize_processed_response_function_uses_namespace(self):
+        """Test deserialization of ProcessedResponse with namespace-qualified function names."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        crm_tool = function_tool(lambda customer_id: customer_id, name_override="lookup_account")
+        billing_tool = function_tool(
+            lambda customer_id: customer_id,
+            name_override="lookup_account",
+        )
+        crm_namespace = tool_namespace(
+            name="crm",
+            description="CRM tools",
+            tools=[crm_tool],
+        )
+        billing_namespace = tool_namespace(
+            name="billing",
+            description="Billing tools",
+            tools=[billing_tool],
+        )
+        agent.tools = [*crm_namespace, *billing_namespace]
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": "lookup_account",
+                        "namespace": "billing",
+                        "call_id": "call123",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "tool": {"name": "lookup_account", "namespace": "billing"},
+                }
+            ],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}
+        )
+
+        assert result is not None
+        assert len(result.functions) == 1
+        assert result.functions[0].function_tool is billing_namespace[0]
+
+    async def test_deserialize_processed_response_rejects_qualified_name_collision(self):
+        """Reject dotted top-level names that collide with namespace-wrapped functions."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        dotted_top_level_tool = function_tool(
+            lambda customer_id: customer_id,
+            name_override="crm.lookup_account",
+        )
+        namespaced_tool = tool_namespace(
+            name="crm",
+            description="CRM tools",
+            tools=[function_tool(lambda customer_id: customer_id, name_override="lookup_account")],
+        )[0]
+        agent.tools = [dotted_top_level_tool, namespaced_tool]
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": "lookup_account",
+                        "namespace": "crm",
+                        "call_id": "call123",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "tool": {"name": "lookup_account", "namespace": "crm"},
+                }
+            ],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        with pytest.raises(UserError, match="qualified name `crm.lookup_account`"):
+            await _deserialize_processed_response(
+                processed_response_data, agent, context, {"TestAgent": agent}
+            )
+
+    async def test_deserialize_processed_response_uses_last_duplicate_top_level_function(self):
+        """Test deserialization preserves last-wins behavior for duplicate top-level tools."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        first_tool = function_tool(lambda customer_id: customer_id, name_override="lookup")
+        second_tool = function_tool(lambda customer_id: customer_id, name_override="lookup")
+        agent.tools = [first_tool, second_tool]
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": "lookup",
+                        "call_id": "call123",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "tool": {"name": "lookup"},
+                }
+            ],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}
+        )
+
+        assert result is not None
+        assert len(result.functions) == 1
+        assert result.functions[0].function_tool is second_tool
+
+    async def test_deserialize_processed_response_uses_tool_call_namespace_for_deferred_top_level(
+        self,
+    ):
+        """Synthetic deferred namespaces should disambiguate resumed same-name top-level tools."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        visible_tool = function_tool(
+            lambda customer_id: customer_id, name_override="lookup_account"
+        )
+        deferred_tool = function_tool(
+            lambda customer_id: customer_id,
+            name_override="lookup_account",
+            defer_loading=True,
+        )
+        agent.tools = [visible_tool, deferred_tool]
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": "lookup_account",
+                        "namespace": "lookup_account",
+                        "call_id": "call123",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "tool": {"name": "lookup_account"},
+                }
+            ],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}
+        )
+
+        assert result is not None
+        assert len(result.functions) == 1
+        assert result.functions[0].function_tool is deferred_tool
+
+    async def test_deserialize_processed_response_uses_serialized_lookup_key_for_deferred_top_level(
+        self,
+    ) -> None:
+        """Serialized lookup metadata should disambiguate deferred tools without raw namespace."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        visible_tool = function_tool(
+            lambda customer_id: f"visible:{customer_id}",
+            name_override="lookup_account",
+        )
+        deferred_tool = function_tool(
+            lambda customer_id: f"deferred:{customer_id}",
+            name_override="lookup_account",
+            defer_loading=True,
+        )
+        agent.tools = [visible_tool, deferred_tool]
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [
+                {
+                    "tool_call": {
+                        "type": "function_call",
+                        "name": "lookup_account",
+                        "call_id": "call123",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "tool": {
+                        "name": "lookup_account",
+                        "lookupKey": {
+                            "kind": "deferred_top_level",
+                            "name": "lookup_account",
+                        },
+                    },
+                }
+            ],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}
+        )
+
+        assert result is not None
+        assert len(result.functions) == 1
+        assert result.functions[0].function_tool is deferred_tool
+
     async def test_deserialize_processed_response_computer_action_in_map(self):
         """Test deserialization of ProcessedResponse with computer action in computer_tools_map."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
@@ -3114,7 +4126,7 @@ class TestRunStateSerializationEdgeCases:
                         "pendingSafetyChecks": [],
                         "pending_safety_checks": [],
                     },
-                    "computer": {"name": computer_tool.name},
+                    "computer": {"name": "computer"},
                 }
             ],
             "local_shell_actions": [],
@@ -3129,6 +4141,78 @@ class TestRunStateSerializationEdgeCases:
         )
         assert result is not None
         assert len(result.computer_actions) == 1
+
+    async def test_deserialize_processed_response_computer_action_accepts_preview_name(self):
+        """Released preview-era computer tool names should still restore."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        class MockComputer(Computer):
+            @property
+            def environment(self) -> str:  # type: ignore[override]
+                return "mac"
+
+            @property
+            def dimensions(self) -> tuple[int, int]:
+                return (1920, 1080)
+
+            def screenshot(self) -> str:
+                return "screenshot"
+
+            def click(self, x: int, y: int, button: str) -> None:
+                pass
+
+            def double_click(self, x: int, y: int) -> None:
+                pass
+
+            def drag(self, path: list[tuple[int, int]]) -> None:
+                pass
+
+            def keypress(self, keys: list[str]) -> None:
+                pass
+
+            def move(self, x: int, y: int) -> None:
+                pass
+
+            def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+                pass
+
+            def type(self, text: str) -> None:
+                pass
+
+            def wait(self) -> None:
+                pass
+
+        agent.tools = [ComputerTool(computer=MockComputer())]
+
+        processed_response_data = {
+            "new_items": [],
+            "handoffs": [],
+            "functions": [],
+            "computer_actions": [
+                {
+                    "tool_call": {
+                        "type": "computer_call",
+                        "id": "1",
+                        "call_id": "call123",
+                        "status": "completed",
+                        "action": {"type": "screenshot"},
+                        "pending_safety_checks": [],
+                    },
+                    "computer": {"name": "computer_use_preview"},
+                }
+            ],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
+            "interruptions": [],
+        }
+
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}
+        )
+        assert len(result.computer_actions) == 1
+        assert result.computer_actions[0].computer_tool.name == "computer_use_preview"
 
     async def test_deserialize_processed_response_shell_action_with_validation_error(self):
         """Test deserialization of ProcessedResponse with shell action ValidationError."""
@@ -3359,11 +4443,12 @@ class TestRunStateSerializationEdgeCases:
             await RunState.from_json(agent, state_json)
 
     @pytest.mark.asyncio
-    async def test_from_json_unsupported_schema_version(self):
+    @pytest.mark.parametrize("schema_version", [_NEXT_UNSUPPORTED_SCHEMA_VERSION, "2.0", "9.9"])
+    async def test_from_json_unsupported_schema_version(self, schema_version: str):
         """Test that from_json raises error when schema version is unsupported."""
         agent = Agent(name="TestAgent")
         state_json = {
-            "$schemaVersion": "2.0",
+            "$schemaVersion": schema_version,
             "original_input": "test",
             "current_agent": {"name": "TestAgent"},
             "context": {
@@ -3377,7 +4462,9 @@ class TestRunStateSerializationEdgeCases:
             "generated_items": [],
         }
 
-        with pytest.raises(UserError, match="Run state schema version 2.0 is not supported"):
+        with pytest.raises(
+            UserError, match=f"Run state schema version {schema_version} is not supported"
+        ):
             await RunState.from_json(agent, state_json)
 
     @pytest.mark.asyncio
@@ -3404,6 +4491,99 @@ class TestRunStateSerializationEdgeCases:
         assert restored._current_agent.name == "TestAgent"
         assert restored._context is not None
         assert restored._context.context == {"foo": "bar"}
+
+    def test_supported_schema_versions_match_released_boundary(self):
+        """The support set should include released versions plus the current unreleased writer."""
+        assert SUPPORTED_SCHEMA_VERSIONS == frozenset(
+            {
+                "1.0",
+                "1.1",
+                "1.2",
+                "1.3",
+                "1.4",
+                "1.5",
+                "1.6",
+                "1.7",
+                "1.8",
+                CURRENT_SCHEMA_VERSION,
+            }
+        )
+
+    def test_supported_schema_versions_have_non_empty_summaries(self):
+        """Every supported schema version should have a one-line historical summary."""
+        assert frozenset(SCHEMA_VERSION_SUMMARIES) == SUPPORTED_SCHEMA_VERSIONS
+        assert CURRENT_SCHEMA_VERSION in SCHEMA_VERSION_SUMMARIES
+        assert all(summary.strip() for summary in SCHEMA_VERSION_SUMMARIES.values())
+
+    @pytest.mark.asyncio
+    async def test_from_json_accepts_schema_version_1_5_without_sandbox_payload(self):
+        """RunState snapshots written before sandbox resume support should still restore."""
+        agent = Agent(name="TestAgent")
+        state_json = {
+            "$schemaVersion": "1.5",
+            "original_input": "test",
+            "current_agent": {"name": "TestAgent"},
+            "context": {
+                "context": {"foo": "bar"},
+                "usage": {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "approvals": {},
+            },
+            "max_turns": 3,
+            "current_turn": 0,
+            "model_responses": [],
+            "generated_items": [],
+        }
+
+        restored = await RunState.from_json(agent, state_json)
+
+        assert restored._current_agent is not None
+        assert restored._current_agent.name == "TestAgent"
+        assert restored._context is not None
+        assert restored._context.context == {"foo": "bar"}
+        assert restored._sandbox is None
+
+    @pytest.mark.asyncio
+    async def test_run_state_round_trip_preserves_serialized_sandbox_session_snapshot_fields(
+        self,
+    ):
+        """RunState should preserve sandbox session payloads needed for typed snapshot restore."""
+        agent = Agent(name="TestAgent")
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        state: RunState[Any, Agent[Any]] = make_state(agent, context=context, original_input="test")
+        client = UnixLocalSandboxClient()
+        session_state = UnixLocalSandboxSessionState(
+            manifest=Manifest(),
+            snapshot=LocalSnapshot(id="local-snapshot", base_path=Path("/tmp/snapshots")),
+        )
+        serialized_session_state = client.serialize_session_state(session_state)
+        state._sandbox = {
+            "backend_id": "unix_local",
+            "current_agent_key": agent.name,
+            "current_agent_name": agent.name,
+            "session_state": serialized_session_state,
+            "sessions_by_agent": {
+                agent.name: {
+                    "agent_name": agent.name,
+                    "session_state": serialized_session_state,
+                }
+            },
+        }
+
+        restored = await RunState.from_json(agent, state.to_json())
+
+        assert restored._sandbox is not None
+        restored_session_payload = cast(dict[str, object], restored._sandbox["session_state"])
+        restored_snapshot_payload = cast(dict[str, object], restored_session_payload["snapshot"])
+        assert restored_snapshot_payload == {
+            "type": "local",
+            "id": "local-snapshot",
+            "base_path": "/tmp/snapshots",
+        }
+
+        restored_session_state = client.deserialize_session_state(restored_session_payload)
+        assert isinstance(restored_session_state, UnixLocalSandboxSessionState)
+        assert isinstance(restored_session_state.snapshot, LocalSnapshot)
+        assert restored_session_state.snapshot.base_path == Path("/tmp/snapshots")
 
     @pytest.mark.asyncio
     async def test_from_json_agent_not_found(self):
@@ -3879,6 +5059,38 @@ class TestToolApprovalItem:
         assert restored_item.tool_name == "explicit_name"
         assert restored_item.name == "explicit_name"
 
+    async def test_round_trip_serialization_preserves_allow_bare_name_alias(self):
+        """Test round-trip serialization preserves bare-name approval alias metadata."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        raw_item = {
+            "type": "function_call",
+            "name": "get_weather",
+            "call_id": "call123",
+            "status": "completed",
+            "arguments": "{}",
+            "namespace": "get_weather",
+        }
+        approval_item = ToolApprovalItem(
+            agent=agent,
+            raw_item=raw_item,
+            tool_name="get_weather",
+            tool_namespace="get_weather",
+            _allow_bare_name_alias=True,
+        )
+        state._generated_items.append(approval_item)
+
+        json_data = state.to_json()
+        assert json_data["generated_items"][0]["allow_bare_name_alias"] is True
+
+        new_state = await RunState.from_json(agent, json_data)
+
+        restored_item = new_state._generated_items[0]
+        assert isinstance(restored_item, ToolApprovalItem)
+        assert restored_item._allow_bare_name_alias is True
+
     def test_tool_approval_item_arguments_property(self):
         """Test that ToolApprovalItem.arguments property correctly extracts arguments."""
         agent = Agent(name="TestAgent")
@@ -3919,6 +5131,216 @@ class TestToolApprovalItem:
         raw_item4 = {"type": "unknown", "name": "tool4"}
         approval_item4 = ToolApprovalItem(agent=agent, raw_item=raw_item4)
         assert approval_item4.arguments is None
+
+    def test_tool_approval_item_tracks_namespace(self):
+        """Test that ToolApprovalItem keeps namespace metadata from Responses tool calls."""
+        agent = Agent(name="TestAgent")
+        raw_item = make_tool_call(
+            call_id="call-ns-1",
+            name="lookup_account",
+            namespace="crm",
+            status="completed",
+            arguments="{}",
+        )
+
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+
+        assert approval_item.tool_name == "lookup_account"
+        assert approval_item.tool_namespace == "crm"
+        assert approval_item.qualified_name == "crm.lookup_account"
+
+    def test_tool_approval_item_collapses_synthetic_deferred_namespace_in_qualified_name(self):
+        """Synthetic deferred namespaces should display as the bare tool name."""
+        agent = Agent(name="TestAgent")
+        raw_item = make_tool_call(
+            call_id="call-weather-1",
+            name="get_weather",
+            namespace="get_weather",
+            status="completed",
+            arguments="{}",
+        )
+
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+
+        assert approval_item.tool_name == "get_weather"
+        assert approval_item.tool_namespace == "get_weather"
+        assert approval_item.qualified_name == "get_weather"
+
+    async def test_round_trip_serialization_with_tool_namespace(self):
+        """Test round-trip serialization preserves tool namespace metadata."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        raw_item = make_tool_call(
+            call_id="call123",
+            name="lookup_account",
+            namespace="billing",
+            status="completed",
+            arguments="{}",
+        )
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+        state._generated_items.append(approval_item)
+
+        new_state = await RunState.from_json(agent, state.to_json())
+
+        assert len(new_state._generated_items) == 1
+        restored_item = new_state._generated_items[0]
+        assert isinstance(restored_item, ToolApprovalItem)
+        assert restored_item.tool_name == "lookup_account"
+        assert restored_item.tool_namespace == "billing"
+        assert restored_item.qualified_name == "billing.lookup_account"
+
+    async def test_round_trip_serialization_preserves_tool_lookup_key(self) -> None:
+        """Deferred approval items should keep their explicit lookup key through RunState."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        raw_item = make_tool_call(
+            call_id="call-weather",
+            name="get_weather",
+            namespace="get_weather",
+            status="completed",
+            arguments="{}",
+        )
+        approval_item = ToolApprovalItem(
+            agent=agent,
+            raw_item=raw_item,
+            tool_lookup_key=("deferred_top_level", "get_weather"),
+        )
+        state._generated_items.append(approval_item)
+
+        new_state = await RunState.from_json(agent, state.to_json())
+
+        assert len(new_state._generated_items) == 1
+        restored_item = new_state._generated_items[0]
+        assert isinstance(restored_item, ToolApprovalItem)
+        assert restored_item.tool_lookup_key == ("deferred_top_level", "get_weather")
+
+    async def test_round_trip_deserializes_statusless_message_output_items(self) -> None:
+        """RunState should restore SDK-built messages that omit response-only defaults."""
+        agent = Agent(name="TestAgent")
+        state: RunState[Any, Agent[Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        message = ResponseOutputMessage.model_construct(
+            id="msg_constructed",
+            type="message",
+            role="assistant",
+            content=[
+                ResponseOutputText.model_construct(
+                    type="output_text",
+                    text="hello",
+                    annotations=[],
+                )
+            ],
+        )
+        state._generated_items.append(MessageOutputItem(agent=agent, raw_item=message))
+
+        restored = await RunState.from_json(agent, state.to_json())
+
+        restored_message = cast(MessageOutputItem, restored._generated_items[0]).raw_item
+        assert isinstance(restored_message, ResponseOutputMessage)
+        assert "status" not in restored_message.model_fields_set
+        assert isinstance(restored_message.content[0], ResponseOutputText)
+        assert "logprobs" not in restored_message.content[0].model_fields_set
+        assert restored_message.model_dump(exclude_unset=True) == {
+            "id": "msg_constructed",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "hello", "annotations": []}],
+        }
+
+    async def test_round_trip_deserializes_statusless_model_response_messages(self) -> None:
+        """ModelResponse output should use the same status-preserving reconstruction path."""
+        agent = Agent(name="TestAgent")
+        state: RunState[Any, Agent[Any]] = make_state(
+            agent,
+            context=RunContextWrapper(context={}),
+            original_input="test",
+        )
+        message = ResponseOutputMessage.model_construct(
+            id="msg_response",
+            type="message",
+            role="assistant",
+            content=[
+                ResponseOutputText.model_construct(
+                    type="output_text",
+                    text="world",
+                    annotations=[],
+                )
+            ],
+        )
+        state._model_responses.append(
+            ModelResponse(output=[message], usage=Usage(), response_id=None)
+        )
+
+        restored = await RunState.from_json(agent, state.to_json())
+
+        restored_message = cast(ResponseOutputMessage, restored._model_responses[0].output[0])
+        assert isinstance(restored_message, ResponseOutputMessage)
+        assert "status" not in restored_message.model_fields_set
+        assert restored_message.model_dump(exclude_unset=True) == {
+            "id": "msg_response",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "world", "annotations": []}],
+        }
+
+    async def test_deserialize_items_restores_tool_search_items(self):
+        """Test that tool search run items survive RunState round-trips."""
+        agent = Agent(name="TestAgent")
+        items = _deserialize_items(
+            [
+                {
+                    "type": "tool_search_call_item",
+                    "agent": {"name": "TestAgent"},
+                    "raw_item": {
+                        "id": "tsc_state",
+                        "type": "tool_search_call",
+                        "arguments": {"paths": ["crm"], "query": "profile"},
+                        "execution": "server",
+                        "status": "completed",
+                    },
+                },
+                {
+                    "type": "tool_search_output_item",
+                    "agent": {"name": "TestAgent"},
+                    "raw_item": {
+                        "id": "tso_state",
+                        "type": "tool_search_output",
+                        "execution": "server",
+                        "status": "completed",
+                        "tools": [
+                            {
+                                "type": "function",
+                                "name": "get_customer_profile",
+                                "description": "Fetch a CRM customer profile.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "customer_id": {
+                                            "type": "string",
+                                        }
+                                    },
+                                    "required": ["customer_id"],
+                                },
+                                "defer_loading": True,
+                            }
+                        ],
+                    },
+                },
+            ],
+            {"TestAgent": agent},
+        )
+
+        assert isinstance(items[0], ToolSearchCallItem)
+        assert isinstance(items[1], ToolSearchOutputItem)
+        assert isinstance(items[0].raw_item, ResponseToolSearchCall)
+        assert isinstance(items[1].raw_item, ResponseToolSearchOutputItem)
 
     async def test_deserialize_items_handles_missing_agent_name(self):
         """Test that _deserialize_items handles items with missing agent name."""

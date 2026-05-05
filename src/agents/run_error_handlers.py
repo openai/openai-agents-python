@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Union
+from typing import Any, Generic
 
 from typing_extensions import TypedDict
 
 from .agent import Agent
-from .exceptions import MaxTurnsExceeded
+from .exceptions import MaxTurnsExceeded, ModelRefusalError
 from .items import ModelResponse, RunItem, TResponseInputItem
 from .run_context import RunContextWrapper, TContext
 from .util._types import MaybeAwaitable
@@ -26,7 +27,7 @@ class RunErrorData:
 
 @dataclass
 class RunErrorHandlerInput(Generic[TContext]):
-    error: MaxTurnsExceeded
+    error: MaxTurnsExceeded | ModelRefusalError
     context: RunContextWrapper[TContext]
     run_data: RunErrorData
 
@@ -42,7 +43,7 @@ class RunErrorHandlerResult:
 # Handlers may return RunErrorHandlerResult, a dict with final_output, or a raw final output value.
 RunErrorHandler = Callable[
     [RunErrorHandlerInput[TContext]],
-    MaybeAwaitable[Union[RunErrorHandlerResult, dict[str, Any], Any, None]],
+    MaybeAwaitable[RunErrorHandlerResult | dict[str, Any] | Any | None],
 ]
 
 
@@ -50,6 +51,7 @@ class RunErrorHandlers(TypedDict, Generic[TContext], total=False):
     """Error handlers keyed by error kind."""
 
     max_turns: RunErrorHandler[TContext]
+    model_refusal: RunErrorHandler[TContext]
 
 
 __all__ = [

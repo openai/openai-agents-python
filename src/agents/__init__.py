@@ -1,10 +1,10 @@
 import logging
 import sys
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from openai import AsyncOpenAI
 
-from . import _config
+from . import _config, sandbox
 from .agent import (
     Agent,
     AgentBase,
@@ -22,6 +22,7 @@ from .exceptions import (
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     ModelBehaviorError,
+    ModelRefusalError,
     OutputGuardrailTripwireTriggered,
     RunErrorDetails,
     ToolInputGuardrailTripwireTriggered,
@@ -74,19 +75,34 @@ from .memory import (
     Session,
     SessionABC,
     SessionSettings,
-    SQLiteSession,
     is_openai_responses_compaction_aware_session,
 )
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider, ModelTracing
 from .models.multi_provider import MultiProvider
+from .models.openai_agent_registration import OpenAIAgentRegistrationConfig
 from .models.openai_chatcompletions import OpenAIChatCompletionsModel
 from .models.openai_provider import OpenAIProvider
-from .models.openai_responses import OpenAIResponsesModel, OpenAIResponsesWSModel
+from .models.openai_responses import (
+    OpenAIResponsesModel,
+    OpenAIResponsesWebSocketOptions,
+    OpenAIResponsesWSModel,
+)
 from .prompts import DynamicPromptFunction, GenerateDynamicPromptData, Prompt
 from .repl import run_demo_loop
 from .responses_websocket_session import ResponsesWebSocketSession, responses_websocket_session
-from .result import RunResult, RunResultStreaming
+from .result import AgentToolInvocation, RunResult, RunResultStreaming
+from .retry import (
+    ModelRetryAdvice,
+    ModelRetryAdviceRequest,
+    ModelRetryBackoffSettings,
+    ModelRetryNormalizedError,
+    ModelRetrySettings,
+    RetryDecision,
+    RetryPolicy,
+    RetryPolicyContext,
+    retry_policies,
+)
 from .run import (
     ReasoningItemIdPolicy,
     RunConfig,
@@ -114,6 +130,7 @@ from .tool import (
     CodeInterpreterTool,
     ComputerProvider,
     ComputerTool,
+    CustomTool,
     FileSearchTool,
     FunctionTool,
     FunctionToolResult,
@@ -148,17 +165,21 @@ from .tool import (
     ShellToolLocalSkill,
     ShellToolSkillReference,
     Tool,
+    ToolOrigin,
+    ToolOriginType,
     ToolOutputFileContent,
     ToolOutputFileContentDict,
     ToolOutputImage,
     ToolOutputImageDict,
     ToolOutputText,
     ToolOutputTextDict,
+    ToolSearchTool,
     WebSearchTool,
     default_tool_error_function,
     dispose_resolved_computers,
     function_tool,
     resolve_computer,
+    tool_namespace,
 )
 from .tool_guardrails import (
     ToolGuardrailFunctionOutput,
@@ -190,6 +211,7 @@ from .tracing import (
     add_trace_processor,
     agent_span,
     custom_span,
+    flush_traces,
     function_span,
     gen_span_id,
     gen_trace_id,
@@ -211,6 +233,19 @@ from .tracing import (
 )
 from .usage import Usage
 from .version import __version__
+
+if TYPE_CHECKING:
+    from .memory.sqlite_session import SQLiteSession
+
+
+def __getattr__(name: str) -> Any:
+    if name == "SQLiteSession":
+        from .memory.sqlite_session import SQLiteSession
+
+        globals()[name] = SQLiteSession
+        return SQLiteSession
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def set_default_openai_key(key: str, use_for_tracing: bool = True) -> None:
@@ -257,6 +292,25 @@ def set_default_openai_responses_transport(transport: Literal["http", "websocket
     _config.set_default_openai_responses_transport(transport)
 
 
+def set_default_openai_agent_registration(
+    config: OpenAIAgentRegistrationConfig | None,
+) -> None:
+    """Set the default OpenAI agent registration config.
+
+    This controls the agent harness ID that OpenAI providers resolve from SDK configuration. If
+    this is not set, providers fall back to the ``OPENAI_AGENT_HARNESS_ID`` environment variable.
+    """
+    _config.set_default_openai_agent_registration(config)
+
+
+def set_default_openai_harness(harness_id: str | None) -> None:
+    """Set the default OpenAI agent harness ID for SDK-managed OpenAI providers.
+
+    Passing ``None`` clears the default and restores environment variable fallback.
+    """
+    _config.set_default_openai_harness(harness_id)
+
+
 def enable_verbose_stdout_logging():
     """Enables verbose logging to stdout. This is useful for debugging."""
     logger = logging.getLogger("openai.agents")
@@ -283,9 +337,19 @@ __all__ = [
     "ModelProvider",
     "ModelTracing",
     "ModelSettings",
+    "ModelRetryAdvice",
+    "ModelRetryAdviceRequest",
+    "ModelRetryBackoffSettings",
+    "ModelRetryNormalizedError",
+    "ModelRetrySettings",
+    "RetryDecision",
+    "RetryPolicy",
+    "RetryPolicyContext",
+    "retry_policies",
     "OpenAIChatCompletionsModel",
     "MultiProvider",
     "OpenAIProvider",
+    "OpenAIAgentRegistrationConfig",
     "OpenAIResponsesModel",
     "OpenAIResponsesWSModel",
     "AgentOutputSchema",
@@ -304,6 +368,7 @@ __all__ = [
     "Prompt",
     "MaxTurnsExceeded",
     "ModelBehaviorError",
+    "ModelRefusalError",
     "ToolTimeoutError",
     "UserError",
     "InputGuardrail",
@@ -337,6 +402,8 @@ __all__ = [
     "MCPApprovalResponseItem",
     "ToolCallItem",
     "ToolCallOutputItem",
+    "ToolOrigin",
+    "ToolOriginType",
     "ReasoningItem",
     "ItemHelpers",
     "RunHooks",
@@ -360,6 +427,7 @@ __all__ = [
     "RunErrorHandlerInput",
     "RunErrorHandlerResult",
     "RunErrorHandlers",
+    "AgentToolInvocation",
     "RunResult",
     "RunResultStreaming",
     "ResponsesWebSocketSession",
@@ -376,6 +444,7 @@ __all__ = [
     "FunctionToolResult",
     "ComputerTool",
     "ComputerProvider",
+    "CustomTool",
     "FileSearchTool",
     "CodeInterpreterTool",
     "ImageGenerationTool",
@@ -420,13 +489,16 @@ __all__ = [
     "ToolOutputImageDict",
     "ToolOutputFileContent",
     "ToolOutputFileContentDict",
+    "ToolSearchTool",
     "function_tool",
+    "tool_namespace",
     "resolve_computer",
     "dispose_resolved_computers",
     "Usage",
     "add_trace_processor",
     "agent_span",
     "custom_span",
+    "flush_traces",
     "function_span",
     "generation_span",
     "get_current_span",
@@ -461,11 +533,15 @@ __all__ = [
     "set_default_openai_client",
     "set_default_openai_api",
     "set_default_openai_responses_transport",
+    "OpenAIResponsesWebSocketOptions",
+    "set_default_openai_harness",
+    "set_default_openai_agent_registration",
     "responses_websocket_session",
     "set_tracing_export_api_key",
     "enable_verbose_stdout_logging",
     "gen_trace_id",
     "gen_span_id",
     "default_tool_error_function",
+    "sandbox",
     "__version__",
 ]

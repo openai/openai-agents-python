@@ -3,7 +3,9 @@
 This example is intentionally minimal:
 1. A single sensitive tool requires human approval.
 2. The first turn always issues that tool call.
-3. Rejection uses a custom message via ``tool_error_formatter``.
+3. ``tool_error_formatter`` defines the universal fallback message shape.
+4. A per-call ``rejection_message`` passed to ``state.reject(...)`` overrides that fallback.
+5. The example prints both the tool output and the assistant's final reply.
 """
 
 import asyncio
@@ -20,10 +22,10 @@ from examples.auto_mode import confirm_with_fallback
 
 
 async def tool_error_formatter(args: ToolErrorFormatterArgs[None]) -> str | None:
-    """Build a simple output message for rejected tool calls."""
+    """Build the universal fallback output message for rejected tool calls."""
     if args.kind != "approval_rejected":
         return None
-    # The defualt one is "Tool execution was not approved."
+    # The default message is "Tool execution was not approved."
     return "Publish action was canceled because approval was rejected."
 
 
@@ -33,17 +35,34 @@ async def publish_announcement(title: str, body: str) -> str:
     return f"Published announcement '{title}' with body: {body}"
 
 
+def _find_formatter_output(result: object) -> str | None:
+    items = getattr(result, "new_items", None)
+    if not isinstance(items, list):
+        return None
+
+    for item in items:
+        if getattr(item, "type", None) != "tool_call_output_item":
+            continue
+        output = getattr(item, "output", None)
+        if isinstance(output, str):
+            return output
+    return None
+
+
 async def main() -> None:
     agent = Agent(
         name="Operations Assistant",
         instructions=(
             "When a user asks to publish an announcement, call the publish_announcement tool directly. "
-            "Do not ask the user for approval in plain text; runtime approvals handle that."
+            "Do not ask the user for approval in plain text; runtime approvals handle that. "
+            "If the tool call is rejected, respond with the exact rejection message and nothing else."
         ),
         model_settings=ModelSettings(tool_choice="publish_announcement"),
         tools=[publish_announcement],
     )
     run_config = RunConfig(tool_error_formatter=tool_error_formatter)
+    # ``tool_error_formatter`` is the universal fallback for approval rejects.
+    # A specific ``rejection_message`` passed to ``state.reject(...)`` below overrides it.
 
     result = await Runner.run(
         agent,
@@ -65,9 +84,20 @@ async def main() -> None:
             if approved:
                 state.approve(interruption)
             else:
-                state.reject(interruption)
+                # This per-call rejection message takes precedence over ``tool_error_formatter``.
+                state.reject(
+                    interruption,
+                    rejection_message=(
+                        "Publish action was canceled because the reviewer denied approval."
+                    ),
+                )
 
         result = await Runner.run(agent, state, run_config=run_config)
+
+    formatter_output = _find_formatter_output(result)
+    if formatter_output:
+        print("\nFormatter output:")
+        print(formatter_output)
 
     print("\nFinal output:")
     print(result.final_output)

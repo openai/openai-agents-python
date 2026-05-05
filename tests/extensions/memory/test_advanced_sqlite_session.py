@@ -1,6 +1,10 @@
 """Tests for AdvancedSQLiteSession functionality."""
 
-from typing import Any, Optional, cast
+import asyncio
+import json
+import tempfile
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -44,9 +48,7 @@ def usage_data() -> Usage:
     )
 
 
-def create_mock_run_result(
-    usage: Optional[Usage] = None, agent: Optional[Agent] = None
-) -> RunResult:
+def create_mock_run_result(usage: Usage | None = None, agent: Agent | None = None) -> RunResult:
     """Helper function to create a mock RunResult for testing."""
     if agent is None:
         agent = Agent(name="test", model=FakeModel())
@@ -95,6 +97,52 @@ async def test_advanced_session_basic_functionality(agent: Agent):
     assert len(retrieved) == 2
     assert retrieved[0].get("content") == "Hello"
     assert retrieved[1].get("content") == "Hi there!"
+
+    session.close()
+
+
+async def test_advanced_session_respects_custom_table_names():
+    """AdvancedSQLiteSession should consistently use configured table names."""
+    session = AdvancedSQLiteSession(
+        session_id="advanced_custom_tables",
+        create_tables=True,
+        sessions_table="custom_agent_sessions",
+        messages_table="custom_agent_messages",
+    )
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi there!"},
+        {"role": "user", "content": "Let's do some math"},
+        {"role": "assistant", "content": "Sure"},
+    ]
+    await session.add_items(items)
+
+    assert await session.get_items() == items
+
+    conversation_turns = await session.get_conversation_turns()
+    assert [turn["turn"] for turn in conversation_turns] == [1, 2]
+
+    matching_turns = await session.find_turns_by_content("math")
+    assert [turn["turn"] for turn in matching_turns] == [2]
+
+    conn = session._get_connection()
+    structure_foreign_keys = {
+        row[2] for row in conn.execute("PRAGMA foreign_key_list(message_structure)").fetchall()
+    }
+    usage_foreign_keys = {
+        row[2] for row in conn.execute("PRAGMA foreign_key_list(turn_usage)").fetchall()
+    }
+    assert structure_foreign_keys == {
+        session.messages_table,
+        session.sessions_table,
+    }
+    assert usage_foreign_keys == {session.sessions_table}
+
+    branch_name = await session.create_branch_from_turn(2, "custom_branch")
+    assert branch_name == "custom_branch"
+    assert await session.get_items() == items[:2]
+    assert await session.get_items(branch_id="main") == items
 
     session.close()
 
@@ -155,6 +203,174 @@ async def test_tool_usage_tracking(agent: Agent):
     tool_names = {usage[0] for usage in tool_usage}
     assert "web_search" in tool_names
     assert "calculator" in tool_names
+
+    session.close()
+
+
+async def test_tool_usage_tracking_preserves_namespaces_and_tool_search(agent: Agent):
+    """Tool usage should retain namespaces and count tool_search calls once."""
+    session_id = "tools_namespace_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Look up the same account in multiple systems"},
+        {
+            "type": "function_call",
+            "name": "lookup_account",
+            "namespace": "crm",
+            "arguments": '{"account_id": "acct_123"}',
+            "call_id": "crm-call",
+        },
+        {
+            "type": "function_call",
+            "name": "lookup_account",
+            "namespace": "billing",
+            "arguments": '{"account_id": "acct_123"}',
+            "call_id": "billing-call",
+        },
+        {
+            "type": "tool_search_call",
+            "id": "tsc_memory",
+            "arguments": {"paths": ["crm"], "query": "lookup_account"},
+            "execution": "server",
+            "status": "completed",
+        },
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "id": "tso_memory",
+                "execution": "server",
+                "status": "completed",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup_account",
+                        "description": "Look up an account.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "account_id": {
+                                    "type": "string",
+                                }
+                            },
+                            "required": ["account_id"],
+                        },
+                        "defer_loading": True,
+                    }
+                ],
+            },
+        ),
+    ]
+    await session.add_items(items)
+
+    usage_by_tool = {tool_name: count for tool_name, count, _turn in await session.get_tool_usage()}
+
+    assert usage_by_tool["crm.lookup_account"] == 1
+    assert usage_by_tool["billing.lookup_account"] == 1
+    assert usage_by_tool["tool_search"] == 1
+
+    session.close()
+
+
+async def test_tool_usage_tracking_counts_tool_search_output_without_matching_call(
+    agent: Agent,
+) -> None:
+    """Tool-search output-only histories should still report one tool_search usage."""
+    session_id = "tools_tool_search_output_only_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Look up customer_42"},
+        cast(
+            TResponseInputItem,
+            {
+                "type": "tool_search_output",
+                "id": "tso_memory_only",
+                "execution": "server",
+                "status": "completed",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup_account",
+                        "description": "Look up an account.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "account_id": {
+                                    "type": "string",
+                                }
+                            },
+                            "required": ["account_id"],
+                        },
+                    }
+                ],
+            },
+        ),
+    ]
+    await session.add_items(items)
+
+    usage_by_tool = {tool_name: count for tool_name, count, _turn in await session.get_tool_usage()}
+
+    assert usage_by_tool["tool_search"] == 1
+
+    session.close()
+
+
+async def test_tool_usage_tracking_uses_bare_name_for_deferred_top_level_calls(agent: Agent):
+    """Deferred top-level tool calls should not retain synthetic namespace aliases."""
+    session_id = "tools_deferred_top_level_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "What is the weather?"},
+        {
+            "type": "function_call",
+            "name": "get_weather",
+            "arguments": '{"city": "Tokyo"}',
+            "call_id": "weather-call",
+        },
+        {
+            "type": "function_call",
+            "name": "get_weather",
+            "namespace": "get_weather",
+            "arguments": '{"city": "Osaka"}',
+            "call_id": "weather-call-2",
+        },
+    ]
+    await session.add_items(items)
+
+    usage_by_tool = {tool_name: count for tool_name, count, _turn in await session.get_tool_usage()}
+
+    assert usage_by_tool["get_weather"] == 2
+    assert "get_weather.get_weather" not in usage_by_tool
+
+    session.close()
+
+
+async def test_tool_usage_tracking_collapses_reserved_same_name_namespace_shape(
+    agent: Agent,
+):
+    """Reserved same-name namespace wire shapes should collapse to the bare tool name."""
+    session_id = "tools_deferred_top_level_namespace_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "What is the weather?"},
+        {
+            "type": "function_call",
+            "name": "lookup_account",
+            "namespace": "lookup_account",
+            "arguments": '{"account_id": "acct_123"}',
+            "call_id": "lookup-call",
+        },
+    ]
+    await session.add_items(items)
+
+    usage_by_tool = {tool_name: count for tool_name, count, _turn in await session.get_tool_usage()}
+
+    assert usage_by_tool["lookup_account"] == 1
+    assert "lookup_account.lookup_account" not in usage_by_tool
 
     session.close()
 
@@ -1129,3 +1345,52 @@ async def test_runner_with_session_settings_override(agent: Agent):
     assert len(history_items) == 2
 
     session.close()
+
+
+async def test_concurrent_add_items_preserves_message_structure_for_file_db():
+    """Concurrent add_items calls should keep agent_messages and message_structure aligned."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "advanced_concurrent.db"
+        session = AdvancedSQLiteSession(
+            session_id="advanced_concurrent",
+            db_path=db_path,
+            create_tables=True,
+        )
+
+        async def add_batch(worker_id: int) -> list[str]:
+            contents = [f"worker-{worker_id}-message-{index}" for index in range(10)]
+            await session.add_items([{"role": "user", "content": content} for content in contents])
+            return contents
+
+        expected_batches = await asyncio.gather(*(add_batch(worker_id) for worker_id in range(8)))
+        expected_contents = {content for batch in expected_batches for content in batch}
+
+        retrieved_items = await session.get_items()
+        retrieved_contents = {
+            content
+            for item in retrieved_items
+            for content in [item.get("content")]
+            if isinstance(content, str)
+        }
+
+        assert retrieved_contents == expected_contents
+        assert len(retrieved_items) == len(expected_contents)
+
+        with session._locked_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT m.message_data
+                FROM {session.messages_table} m
+                JOIN message_structure s ON s.message_id = m.id
+                WHERE m.session_id = ?
+                ORDER BY s.sequence_number ASC
+                """,
+                (session.session_id,),
+            ).fetchall()
+
+        structured_contents = {json.loads(message_data).get("content") for (message_data,) in rows}
+
+        assert structured_contents == expected_contents
+        assert len(rows) == len(expected_contents)
+
+        session.close()

@@ -20,37 +20,88 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from .. import _debug
 from ..agent_output import AgentOutputSchemaBase
+from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..logger import logger
+from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import Tool
 from ..tracing import generation_span
 from ..tracing.span_data import GenerationSpanData
 from ..tracing.spans import Span
 from ..usage import Usage
 from ..util._json import _to_dump_compatible
+from ._openai_retry import get_openai_retry_advice
+from ._retry_runtime import should_disable_provider_managed_retries
 from .chatcmpl_converter import Converter
 from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
 from .openai_responses import Converter as OpenAIResponsesConverter
+from .reasoning_content_replay import ShouldReplayReasoningContent
 
 if TYPE_CHECKING:
     from ..model_settings import ModelSettings
 
 
 class OpenAIChatCompletionsModel(Model):
+    _OFFICIAL_OPENAI_SUPPORTED_INPUT_CONTENT_TYPES = frozenset(
+        {"input_text", "input_image", "input_audio", "input_file"}
+    )
+
     def __init__(
         self,
         model: str | ChatModel,
         openai_client: AsyncOpenAI,
+        should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
     ) -> None:
         self.model = model
         self._client = openai_client
+        self.should_replay_reasoning_content = should_replay_reasoning_content
 
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
+
+    def _supports_default_prompt_cache_key(self) -> bool:
+        return ChatCmplHelpers.is_openai(self._get_client())
+
+    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
+        return get_openai_retry_advice(request)
+
+    def _validate_official_openai_input_content_types(
+        self, request_input: str | list[TResponseInputItem]
+    ) -> None:
+        if not ChatCmplHelpers.is_openai(self._client) or isinstance(request_input, str):
+            return
+
+        for item in request_input:
+            message = Converter.maybe_easy_input_message(item) or Converter.maybe_input_message(
+                item
+            )
+            if message is None or message["role"] != "user":
+                continue
+
+            content_parts = message["content"]
+            if isinstance(content_parts, str):
+                continue
+
+            for part in content_parts:
+                if not isinstance(part, dict):
+                    continue
+
+                normalized_part = Converter._normalize_input_content_part_alias(part)
+                if not isinstance(normalized_part, dict):
+                    continue
+
+                content_type = normalized_part.get("type")
+                if content_type in self._OFFICIAL_OPENAI_SUPPORTED_INPUT_CONTENT_TYPES:
+                    continue
+
+                raise UserError(
+                    "Unsupported content type for official OpenAI Chat Completions: "
+                    f"{content_type!r} in {part}"
+                )
 
     async def get_response(
         self,
@@ -82,6 +133,14 @@ class OpenAIChatCompletionsModel(Model):
                 stream=False,
                 prompt=prompt,
             )
+
+            if not response.choices:
+                provider_error = getattr(response, "error", None)
+                error_details = f": {provider_error}" if provider_error is not None else ""
+                raise ModelBehaviorError(
+                    f"ChatCompletion response has no choices (possible provider error payload)"
+                    f"{error_details}"
+                )
 
             message: ChatCompletionMessage | None = None
             first_choice: Choice | None = None
@@ -272,7 +331,13 @@ class OpenAIChatCompletionsModel(Model):
         stream: bool = False,
         prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
-        converted_messages = Converter.items_to_messages(input, model=self.model)
+        self._validate_official_openai_input_content_types(input)
+        converted_messages = Converter.items_to_messages(
+            input,
+            model=self.model,
+            base_url=str(self._client.base_url),
+            should_replay_reasoning_content=self.should_replay_reasoning_content,
+        )
 
         if system_instructions:
             converted_messages.insert(
@@ -334,31 +399,46 @@ class OpenAIChatCompletionsModel(Model):
 
         stream_param: Literal[True] | Omit = True if stream else omit
 
-        ret = await self._get_client().chat.completions.create(
-            model=self.model,
-            messages=converted_messages,
-            tools=tools_param,
-            temperature=self._non_null_or_omit(model_settings.temperature),
-            top_p=self._non_null_or_omit(model_settings.top_p),
-            frequency_penalty=self._non_null_or_omit(model_settings.frequency_penalty),
-            presence_penalty=self._non_null_or_omit(model_settings.presence_penalty),
-            max_tokens=self._non_null_or_omit(model_settings.max_tokens),
-            tool_choice=tool_choice,
-            response_format=response_format,
-            parallel_tool_calls=parallel_tool_calls,
-            stream=cast(Any, stream_param),
-            stream_options=self._non_null_or_omit(stream_options),
-            store=self._non_null_or_omit(store),
-            reasoning_effort=self._non_null_or_omit(reasoning_effort),
-            verbosity=self._non_null_or_omit(model_settings.verbosity),
-            top_logprobs=self._non_null_or_omit(model_settings.top_logprobs),
-            prompt_cache_retention=self._non_null_or_omit(model_settings.prompt_cache_retention),
-            extra_headers=self._merge_headers(model_settings),
-            extra_query=model_settings.extra_query,
-            extra_body=model_settings.extra_body,
-            metadata=self._non_null_or_omit(model_settings.metadata),
-            **(model_settings.extra_args or {}),
+        create_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": converted_messages,
+            "tools": tools_param,
+            "temperature": self._non_null_or_omit(model_settings.temperature),
+            "top_p": self._non_null_or_omit(model_settings.top_p),
+            "frequency_penalty": self._non_null_or_omit(model_settings.frequency_penalty),
+            "presence_penalty": self._non_null_or_omit(model_settings.presence_penalty),
+            "max_tokens": self._non_null_or_omit(model_settings.max_tokens),
+            "tool_choice": tool_choice,
+            "response_format": response_format,
+            "parallel_tool_calls": parallel_tool_calls,
+            "stream": cast(Any, stream_param),
+            "stream_options": self._non_null_or_omit(stream_options),
+            "store": self._non_null_or_omit(store),
+            "reasoning_effort": self._non_null_or_omit(reasoning_effort),
+            "verbosity": self._non_null_or_omit(model_settings.verbosity),
+            "top_logprobs": self._non_null_or_omit(model_settings.top_logprobs),
+            "prompt_cache_retention": self._non_null_or_omit(model_settings.prompt_cache_retention),
+            "extra_headers": self._merge_headers(model_settings),
+            "extra_query": model_settings.extra_query,
+            "extra_body": model_settings.extra_body,
+            "metadata": self._non_null_or_omit(model_settings.metadata),
+        }
+        duplicate_extra_arg_keys = sorted(
+            set(create_kwargs).intersection(model_settings.extra_args or {})
         )
+        if duplicate_extra_arg_keys:
+            if len(duplicate_extra_arg_keys) == 1:
+                key = duplicate_extra_arg_keys[0]
+                raise TypeError(
+                    f"chat.completions.create() got multiple values for keyword argument '{key}'"
+                )
+            keys = ", ".join(repr(key) for key in duplicate_extra_arg_keys)
+            raise TypeError(
+                f"chat.completions.create() got multiple values for keyword arguments {keys}"
+            )
+        create_kwargs.update(model_settings.extra_args or {})
+
+        ret = await self._get_client().chat.completions.create(**create_kwargs)
 
         if isinstance(ret, ChatCompletion):
             return ret
@@ -394,6 +474,10 @@ class OpenAIChatCompletionsModel(Model):
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
             self._client = AsyncOpenAI()
+        if should_disable_provider_managed_retries():
+            with_options = getattr(self._client, "with_options", None)
+            if callable(with_options):
+                return cast(AsyncOpenAI, with_options(max_retries=0))
         return self._client
 
     def _merge_headers(self, model_settings: ModelSettings):

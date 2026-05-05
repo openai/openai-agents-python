@@ -25,6 +25,10 @@ from agents.guardrail import input_guardrail, output_guardrail
 from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_text_message
 
+SHORT_DELAY = 0.01
+MEDIUM_DELAY = 0.03
+LONG_DELAY = 0.05
+
 
 def get_sync_guardrail(triggers: bool, output_info: Any | None = None):
     def sync_guardrail(
@@ -224,6 +228,7 @@ async def test_input_guardrail_decorators():
     )
     assert not result.output.tripwire_triggered
     assert result.output.output_info == "test_1"
+    assert guardrail.get_name() == "decorated_input_guardrail"
 
     guardrail = decorated_named_input_guardrail
     result = await guardrail.run(
@@ -262,6 +267,7 @@ async def test_output_guardrail_decorators():
     )
     assert not result.output.tripwire_triggered
     assert result.output.output_info == "test_3"
+    assert guardrail.get_name() == "decorated_output_guardrail"
 
     guardrail = decorated_named_output_guardrail
     result = await guardrail.run(
@@ -336,7 +342,7 @@ async def test_parallel_guardrail_runs_concurrently_with_agent():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal guardrail_executed
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         guardrail_executed = True
         return GuardrailFunctionOutput(
             output_info="parallel_ok",
@@ -370,7 +376,7 @@ async def test_parallel_guardrail_runs_concurrently_with_agent_streaming():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal guardrail_executed
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(SHORT_DELAY)
         guardrail_executed = True
         return GuardrailFunctionOutput(
             output_info="parallel_streaming_ok",
@@ -407,7 +413,7 @@ async def test_blocking_guardrail_prevents_agent_execution():
     ) -> GuardrailFunctionOutput:
         nonlocal guardrail_executed
         guardrail_executed = True
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         return GuardrailFunctionOutput(
             output_info="security_violation",
             tripwire_triggered=True,
@@ -440,7 +446,7 @@ async def test_blocking_guardrail_prevents_agent_execution_streaming():
     ) -> GuardrailFunctionOutput:
         nonlocal guardrail_executed
         guardrail_executed = True
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         return GuardrailFunctionOutput(
             output_info="blocked_streaming",
             tripwire_triggered=True,
@@ -481,7 +487,7 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal guardrail_executed
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(LONG_DELAY)
         guardrail_executed = True
         return GuardrailFunctionOutput(
             output_info="slow_parallel_triggered",
@@ -531,7 +537,7 @@ async def test_parallel_guardrail_trip_cancels_model_task():
     async def slow_get_response(*args, **kwargs):
         model_started.set()
         try:
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.02)
             return await original_get_response(*args, **kwargs)
         except asyncio.CancelledError:
             model_cancelled.set()
@@ -578,7 +584,7 @@ async def test_parallel_guardrail_trip_compat_mode_does_not_cancel_model_task():
     async def slow_get_response(*args, **kwargs):
         model_started.set()
         try:
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.02)
             return await original_get_response(*args, **kwargs)
         except asyncio.CancelledError:
             model_cancelled.set()
@@ -623,7 +629,7 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution_streaming():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal guardrail_executed
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(LONG_DELAY)
         guardrail_executed = True
         return GuardrailFunctionOutput(
             output_info="slow_parallel_triggered_streaming",
@@ -655,6 +661,143 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution_streaming():
 
 
 @pytest.mark.asyncio
+async def test_parallel_guardrail_trip_before_tool_execution_stops_streaming_turn():
+    tool_was_executed = False
+    model_started = asyncio.Event()
+    guardrail_tripped = asyncio.Event()
+
+    @function_tool
+    def dangerous_tool() -> str:
+        nonlocal tool_was_executed
+        tool_was_executed = True
+        return "tool_executed"
+
+    @input_guardrail(run_in_parallel=True)
+    async def tripwire_before_tool_execution(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await asyncio.wait_for(model_started.wait(), timeout=1)
+        guardrail_tripped.set()
+        return GuardrailFunctionOutput(
+            output_info="parallel_trip_before_tool_execution",
+            tripwire_triggered=True,
+        )
+
+    model = FakeModel()
+    original_stream_response = model.stream_response
+
+    async def delayed_stream_response(*args, **kwargs):
+        model_started.set()
+        await asyncio.wait_for(guardrail_tripped.wait(), timeout=1)
+        await asyncio.sleep(SHORT_DELAY)
+        async for event in original_stream_response(*args, **kwargs):
+            yield event
+
+    agent = Agent(
+        name="streaming_guardrail_hardening_agent",
+        instructions="Call the dangerous_tool immediately",
+        tools=[dangerous_tool],
+        input_guardrails=[tripwire_before_tool_execution],
+        model=model,
+    )
+    model.set_next_output([get_function_tool_call("dangerous_tool", arguments="{}")])
+    model.set_next_output([get_text_message("done")])
+
+    with patch.object(model, "stream_response", side_effect=delayed_stream_response):
+        result = Runner.run_streamed(agent, "trigger guardrail")
+
+        with pytest.raises(InputGuardrailTripwireTriggered):
+            async for _event in result.stream_events():
+                pass
+
+    assert model_started.is_set() is True
+    assert guardrail_tripped.is_set() is True
+    assert tool_was_executed is False
+    assert model.first_turn_args is not None, "Model should have been called in parallel mode"
+
+
+@pytest.mark.asyncio
+async def test_parallel_guardrail_trip_with_slow_cancel_sibling_stops_streaming_turn():
+    tool_was_executed = False
+    model_started = asyncio.Event()
+    guardrail_tripped = asyncio.Event()
+    slow_cancel_started = asyncio.Event()
+    slow_cancel_finished = asyncio.Event()
+
+    @function_tool
+    def dangerous_tool() -> str:
+        nonlocal tool_was_executed
+        tool_was_executed = True
+        return "tool_executed"
+
+    @input_guardrail(run_in_parallel=True)
+    async def tripwire_before_tool_execution(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await asyncio.wait_for(model_started.wait(), timeout=1)
+        guardrail_tripped.set()
+        return GuardrailFunctionOutput(
+            output_info="parallel_trip_before_tool_execution_with_slow_cancel",
+            tripwire_triggered=True,
+        )
+
+    @input_guardrail(run_in_parallel=True)
+    async def slow_to_cancel_guardrail(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        try:
+            await asyncio.Event().wait()
+            return GuardrailFunctionOutput(
+                output_info="slow_to_cancel_guardrail_completed",
+                tripwire_triggered=False,
+            )
+        except asyncio.CancelledError:
+            slow_cancel_started.set()
+            await asyncio.sleep(SHORT_DELAY)
+            slow_cancel_finished.set()
+            raise
+
+    model = FakeModel()
+    original_stream_response = model.stream_response
+
+    async def delayed_stream_response(*args, **kwargs):
+        model_started.set()
+        await asyncio.wait_for(guardrail_tripped.wait(), timeout=1)
+        await asyncio.wait_for(slow_cancel_started.wait(), timeout=1)
+        async for event in original_stream_response(*args, **kwargs):
+            yield event
+
+    agent = Agent(
+        name="streaming_guardrail_slow_cancel_agent",
+        instructions="Call the dangerous_tool immediately",
+        tools=[dangerous_tool],
+        input_guardrails=[tripwire_before_tool_execution, slow_to_cancel_guardrail],
+        model=model,
+    )
+    model.set_next_output([get_function_tool_call("dangerous_tool", arguments="{}")])
+    model.set_next_output([get_text_message("done")])
+
+    with patch.object(model, "stream_response", side_effect=delayed_stream_response):
+        result = Runner.run_streamed(agent, "trigger guardrail")
+
+        with pytest.raises(InputGuardrailTripwireTriggered) as excinfo:
+            async for _event in result.stream_events():
+                pass
+
+    exc = excinfo.value
+    assert exc.run_data is not None
+    assert [res.output.output_info for res in exc.run_data.input_guardrail_results] == [
+        "parallel_trip_before_tool_execution_with_slow_cancel"
+    ]
+    assert model_started.is_set() is True
+    assert guardrail_tripped.is_set() is True
+    assert slow_cancel_started.is_set() is True
+    assert slow_cancel_finished.is_set() is True
+    assert tool_was_executed is False
+    assert model.first_turn_args is not None, "Model should have been called in parallel mode"
+
+
+@pytest.mark.asyncio
 async def test_blocking_guardrail_prevents_tool_execution():
     tool_was_executed = False
     guardrail_executed = False
@@ -670,7 +813,7 @@ async def test_blocking_guardrail_prevents_tool_execution():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal guardrail_executed
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         guardrail_executed = True
         return GuardrailFunctionOutput(
             output_info="blocked_dangerous_input",
@@ -711,7 +854,7 @@ async def test_blocking_guardrail_prevents_tool_execution_streaming():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal guardrail_executed
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         guardrail_executed = True
         return GuardrailFunctionOutput(
             output_info="blocked_dangerous_input_streaming",
@@ -748,7 +891,7 @@ async def test_parallel_guardrail_passes_agent_continues():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal guardrail_executed
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(SHORT_DELAY)
         guardrail_executed = True
         return GuardrailFunctionOutput(
             output_info="parallel_passed",
@@ -780,7 +923,7 @@ async def test_parallel_guardrail_passes_agent_continues_streaming():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal guardrail_executed
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(SHORT_DELAY)
         guardrail_executed = True
         return GuardrailFunctionOutput(
             output_info="parallel_passed_streaming",
@@ -816,7 +959,7 @@ async def test_blocking_guardrail_passes_agent_continues():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal guardrail_executed
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         guardrail_executed = True
         return GuardrailFunctionOutput(
             output_info="blocking_passed",
@@ -848,7 +991,7 @@ async def test_blocking_guardrail_passes_agent_continues_streaming():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         nonlocal guardrail_executed
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         guardrail_executed = True
         return GuardrailFunctionOutput(
             output_info="blocking_passed_streaming",
@@ -884,7 +1027,7 @@ async def test_mixed_blocking_and_parallel_guardrails():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         timestamps["blocking_start"] = time.time()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         timestamps["blocking_end"] = time.time()
         return GuardrailFunctionOutput(
             output_info="blocking_passed",
@@ -896,7 +1039,7 @@ async def test_mixed_blocking_and_parallel_guardrails():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         timestamps["parallel_start"] = time.time()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         timestamps["parallel_end"] = time.time()
         return GuardrailFunctionOutput(
             output_info="parallel_passed",
@@ -954,7 +1097,7 @@ async def test_mixed_blocking_and_parallel_guardrails_streaming():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         timestamps["blocking_start"] = time.time()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         timestamps["blocking_end"] = time.time()
         return GuardrailFunctionOutput(
             output_info="blocking_passed",
@@ -966,7 +1109,7 @@ async def test_mixed_blocking_and_parallel_guardrails_streaming():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         timestamps["parallel_start"] = time.time()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         timestamps["parallel_end"] = time.time()
         return GuardrailFunctionOutput(
             output_info="parallel_passed",
@@ -1027,7 +1170,7 @@ async def test_multiple_blocking_guardrails_complete_before_agent():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         timestamps["first_blocking_start"] = time.time()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         timestamps["first_blocking_end"] = time.time()
         return GuardrailFunctionOutput(
             output_info="first_passed",
@@ -1039,7 +1182,7 @@ async def test_multiple_blocking_guardrails_complete_before_agent():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         timestamps["second_blocking_start"] = time.time()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         timestamps["second_blocking_end"] = time.time()
         return GuardrailFunctionOutput(
             output_info="second_passed",
@@ -1094,7 +1237,7 @@ async def test_multiple_blocking_guardrails_complete_before_agent_streaming():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         timestamps["first_blocking_start"] = time.time()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         timestamps["first_blocking_end"] = time.time()
         return GuardrailFunctionOutput(
             output_info="first_passed",
@@ -1106,7 +1249,7 @@ async def test_multiple_blocking_guardrails_complete_before_agent_streaming():
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
         timestamps["second_blocking_start"] = time.time()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         timestamps["second_blocking_end"] = time.time()
         return GuardrailFunctionOutput(
             output_info="second_passed",
@@ -1167,7 +1310,7 @@ async def test_multiple_blocking_guardrails_one_triggers():
     ) -> GuardrailFunctionOutput:
         nonlocal first_guardrail_executed
         timestamps["first_blocking_start"] = time.time()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         first_guardrail_executed = True
         timestamps["first_blocking_end"] = time.time()
         return GuardrailFunctionOutput(
@@ -1181,7 +1324,7 @@ async def test_multiple_blocking_guardrails_one_triggers():
     ) -> GuardrailFunctionOutput:
         nonlocal second_guardrail_executed
         timestamps["second_blocking_start"] = time.time()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         second_guardrail_executed = True
         timestamps["second_blocking_end"] = time.time()
         return GuardrailFunctionOutput(
@@ -1224,7 +1367,7 @@ async def test_multiple_blocking_guardrails_one_triggers_streaming():
     ) -> GuardrailFunctionOutput:
         nonlocal first_guardrail_executed
         timestamps["first_blocking_start"] = time.time()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         first_guardrail_executed = True
         timestamps["first_blocking_end"] = time.time()
         return GuardrailFunctionOutput(
@@ -1238,7 +1381,7 @@ async def test_multiple_blocking_guardrails_one_triggers_streaming():
     ) -> GuardrailFunctionOutput:
         nonlocal second_guardrail_executed
         timestamps["second_blocking_start"] = time.time()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(MEDIUM_DELAY)
         second_guardrail_executed = True
         timestamps["second_blocking_end"] = time.time()
         return GuardrailFunctionOutput(
@@ -1349,7 +1492,7 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger():
     ) -> GuardrailFunctionOutput:
         nonlocal fast_guardrail_executed
         timestamps["fast_start"] = time.time()
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(SHORT_DELAY)
         fast_guardrail_executed = True
         timestamps["fast_end"] = time.time()
         return GuardrailFunctionOutput(
@@ -1364,7 +1507,7 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger():
         nonlocal slow_guardrail_executed, slow_guardrail_cancelled
         timestamps["slow_start"] = time.time()
         try:
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(MEDIUM_DELAY)
             slow_guardrail_executed = True
             timestamps["slow_end"] = time.time()
             return GuardrailFunctionOutput(
@@ -1431,7 +1574,7 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger_streaming():
     ) -> GuardrailFunctionOutput:
         nonlocal fast_guardrail_executed
         timestamps["fast_start"] = time.time()
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(SHORT_DELAY)
         fast_guardrail_executed = True
         timestamps["fast_end"] = time.time()
         return GuardrailFunctionOutput(
@@ -1446,7 +1589,7 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger_streaming():
         nonlocal slow_guardrail_executed, slow_guardrail_cancelled
         timestamps["slow_start"] = time.time()
         try:
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(MEDIUM_DELAY)
             slow_guardrail_executed = True
             timestamps["slow_end"] = time.time()
             return GuardrailFunctionOutput(

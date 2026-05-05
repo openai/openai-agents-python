@@ -14,6 +14,9 @@ from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 from tests.testing_processor import fetch_events, fetch_ordered_spans
 
+FAST_GUARDRAIL_DELAY = 0.005
+SLOW_GUARDRAIL_DELAY = 0.02
+
 
 def make_input_guardrail(delay_seconds: float, *, trip: bool) -> InputGuardrail[Any]:
     async def guardrail(
@@ -41,8 +44,10 @@ async def test_input_guardrail_results_follow_completion_order():
     async def slow_guardrail(
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
-        await asyncio.sleep(0.05)
-        return GuardrailFunctionOutput(output_info={"delay": 0.05}, tripwire_triggered=False)
+        await asyncio.sleep(FAST_GUARDRAIL_DELAY)
+        return GuardrailFunctionOutput(
+            output_info={"delay": FAST_GUARDRAIL_DELAY}, tripwire_triggered=False
+        )
 
     model = FakeModel()
     model.set_next_output([get_text_message("Final response")])
@@ -61,11 +66,11 @@ async def test_input_guardrail_results_follow_completion_order():
         pass
 
     delays = [res.output.output_info["delay"] for res in result.input_guardrail_results]
-    assert delays == [0.0, 0.05]
+    assert delays == [0.0, FAST_GUARDRAIL_DELAY]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guardrail_delay", [0.0, 0.2])
+@pytest.mark.parametrize("guardrail_delay", [0.0, SLOW_GUARDRAIL_DELAY])
 async def test_run_streamed_input_guardrail_timing_is_consistent(guardrail_delay: float):
     """Ensure streaming behavior matches when input guardrail finishes before and after LLM stream.
 
@@ -131,7 +136,7 @@ async def test_run_streamed_input_guardrail_sequences_match_between_fast_and_slo
         return events
 
     events_fast = await run_once(0.0)
-    events_slow = await run_once(0.2)
+    events_slow = await run_once(SLOW_GUARDRAIL_DELAY)
 
     assert events_fast == events_slow, (
         f"Event sequences differ between guardrail timings:\nfast={events_fast}\nslow={events_slow}"
@@ -139,7 +144,7 @@ async def test_run_streamed_input_guardrail_sequences_match_between_fast_and_slo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guardrail_delay", [0.0, 0.2])
+@pytest.mark.parametrize("guardrail_delay", [0.0, SLOW_GUARDRAIL_DELAY])
 async def test_run_streamed_input_guardrail_tripwire_raises(guardrail_delay: float):
     """Guardrail tripwire must raise from stream_events regardless of timing."""
 
@@ -206,7 +211,7 @@ async def test_parent_span_and_trace_finish_after_slow_input_guardrail():
     agent = Agent(
         name="TimingAgentTrace",
         model=model,
-        input_guardrails=[make_input_guardrail(0.2, trip=False)],  # guardrail slower than model
+        input_guardrails=[make_input_guardrail(SLOW_GUARDRAIL_DELAY, trip=False)],
     )
 
     result = Runner.run_streamed(agent, input="Hello")
@@ -235,7 +240,7 @@ async def test_parent_span_and_trace_finish_after_slow_input_guardrail():
 async def test_parent_span_and_trace_finish_after_slow_model():
     """Agent span and trace finish after model when model completes last."""
 
-    model = SlowCompleteFakeModel(delay_seconds=0.2, tracing_enabled=True)
+    model = SlowCompleteFakeModel(delay_seconds=SLOW_GUARDRAIL_DELAY, tracing_enabled=True)
     model.set_next_output([get_text_message("Final response")])
     agent = Agent(
         name="TimingAgentTrace",

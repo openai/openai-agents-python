@@ -40,10 +40,10 @@ def _to_dump_compatible_internal(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: _to_dump_compatible_internal(v) for k, v in obj.items()}
 
-    if isinstance(obj, (list, tuple)):
+    if isinstance(obj, list | tuple):
         return [_to_dump_compatible_internal(x) for x in obj]
 
-    if isinstance(obj, Iterable) and not isinstance(obj, (str, bytes, bytearray)):
+    if isinstance(obj, Iterable) and not isinstance(obj, str | bytes | bytearray):
         return [_to_dump_compatible_internal(x) for x in obj]
 
     return obj

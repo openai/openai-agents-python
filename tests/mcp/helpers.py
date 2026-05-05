@@ -11,7 +11,10 @@ from mcp.types import (
     Content,
     GetPromptResult,
     ListPromptsResult,
+    ListResourcesResult,
+    ListResourceTemplatesResult,
     PromptMessage,
+    ReadResourceResult,
     TextContent,
 )
 
@@ -137,6 +140,20 @@ class FakeMCPServer(MCPServer):
         content = f"Fake prompt content for {name}"
         message = PromptMessage(role="user", content=TextContent(type="text", text=content))
         return GetPromptResult(description=f"Fake prompt: {name}", messages=[message])
+
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
+        """Return empty list of resources for fake server."""
+        return ListResourcesResult(resources=[])
+
+    async def list_resource_templates(
+        self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
+        """Return empty list of resource templates for fake server."""
+        return ListResourceTemplatesResult(resourceTemplates=[])
+
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        """Return empty resource contents for fake server."""
+        return ReadResourceResult(contents=[])
 
     @property
     def name(self) -> str:

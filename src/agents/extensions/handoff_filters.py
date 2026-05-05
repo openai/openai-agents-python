@@ -1,3 +1,5 @@
+"""Contains common handoff input filters, for convenience."""
+
 from __future__ import annotations
 
 from ..handoffs import (
@@ -8,14 +10,18 @@ from ..handoffs import (
 from ..items import (
     HandoffCallItem,
     HandoffOutputItem,
+    MCPApprovalRequestItem,
+    MCPApprovalResponseItem,
+    MCPListToolsItem,
     ReasoningItem,
     RunItem,
+    ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
     TResponseInputItem,
 )
-
-"""Contains common handoff input filters, for convenience. """
 
 __all__ = [
     "remove_all_tools",
@@ -50,9 +56,15 @@ def _remove_tools_from_items(items: tuple[RunItem, ...]) -> tuple[RunItem, ...]:
         if (
             isinstance(item, HandoffCallItem)
             or isinstance(item, HandoffOutputItem)
+            or isinstance(item, ToolSearchCallItem)
+            or isinstance(item, ToolSearchOutputItem)
             or isinstance(item, ToolCallItem)
             or isinstance(item, ToolCallOutputItem)
             or isinstance(item, ReasoningItem)
+            or isinstance(item, MCPListToolsItem)
+            or isinstance(item, MCPApprovalRequestItem)
+            or isinstance(item, MCPApprovalResponseItem)
+            or isinstance(item, ToolApprovalItem)
         ):
             continue
         filtered_items.append(item)
@@ -68,7 +80,24 @@ def _remove_tool_types_from_input(
         "computer_call",
         "computer_call_output",
         "file_search_call",
+        "tool_search_call",
+        "tool_search_output",
         "web_search_call",
+        "mcp_call",
+        "mcp_list_tools",
+        "mcp_approval_request",
+        "mcp_approval_response",
+        "reasoning",
+        "code_interpreter_call",
+        "image_generation_call",
+        "local_shell_call",
+        "local_shell_call_output",
+        "shell_call",
+        "shell_call_output",
+        "apply_patch_call",
+        "apply_patch_call_output",
+        "custom_tool_call",
+        "custom_tool_call_output",
     ]
 
     filtered_items: list[TResponseInputItem] = []

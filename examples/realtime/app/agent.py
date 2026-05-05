@@ -90,6 +90,7 @@ triage_agent = RealtimeAgent(
         f"{RECOMMENDED_PROMPT_PREFIX} "
         "You are a helpful triaging agent. You can use your tools to delegate questions to other appropriate agents."
     ),
+    tools=[get_weather],
     handoffs=[faq_agent, realtime_handoff(seat_booking_agent)],
 )
 

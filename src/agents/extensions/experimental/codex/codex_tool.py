@@ -6,13 +6,13 @@ import inspect
 import json
 import os
 import re
-from collections.abc import AsyncGenerator, Awaitable, Mapping, MutableMapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
-from typing import Any, Callable, Union
+from typing import Any, Literal, TypeAlias, TypeGuard
 
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
-from typing_extensions import Literal, NotRequired, TypeAlias, TypedDict, TypeGuard
+from typing_extensions import NotRequired, TypedDict
 
 from agents import _debug
 from agents.exceptions import ModelBehaviorError, UserError
@@ -20,11 +20,16 @@ from agents.logger import logger
 from agents.models import _openai_shared
 from agents.run_context import RunContextWrapper
 from agents.strict_schema import ensure_strict_json_schema
-from agents.tool import FunctionTool, ToolErrorFunction, default_tool_error_function
+from agents.tool import (
+    FunctionTool,
+    ToolErrorFunction,
+    _build_handled_function_tool_error_handler,
+    _build_wrapped_function_tool,
+    default_tool_error_function,
+)
 from agents.tool_context import ToolContext
 from agents.tracing import SpanError, custom_span
 from agents.usage import Usage as AgentsUsage
-from agents.util import _error_tracing
 from agents.util._types import MaybeAwaitable
 
 from .codex import Codex
@@ -43,8 +48,6 @@ from .events import (
 )
 from .items import (
     CommandExecutionItem,
-    McpToolCallItem,
-    ReasoningItem,
     ThreadItem,
     is_agent_message_item,
 )
@@ -154,7 +157,7 @@ class OutputSchemaArray(TypedDict, total=False):
     items: OutputSchemaPrimitive
 
 
-OutputSchemaField: TypeAlias = Union[OutputSchemaPrimitive, OutputSchemaArray]
+OutputSchemaField: TypeAlias = OutputSchemaPrimitive | OutputSchemaArray
 
 
 class OutputSchemaPropertyDescriptor(TypedDict, total=False):
@@ -379,7 +382,7 @@ def codex_tool(
                     resolved_options.span_data_max_chars,
                     resolved_thread_id_holder=resolved_thread_id_holder,
                 )
-            except Exception:
+            except BaseException:
                 resolved_thread_id = resolved_thread_id_holder["thread_id"]
                 raise
 
@@ -394,38 +397,27 @@ def codex_tool(
                 )
 
             return CodexToolResult(thread_id=resolved_thread_id, response=response, usage=usage)
-        except Exception as exc:  # noqa: BLE001
+        except BaseException:
             _try_store_thread_id_in_run_context_after_error(
                 ctx=ctx,
                 key=resolved_run_context_thread_id_key,
                 thread_id=resolved_thread_id,
                 enabled=resolved_options.use_run_context_thread_id,
             )
+            raise
 
-            if resolved_options.failure_error_function is None:
-                raise
-
-            result = resolved_options.failure_error_function(ctx, exc)
-            if inspect.isawaitable(result):
-                result = await result
-
-            _error_tracing.attach_error_to_current_span(
-                SpanError(
-                    message="Error running Codex tool (non-fatal)",
-                    data={"tool_name": name, "error": str(exc)},
-                )
-            )
-            if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug("Codex tool failed")
-            else:
-                logger.error("Codex tool failed: %s", exc, exc_info=exc)
-            return result
-
-    function_tool = FunctionTool(
+    function_tool = _build_wrapped_function_tool(
         name=name,
         description=description,
         params_json_schema=params_schema,
-        on_invoke_tool=_on_invoke_tool,
+        invoke_tool_impl=_on_invoke_tool,
+        on_handled_error=_build_handled_function_tool_error_handler(
+            span_message="Error running Codex tool (non-fatal)",
+            log_label="Codex tool",
+            include_input_json_in_logs=False,
+            include_tool_name_in_log_messages=False,
+        ),
+        failure_error_function=resolved_options.failure_error_function,
         strict_json_schema=True,
         is_enabled=resolved_options.is_enabled,
     )
@@ -1031,7 +1023,7 @@ async def _consume_events(
     span_data_max_chars: int | None,
     resolved_thread_id_holder: dict[str, str | None] | None = None,
 ) -> tuple[str, Usage | None, str | None]:
-    # Track spans keyed by item id for command/mcp/reasoning events.
+    # Track spans keyed by item id for command execution events.
     active_spans: dict[str, Any] = {}
     final_response = ""
     usage: Usage | None = None
@@ -1150,40 +1142,6 @@ def _handle_item_started(
         spans[item_id] = span
         return
 
-    if _is_mcp_tool_call_item(item):
-        data = _merge_span_data(
-            {},
-            {
-                "server": item.server,
-                "tool": item.tool,
-                "status": item.status,
-                "arguments": _truncate_span_value(
-                    _maybe_as_dict(item.arguments), span_data_max_chars
-                ),
-            },
-            span_data_max_chars,
-        )
-        span = custom_span(
-            name="Codex MCP tool call",
-            data=data,
-        )
-        span.start()
-        spans[item_id] = span
-        return
-
-    if _is_reasoning_item(item):
-        data = _merge_span_data(
-            {},
-            {"text": _truncate_span_value(item.text, span_data_max_chars)},
-            span_data_max_chars,
-        )
-        span = custom_span(
-            name="Codex reasoning",
-            data=data,
-        )
-        span.start()
-        spans[item_id] = span
-
 
 def _handle_item_updated(
     item: ThreadItem, spans: dict[str, Any], span_data_max_chars: int | None
@@ -1197,10 +1155,6 @@ def _handle_item_updated(
 
     if _is_command_execution_item(item):
         _update_command_span(span, item, span_data_max_chars)
-    elif _is_mcp_tool_call_item(item):
-        _update_mcp_tool_span(span, item, span_data_max_chars)
-    elif _is_reasoning_item(item):
-        _update_reasoning_span(span, item, span_data_max_chars)
 
 
 def _handle_item_completed(
@@ -1228,13 +1182,6 @@ def _handle_item_completed(
                     data=error_data,
                 )
             )
-    elif _is_mcp_tool_call_item(item):
-        _update_mcp_tool_span(span, item, span_data_max_chars)
-        error = item.error
-        if item.status == "failed" and error is not None and error.message:
-            span.set_error(SpanError(message=error.message, data={}))
-    elif _is_reasoning_item(item):
-        _update_reasoning_span(span, item, span_data_max_chars)
 
     span.finish()
     spans.pop(item_id, None)
@@ -1277,20 +1224,10 @@ def _stringify_span_value(value: Any) -> str:
         return str(value)
 
 
-def _maybe_as_dict(value: Any) -> Any:
-    if isinstance(value, _DictLike):
-        return value.as_dict()
-    if isinstance(value, list):
-        return [_maybe_as_dict(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _maybe_as_dict(item) for key, item in value.items()}
-    return value
-
-
 def _truncate_span_value(value: Any, max_chars: int | None) -> Any:
     if max_chars is None:
         return value
-    if value is None or isinstance(value, (bool, int, float)):
+    if value is None or isinstance(value, bool | int | float):
         return value
     if isinstance(value, str):
         return _truncate_span_string(value, max_chars)
@@ -1464,31 +1401,6 @@ def _update_command_span(
     )
 
 
-def _update_mcp_tool_span(
-    span: Any, item: McpToolCallItem, span_data_max_chars: int | None
-) -> None:
-    _apply_span_updates(
-        span,
-        {
-            "server": item.server,
-            "tool": item.tool,
-            "status": item.status,
-            "arguments": _truncate_span_value(_maybe_as_dict(item.arguments), span_data_max_chars),
-            "result": _truncate_span_value(_maybe_as_dict(item.result), span_data_max_chars),
-            "error": _truncate_span_value(_maybe_as_dict(item.error), span_data_max_chars),
-        },
-        span_data_max_chars,
-    )
-
-
-def _update_reasoning_span(span: Any, item: ReasoningItem, span_data_max_chars: int | None) -> None:
-    _apply_span_updates(
-        span,
-        {"text": _truncate_span_value(item.text, span_data_max_chars)},
-        span_data_max_chars,
-    )
-
-
 def _build_default_response(args: CodexToolCallArguments) -> str:
     input_summary = "with inputs." if args.get("inputs") else "with no inputs."
     return f"Codex task completed {input_summary}"
@@ -1496,11 +1408,3 @@ def _build_default_response(args: CodexToolCallArguments) -> str:
 
 def _is_command_execution_item(item: ThreadItem) -> TypeGuard[CommandExecutionItem]:
     return isinstance(item, CommandExecutionItem)
-
-
-def _is_mcp_tool_call_item(item: ThreadItem) -> TypeGuard[McpToolCallItem]:
-    return isinstance(item, McpToolCallItem)
-
-
-def _is_reasoning_item(item: ThreadItem) -> TypeGuard[ReasoningItem]:
-    return isinstance(item, ReasoningItem)

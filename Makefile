@@ -19,9 +19,37 @@ lint:
 mypy: 
 	uv run mypy . --exclude site
 
+.PHONY: pyright
+pyright:
+	uv run pyright --project pyrightconfig.json
+
+.PHONY: typecheck
+typecheck:
+	@set -eu; \
+	mypy_pid=''; \
+	pyright_pid=''; \
+	trap 'test -n "$$mypy_pid" && kill $$mypy_pid 2>/dev/null || true; test -n "$$pyright_pid" && kill $$pyright_pid 2>/dev/null || true' EXIT INT TERM; \
+	echo "Running make mypy and make pyright in parallel..."; \
+	$(MAKE) mypy & mypy_pid=$$!; \
+	$(MAKE) pyright & pyright_pid=$$!; \
+	wait $$mypy_pid; \
+	wait $$pyright_pid; \
+	trap - EXIT
+
 .PHONY: tests
-tests: 
-	uv run pytest 
+tests: tests-parallel tests-serial
+
+.PHONY: tests-asyncio-stability
+tests-asyncio-stability:
+	bash .github/scripts/run-asyncio-teardown-stability.sh
+
+.PHONY: tests-parallel
+tests-parallel:
+	uv run pytest -n auto --dist loadfile -m "not serial"
+
+.PHONY: tests-serial
+tests-serial:
+	uv run pytest -m serial
 
 .PHONY: coverage
 coverage:
@@ -57,4 +85,4 @@ deploy-docs:
 	uv run mkdocs gh-deploy --force --verbose
 
 .PHONY: check
-check: format-check lint mypy tests
+check: format-check lint typecheck tests

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
@@ -29,6 +28,19 @@ def agent() -> Agent:
 def encryption_key() -> str:
     """Fixture for a valid Fernet encryption key."""
     return str(Fernet.generate_key().decode("utf-8"))
+
+
+@pytest.fixture
+def set_fernet_time(monkeypatch):
+    """Freeze Fernet TTL checks so expiration tests avoid real waiting."""
+    current_time = 1_000
+
+    def _set_time(value: int) -> None:
+        nonlocal current_time
+        current_time = value
+
+    monkeypatch.setattr("cryptography.fernet.time.time", lambda: current_time)
+    return _set_time
 
 
 @pytest.fixture
@@ -142,9 +154,10 @@ async def test_encrypted_session_clear(encryption_key: str, underlying_session: 
 
 
 async def test_encrypted_session_ttl_expiration(
-    encryption_key: str, underlying_session: SQLiteSession
+    encryption_key: str, underlying_session: SQLiteSession, set_fernet_time
 ):
     """Test TTL expiration - expired items are silently skipped."""
+    set_fernet_time(1_000)
     session = EncryptedSession(
         session_id="test_session",
         underlying_session=underlying_session,
@@ -158,7 +171,7 @@ async def test_encrypted_session_ttl_expiration(
     ]
     await session.add_items(items)
 
-    time.sleep(2)
+    set_fernet_time(1_002)
 
     retrieved = await session.get_items()
     assert len(retrieved) == 0
@@ -170,9 +183,10 @@ async def test_encrypted_session_ttl_expiration(
 
 
 async def test_encrypted_session_pop_expired(
-    encryption_key: str, underlying_session: SQLiteSession
+    encryption_key: str, underlying_session: SQLiteSession, set_fernet_time
 ):
     """Test pop_item with expired data."""
+    set_fernet_time(1_000)
     session = EncryptedSession(
         session_id="test_session",
         underlying_session=underlying_session,
@@ -181,7 +195,7 @@ async def test_encrypted_session_pop_expired(
     )
 
     await session.add_items([{"role": "user", "content": "Test"}])
-    time.sleep(2)
+    set_fernet_time(1_002)
 
     popped = await session.pop_item()
     assert popped is None
@@ -190,9 +204,10 @@ async def test_encrypted_session_pop_expired(
 
 
 async def test_encrypted_session_pop_mixed_expired_valid(
-    encryption_key: str, underlying_session: SQLiteSession
+    encryption_key: str, underlying_session: SQLiteSession, set_fernet_time
 ):
     """Test pop_item auto-retry with mixed expired and valid items."""
+    set_fernet_time(1_000)
     session = EncryptedSession(
         session_id="test_session",
         underlying_session=underlying_session,
@@ -207,7 +222,7 @@ async def test_encrypted_session_pop_mixed_expired_valid(
         ]
     )
 
-    time.sleep(3)
+    set_fernet_time(1_003)
 
     await session.add_items(
         [

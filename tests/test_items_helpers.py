@@ -3,8 +3,9 @@ from __future__ import annotations
 import gc
 import json
 import weakref
-from typing import cast
+from typing import Any, cast
 
+from openai.types.responses.computer_action import Click as BatchedClick, Type as BatchedType
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
     ResponseComputerToolCall,
@@ -29,6 +30,8 @@ from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.response_output_text_param import ResponseOutputTextParam
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from openai.types.responses.response_reasoning_item_param import ResponseReasoningItemParam
+from openai.types.responses.response_tool_search_call import ResponseToolSearchCall
+from openai.types.responses.response_tool_search_output_item import ResponseToolSearchOutputItem
 from pydantic import TypeAdapter
 
 from agents import (
@@ -42,7 +45,7 @@ from agents import (
     TResponseInputItem,
     Usage,
 )
-from agents.items import ToolCallOutputItem
+from agents.items import ToolCallItem, ToolCallOutputItem
 
 
 def make_message(
@@ -102,6 +105,48 @@ def test_extract_last_text_returns_text_only() -> None:
     # Whereas when last content is a refusal, extract_last_text returns None.
     message2 = make_message([first_text, ResponseOutputRefusal(refusal="no", type="refusal")])
     assert ItemHelpers.extract_last_text(message2) is None
+
+
+def test_extract_text_concatenates_all_text_segments() -> None:
+    first_text = ResponseOutputText(annotations=[], text="part1", type="output_text", logprobs=[])
+    second_text = ResponseOutputText(annotations=[], text="part2", type="output_text", logprobs=[])
+    refusal = ResponseOutputRefusal(refusal="no", type="refusal")
+    message = make_message([first_text, refusal, second_text])
+
+    assert ItemHelpers.extract_text(message) == "part1part2"
+    assert (
+        ItemHelpers.extract_text(
+            ResponseFunctionToolCall(
+                id="tool123",
+                arguments="{}",
+                call_id="call123",
+                name="func",
+                type="function_call",
+            )
+        )
+        is None
+    )
+
+
+def test_extract_text_tolerates_none_text_content() -> None:
+    """Regression: ``content_item.text`` can be ``None`` when output items
+    are assembled via ``model_construct`` (e.g. partial streaming responses)
+    or surfaced through provider gateways like LiteLLM. Without the ``or ""``
+    guard, ``extract_text`` raised
+    ``TypeError: can only concatenate str (not "NoneType") to str`` deep
+    inside ``execute_tools_and_side_effects`` and aborted the agent turn.
+    """
+    none_text = ResponseOutputText.model_construct(
+        annotations=[], text=None, type="output_text", logprobs=[]
+    )
+    real_text = ResponseOutputText(annotations=[], text="hello", type="output_text", logprobs=[])
+
+    # Single None-text item: result is None (since concatenated text is "").
+    assert ItemHelpers.extract_text(make_message([none_text])) is None
+
+    # Mixed content: real text is preserved, None is skipped.
+    assert ItemHelpers.extract_text(make_message([real_text, none_text])) == "hello"
+    assert ItemHelpers.extract_text(make_message([none_text, real_text])) == "hello"
 
 
 def test_input_to_new_input_list_from_string() -> None:
@@ -416,6 +461,35 @@ def test_to_input_items_for_computer_call_click() -> None:
     assert converted_dict == expected
 
 
+def test_to_input_items_for_computer_call_batched_actions() -> None:
+    """A batched computer call should preserve its actions list when replayed as input."""
+    comp_call = ResponseComputerToolCall(
+        id="comp2",
+        actions=[
+            BatchedClick(type="click", x=3, y=4, button="left"),
+            BatchedType(type="type", text="hello"),
+        ],
+        type="computer_call",
+        call_id="comp2",
+        pending_safety_checks=[],
+        status="completed",
+    )
+    resp = ModelResponse(output=[comp_call], usage=Usage(), response_id=None)
+    input_items = resp.to_input_items()
+    assert isinstance(input_items, list) and len(input_items) == 1
+    assert input_items[0] == {
+        "id": "comp2",
+        "type": "computer_call",
+        "actions": [
+            {"type": "click", "x": 3, "y": 4, "button": "left"},
+            {"type": "type", "text": "hello"},
+        ],
+        "call_id": "comp2",
+        "pending_safety_checks": [],
+        "status": "completed",
+    }
+
+
 def test_to_input_items_for_reasoning() -> None:
     """A reasoning output should produce the same dict as a reasoning input item."""
     rc = Summary(text="why", type="summary_text")
@@ -433,6 +507,52 @@ def test_to_input_items_for_reasoning() -> None:
     print(converted_dict)
     print(expected)
     assert converted_dict == expected
+
+
+def test_to_input_items_for_tool_search_strips_created_by() -> None:
+    """Tool-search output items should reuse the replay sanitizer before round-tripping."""
+    tool_search_call = ResponseToolSearchCall(
+        id="tsc_123",
+        call_id="call_tsc_123",
+        arguments={"query": "profile"},
+        execution="server",
+        status="completed",
+        type="tool_search_call",
+        created_by="server",
+    )
+    tool_search_output = ResponseToolSearchOutputItem(
+        id="tso_123",
+        call_id="call_tsc_123",
+        execution="server",
+        status="completed",
+        tools=[],
+        type="tool_search_output",
+        created_by="server",
+    )
+
+    resp = ModelResponse(
+        output=[tool_search_call, tool_search_output], usage=Usage(), response_id=None
+    )
+    input_items = resp.to_input_items()
+
+    assert input_items == [
+        {
+            "id": "tsc_123",
+            "call_id": "call_tsc_123",
+            "arguments": {"query": "profile"},
+            "execution": "server",
+            "status": "completed",
+            "type": "tool_search_call",
+        },
+        {
+            "id": "tso_123",
+            "call_id": "call_tsc_123",
+            "execution": "server",
+            "status": "completed",
+            "tools": [],
+            "type": "tool_search_output",
+        },
+    ]
 
 
 def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:
@@ -469,3 +589,132 @@ def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:
 
     # This used to fail when validated payloads retained ValidatorIterator fields.
     json.dumps(new_list)
+
+
+def test_tool_call_item_to_input_item_keeps_payload_api_safe() -> None:
+    agent = Agent(name="test", instructions="test")
+    raw_item = ResponseFunctionToolCall(
+        id="fc_1",
+        call_id="call_1",
+        name="my_tool",
+        arguments="{}",
+        type="function_call",
+        status="completed",
+    )
+    item = ToolCallItem(
+        agent=agent,
+        raw_item=raw_item,
+        title="My Tool",
+        description="A helpful tool",
+    )
+
+    result = item.to_input_item()
+    result_dict = cast(dict[str, Any], result)
+
+    assert isinstance(result, dict)
+    assert result_dict["type"] == "function_call"
+    assert "title" not in result_dict
+    assert "description" not in result_dict
+
+
+def test_tool_call_item_tool_name_from_function_call() -> None:
+    """ToolCallItem.tool_name should return the name attribute from a typed raw item."""
+    agent = Agent(name="test")
+    raw = ResponseFunctionToolCall(
+        id="fc1",
+        call_id="call_1",
+        name="my_tool",
+        arguments="{}",
+        type="function_call",
+    )
+    item = ToolCallItem(agent=agent, raw_item=raw)
+    assert item.tool_name == "my_tool"
+
+
+def test_tool_call_item_tool_name_from_dict() -> None:
+    """ToolCallItem.tool_name should return the 'name' key from a dict raw item."""
+    agent = Agent(name="test")
+    raw: dict[str, Any] = {
+        "type": "function_call",
+        "name": "dict_tool",
+        "call_id": "call_1",
+        "arguments": "{}",
+    }
+    item = ToolCallItem(agent=agent, raw_item=raw)
+    assert item.tool_name == "dict_tool"
+
+
+def test_tool_call_item_tool_name_returns_none_when_missing() -> None:
+    """ToolCallItem.tool_name should be None when the raw item has no name attribute."""
+    agent = Agent(name="test")
+    raw = ResponseFileSearchToolCall(
+        id="fs1",
+        queries=["q"],
+        status="completed",
+        type="file_search_call",
+    )
+    item = ToolCallItem(agent=agent, raw_item=raw)
+    assert item.tool_name is None
+
+
+def test_tool_call_item_call_id_from_function_call() -> None:
+    """ToolCallItem.call_id should return the call_id attribute from a typed raw item."""
+    agent = Agent(name="test")
+    raw = ResponseFunctionToolCall(
+        id="fc1",
+        call_id="call_abc",
+        name="t",
+        arguments="{}",
+        type="function_call",
+    )
+    item = ToolCallItem(agent=agent, raw_item=raw)
+    assert item.call_id == "call_abc"
+
+
+def test_tool_call_item_call_id_falls_back_to_id() -> None:
+    """ToolCallItem.call_id should fall back to id when call_id is absent."""
+    agent = Agent(name="test")
+    raw = ResponseFileSearchToolCall(
+        id="fs_xyz",
+        queries=["q"],
+        status="completed",
+        type="file_search_call",
+    )
+    item = ToolCallItem(agent=agent, raw_item=raw)
+    assert item.call_id == "fs_xyz"
+
+
+def test_tool_call_item_call_id_from_dict() -> None:
+    """ToolCallItem.call_id should return the 'call_id' key from a dict raw item."""
+    agent = Agent(name="test")
+    raw: dict[str, Any] = {
+        "type": "function_call",
+        "name": "t",
+        "call_id": "call_dict_id",
+        "arguments": "{}",
+    }
+    item = ToolCallItem(agent=agent, raw_item=raw)
+    assert item.call_id == "call_dict_id"
+
+
+def test_tool_call_output_item_call_id_from_function_call_output() -> None:
+    """ToolCallOutputItem.call_id should return call_id from the FunctionCallOutput dict."""
+    agent = Agent(name="test")
+    raw = {
+        "type": "function_call_output",
+        "call_id": "call_out_1",
+        "output": "ok",
+    }
+    item = ToolCallOutputItem(agent=agent, raw_item=raw, output="ok")
+    assert item.call_id == "call_out_1"
+
+
+def test_tool_call_output_item_call_id_returns_none_when_missing() -> None:
+    """ToolCallOutputItem.call_id should be None when neither call_id nor id are present."""
+    agent = Agent(name="test")
+    raw = {
+        "type": "function_call_output",
+        "output": "ok",
+    }
+    item = ToolCallOutputItem(agent=agent, raw_item=raw, output="ok")
+    assert item.call_id is None

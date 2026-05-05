@@ -146,7 +146,7 @@ async def main():
 
     # === PART 3: Conversation Branching ===
     print("\n=== PART 3: Conversation Branching ===")
-    print("Let's explore a different path from turn 2...")
+    print("Let's explore a different path starting before turn 2...")
 
     # Show available turns for branching
     print("\nAvailable turns for branching:")
@@ -159,10 +159,10 @@ async def main():
     branch_id = await session.create_branch_from_turn(2)
     print(f"Created branch: {branch_id}")
 
-    # Show what's in the new branch (should have conversation up to turn 2)
+    # Show what's in the new branch (it should contain items created before turn 2)
     branch_items = await session.get_items()
     print(f"Items copied to new branch: {len(branch_items)}")
-    print("New branch contains:")
+    print("New branch starts before turn 2 and contains:")
     for i, item in enumerate(branch_items, 1):  # type: ignore[assignment]
         role = str(item.get("role", item.get("type", "unknown")))
         if item.get("type") == "function_call":

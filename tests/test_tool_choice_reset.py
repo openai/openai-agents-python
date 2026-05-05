@@ -47,6 +47,13 @@ class TestToolChoiceReset:
         new_settings = maybe_reset_tool_choice(agent, tracker, model_settings)
         assert new_settings.tool_choice is None
 
+        # Case 5b: a literal tool named "tool_search" should count like any other tool.
+        model_settings = ModelSettings(tool_choice="required")
+        tracker = AgentToolUseTracker()
+        tracker.add_tool_use(agent, ["tool_search"])
+        new_settings = maybe_reset_tool_choice(agent, tracker, model_settings)
+        assert new_settings.tool_choice is None
+
         # Case 6: Tool usage on a different agent should not affect the tool choice
         model_settings = ModelSettings(tool_choice="foo_bar")
         tracker = AgentToolUseTracker()

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, cast
 
 import pytest
@@ -27,6 +30,16 @@ from agents import (
 from agents.agent import ToolsToFinalOutputResult
 from agents.items import TResponseInputItem
 from agents.tool import FunctionToolResult, function_tool
+from examples.sandbox.basic import _import_docker_from_env
+from examples.sandbox.docker.docker_runner import (
+    _format_tool_call,
+    _format_tool_output,
+)
+from examples.sandbox.sandbox_agents_as_tools import (
+    PricingPacketReview,
+    RolloutRiskReview,
+    _structured_tool_output_extractor,
+)
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -36,6 +49,29 @@ from .test_responses import (
     get_text_input_item,
     get_text_message,
 )
+
+
+def test_sandbox_basic_direct_run_imports_external_docker_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sdk_dir = tmp_path / "sdk"
+    docker_package = sdk_dir / "docker"
+    docker_package.mkdir(parents=True)
+    docker_package.joinpath("__init__.py").write_text(
+        "def from_env():\n    return 'external docker sdk'\n"
+    )
+
+    script_dir = Path("examples/sandbox").resolve()
+    monkeypatch.setattr(sys, "path", [str(script_dir), str(sdk_dir)])
+    for module_name in list(sys.modules):
+        if module_name == "docker" or module_name.startswith("docker."):
+            monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    docker_from_env = _import_docker_from_env()
+
+    assert docker_from_env() == "external docker sdk"
+    assert sys.path == [str(script_dir), str(sdk_dir)]
 
 
 @dataclass
@@ -487,6 +523,185 @@ async def test_agent_as_tool_streaming_example_collects_events() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sandbox_agents_as_tools_example_serializes_structured_reviews() -> None:
+    pricing_model = FakeModel()
+    pricing_model.set_next_output(
+        [
+            get_final_output_message(
+                json.dumps(
+                    {
+                        "requested_discount_percent": 15,
+                        "requested_term_months": 24,
+                        "pricing_risk": "medium",
+                        "summary": "Discount ask is above target band.",
+                        "recommended_next_step": "Trade discount for a stronger give-get.",
+                        "evidence_files": ["pricing_summary.md", "commercial_notes.md"],
+                    }
+                )
+            )
+        ]
+    )
+    rollout_model = FakeModel()
+    rollout_model.set_next_output(
+        [
+            get_final_output_message(
+                json.dumps(
+                    {
+                        "rollout_risk": "medium",
+                        "summary": "Launch timing is compressed.",
+                        "blockers": [
+                            "Regional admin training is incomplete.",
+                            "SSO migration lands in week 2.",
+                        ],
+                        "recommended_next_step": "Require a phased rollout plan.",
+                        "evidence_files": ["rollout_plan.md", "support_history.md"],
+                    }
+                )
+            )
+        ]
+    )
+    orchestrator_model = FakeModel()
+    orchestrator_model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "review_pricing_packet",
+                    json.dumps({"input": "Review pricing"}),
+                    call_id="outer_pricing",
+                ),
+                get_function_tool_call(
+                    "review_rollout_risk",
+                    json.dumps({"input": "Review rollout"}),
+                    call_id="outer_rollout",
+                ),
+                get_function_tool_call(
+                    "get_discount_approval_rule",
+                    json.dumps({"discount_percent": 15}),
+                    call_id="outer_approval",
+                ),
+            ],
+            [get_text_message("Recommendation complete")],
+        ]
+    )
+
+    @function_tool
+    def get_discount_approval_rule(discount_percent: int) -> str:
+        if discount_percent <= 10:
+            return "AE"
+        if discount_percent <= 15:
+            return "RSD"
+        return "Finance + RSD"
+
+    pricing_agent = Agent(
+        name="pricing",
+        model=pricing_model,
+        output_type=PricingPacketReview,
+    )
+    rollout_agent = Agent(
+        name="rollout",
+        model=rollout_model,
+        output_type=RolloutRiskReview,
+    )
+    orchestrator = Agent(
+        name="orchestrator",
+        model=orchestrator_model,
+        tools=[
+            pricing_agent.as_tool(
+                "review_pricing_packet",
+                "Pricing review",
+                custom_output_extractor=_structured_tool_output_extractor,
+            ),
+            rollout_agent.as_tool(
+                "review_rollout_risk",
+                "Rollout review",
+                custom_output_extractor=_structured_tool_output_extractor,
+            ),
+            get_discount_approval_rule,
+        ],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    result = await Runner.run(orchestrator, "Review the renewal")
+
+    assert result.final_output == "Recommendation complete"
+    outer_second_turn_input = cast(
+        list[dict[str, Any]],
+        orchestrator_model.last_turn_args["input"],
+    )
+    outer_tool_outputs = [
+        item for item in outer_second_turn_input if item.get("type") == "function_call_output"
+    ]
+    assert outer_tool_outputs == [
+        {
+            "call_id": "outer_pricing",
+            "output": json.dumps(
+                {
+                    "evidence_files": ["pricing_summary.md", "commercial_notes.md"],
+                    "pricing_risk": "medium",
+                    "recommended_next_step": "Trade discount for a stronger give-get.",
+                    "requested_discount_percent": 15,
+                    "requested_term_months": 24,
+                    "summary": "Discount ask is above target band.",
+                },
+                sort_keys=True,
+            ),
+            "type": "function_call_output",
+        },
+        {
+            "call_id": "outer_rollout",
+            "output": json.dumps(
+                {
+                    "blockers": [
+                        "Regional admin training is incomplete.",
+                        "SSO migration lands in week 2.",
+                    ],
+                    "evidence_files": ["rollout_plan.md", "support_history.md"],
+                    "recommended_next_step": "Require a phased rollout plan.",
+                    "rollout_risk": "medium",
+                    "summary": "Launch timing is compressed.",
+                },
+                sort_keys=True,
+            ),
+            "type": "function_call_output",
+        },
+        {
+            "call_id": "outer_approval",
+            "output": "RSD",
+            "type": "function_call_output",
+        },
+    ]
+
+
+def test_docker_runner_formats_tool_calls_without_dumping_run_item() -> None:
+    assert (
+        _format_tool_call(
+            {
+                "type": "function_call",
+                "name": "read_file",
+                "arguments": json.dumps({"path": "README.md"}),
+            }
+        )
+        == '[tool call] read_file: {"path": "README.md"}'
+    )
+
+    assert (
+        _format_tool_call(
+            {
+                "type": "shell_call",
+                "action": {
+                    "commands": ["find . -maxdepth 2 -type f", "cat README.md"],
+                },
+            }
+        )
+        == "[tool call] shell: find . -maxdepth 2 -type f; cat README.md"
+    )
+
+
+def test_docker_runner_formats_tool_output_as_readable_block() -> None:
+    assert _format_tool_output("$ ls\nREADME.md\nsrc\n") == "[tool output]\n$ ls\nREADME.md\nsrc\n"
+
+
+@pytest.mark.asyncio
 async def test_forcing_tool_use_behaviors_align_with_example() -> None:
     """Mimics forcing_tool_use example: default vs first_tool vs custom behaviors."""
 
@@ -717,3 +932,261 @@ async def test_agents_as_tools_orchestrator_runs_multiple_translations() -> None
     assert spanish_model.last_turn_args["input"] == [{"content": "Hi", "role": "user"}]
     assert french_model.last_turn_args["input"] == [{"content": "Hi", "role": "user"}]
     assert len(result.raw_responses) == 3
+
+
+@pytest.mark.asyncio
+async def test_agents_as_tools_subagent_cancellation_preserves_parent_final_output() -> None:
+    """A cancelled nested subagent should not drop sibling outputs from the parent turn."""
+
+    async def _cancel_tool() -> str:
+        raise asyncio.CancelledError("tool-cancelled")
+
+    success_model = FakeModel()
+    success_model.set_next_output([get_text_message("Status: ok")])
+    success_agent = Agent(name="status", model=success_model)
+
+    observability_model = FakeModel()
+    observability_model.set_next_output(
+        [get_function_tool_call("cancel_tool", "{}", call_id="inner_cancel")]
+    )
+    observability_agent = Agent(
+        name="observability",
+        model=observability_model,
+        tools=[function_tool(_cancel_tool, name_override="cancel_tool")],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    orchestrator_model = FakeModel()
+    orchestrator_model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "status_agent",
+                    json.dumps({"input": "Hi"}),
+                    call_id="outer_status",
+                ),
+                get_function_tool_call(
+                    "observability_agent",
+                    json.dumps({"input": "Hi"}),
+                    call_id="outer_observability",
+                ),
+            ],
+            [get_text_message("Summary complete")],
+        ]
+    )
+
+    orchestrator = Agent(
+        name="orchestrator",
+        model=orchestrator_model,
+        tools=[
+            success_agent.as_tool("status_agent", "Status"),
+            observability_agent.as_tool("observability_agent", "Observability"),
+        ],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    result = await Runner.run(orchestrator, "Hi")
+
+    assert result.final_output == "Summary complete"
+    assert len(result.raw_responses) == 2
+    assert success_model.last_turn_args["input"] == [{"content": "Hi", "role": "user"}]
+    assert observability_model.first_turn_args is not None
+    assert observability_model.first_turn_args["input"] == [{"content": "Hi", "role": "user"}]
+
+    second_turn_input = cast(list[dict[str, Any]], orchestrator_model.last_turn_args["input"])
+    tool_outputs = [
+        item for item in second_turn_input if item.get("type") == "function_call_output"
+    ]
+    assert len(tool_outputs) == 2
+    assert tool_outputs[0] == {
+        "call_id": "outer_status",
+        "output": "Status: ok",
+        "type": "function_call_output",
+    }
+    assert tool_outputs[1]["call_id"] == "outer_observability"
+    assert tool_outputs[1]["type"] == "function_call_output"
+    assert tool_outputs[1]["output"].startswith(
+        "An error occurred while running the tool. Please try again. Error:"
+    )
+    assert "cancel" in tool_outputs[1]["output"].lower()
+
+
+@pytest.mark.asyncio
+async def test_agents_as_tools_streaming_subagent_cancellation_preserves_parent_output() -> None:
+    """A streaming nested subagent should retain sibling outputs after cancellation."""
+
+    async def _ok_tool() -> str:
+        return "Investigation: ok"
+
+    async def _cancel_tool() -> str:
+        raise asyncio.CancelledError("tool-cancelled")
+
+    received_events: list[AgentToolStreamEvent] = []
+
+    async def on_stream(event: AgentToolStreamEvent) -> None:
+        received_events.append(event)
+
+    status_model = FakeModel()
+    status_model.set_next_output([get_text_message("Status: ok")])
+    status_agent = Agent(name="status", model=status_model)
+
+    observability_model = FakeModel()
+    observability_model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call("ok_tool", "{}", call_id="inner_ok"),
+                get_function_tool_call("cancel_tool", "{}", call_id="inner_cancel"),
+            ],
+            [get_text_message("Nested summary")],
+        ]
+    )
+    observability_agent = Agent(
+        name="observability",
+        model=observability_model,
+        tools=[
+            function_tool(_ok_tool, name_override="ok_tool"),
+            function_tool(_cancel_tool, name_override="cancel_tool"),
+        ],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    orchestrator_model = FakeModel()
+    orchestrator_model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "status_agent",
+                    json.dumps({"input": "Hi"}),
+                    call_id="outer_status",
+                ),
+                get_function_tool_call(
+                    "observability_agent",
+                    json.dumps({"input": "Hi"}),
+                    call_id="outer_observability",
+                ),
+            ],
+            [get_text_message("Summary complete")],
+        ]
+    )
+
+    orchestrator = Agent(
+        name="orchestrator",
+        model=orchestrator_model,
+        tools=[
+            status_agent.as_tool("status_agent", "Status"),
+            observability_agent.as_tool(
+                "observability_agent",
+                "Observability",
+                on_stream=on_stream,
+            ),
+        ],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    result = await Runner.run(orchestrator, "Hi")
+
+    assert result.final_output == "Summary complete"
+    assert len(result.raw_responses) == 2
+    assert received_events, "on_stream should confirm the nested streaming path ran"
+    assert status_model.last_turn_args["input"] == [{"content": "Hi", "role": "user"}]
+    assert observability_model.last_turn_args is not None
+
+    nested_second_turn_input = cast(
+        list[dict[str, Any]],
+        observability_model.last_turn_args["input"],
+    )
+    nested_tool_outputs = [
+        item for item in nested_second_turn_input if item.get("type") == "function_call_output"
+    ]
+    assert nested_tool_outputs == [
+        {
+            "call_id": "inner_ok",
+            "output": "Investigation: ok",
+            "type": "function_call_output",
+        },
+        {
+            "call_id": "inner_cancel",
+            "output": (
+                "An error occurred while running the tool. Please try again. Error: tool-cancelled"
+            ),
+            "type": "function_call_output",
+        },
+    ]
+
+    outer_second_turn_input = cast(
+        list[dict[str, Any]],
+        orchestrator_model.last_turn_args["input"],
+    )
+    outer_tool_outputs = [
+        item for item in outer_second_turn_input if item.get("type") == "function_call_output"
+    ]
+    assert outer_tool_outputs == [
+        {
+            "call_id": "outer_status",
+            "output": "Status: ok",
+            "type": "function_call_output",
+        },
+        {
+            "call_id": "outer_observability",
+            "output": "Nested summary",
+            "type": "function_call_output",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agents_as_tools_failure_error_function_none_reraises_cancelled_error() -> None:
+    """Explicit None should preserve cancellation semantics for nested agent tools."""
+
+    async def _cancel_tool() -> str:
+        raise asyncio.CancelledError("tool-cancelled")
+
+    status_model = FakeModel()
+    status_model.set_next_output([get_text_message("Status: ok")])
+    status_agent = Agent(name="status", model=status_model)
+
+    observability_model = FakeModel()
+    observability_model.set_next_output(
+        [get_function_tool_call("cancel_tool", "{}", call_id="inner_cancel")]
+    )
+    observability_agent = Agent(
+        name="observability",
+        model=observability_model,
+        tools=[
+            function_tool(_cancel_tool, name_override="cancel_tool", failure_error_function=None)
+        ],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    orchestrator_model = FakeModel()
+    orchestrator_model.set_next_output(
+        [
+            get_function_tool_call(
+                "status_agent",
+                json.dumps({"input": "Hi"}),
+                call_id="outer_status",
+            ),
+            get_function_tool_call(
+                "observability_agent",
+                json.dumps({"input": "Hi"}),
+                call_id="outer_observability",
+            ),
+        ]
+    )
+
+    orchestrator = Agent(
+        name="orchestrator",
+        model=orchestrator_model,
+        tools=[
+            status_agent.as_tool("status_agent", "Status"),
+            observability_agent.as_tool(
+                "observability_agent",
+                "Observability",
+                failure_error_function=None,
+            ),
+        ],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await Runner.run(orchestrator, "Hi")

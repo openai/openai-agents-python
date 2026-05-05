@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -6,11 +7,13 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from agents.tracing.processor_interface import TracingProcessor
+from agents.tracing import flush_traces, get_trace_provider
+from agents.tracing.processor_interface import TracingExporter, TracingProcessor
 from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor
+from agents.tracing.provider import DefaultTraceProvider, TraceProvider
 from agents.tracing.span_data import AgentSpanData
-from agents.tracing.spans import SpanImpl
-from agents.tracing.traces import TraceImpl
+from agents.tracing.spans import Span, SpanImpl
+from agents.tracing.traces import Trace, TraceImpl
 
 
 def get_span(processor: TracingProcessor) -> SpanImpl[AgentSpanData]:
@@ -123,6 +126,34 @@ def test_batch_trace_processor_force_flush(mocked_exporter):
     processor.shutdown()
 
 
+def test_batch_trace_processor_force_flush_waits_for_in_flight_background_export():
+    export_started = threading.Event()
+    export_continue = threading.Event()
+
+    class BlockingExporter(TracingExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            export_started.set()
+            assert export_continue.wait(timeout=2.0)
+
+    processor = BatchTraceProcessor(exporter=BlockingExporter(), schedule_delay=0.01)
+    processor.on_trace_start(get_trace(processor))
+
+    assert export_started.wait(timeout=2.0)
+
+    flush_thread = threading.Thread(target=processor.force_flush)
+    flush_thread.start()
+
+    time.sleep(0.1)
+    assert flush_thread.is_alive(), "force_flush() should wait for an in-flight export"
+
+    export_continue.set()
+    flush_thread.join(timeout=2.0)
+
+    assert not flush_thread.is_alive()
+
+    processor.shutdown()
+
+
 def test_batch_trace_processor_shutdown_flushes(mocked_exporter):
     processor = BatchTraceProcessor(exporter=mocked_exporter, schedule_delay=5.0)
     processor.on_trace_start(get_trace(processor))
@@ -169,6 +200,100 @@ def test_batch_trace_processor_scheduled_export(mocked_exporter):
         total_exported += len(batch)
 
     assert total_exported == 1, "Item should be exported after scheduled delay"
+
+
+def test_flush_traces_delegates_to_default_trace_provider():
+    provider = DefaultTraceProvider()
+    mock_processor = MagicMock()
+    provider.register_processor(mock_processor)
+
+    with patch("agents.tracing.setup.GLOBAL_TRACE_PROVIDER", provider):
+        flush_traces()
+
+    mock_processor.force_flush.assert_called_once()
+
+
+def test_flush_traces_is_importable_from_top_level_agents_package():
+    from agents import flush_traces as top_level_flush_traces
+
+    assert top_level_flush_traces is flush_traces
+
+
+def test_default_trace_provider_force_flush_respects_disabled_flag():
+    provider = DefaultTraceProvider()
+    mock_processor = MagicMock()
+    provider.register_processor(mock_processor)
+
+    provider.set_disabled(True)
+    provider.force_flush()
+
+    mock_processor.force_flush.assert_not_called()
+
+
+def test_trace_provider_force_flush_and_shutdown_default_to_noops():
+    class MinimalProvider(TraceProvider):
+        def register_processor(self, processor: TracingProcessor) -> None:
+            pass
+
+        def set_processors(self, processors: list[TracingProcessor]) -> None:
+            pass
+
+        def get_current_trace(self):
+            return None
+
+        def get_current_span(self):
+            return None
+
+        def set_disabled(self, disabled: bool) -> None:
+            pass
+
+        def time_iso(self) -> str:
+            return ""
+
+        def gen_trace_id(self) -> str:
+            return "trace_123"
+
+        def gen_span_id(self) -> str:
+            return "span_123"
+
+        def gen_group_id(self) -> str:
+            return "group_123"
+
+        def create_trace(
+            self,
+            name,
+            trace_id=None,
+            group_id=None,
+            metadata=None,
+            disabled=False,
+            tracing=None,
+        ):
+            raise NotImplementedError
+
+        def create_span(self, span_data, span_id=None, parent=None, disabled=False):
+            raise NotImplementedError
+
+    provider = MinimalProvider()
+    provider.force_flush()
+    provider.shutdown()
+
+
+def test_get_trace_provider_force_flush_flushes_default_processor(mocked_exporter):
+    provider = DefaultTraceProvider()
+    processor = BatchTraceProcessor(exporter=mocked_exporter, schedule_delay=60.0)
+    provider.register_processor(processor)
+
+    with patch("agents.tracing.setup.GLOBAL_TRACE_PROVIDER", provider):
+        processor.on_trace_start(get_trace(processor))
+        processor.on_span_end(get_span(processor))
+
+        get_trace_provider().force_flush()
+
+    total_exported = sum(
+        len(call_args[0][0]) for call_args in mocked_exporter.export.call_args_list
+    )
+    assert total_exported == 2
+    processor.shutdown()
 
 
 @pytest.fixture
@@ -447,7 +572,7 @@ def test_backend_span_exporter_keeps_generation_usage_for_custom_endpoint(mock_c
 
 
 @patch("httpx.Client")
-def test_backend_span_exporter_does_not_modify_non_generation_usage(mock_client):
+def test_backend_span_exporter_drops_non_generation_usage_for_openai_endpoint(mock_client):
     class DummyItem:
         tracing_api_key = None
 
@@ -465,6 +590,35 @@ def test_backend_span_exporter_does_not_modify_non_generation_usage(mock_client)
     mock_client.return_value.post.return_value = mock_response
 
     exporter = BackendSpanExporter(api_key="test_key")
+    exporter.export([cast(Any, DummyItem())])
+
+    sent_payload = mock_client.return_value.post.call_args.kwargs["json"]["data"][0]
+    assert "usage" not in sent_payload["span_data"]
+    exporter.close()
+
+
+@patch("httpx.Client")
+def test_backend_span_exporter_keeps_non_generation_usage_for_custom_endpoint(mock_client):
+    class DummyItem:
+        tracing_api_key = None
+
+        def export(self):
+            return {
+                "object": "trace.span",
+                "span_data": {
+                    "type": "function",
+                    "usage": {"requests": 1},
+                },
+            }
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(
+        api_key="test_key",
+        endpoint="https://example.com/v1/traces/ingest",
+    )
     exporter.export([cast(Any, DummyItem())])
 
     sent_payload = mock_client.return_value.post.call_args.kwargs["json"]["data"][0]
@@ -792,6 +946,48 @@ def test_sanitize_for_openai_tracing_api_replaces_unserializable_output():
         "original_type": "bytes",
         "preview": "<bytes bytes=10 truncated>",
     }
+    exporter.close()
+
+
+def test_truncate_json_value_for_limit_terminates_preview_dict_under_zero_budget():
+    exporter = BackendSpanExporter(api_key="test_key")
+    preview = exporter._truncated_preview(None)
+
+    truncated = exporter._truncate_json_value_for_limit(preview, 0)
+
+    assert truncated == {}
+    exporter.close()
+
+
+def test_sanitize_for_openai_tracing_api_handles_none_content_under_tight_budget():
+    exporter = BackendSpanExporter(api_key="test_key")
+    payload: dict[str, Any] = {
+        "object": "trace.span",
+        "span_data": {
+            "type": "generation",
+            "output": [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "name": "a" * 25_000,
+                    "tool_calls": [],
+                }
+                for _ in range(8)
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    }
+
+    sanitized = exporter._sanitize_for_openai_tracing_api(payload)
+    sanitized_output = cast(list[Any], sanitized["span_data"]["output"])
+
+    assert isinstance(sanitized_output, list)
+    assert sanitized_output != payload["span_data"]["output"]
+    assert (
+        exporter._value_json_size_bytes(sanitized_output)
+        <= exporter._OPENAI_TRACING_MAX_FIELD_BYTES
+    )
+    assert any(item == {} for item in sanitized_output)
     exporter.close()
 
 

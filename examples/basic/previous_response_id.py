@@ -1,7 +1,7 @@
 import asyncio
 
 from agents import Agent, Runner
-from examples.auto_mode import input_with_fallback
+from examples.auto_mode import input_with_fallback, is_auto_mode
 
 """This demonstrates usage of the `previous_response_id` parameter to continue a conversation.
 The second run passes the previous response ID to the model, which allows it to continue the
@@ -16,6 +16,7 @@ you'll need to re-send the previous conversation history.
 
 
 async def main():
+    print("=== Non-streaming Example ===")
     agent = Agent(
         name="Assistant",
         instructions="You are a helpful assistant. be VERY concise.",
@@ -35,6 +36,7 @@ async def main():
 
 
 async def main_stream():
+    print("=== Streaming Example ===")
     agent = Agent(
         name="Assistant",
         instructions="You are a helpful assistant. be VERY concise.",
@@ -60,8 +62,13 @@ async def main_stream():
 
 
 if __name__ == "__main__":
-    is_stream = input_with_fallback("Run in stream mode? (y/n): ", "n")
-    if is_stream == "y":
+    if is_auto_mode():
+        asyncio.run(main())
+        print()
         asyncio.run(main_stream())
     else:
-        asyncio.run(main())
+        is_stream = input_with_fallback("Run in stream mode? (y/n): ", "n")
+        if is_stream == "y":
+            asyncio.run(main_stream())
+        else:
+            asyncio.run(main())

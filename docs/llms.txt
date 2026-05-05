@@ -37,7 +37,8 @@ The SDK focuses on a concise set of primitives so you can orchestrate multi-agen
 - [Voice quickstart](https://openai.github.io/openai-agents-python/voice/quickstart/): Build speech-enabled agents with streaming transcription and TTS.
 - [Voice pipeline](https://openai.github.io/openai-agents-python/voice/pipeline/): Customize audio ingestion, tool execution, and response rendering.
 - [Realtime quickstart](https://openai.github.io/openai-agents-python/realtime/quickstart/): Stand up low-latency realtime agents with websocket transport (WebRTC is not available in the Python SDK).
-- [Realtime guide](https://openai.github.io/openai-agents-python/realtime/guide/): Deep dive into session lifecycle, event formats, and concurrency patterns.
+- [Realtime transport](https://openai.github.io/openai-agents-python/realtime/transport/): Decide between the default server-side WebSocket path and SIP attach flows, with the browser WebRTC boundary called out explicitly.
+- [Realtime guide](https://openai.github.io/openai-agents-python/realtime/guide/): Deep dive into session lifecycle, structured input, approvals, interruptions, and low-level transport control.
 
 ## API Reference Highlights
 - [Agents API index](https://openai.github.io/openai-agents-python/ref/index/): Entry point for class and function documentation throughout the SDK.
@@ -48,11 +49,10 @@ The SDK focuses on a concise set of primitives so you can orchestrate multi-agen
 - [Tracing APIs](https://openai.github.io/openai-agents-python/ref/tracing/index/): Programmatic interfaces for creating traces, spans, and integrating custom processors.
 - [Realtime APIs](https://openai.github.io/openai-agents-python/ref/realtime/agent/): Classes for realtime agents, runners, sessions, and event payloads.
 - [Voice APIs](https://openai.github.io/openai-agents-python/ref/voice/pipeline/): Configure voice pipelines, inputs, events, and model adapters.
-- [Extensions](https://openai.github.io/openai-agents-python/ref/extensions/handoff_filters/): Extend the SDK with custom handoff filters, prompts, LiteLLM integration, and SQLAlchemy session memory.
+- [Extensions](https://openai.github.io/openai-agents-python/ref/extensions/handoff_filters/): Extend the SDK with custom handoff filters, prompts, third-party adapters, and SQLAlchemy session memory.
 
 ## Models and Providers
-- [Model catalog](https://openai.github.io/openai-agents-python/models/): Overview of supported model families and configuration guidance.
-- [LiteLLM integration](https://openai.github.io/openai-agents-python/models/litellm/): Configure LiteLLM as a provider to fan out across multiple model backends.
+- [Model catalog](https://openai.github.io/openai-agents-python/models/): Overview of OpenAI models, non-OpenAI provider patterns, websocket transport, and third-party adapter guidance.
 
 ## Optional
 - [Release notes](https://openai.github.io/openai-agents-python/release/): Track SDK changes, migration notes, and deprecations.

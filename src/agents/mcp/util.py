@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import functools
 import inspect
 import json
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Protocol, Union
+from typing import TYPE_CHECKING, Any, Protocol, Union
 
 import httpx
 from typing_extensions import NotRequired, TypedDict
 
 from .. import _debug
-from ..exceptions import AgentsException, ModelBehaviorError, UserError
+from .._mcp_tool_metadata import resolve_mcp_tool_description_for_model, resolve_mcp_tool_title
+from ..exceptions import AgentsException, MCPToolCancellationError, ModelBehaviorError, UserError
+
+try:
+    from mcp.shared.exceptions import McpError as _McpError
+except ImportError:  # pragma: no cover – mcp is optional on Python < 3.10
+    _McpError = None  # type: ignore[assignment, misc]
 from ..logger import logger
 from ..run_context import RunContextWrapper
 from ..strict_schema import ensure_strict_json_schema
@@ -20,13 +27,16 @@ from ..tool import (
     FunctionTool,
     Tool,
     ToolErrorFunction,
+    ToolOrigin,
+    ToolOriginType,
     ToolOutputImageDict,
     ToolOutputTextDict,
+    _build_handled_function_tool_error_handler,
+    _build_wrapped_function_tool,
     default_tool_error_function,
 )
 from ..tool_context import ToolContext
-from ..tracing import FunctionSpanData, SpanError, get_current_span, mcp_tools_span
-from ..util import _error_tracing
+from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
 from ..util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
@@ -170,6 +180,28 @@ def create_static_tool_filter(
 class MCPUtil:
     """Set of utilities for interop between MCP and Agents SDK tools."""
 
+    @staticmethod
+    def _extract_static_meta(tool: Any) -> dict[str, Any] | None:
+        meta = getattr(tool, "meta", None)
+        if isinstance(meta, dict):
+            return copy.deepcopy(meta)
+
+        model_extra = getattr(tool, "model_extra", None)
+        if isinstance(model_extra, dict):
+            extra_meta = model_extra.get("meta")
+            if isinstance(extra_meta, dict):
+                return copy.deepcopy(extra_meta)
+
+        model_dump = getattr(tool, "model_dump", None)
+        if callable(model_dump):
+            dumped = model_dump()
+            if isinstance(dumped, dict):
+                dumped_meta = dumped.get("meta")
+                if isinstance(dumped_meta, dict):
+                    return copy.deepcopy(dumped_meta)
+
+        return None
+
     @classmethod
     async def get_all_function_tools(
         cls,
@@ -244,7 +276,13 @@ class MCPUtil:
         policies. If the server uses a callable approval policy, approvals default
         to required to avoid bypassing dynamic checks.
         """
-        invoke_func_impl = functools.partial(cls.invoke_mcp_tool, server, tool)
+        static_meta = cls._extract_static_meta(tool)
+        invoke_func_impl = functools.partial(
+            cls.invoke_mcp_tool,
+            server,
+            tool,
+            meta=static_meta,
+        )
         effective_failure_error_function = server._get_failure_error_function(
             failure_error_function
         )
@@ -261,55 +299,29 @@ class MCPUtil:
             except Exception as e:
                 logger.info(f"Error converting MCP schema to strict mode: {e}")
 
-        # Wrap the invoke function with error handling, similar to regular function tools.
-        # This ensures that MCP tool errors (like timeouts) are handled gracefully instead
-        # of halting the entire agent flow.
-        async def invoke_func(ctx: ToolContext[Any], input_json: str) -> ToolOutput:
-            try:
-                return await invoke_func_impl(ctx, input_json)
-            except Exception as e:
-                if effective_failure_error_function is None:
-                    raise
-
-                # Use configured error handling function to convert exception to error message.
-                result = effective_failure_error_function(ctx, e)
-                if inspect.isawaitable(result):
-                    result = await result
-
-                # Attach error to tracing span.
-                _error_tracing.attach_error_to_current_span(
-                    SpanError(
-                        message="Error running tool (non-fatal)",
-                        data={
-                            "tool_name": tool.name,
-                            "error": str(e),
-                        },
-                    )
-                )
-
-                # Log the error.
-                if _debug.DONT_LOG_TOOL_DATA:
-                    logger.debug(f"MCP tool {tool.name} failed")
-                else:
-                    logger.error(
-                        f"MCP tool {tool.name} failed: {input_json} {e}",
-                        exc_info=e,
-                    )
-
-                return result
-
         needs_approval: (
             bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
         ) = server._get_needs_approval_for_tool(tool, agent)
 
-        return FunctionTool(
+        function_tool = _build_wrapped_function_tool(
             name=tool.name,
-            description=tool.description or "",
+            description=resolve_mcp_tool_description_for_model(tool),
             params_json_schema=schema,
-            on_invoke_tool=invoke_func,
+            invoke_tool_impl=invoke_func_impl,
+            on_handled_error=_build_handled_function_tool_error_handler(
+                span_message="Error running tool (non-fatal)",
+                log_label="MCP tool",
+            ),
+            failure_error_function=effective_failure_error_function,
             strict_json_schema=is_strict,
             needs_approval=needs_approval,
+            mcp_title=resolve_mcp_tool_title(tool),
+            tool_origin=ToolOrigin(
+                type=ToolOriginType.MCP,
+                mcp_server_name=server.name,
+            ),
         )
+        return function_tool
 
     @staticmethod
     def _merge_mcp_meta(
@@ -320,9 +332,9 @@ class MCPUtil:
             return None
         merged: dict[str, Any] = {}
         if resolved_meta is not None:
-            merged.update(resolved_meta)
+            merged.update(copy.deepcopy(resolved_meta))
         if explicit_meta is not None:
-            merged.update(explicit_meta)
+            merged.update(copy.deepcopy(explicit_meta))
         return merged
 
     @classmethod
@@ -364,16 +376,21 @@ class MCPUtil:
         meta: dict[str, Any] | None = None,
     ) -> ToolOutput:
         """Invoke an MCP tool and return the result as ToolOutput."""
+        json_decode_error: Exception | None = None
         try:
             json_data: dict[str, Any] = json.loads(input_json) if input_json else {}
         except Exception as e:
+            json_decode_error = e
+
+        if json_decode_error is not None:
+            error_message = f"Invalid JSON input for tool {tool.name}"
             if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"Invalid JSON input for tool {tool.name}")
+                logger.debug(error_message)
+                raise ModelBehaviorError(error_message)
             else:
-                logger.debug(f"Invalid JSON input for tool {tool.name}: {input_json}")
-            raise ModelBehaviorError(
-                f"Invalid JSON input for tool {tool.name}: {input_json}"
-            ) from e
+                error_message = f"{error_message}: {input_json}"
+                logger.debug(error_message)
+            raise ModelBehaviorError(error_message) from json_decode_error
 
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug(f"Invoking MCP tool {tool.name}")
@@ -383,14 +400,46 @@ class MCPUtil:
         try:
             resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
             merged_meta = cls._merge_mcp_meta(resolved_meta, meta)
-            if merged_meta is None:
-                result = await server.call_tool(tool.name, json_data)
-            else:
-                result = await server.call_tool(tool.name, json_data, meta=merged_meta)
-        except UserError:
-            # Re-raise UserError as-is (it already has a good message)
+            call_task = asyncio.create_task(
+                server.call_tool(tool.name, json_data)
+                if merged_meta is None
+                else server.call_tool(tool.name, json_data, meta=merged_meta)
+            )
+            try:
+                done, _ = await asyncio.wait({call_task}, return_when=asyncio.FIRST_COMPLETED)
+                finished_task = done.pop()
+                if finished_task.cancelled():
+                    raise MCPToolCancellationError(
+                        f"Failed to call tool '{tool.name}' on MCP server '{server.name}': "
+                        "tool execution was cancelled."
+                    )
+                result = finished_task.result()
+            except asyncio.CancelledError:
+                if not call_task.done():
+                    call_task.cancel()
+                try:
+                    await call_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                raise
+        except (UserError, MCPToolCancellationError):
+            # Re-raise handled tool-call errors as-is; the FunctionTool failure pipeline
+            # will format them into model-visible tool errors when appropriate.
             raise
         except Exception as e:
+            if _McpError is not None and isinstance(e, _McpError):
+                # An MCP-level error (e.g. upstream HTTP 4xx/5xx, tool not found, etc.)
+                # is not a programming error – re-raise so the FunctionTool failure
+                # pipeline (failure_error_function) can handle it.  The default handler
+                # will surface the message as a structured error result; callers who set
+                # failure_error_function=None will have the error raised as documented.
+                error_text = e.error.message if hasattr(e, "error") and e.error else str(e)
+                logger.warning(
+                    f"MCP tool {tool.name} on server '{server.name}' returned an error: "
+                    f"{error_text}"
+                )
+                raise
+
             logger.error(f"Error invoking MCP tool {tool.name} on server '{server.name}': {e}")
             raise AgentsException(
                 f"Error invoking MCP tool {tool.name} on server '{server.name}': {e}"
@@ -429,7 +478,10 @@ class MCPUtil:
         current_span = get_current_span()
         if current_span:
             if isinstance(current_span.span_data, FunctionSpanData):
-                current_span.span_data.output = tool_output
+                if not isinstance(context, ToolContext) or (
+                    context.run_config is None or context.run_config.trace_include_sensitive_data
+                ):
+                    current_span.span_data.output = tool_output
                 current_span.span_data.mcp_data = {
                     "server": server.name,
                 }

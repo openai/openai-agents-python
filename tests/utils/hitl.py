@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
-from collections.abc import Awaitable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, cast
+from typing import Any, cast
 
-from openai.types.responses import ResponseCustomToolCall, ResponseFunctionToolCall
+from openai.types.responses import ResponseFunctionToolCall
 
 from agents import Agent, Runner, RunResult, RunResultStreaming
 from agents.items import ToolApprovalItem, ToolCallOutputItem, TResponseOutputItem
@@ -283,17 +282,6 @@ def make_shell_call(
     )
 
 
-def make_apply_patch_call(call_id: str, diff: str = "-a\n+b\n") -> ResponseCustomToolCall:
-    """Create a ResponseCustomToolCall for apply_patch."""
-    operation_json = json.dumps({"type": "update_file", "path": "test.md", "diff": diff})
-    return ResponseCustomToolCall(
-        type="custom_tool_call",
-        name="apply_patch",
-        call_id=call_id,
-        input=operation_json,
-    )
-
-
 def make_apply_patch_dict(call_id: str, diff: str = "-a\n+b\n") -> TResponseOutputItem:
     """Create an apply_patch_call dict payload."""
     return cast(
@@ -311,13 +299,22 @@ def make_function_tool_call(
     *,
     call_id: str = "call-1",
     arguments: str = "{}",
+    namespace: str | None = None,
 ) -> ResponseFunctionToolCall:
     """Create a ResponseFunctionToolCall for HITL scenarios."""
+    if namespace is None:
+        return ResponseFunctionToolCall(
+            type="function_call",
+            name=name,
+            call_id=call_id,
+            arguments=arguments,
+        )
     return ResponseFunctionToolCall(
         type="function_call",
         name=name,
         call_id=call_id,
         arguments=arguments,
+        namespace=namespace,
     )
 
 
@@ -469,10 +466,12 @@ def reject_tool_call(
     agent: Agent[Any],
     raw_item: Any,
     tool_name: str,
+    *,
+    rejection_message: str | None = None,
 ) -> ToolApprovalItem:
     """Reject a tool call in the context and return the approval item used."""
     approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name=tool_name)
-    context_wrapper.reject_tool(approval_item)
+    context_wrapper.reject_tool(approval_item, rejection_message=rejection_message)
     return approval_item
 
 

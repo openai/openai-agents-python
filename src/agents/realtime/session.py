@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import json
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
+from pydantic import BaseModel
 from typing_extensions import assert_never
 
+from .._tool_identity import get_function_tool_lookup_key_for_tool
 from ..agent import Agent
 from ..exceptions import UserError
 from ..handoffs import Handoff
@@ -65,6 +68,29 @@ from .model_inputs import (
 )
 
 REJECTION_MESSAGE = DEFAULT_APPROVAL_REJECTION_MESSAGE
+
+
+def _serialize_tool_output(output: Any) -> str:
+    """Serialize structured tool outputs to JSON when possible."""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, BaseModel):
+        try:
+            output = output.model_dump(mode="json")
+        except Exception:
+            try:
+                output = output.model_dump()
+            except Exception:
+                return str(output)
+    elif dataclasses.is_dataclass(output) and not isinstance(output, type):
+        try:
+            output = dataclasses.asdict(output)
+        except Exception:
+            return str(output)
+    try:
+        return json.dumps(output, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(output)
 
 
 class RealtimeSession(RealtimeModelListener):
@@ -321,7 +347,7 @@ class RealtimeSession(RealtimeModelListener):
                         # Only attempt to preserve for audio-like content
                         if entry.type in ("audio", "input_audio"):
                             # Use tuple form when checking against multiple classes.
-                            assert isinstance(entry, (InputAudio, AssistantAudio))
+                            assert isinstance(entry, InputAudio | AssistantAudio)
                             # Determine if transcript is missing/empty on the incoming entry
                             entry_transcript = entry.transcript
                             if not entry_transcript:
@@ -502,6 +528,14 @@ class RealtimeSession(RealtimeModelListener):
 
     async def _resolve_approval_rejection_message(self, *, tool: FunctionTool, call_id: str) -> str:
         """Resolve model-visible output text for approval rejections."""
+        explicit_message = self._context_wrapper.get_rejection_message(
+            tool.name,
+            call_id,
+            tool_lookup_key=get_function_tool_lookup_key_for_tool(tool),
+        )
+        if explicit_message is not None:
+            return explicit_message
+
         formatter = self._run_config.get("tool_error_formatter")
         if formatter is None:
             return REJECTION_MESSAGE
@@ -549,14 +583,24 @@ class RealtimeSession(RealtimeModelListener):
         else:
             await self._handle_tool_call(tool_call, agent_snapshot=agent_snapshot)
 
-    async def reject_tool_call(self, call_id: str, *, always: bool = False) -> None:
+    async def reject_tool_call(
+        self,
+        call_id: str,
+        *,
+        always: bool = False,
+        rejection_message: str | None = None,
+    ) -> None:
         """Reject a pending tool call and notify the model."""
         pending = self._pending_tool_calls.pop(call_id, None)
         if pending is None:
             return
 
         tool_call, agent_snapshot, function_tool, approval_item = pending
-        self._context_wrapper.reject_tool(approval_item, always_reject=always)
+        self._context_wrapper.reject_tool(
+            approval_item,
+            always_reject=always,
+            rejection_message=rejection_message,
+        )
         await self._send_tool_rejection(tool_call, tool=function_tool, agent=agent_snapshot)
 
     async def _handle_tool_call(
@@ -610,7 +654,9 @@ class RealtimeSession(RealtimeModelListener):
 
             await self._model.send_event(
                 RealtimeModelSendToolOutput(
-                    tool_call=event, output=str(result), start_response=True
+                    tool_call=event,
+                    output=_serialize_tool_output(result),
+                    start_response=True,
                 )
             )
 
@@ -1062,5 +1108,5 @@ class RealtimeSession(RealtimeModelListener):
             return res
 
         results = await asyncio.gather(*(_check_handoff_enabled(h) for h in handoffs))
-        enabled = [h for h, ok in zip(handoffs, results) if ok]
+        enabled = [h for h, ok in zip(handoffs, results, strict=False) if ok]
         return enabled

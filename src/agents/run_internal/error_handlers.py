@@ -8,7 +8,7 @@ from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
 from ..agent import Agent
 from ..agent_output import _WRAPPER_DICT_KEY, AgentOutputSchema
-from ..exceptions import MaxTurnsExceeded, ModelBehaviorError, UserError
+from ..exceptions import MaxTurnsExceeded, ModelBehaviorError, ModelRefusalError, UserError
 from ..items import (
     ItemHelpers,
     MessageOutputItem,
@@ -69,7 +69,7 @@ def format_final_output_text(agent: Agent[Any], final_output: Any) -> str:
             payload_bytes = output_schema._type_adapter.dump_json(payload_value)
             return (
                 payload_bytes.decode()
-                if isinstance(payload_bytes, (bytes, bytearray))
+                if isinstance(payload_bytes, bytes | bytearray)
                 else str(payload_bytes)
             )
         return json.dumps(payload_value, ensure_ascii=False)
@@ -92,7 +92,7 @@ def validate_handler_final_output(agent: Agent[Any], final_output: Any) -> Any:
             payload_bytes = output_schema._type_adapter.dump_json(payload_value)
             payload = (
                 payload_bytes.decode()
-                if isinstance(payload_bytes, (bytes, bytearray))
+                if isinstance(payload_bytes, bytes | bytearray)
                 else str(payload_bytes)
             )
         else:
@@ -128,13 +128,16 @@ def create_message_output_item(agent: Agent[Any], output_text: str) -> MessageOu
 async def resolve_run_error_handler_result(
     *,
     error_handlers: RunErrorHandlers[TContext] | None,
-    error: MaxTurnsExceeded,
+    error: MaxTurnsExceeded | ModelRefusalError,
     context_wrapper: RunContextWrapper[TContext],
     run_data: RunErrorData,
 ) -> RunErrorHandlerResult | None:
     if not error_handlers:
         return None
-    handler = error_handlers.get("max_turns")
+    if isinstance(error, ModelRefusalError):
+        handler = error_handlers.get("model_refusal")
+    else:
+        handler = error_handlers.get("max_turns")
     if handler is None:
         return None
     handler_input = RunErrorHandlerInput(

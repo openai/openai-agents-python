@@ -11,6 +11,7 @@ import aiosqlite
 
 from ...items import TResponseInputItem
 from ...memory import SessionABC
+from ...memory.session_settings import SessionSettings
 
 
 class AsyncSQLiteSession(SessionABC):
@@ -20,6 +21,8 @@ class AsyncSQLiteSession(SessionABC):
     By default, uses an in-memory database that is lost when the process ends.
     For persistent storage, provide a file path.
     """
+
+    session_settings: SessionSettings | None = None
 
     def __init__(
         self,
