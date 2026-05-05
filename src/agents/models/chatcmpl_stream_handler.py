@@ -419,7 +419,7 @@ class ChatCmplStreamHandler:
                     yield ResponseContentPartAddedEvent(
                         content_index=state.refusal_content_index_and_output[0],
                         item_id=FAKE_RESPONSES_ID,
-                        output_index=(1 if state.reasoning_content_index_and_output else 0),
+                        output_index=(1 if state.reasoning_content_index_and_output is not None else 0),
                         part=ResponseOutputRefusal(
                             refusal="",
                             type="refusal",
