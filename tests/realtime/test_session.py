@@ -63,6 +63,17 @@ from agents.realtime.session import REJECTION_MESSAGE, RealtimeSession, _seriali
 from agents.run_context import RunContextWrapper
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
+from agents.tracing import trace
+from tests.testing_processor import SPAN_PROCESSOR_TESTING
+
+
+def _export_finished_spans() -> list[dict[str, Any]]:
+    span_exports: list[dict[str, Any]] = []
+    for span in SPAN_PROCESSOR_TESTING.get_ordered_spans(including_empty=True):
+        exported = span.export()
+        if exported is not None:
+            span_exports.append(exported)
+    return span_exports
 
 
 class _DummyModel(RealtimeModel):
@@ -125,6 +136,124 @@ async def test_aiter_cancel_breaks_loop_gracefully():
     consumer.cancel()
     # The iterator swallows CancelledError internally and exits cleanly
     await consumer
+
+
+@pytest.mark.asyncio
+async def test_realtime_turns_create_agent_spans():
+    model = _DummyModel()
+
+    async def invoke_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+        return "tool result"
+
+    tool = FunctionTool(
+        name="lookup",
+        description="lookup",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=invoke_tool,
+    )
+    target_agent = RealtimeAgent(name="target")
+    handoff = Handoff(
+        tool_name="transfer_to_target",
+        tool_description="transfer",
+        input_json_schema={},
+        on_invoke_handoff=AsyncMock(return_value=target_agent),
+        input_filter=None,
+        agent_name=target_agent.name,
+        is_enabled=True,
+    )
+    agent = RealtimeAgent(name="agent", tools=[tool], handoffs=[handoff])
+    session = RealtimeSession(model, agent, None)
+    await session._get_updated_model_settings_from_agent(None, agent)
+
+    with trace("RealtimeAgent Test"):
+        await session.on_event(RealtimeModelTurnStartedEvent())
+        await session.on_event(RealtimeModelTurnEndedEvent())
+
+    span_exports = _export_finished_spans()
+    agent_span = next(span for span in span_exports if span["span_data"]["type"] == "agent")
+
+    assert agent_span["span_data"]["name"] == "agent"
+    assert agent_span["span_data"]["tools"] == ["lookup"]
+    assert agent_span["span_data"]["handoffs"] == ["target"]
+    assert agent_span["span_data"]["output_type"] == "str"
+
+
+@pytest.mark.asyncio
+async def test_realtime_tracing_disabled_skips_agent_spans():
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None, run_config={"tracing_disabled": True})
+
+    with trace("RealtimeAgent Test"):
+        await session.on_event(RealtimeModelTurnStartedEvent())
+        await session.on_event(RealtimeModelTurnEndedEvent())
+
+    assert SPAN_PROCESSOR_TESTING.get_ordered_spans(including_empty=True) == []
+
+
+@pytest.mark.asyncio
+async def test_realtime_function_tool_calls_create_function_spans():
+    model = _DummyModel()
+
+    async def invoke_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+        return "tool result"
+
+    tool = FunctionTool(
+        name="lookup",
+        description="lookup",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=invoke_tool,
+    )
+    agent = RealtimeAgent(name="agent", tools=[tool])
+    session = RealtimeSession(model, agent, None, run_config={"async_tool_calls": False})
+    await session._get_updated_model_settings_from_agent(None, agent)
+
+    with trace("RealtimeAgent Test"):
+        await session.on_event(RealtimeModelTurnStartedEvent())
+        await session._handle_tool_call(
+            RealtimeModelToolCallEvent(name="lookup", call_id="call_1", arguments='{"q": "x"}')
+        )
+        await session.on_event(RealtimeModelTurnEndedEvent())
+
+    span_exports = _export_finished_spans()
+    function_span = next(span for span in span_exports if span["span_data"]["type"] == "function")
+
+    assert function_span["span_data"]["name"] == "lookup"
+
+
+@pytest.mark.asyncio
+async def test_realtime_handoffs_create_handoff_spans():
+    model = _DummyModel()
+    target_agent = RealtimeAgent(name="target")
+    handoff = Handoff(
+        tool_name="transfer_to_target",
+        tool_description="transfer",
+        input_json_schema={},
+        on_invoke_handoff=AsyncMock(return_value=target_agent),
+        input_filter=None,
+        agent_name=target_agent.name,
+        is_enabled=True,
+    )
+    agent = RealtimeAgent(name="agent", handoffs=[handoff])
+    session = RealtimeSession(model, agent, None, run_config={"async_tool_calls": False})
+    await session._get_updated_model_settings_from_agent(None, agent)
+
+    with trace("RealtimeAgent Test"):
+        await session.on_event(RealtimeModelTurnStartedEvent())
+        await session._handle_tool_call(
+            RealtimeModelToolCallEvent(
+                name="transfer_to_target",
+                call_id="call_1",
+                arguments="{}",
+            )
+        )
+        await session.on_event(RealtimeModelTurnEndedEvent())
+
+    span_exports = _export_finished_spans()
+    handoff_span = next(span for span in span_exports if span["span_data"]["type"] == "handoff")
+
+    assert handoff_span["span_data"]["from_agent"] == "agent"
+    assert handoff_span["span_data"]["to_agent"] == "target"
 
 
 @pytest.mark.asyncio
@@ -300,6 +429,7 @@ class MockRealtimeModel(RealtimeModel):
 @pytest.fixture
 def mock_agent():
     agent = Mock(spec=RealtimeAgent)
+    agent.name = "agent"
     agent.get_all_tools = AsyncMock(return_value=[])
 
     type(agent).handoffs = PropertyMock(return_value=[])
