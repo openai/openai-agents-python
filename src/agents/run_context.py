@@ -61,6 +61,16 @@ class RunContextWrapper(Generic[TContext]):
     tool_input: Any | None = None
     """Structured input for the current agent tool run, when available."""
 
+    @property
+    def current_tool_call_id(self) -> str | None:
+        """The active tool call ID when this context represents a tool invocation.
+
+        Function and custom tool hooks receive a ``ToolContext`` subclass that carries the
+        model-provided call ID. Other hook contexts, including local tool types without call IDs,
+        return ``None``.
+        """
+        return self._to_str_or_none(getattr(self, "tool_call_id", None))
+
     @staticmethod
     def _to_str_or_none(value: Any) -> str | None:
         if isinstance(value, str):

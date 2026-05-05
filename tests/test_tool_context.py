@@ -35,6 +35,12 @@ def test_tool_context_requires_fields() -> None:
         ToolContext.from_agent_context(ctx, tool_call_id="call-1")
 
 
+def test_run_context_wrapper_current_tool_call_id_defaults_to_none() -> None:
+    ctx: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+
+    assert ctx.current_tool_call_id is None
+
+
 def test_tool_context_missing_defaults_raise() -> None:
     base_ctx: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
     with pytest.raises(ValueError):
@@ -64,6 +70,7 @@ def test_tool_context_from_agent_context_populates_fields() -> None:
 
     assert tool_ctx.tool_name == "test_tool"
     assert tool_ctx.tool_call_id == "call-123"
+    assert tool_ctx.current_tool_call_id == "call-123"
     assert tool_ctx.tool_arguments == '{"a": 1}'
     assert tool_ctx.agent is agent
 

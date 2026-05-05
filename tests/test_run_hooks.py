@@ -354,6 +354,48 @@ async def test_run_hooks_count_tool_and_handoff_invocations():
 
 
 @pytest.mark.asyncio
+async def test_run_tool_hooks_expose_current_tool_call_id_without_cast():
+    hook_events: list[tuple[str, str | None]] = []
+
+    class CurrentToolCallIdHooks(RunHooks):
+        async def on_tool_start(
+            self,
+            context: RunContextWrapper[TContext],
+            agent: Agent[TContext],
+            tool: Tool,
+        ) -> None:
+            hook_events.append(("start", context.current_tool_call_id))
+
+        async def on_tool_end(
+            self,
+            context: RunContextWrapper[TContext],
+            agent: Agent[TContext],
+            tool: Tool,
+            result: str,
+        ) -> None:
+            hook_events.append(("end", context.current_tool_call_id))
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("some_function", "result")],
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
+            [get_text_message("done")],
+        ]
+    )
+
+    await Runner.run(agent, input="user_message", hooks=CurrentToolCallIdHooks())
+
+    assert [event for event, _ in hook_events] == ["start", "end"]
+    assert hook_events[0][1] is not None
+    assert hook_events[0][1] == hook_events[1][1]
+
+
+@pytest.mark.asyncio
 async def test_streamed_run_hooks_count_tool_and_handoff_invocations():
     hooks = RunHooksForTests()
     model = FakeModel()

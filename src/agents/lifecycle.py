@@ -75,6 +75,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
     ) -> None:
         """Called immediately before a local tool is invoked.
 
+        Use ``context.current_tool_call_id`` to read the call ID when one is available.
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
         and ``tool_arguments``. Other local tool families may provide a plain
@@ -91,6 +92,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
     ) -> None:
         """Called immediately after a local tool is invoked.
 
+        Use ``context.current_tool_call_id`` to read the call ID when one is available.
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
         and ``tool_arguments``. Other local tool families may provide a plain
@@ -149,6 +151,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     ) -> None:
         """Called immediately before a local tool is invoked.
 
+        Use ``context.current_tool_call_id`` to read the call ID when one is available.
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
         and ``tool_arguments``. Other local tool families may provide a plain
@@ -165,6 +168,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     ) -> None:
         """Called immediately after a local tool is invoked.
 
+        Use ``context.current_tool_call_id`` to read the call ID when one is available.
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
         and ``tool_arguments``. Other local tool families may provide a plain
