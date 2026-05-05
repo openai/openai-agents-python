@@ -75,6 +75,7 @@ def test_all_fields_serialization() -> None:
                 jitter=False,
             ),
         ),
+        context_management=[{"type": "compaction", "compact_threshold": 200000}],
     )
 
     # Verify that every single field is set to a non-None value

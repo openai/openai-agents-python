@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from openai.types.responses.response_create_params import ContextManagement
 
 from agents import Agent, ModelSettings, RunConfig, Runner
 
@@ -125,7 +126,7 @@ async def test_runner_respects_existing_extra_body_prompt_cache_key() -> None:
 async def test_runner_generates_prompt_cache_key_with_unrelated_extra_args() -> None:
     model = PromptCacheFakeModel()
     model.set_next_output([get_text_message("done")])
-    model_settings = ModelSettings(extra_args={"context_management": [{"type": "compaction"}]})
+    model_settings = ModelSettings(extra_args={"service_tier": "flex"})
     agent = Agent(
         name="test",
         model=model,
@@ -137,10 +138,34 @@ async def test_runner_generates_prompt_cache_key_with_unrelated_extra_args() -> 
     assert _sent_prompt_cache_key(model) is not None
     sent_model_settings = _sent_model_settings(model)
     assert sent_model_settings.extra_args == {
-        "context_management": [{"type": "compaction"}],
+        "service_tier": "flex",
         "prompt_cache_key": _sent_prompt_cache_key(model),
     }
-    assert model_settings.extra_args == {"context_management": [{"type": "compaction"}]}
+    assert model_settings.extra_args == {"service_tier": "flex"}
+
+
+@pytest.mark.asyncio
+async def test_runner_preserves_context_management_when_adding_prompt_cache_key() -> None:
+    model = PromptCacheFakeModel()
+    model.set_next_output([get_text_message("done")])
+    context_management: list[ContextManagement] = [
+        {"type": "compaction", "compact_threshold": 200000}
+    ]
+    model_settings = ModelSettings(context_management=context_management)
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=model_settings,
+    )
+
+    await Runner.run(agent, "hi")
+
+    assert _sent_prompt_cache_key(model) is not None
+    sent_model_settings = _sent_model_settings(model)
+    assert sent_model_settings.context_management == context_management
+    assert sent_model_settings.extra_args == {"prompt_cache_key": _sent_prompt_cache_key(model)}
+    assert model_settings.context_management == context_management
+    assert model_settings.extra_args is None
 
 
 @pytest.mark.asyncio
