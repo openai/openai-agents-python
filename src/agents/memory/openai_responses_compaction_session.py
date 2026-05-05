@@ -243,11 +243,37 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     ) -> None:
         try:
             await self.underlying_session.clear_session()
+        except Exception as clear_error:
+            await self._restore_underlying_session_items_after_failed_clear(
+                previous_items, clear_error
+            )
+            raise
+
+        try:
             if output_items:
                 await self.underlying_session.add_items(output_items)
         except Exception as replacement_error:
             await self._restore_underlying_session_items(previous_items, replacement_error)
             raise
+
+    async def _restore_underlying_session_items_after_failed_clear(
+        self,
+        previous_items: list[TResponseInputItem],
+        clear_error: Exception,
+    ) -> None:
+        try:
+            current_items = await self.underlying_session.get_items()
+        except Exception:
+            logger.warning(
+                "Failed to inspect session history after compaction replacement clear failed.",
+                exc_info=True,
+            )
+            return
+
+        if current_items == previous_items:
+            return
+
+        await self._restore_underlying_session_items(previous_items, clear_error)
 
     async def _restore_underlying_session_items(
         self,

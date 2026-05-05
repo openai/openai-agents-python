@@ -543,6 +543,108 @@ class TestOpenAIResponsesCompactionSession:
         assert failing_session.add_calls == 2
 
     @pytest.mark.asyncio
+    async def test_run_compaction_does_not_restore_when_clear_fails_without_mutation(
+        self,
+    ) -> None:
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "original"}),
+        ]
+        compacted_items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "compacted"},
+            )
+        ]
+
+        class FailingClearBeforeMutationSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.add_calls = 0
+                self.clear_calls = 0
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                self.add_calls += 1
+                await super().add_items(items)
+
+            async def clear_session(self) -> None:
+                self.clear_calls += 1
+                raise RuntimeError("clear failed")
+
+        failing_session = FailingClearBeforeMutationSession(history=history)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = compacted_items
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=failing_session,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        with pytest.raises(RuntimeError, match="clear failed"):
+            await session.run_compaction({"force": True})
+
+        assert await failing_session.get_items() == history
+        assert failing_session.clear_calls == 1
+        assert failing_session.add_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_restores_history_when_clear_fails_after_mutation(
+        self,
+    ) -> None:
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "original"}),
+        ]
+        compacted_items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "compacted"},
+            )
+        ]
+
+        class PartiallyFailingClearSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.add_calls = 0
+                self.clear_calls = 0
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                self.add_calls += 1
+                await super().add_items(items)
+
+            async def clear_session(self) -> None:
+                self.clear_calls += 1
+                await super().clear_session()
+                if self.clear_calls == 1:
+                    raise RuntimeError("clear failed")
+
+        failing_session = PartiallyFailingClearSession(history=history)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = compacted_items
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=failing_session,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        with pytest.raises(RuntimeError, match="clear failed"):
+            await session.run_compaction({"force": True})
+
+        assert await failing_session.get_items() == history
+        assert failing_session.clear_calls == 2
+        assert failing_session.add_calls == 1
+
+    @pytest.mark.asyncio
     async def test_run_compaction_reraises_replacement_error_when_restore_fails(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
