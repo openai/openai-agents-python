@@ -332,9 +332,9 @@ class MCPUtil:
             return None
         merged: dict[str, Any] = {}
         if resolved_meta is not None:
-            merged.update(resolved_meta)
+            merged.update(copy.deepcopy(resolved_meta))
         if explicit_meta is not None:
-            merged.update(explicit_meta)
+            merged.update(copy.deepcopy(explicit_meta))
         return merged
 
     @classmethod
