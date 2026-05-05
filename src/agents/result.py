@@ -18,6 +18,7 @@ from .exceptions import (
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     RunErrorDetails,
+    _should_drain_stream_events_before_raising,
 )
 from .guardrail import InputGuardrailResult, OutputGuardrailResult
 from .items import (
@@ -705,7 +706,12 @@ class RunResultStreaming(RunResultBase):
         try:
             while True:
                 self._check_errors()
-                should_drain_queued_events = isinstance(self._stored_exception, MaxTurnsExceeded)
+                should_drain_queued_events = isinstance(
+                    self._stored_exception, MaxTurnsExceeded
+                ) or (
+                    self._stored_exception is not None
+                    and _should_drain_stream_events_before_raising(self._stored_exception)
+                )
                 if self._stored_exception and (
                     not should_drain_queued_events or self._event_queue.empty()
                 ):

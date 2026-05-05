@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from agents import (
     Agent,
+    AgentBase,
     ApplyPatchTool,
     FunctionTool,
     HostedMCPTool,
@@ -1244,6 +1245,78 @@ async def test_execute_function_tool_calls_eager_task_factory_tracks_state_safel
         loop.set_task_factory(previous_task_factory)
 
     assert [result.output for result in function_results] == ["first", "second"]
+    assert input_guardrail_results == []
+    assert output_guardrail_results == []
+
+
+@pytest.mark.asyncio
+async def test_function_tool_disabled_before_execution_fails_before_starting_siblings() -> None:
+    enabled_checks: list[bool] = []
+    disabled_tool_invocations = 0
+    sibling_tool_invocations = 0
+
+    def _is_lookup_enabled(_ctx: RunContextWrapper[Any], _agent: AgentBase[Any]) -> bool:
+        enabled = not enabled_checks
+        enabled_checks.append(enabled)
+        return enabled
+
+    @function_tool(name_override="lookup_secret", is_enabled=_is_lookup_enabled)
+    def lookup_secret() -> str:
+        nonlocal disabled_tool_invocations
+        disabled_tool_invocations += 1
+        return "secret"
+
+    @function_tool(name_override="record_side_effect")
+    def record_side_effect() -> str:
+        nonlocal sibling_tool_invocations
+        sibling_tool_invocations += 1
+        return "recorded"
+
+    agent = Agent(name="test", tools=[lookup_secret, record_side_effect])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("lookup_secret", "{}", call_id="call-1"),
+            get_function_tool_call("record_side_effect", "{}", call_id="call-2"),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with pytest.raises(ModelBehaviorError, match="lookup_secret is currently disabled"):
+        await get_execute_result(agent, response)
+
+    assert enabled_checks == [True, False]
+    assert disabled_tool_invocations == 0
+    assert sibling_tool_invocations == 0
+
+
+@pytest.mark.asyncio
+async def test_execute_function_tool_calls_allows_non_agent_function_tool() -> None:
+    @function_tool(name_override="synthetic_tool")
+    def synthetic_tool() -> str:
+        return "synthetic-result"
+
+    tool_run = ToolRunFunction(
+        tool_call=cast(
+            ResponseFunctionToolCall,
+            get_function_tool_call("synthetic_tool", "{}", call_id="call-1"),
+        ),
+        function_tool=synthetic_tool,
+    )
+
+    (
+        function_results,
+        input_guardrail_results,
+        output_guardrail_results,
+    ) = await execute_function_tool_calls(
+        bindings=bind_public_agent(Agent(name="test", tools=[])),
+        tool_runs=[tool_run],
+        hooks=RunHooks(),
+        context_wrapper=RunContextWrapper(None),
+        config=RunConfig(),
+    )
+
+    assert [result.output for result in function_results] == ["synthetic-result"]
     assert input_guardrail_results == []
     assert output_guardrail_results == []
 

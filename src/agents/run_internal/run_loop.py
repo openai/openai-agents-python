@@ -58,6 +58,10 @@ from ..items import (
 from ..lifecycle import RunHooks
 from ..logger import logger
 from ..memory import Session
+from ..models._response_terminal import (
+    response_error_event_failure_error,
+    response_terminal_failure_error,
+)
 from ..result import RunResultStreaming
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
@@ -1484,9 +1488,14 @@ async def run_single_turn_streamed(
             is_completed_event = True
             terminal_response = event.response
         elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
+            event_type = cast(str, event.type)
             maybe_response = getattr(event, "response", None)
-            if isinstance(maybe_response, Response):
-                terminal_response = maybe_response
+            raise response_terminal_failure_error(
+                event_type,
+                maybe_response if isinstance(maybe_response, Response) else None,
+            )
+        elif getattr(event, "type", None) in {"error", "response.error"}:
+            raise response_error_event_failure_error(cast(str, event.type), event)
 
         if terminal_response is not None:
             if is_completed_event and not terminal_response.output and streamed_response_output:
