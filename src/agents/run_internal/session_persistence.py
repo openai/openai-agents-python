@@ -86,6 +86,7 @@ async def prepare_input_with_session(
         history = await session.get_items(limit=resolved_settings.limit)
     else:
         history = await session.get_items()
+    is_openai_conversation_session = isinstance(session, OpenAIConversationsSession)
     converted_history = [
         strip_internal_input_item_metadata(ensure_input_item_format(item)) for item in history
     ]
@@ -122,28 +123,38 @@ async def prepare_input_with_session(
         # The callback may reorder, drop, or duplicate items. Keep separate reference maps for
         # the copied history and copied new-input lists so we can reconstruct which output items
         # belong to the new turn and therefore still need to be persisted.
-        history_refs = _build_reference_map(history_for_callback)
+        history_refs = _build_reference_map(
+            history_for_callback,
+            ignore_openai_conversation_item_ids=is_openai_conversation_session,
+        )
         new_refs = _build_reference_map(new_items_for_callback)
-        history_counts = _build_frequency_map(history_for_callback)
+        history_counts = _build_frequency_map(
+            history_for_callback,
+            ignore_openai_conversation_item_ids=is_openai_conversation_session,
+        )
         new_counts = _build_frequency_map(new_items_for_callback)
 
         appended: list[Any] = []
         for combined_index, item in enumerate(combined):
-            key = _session_item_key(item)
-            if _consume_reference(new_refs, key, item):
-                new_counts[key] = max(new_counts.get(key, 0) - 1, 0)
+            history_key = _session_item_key(
+                item,
+                ignore_openai_conversation_item_ids=is_openai_conversation_session,
+            )
+            new_key = _session_item_key(item)
+            if _consume_reference(new_refs, new_key, item):
+                new_counts[new_key] = max(new_counts.get(new_key, 0) - 1, 0)
                 appended.append(item)
                 continue
-            if _consume_reference(history_refs, key, item):
-                history_counts[key] = max(history_counts.get(key, 0) - 1, 0)
+            if _consume_reference(history_refs, history_key, item):
+                history_counts[history_key] = max(history_counts.get(history_key, 0) - 1, 0)
                 prune_history_indexes.add(combined_index)
                 continue
-            if history_counts.get(key, 0) > 0:
-                history_counts[key] = history_counts.get(key, 0) - 1
+            if history_counts.get(history_key, 0) > 0:
+                history_counts[history_key] = history_counts.get(history_key, 0) - 1
                 prune_history_indexes.add(combined_index)
                 continue
-            if new_counts.get(key, 0) > 0:
-                new_counts[key] = max(new_counts.get(key, 0) - 1, 0)
+            if new_counts.get(new_key, 0) > 0:
+                new_counts[new_key] = max(new_counts.get(new_key, 0) - 1, 0)
                 appended.append(item)
                 continue
             appended.append(item)
@@ -159,6 +170,11 @@ async def prepare_input_with_session(
 
     # Normalize exactly as the runtime does elsewhere so the prepared model input and the
     # persisted session items are derived from the same item shape and dedupe rules.
+    if is_openai_conversation_session and prune_history_indexes:
+        prepared_items_raw = _sanitize_openai_conversation_history_items_for_model_input(
+            prepared_items_raw,
+            prune_history_indexes,
+        )
     prepared_as_inputs = [ensure_input_item_format(item) for item in prepared_items_raw]
     filtered = drop_orphan_function_calls(
         prepared_as_inputs,
@@ -555,6 +571,32 @@ def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInp
     return item
 
 
+def _sanitize_openai_conversation_history_items_for_model_input(
+    items: Sequence[TResponseInputItem],
+    history_indexes: set[int],
+) -> list[TResponseInputItem]:
+    """Remove Conversation item metadata only from session-history items sent to the model."""
+    sanitized_items: list[TResponseInputItem] = []
+    for index, item in enumerate(items):
+        if index in history_indexes:
+            sanitized_items.append(_sanitize_openai_conversation_history_item_for_model_input(item))
+        else:
+            sanitized_items.append(item)
+    return sanitized_items
+
+
+def _sanitize_openai_conversation_history_item_for_model_input(
+    item: TResponseInputItem,
+) -> TResponseInputItem:
+    """Remove Conversation replay metadata from assistant messages only."""
+    if isinstance(item, dict) and item.get("type") == "message" and item.get("role") == "assistant":
+        clean_item = cast(dict[str, Any], strip_internal_input_item_metadata(item))
+        clean_item.pop("id", None)
+        clean_item.pop("provider_data", None)
+        return cast(TResponseInputItem, clean_item)
+    return item
+
+
 def _fingerprint_or_repr(item: TResponseInputItem, *, ignore_ids_for_matching: bool) -> str:
     """Fingerprint an item or fall back to repr when unavailable."""
     return fingerprint_input_item(item, ignore_ids_for_matching=ignore_ids_for_matching) or repr(
@@ -677,7 +719,7 @@ def _collect_retry_owned_tail_serializations(
     return []
 
 
-def _session_item_key(item: Any) -> str:
+def _session_item_key(item: Any, *, ignore_openai_conversation_item_ids: bool = False) -> str:
     """Return a stable representation of a session item for comparison."""
     try:
         if hasattr(item, "model_dump"):
@@ -691,16 +733,30 @@ def _session_item_key(item: Any) -> str:
                 dict[str, Any],
                 strip_internal_input_item_metadata(cast(TResponseInputItem, payload)),
             )
+            if ignore_openai_conversation_item_ids:
+                payload = cast(
+                    dict[str, Any],
+                    _sanitize_openai_conversation_history_item_for_model_input(
+                        cast(TResponseInputItem, payload)
+                    ),
+                )
         return json.dumps(payload, sort_keys=True, default=str)
     except Exception:
         return repr(item)
 
 
-def _build_reference_map(items: Sequence[Any]) -> dict[str, list[Any]]:
+def _build_reference_map(
+    items: Sequence[Any],
+    *,
+    ignore_openai_conversation_item_ids: bool = False,
+) -> dict[str, list[Any]]:
     """Map serialized keys to the concrete session items used to build them."""
     refs: dict[str, list[Any]] = {}
     for item in items:
-        key = _session_item_key(item)
+        key = _session_item_key(
+            item,
+            ignore_openai_conversation_item_ids=ignore_openai_conversation_item_ids,
+        )
         refs.setdefault(key, []).append(item)
     return refs
 
@@ -719,10 +775,17 @@ def _consume_reference(ref_map: dict[str, list[Any]], key: str, candidate: Any) 
     return False
 
 
-def _build_frequency_map(items: Sequence[Any]) -> dict[str, int]:
+def _build_frequency_map(
+    items: Sequence[Any],
+    *,
+    ignore_openai_conversation_item_ids: bool = False,
+) -> dict[str, int]:
     """Count how many times each serialized key appears in a collection."""
     freq: dict[str, int] = {}
     for item in items:
-        key = _session_item_key(item)
+        key = _session_item_key(
+            item,
+            ignore_openai_conversation_item_ids=ignore_openai_conversation_item_ids,
+        )
         freq[key] = freq.get(key, 0) + 1
     return freq

@@ -2118,6 +2118,219 @@ async def test_prepare_input_with_session_matches_copied_items_by_content() -> N
 
 
 @pytest.mark.asyncio
+async def test_prepare_input_with_openai_conversation_strips_assistant_history_ids() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self, history: list[TResponseInputItem]) -> None:
+            self.history = history
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            if limit is None:
+                return list(self.history)
+            return self.history[-limit:]
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.history.extend(items)
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return self.history.pop() if self.history else None
+
+        async def clear_session(self) -> None:
+            self.history.clear()
+
+    history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_assistant",
+            "type": "message",
+            "role": "assistant",
+            "content": "history",
+            "provider_data": {"server": "metadata"},
+        },
+    )
+    user_history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_user",
+            "type": "message",
+            "role": "user",
+            "content": "user history",
+            "provider_data": {"server": "metadata"},
+        },
+    )
+    function_call_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_call",
+            "type": "function_call",
+            "call_id": "call_history",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+    )
+    function_call_output_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_output",
+            "type": "function_call_output",
+            "call_id": "call_history",
+            "output": "ok",
+        },
+    )
+    session = DummyOpenAIConversationsSession(
+        history=[user_history_item, history_item, function_call_item, function_call_output_item]
+    )
+
+    prepared, session_items = await prepare_input_with_session("new", session, None)
+
+    assert isinstance(prepared, list)
+    user_payload = cast(dict[str, Any], prepared[0])
+    history_payload = cast(dict[str, Any], prepared[1])
+    call_payload = cast(dict[str, Any], prepared[2])
+    output_payload = cast(dict[str, Any], prepared[3])
+    new_payload = cast(dict[str, Any], prepared[4])
+    assert user_payload["role"] == "user"
+    assert user_payload["id"] == "conv_item_user"
+    assert "provider_data" in user_payload
+    assert history_payload["role"] == "assistant"
+    assert "id" not in history_payload
+    assert "provider_data" not in history_payload
+    assert call_payload["id"] == "conv_item_call"
+    assert output_payload["id"] == "conv_item_output"
+    assert new_payload["role"] == "user"
+    assert new_payload["content"] == "new"
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_regular_session_preserves_history_ids() -> None:
+    history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "message_id",
+            "type": "message",
+            "role": "assistant",
+            "content": "history",
+        },
+    )
+    session = SimpleListSession(history=[history_item])
+
+    prepared, _ = await prepare_input_with_session("new", session, None)
+
+    assert isinstance(prepared, list)
+    history_payload = cast(dict[str, Any], prepared[0])
+    assert history_payload["id"] == "message_id"
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_openai_conversation_callback_matches_assistant_no_ids() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self, history: list[TResponseInputItem]) -> None:
+            self.history = history
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            if limit is None:
+                return list(self.history)
+            return self.history[-limit:]
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.history.extend(items)
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return self.history.pop() if self.history else None
+
+        async def clear_session(self) -> None:
+            self.history.clear()
+
+    history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_assistant",
+            "type": "message",
+            "role": "assistant",
+            "content": "history",
+            "provider_data": {"server": "metadata"},
+        },
+    )
+    session = DummyOpenAIConversationsSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        history_copy = dict(cast(dict[str, Any], history[0]))
+        history_copy.pop("id", None)
+        history_copy.pop("provider_data", None)
+        return [
+            cast(TResponseInputItem, history_copy),
+            cast(TResponseInputItem, dict(cast(dict[str, Any], new_input[0]))),
+        ]
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+
+    assert isinstance(prepared, list)
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "history",
+        "new",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_openai_conversation_callback_keeps_user_ids_distinct() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self, history: list[TResponseInputItem]) -> None:
+            self.history = history
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            if limit is None:
+                return list(self.history)
+            return self.history[-limit:]
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.history.extend(items)
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return self.history.pop() if self.history else None
+
+        async def clear_session(self) -> None:
+            self.history.clear()
+
+    history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_user",
+            "type": "message",
+            "role": "user",
+            "content": "history",
+            "provider_data": {"server": "metadata"},
+        },
+    )
+    session = DummyOpenAIConversationsSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        history_copy = dict(cast(dict[str, Any], history[0]))
+        history_copy.pop("id", None)
+        history_copy.pop("provider_data", None)
+        return [
+            cast(TResponseInputItem, history_copy),
+            cast(TResponseInputItem, dict(cast(dict[str, Any], new_input[0]))),
+        ]
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+
+    assert isinstance(prepared, list)
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "history",
+        "new",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == [
+        "history",
+        "new",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_persist_session_items_for_guardrail_trip_uses_original_input_when_missing() -> None:
     session = SimpleListSession()
     agent = Agent(name="agent", model=FakeModel())
