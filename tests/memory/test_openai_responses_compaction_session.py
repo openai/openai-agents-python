@@ -124,7 +124,13 @@ class TestOpenAIResponsesCompactionSession:
                 compaction_input_token_threshold=-1,
             )
 
-    def test_init_accepts_async_azure_openai_client_with_openai_style_deployment(self) -> None:
+    @pytest.mark.parametrize(
+        "deployment_name",
+        ["gpt-4.1", "gpt-5", "gpt-5.2", "gpt-5.5", "gpt-5-mini", "o3"],
+    )
+    def test_init_accepts_async_azure_openai_client_with_openai_style_deployment(
+        self, deployment_name: str
+    ) -> None:
         mock_session = self.create_mock_session()
         client = AsyncAzureOpenAI(
             azure_endpoint="https://example.openai.azure.com",
@@ -136,11 +142,46 @@ class TestOpenAIResponsesCompactionSession:
             session_id="test",
             underlying_session=mock_session,
             client=client,
-            model="gpt-5.5",
+            model=deployment_name,
         )
 
         assert session.client is client
-        assert session.model == "gpt-5.5"
+        assert session.model == deployment_name
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "deployment_name",
+        ["gpt-4.1", "gpt-5", "gpt-5.2", "gpt-5.5", "gpt-5-mini", "o3"],
+    )
+    async def test_run_compaction_passes_openai_style_deployment_name_unchanged(
+        self, deployment_name: str
+    ) -> None:
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "msg"})
+        ]
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = []
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            model=deployment_name,
+            compaction_input_token_threshold=100,
+        )
+
+        await session.run_compaction(
+            {"response_id": "resp-123", "usage": Usage(input_tokens=100, total_tokens=125)}
+        )
+
+        mock_client.responses.compact.assert_called_once_with(
+            previous_response_id="resp-123",
+            model=deployment_name,
+        )
 
     @pytest.mark.asyncio
     async def test_add_items_delegates(self) -> None:
