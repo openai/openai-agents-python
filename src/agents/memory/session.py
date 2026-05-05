@@ -7,6 +7,7 @@ from typing_extensions import TypedDict
 
 if TYPE_CHECKING:
     from ..items import TResponseInputItem
+    from ..usage import Usage
     from .session_settings import SessionSettings
 
 
@@ -126,6 +127,9 @@ class OpenAIResponsesCompactionArgs(TypedDict, total=False):
 
     force: bool
     """Whether to force compaction even if the threshold is not met."""
+
+    usage: Usage
+    """Usage from the latest model response, when available."""
 
 
 @runtime_checkable

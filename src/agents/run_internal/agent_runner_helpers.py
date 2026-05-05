@@ -469,6 +469,7 @@ async def save_turn_items_if_needed(
     items: list[RunItem],
     response_id: str | None,
     store: bool | None = None,
+    usage: Usage | None = None,
 ) -> None:
     """Persist turn items when persistence is enabled and guardrails allow it."""
     if not session_persistence_enabled:
@@ -484,6 +485,7 @@ async def save_turn_items_if_needed(
         run_state,
         response_id=response_id,
         store=store,
+        usage=usage,
     )
 
 

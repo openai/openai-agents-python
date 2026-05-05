@@ -307,6 +307,7 @@ async def _save_resumed_stream_items(
     items: list[RunItem],
     response_id: str | None,
     store: bool | None = None,
+    usage: Usage | None = None,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
@@ -321,6 +322,7 @@ async def _save_resumed_stream_items(
         response_id=response_id,
         reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
         store=store,
+        usage=usage,
     )
     if run_state is not None:
         run_state._current_turn_persisted_item_count = (
@@ -338,6 +340,7 @@ async def _save_stream_items(
     response_id: str | None,
     update_persisted_count: bool,
     store: bool | None = None,
+    usage: Usage | None = None,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
@@ -352,6 +355,7 @@ async def _save_stream_items(
         run_state,
         response_id=response_id,
         store=store,
+        usage=usage,
     )
     if update_persisted_count and streamed_result._state is not None:
         streamed_result._current_turn_persisted_item_count = (
@@ -394,10 +398,11 @@ async def _finalize_streamed_final_output(
     run_config: RunConfig,
     output: Any,
     context_wrapper: RunContextWrapper[TContext],
-    save_items: Callable[[list[RunItem], str | None, bool | None], Awaitable[None]],
+    save_items: Callable[[list[RunItem], str | None, bool | None, Usage | None], Awaitable[None]],
     items: list[RunItem],
     response_id: str | None,
     store_setting: bool | None,
+    usage: Usage | None,
 ) -> None:
     output_guardrail_results = await _run_output_guardrails_for_stream(
         agent=agent,
@@ -410,7 +415,7 @@ async def _finalize_streamed_final_output(
     streamed_result.final_output = output
     streamed_result.is_complete = True
 
-    await save_items(items, response_id, store_setting)
+    await save_items(items, response_id, store_setting, usage)
 
     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
 
@@ -418,14 +423,15 @@ async def _finalize_streamed_final_output(
 async def _finalize_streamed_interruption(
     *,
     streamed_result: RunResultStreaming,
-    save_items: Callable[[list[RunItem], str | None, bool | None], Awaitable[None]],
+    save_items: Callable[[list[RunItem], str | None, bool | None, Usage | None], Awaitable[None]],
     items: list[RunItem],
     response_id: str | None,
     store_setting: bool | None,
+    usage: Usage | None,
     interruptions: list[ToolApprovalItem],
     processed_response: ProcessedResponse | None,
 ) -> None:
-    await save_items(items, response_id, store_setting)
+    await save_items(items, response_id, store_setting, usage)
     _complete_stream_interruption(
         streamed_result,
         interruptions=interruptions,
@@ -613,7 +619,10 @@ async def start_streaming(
                 streamed_result._original_input_for_persistence = session_items_snapshot
 
         async def _save_resumed_items(
-            items: list[RunItem], response_id: str | None, store_setting: bool | None
+            items: list[RunItem],
+            response_id: str | None,
+            store_setting: bool | None,
+            usage: Usage | None,
         ) -> None:
             await _save_resumed_stream_items(
                 session=session,
@@ -623,10 +632,14 @@ async def start_streaming(
                 items=items,
                 response_id=response_id,
                 store=store_setting,
+                usage=usage,
             )
 
         async def _save_stream_items_with_count(
-            items: list[RunItem], response_id: str | None, store_setting: bool | None
+            items: list[RunItem],
+            response_id: str | None,
+            store_setting: bool | None,
+            usage: Usage | None,
         ) -> None:
             await _save_stream_items(
                 session=session,
@@ -637,10 +650,14 @@ async def start_streaming(
                 response_id=response_id,
                 update_persisted_count=True,
                 store=store_setting,
+                usage=usage,
             )
 
         async def _save_stream_items_without_count(
-            items: list[RunItem], response_id: str | None, store_setting: bool | None
+            items: list[RunItem],
+            response_id: str | None,
+            store_setting: bool | None,
+            usage: Usage | None,
         ) -> None:
             await _save_stream_items(
                 session=session,
@@ -651,6 +668,7 @@ async def start_streaming(
                 response_id=response_id,
                 update_persisted_count=False,
                 store=store_setting,
+                usage=usage,
             )
     except BaseException:
         if current_task_span:
@@ -794,6 +812,7 @@ async def start_streaming(
                             items=list(turn_session_items),
                             response_id=turn_result.model_response.response_id,
                             store_setting=store_setting,
+                            usage=turn_result.model_response.usage,
                             interruptions=approvals_from_step(turn_result.next_step),
                             processed_response=run_state._last_processed_response,
                         )
@@ -824,6 +843,7 @@ async def start_streaming(
                             items=list(turn_session_items),
                             response_id=turn_result.model_response.response_id,
                             store_setting=store_setting,
+                            usage=turn_result.model_response.usage,
                         )
                         break
 
@@ -832,6 +852,7 @@ async def start_streaming(
                             list(turn_session_items),
                             turn_result.model_response.response_id,
                             store_setting,
+                            turn_result.model_response.usage,
                         )
                         run_state._current_step = NextStepRunAgain()  # type: ignore[assignment]
                         continue
@@ -928,9 +949,11 @@ async def start_streaming(
                         run_config.model_settings
                     ).store
                     if is_resumed_state:
-                        await _save_resumed_items([synthesized_item], None, store_setting)
+                        await _save_resumed_items([synthesized_item], None, store_setting, None)
                     else:
-                        await _save_stream_items_with_count([synthesized_item], None, store_setting)
+                        await _save_stream_items_with_count(
+                            [synthesized_item], None, store_setting, None
+                        )
 
                 await run_final_output_hooks(
                     current_agent, hooks, context_wrapper, validated_output
@@ -1092,6 +1115,7 @@ async def start_streaming(
                         turn_session_items,
                         turn_result.model_response.response_id,
                         store_setting,
+                        turn_result.model_response.usage,
                     )
                     current_agent = turn_result.next_step.new_agent
                     if run_state is not None:
@@ -1120,6 +1144,7 @@ async def start_streaming(
                         items=turn_session_items,
                         response_id=turn_result.model_response.response_id,
                         store_setting=store_setting,
+                        usage=turn_result.model_response.usage,
                     )
                     break
                 elif isinstance(turn_result.next_step, NextStepInterruption):
@@ -1143,6 +1168,7 @@ async def start_streaming(
                         items=turn_session_items,
                         response_id=turn_result.model_response.response_id,
                         store_setting=store_setting,
+                        usage=turn_result.model_response.usage,
                         interruptions=approvals_from_step(turn_result.next_step),
                         processed_response=processed_response_for_state,
                     )
@@ -1155,6 +1181,7 @@ async def start_streaming(
                         turn_session_items,
                         turn_result.model_response.response_id,
                         store_setting,
+                        turn_result.model_response.usage,
                     )
 
                     if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]

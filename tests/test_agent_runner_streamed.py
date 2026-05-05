@@ -1862,6 +1862,7 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
         response_id: str | None,
         reasoning_item_id_policy: str | None = None,
         store: bool | None = None,
+        usage: Usage | None = None,
     ) -> int:
         observed_counts.append(persisted_count)
         result = await real_save_resumed(
@@ -1871,6 +1872,7 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
             response_id=response_id,
             reasoning_item_id_policy=reasoning_item_id_policy,
             store=store,
+            usage=usage,
         )
         return int(result)
 

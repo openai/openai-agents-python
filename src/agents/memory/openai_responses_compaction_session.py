@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 from ..items import TResponseInputItem
 from ..models._openai_shared import get_default_openai_client
 from ..run_internal.items import normalize_input_items_for_api
+from ..usage import Usage
 from .openai_conversations_session import OpenAIConversationsSession
 from .session import (
     OpenAIResponsesCompactionArgs,
@@ -90,6 +91,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         client: AsyncOpenAI | None = None,
         model: str = "gpt-4.1",
         compaction_mode: OpenAIResponsesCompactionMode = "auto",
+        compaction_input_token_threshold: int | None = None,
         should_trigger_compaction: Callable[[dict[str, Any]], bool] | None = None,
     ):
         """Initialize the compaction session.
@@ -105,6 +107,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             compaction_mode: Controls how the compaction request provides conversation
                 history. "auto" (default) uses input when the last response was not
                 stored or no response_id is available.
+            compaction_input_token_threshold: Trigger compaction when the latest model
+                response reports at least this many input tokens. Ignored when
+                should_trigger_compaction is provided.
             should_trigger_compaction: Custom decision hook. Defaults to triggering when
                 10+ compaction candidates exist.
         """
@@ -116,15 +121,16 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         if not is_openai_model_name(model):
             raise ValueError(f"Unsupported model for OpenAI responses compaction: {model}")
+        if compaction_input_token_threshold is not None and compaction_input_token_threshold < 0:
+            raise ValueError("compaction_input_token_threshold must be greater than or equal to 0.")
 
         self.session_id = session_id
         self.underlying_session = underlying_session
         self._client = client
         self.model = model
         self.compaction_mode = compaction_mode
-        self.should_trigger_compaction = (
-            should_trigger_compaction or default_should_trigger_compaction
-        )
+        self.compaction_input_token_threshold = compaction_input_token_threshold
+        self.should_trigger_compaction = should_trigger_compaction or self._default_should_compact
 
         # cache for incremental candidate tracking
         self._compaction_candidate_items: list[TResponseInputItem] | None = None
@@ -174,6 +180,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             store=store,
             requested_mode=requested_mode,
         )
+        usage = args.get("usage") if args else None
 
         if resolved_mode == "previous_response_id" and not self._response_id:
             raise ValueError(
@@ -185,12 +192,13 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         force = args.get("force", False) if args else False
         should_compact = force or self.should_trigger_compaction(
-            {
-                "response_id": self._response_id,
-                "compaction_mode": resolved_mode,
-                "compaction_candidate_items": compaction_candidate_items,
-                "session_items": session_items,
-            }
+            self._build_compaction_context(
+                response_id=self._response_id,
+                compaction_mode=resolved_mode,
+                compaction_candidate_items=compaction_candidate_items,
+                session_items=session_items,
+                usage=usage,
+            )
         )
 
         if not should_compact:
@@ -232,7 +240,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit)
 
-    async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
+    async def _defer_compaction(
+        self,
+        response_id: str,
+        store: bool | None = None,
+        usage: Usage | None = None,
+    ) -> None:
         if self._deferred_response_id is not None:
             return
         compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
@@ -242,12 +255,13 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             requested_mode=None,
         )
         should_compact = self.should_trigger_compaction(
-            {
-                "response_id": response_id,
-                "compaction_mode": resolved_mode,
-                "compaction_candidate_items": compaction_candidate_items,
-                "session_items": session_items,
-            }
+            self._build_compaction_context(
+                response_id=response_id,
+                compaction_mode=resolved_mode,
+                compaction_candidate_items=compaction_candidate_items,
+                session_items=session_items,
+                usage=usage,
+            )
         )
         if should_compact:
             self._deferred_response_id = response_id
@@ -297,6 +311,31 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             f"candidates: initialized (history={len(history)}, candidates={len(candidates)})"
         )
         return (candidates[:], history[:])
+
+    def _build_compaction_context(
+        self,
+        *,
+        response_id: str | None,
+        compaction_mode: _ResolvedCompactionMode,
+        compaction_candidate_items: list[TResponseInputItem],
+        session_items: list[TResponseInputItem],
+        usage: Usage | None,
+    ) -> dict[str, Any]:
+        return {
+            "response_id": response_id,
+            "compaction_mode": compaction_mode,
+            "compaction_candidate_items": compaction_candidate_items,
+            "session_items": session_items,
+            "usage": usage,
+        }
+
+    def _default_should_compact(self, context: dict[str, Any]) -> bool:
+        if self.compaction_input_token_threshold is not None:
+            usage = context.get("usage")
+            if not isinstance(usage, Usage):
+                return False
+            return usage.input_tokens >= self.compaction_input_token_threshold
+        return default_should_trigger_compaction(context)
 
 
 def _strip_orphaned_assistant_ids(

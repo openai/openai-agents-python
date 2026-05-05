@@ -877,6 +877,7 @@ class AgentRunner:
                                             run_state._reasoning_item_id_policy
                                         ),
                                         store=store_setting,
+                                        usage=turn_result.model_response.usage,
                                     )
                                 )
 
@@ -989,6 +990,7 @@ class AgentRunner:
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
+                                        usage=turn_result.model_response.usage,
                                     )
                                 result._original_input = copy_input_items(original_input)
                                 return _finalize_result(result)
@@ -1331,6 +1333,7 @@ class AgentRunner:
                                             run_state._reasoning_item_id_policy
                                         ),
                                         store=store_setting,
+                                        usage=turn_result.model_response.usage,
                                     )
                                     run_state._current_turn_persisted_item_count += saved_count
                                 else:
@@ -1341,6 +1344,7 @@ class AgentRunner:
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
+                                        usage=turn_result.model_response.usage,
                                     )
 
                     # After the first resumed turn, treat subsequent turns as fresh
@@ -1393,6 +1397,7 @@ class AgentRunner:
                                 items=session_items_for_turn(turn_result),
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
+                                usage=turn_result.model_response.usage,
                             )
                             result._original_input = copy_input_items(original_input)
                             return _finalize_result(result)
@@ -1412,6 +1417,7 @@ class AgentRunner:
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
+                                        usage=turn_result.model_response.usage,
                                     )
                             append_model_response_if_new(
                                 model_responses, turn_result.model_response
@@ -1473,6 +1479,7 @@ class AgentRunner:
                                 items=session_items_for_turn(turn_result),
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
+                                usage=turn_result.model_response.usage,
                             )
                             continue
                         else:

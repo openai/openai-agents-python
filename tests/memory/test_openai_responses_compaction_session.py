@@ -6,6 +6,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from openai import AsyncAzureOpenAI
 
 from agents import Agent, Runner
 from agents.items import TResponseInputItem
@@ -24,6 +25,7 @@ from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
 )
+from agents.usage import Usage
 from tests.fake_model import FakeModel
 from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
 from tests.utils.simple_session import SimpleListSession
@@ -111,6 +113,34 @@ class TestOpenAIResponsesCompactionSession:
             model="gpt-4.1",
         )
         assert session.model == "gpt-4.1"
+
+    def test_init_rejects_negative_token_threshold(self) -> None:
+        mock_session = self.create_mock_session()
+
+        with pytest.raises(ValueError, match="compaction_input_token_threshold"):
+            OpenAIResponsesCompactionSession(
+                session_id="test",
+                underlying_session=mock_session,
+                compaction_input_token_threshold=-1,
+            )
+
+    def test_init_accepts_async_azure_openai_client_with_openai_style_deployment(self) -> None:
+        mock_session = self.create_mock_session()
+        client = AsyncAzureOpenAI(
+            azure_endpoint="https://example.openai.azure.com",
+            api_key="test-key",
+            api_version="preview",
+        )
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=client,
+            model="gpt-5.5",
+        )
+
+        assert session.client is client
+        assert session.model == "gpt-5.5"
 
     @pytest.mark.asyncio
     async def test_add_items_delegates(self) -> None:
@@ -450,6 +480,83 @@ class TestOpenAIResponsesCompactionSession:
         mock_client.responses.compact.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_run_compaction_executes_when_input_token_threshold_met(self) -> None:
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "msg"})
+        ]
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [{"type": "compaction", "summary": "compacted"}]
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            compaction_input_token_threshold=100,
+        )
+
+        await session.run_compaction(
+            {"response_id": "resp-123", "usage": Usage(input_tokens=100, total_tokens=125)}
+        )
+
+        mock_client.responses.compact.assert_called_once_with(
+            previous_response_id="resp-123",
+            model="gpt-4.1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_skips_when_input_token_threshold_not_met(self) -> None:
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "msg"})
+        ]
+
+        mock_client = MagicMock()
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            compaction_input_token_threshold=100,
+        )
+
+        await session.run_compaction(
+            {"response_id": "resp-123", "usage": Usage(input_tokens=99, total_tokens=125)}
+        )
+
+        mock_client.responses.compact.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_custom_trigger_receives_usage_and_remains_authoritative(self) -> None:
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "msg"})
+        ]
+        observed: dict[str, Any] = {}
+
+        def should_trigger_compaction(context: dict[str, Any]) -> bool:
+            observed["usage"] = context["usage"]
+            return False
+
+        mock_client = MagicMock()
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            compaction_input_token_threshold=100,
+            should_trigger_compaction=should_trigger_compaction,
+        )
+        usage = Usage(input_tokens=100, total_tokens=125)
+
+        await session.run_compaction({"response_id": "resp-123", "usage": usage})
+
+        assert observed["usage"] is usage
+        mock_client.responses.compact.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_run_compaction_executes_when_threshold_met(self) -> None:
         mock_session = self.create_mock_session()
         # Return exactly threshold items (all assistant messages = candidates)
@@ -771,6 +878,32 @@ class TestOpenAIResponsesCompactionSession:
         assert any(isinstance(item, dict) and item.get("type") == "compaction" for item in items)
 
     @pytest.mark.asyncio
+    async def test_token_threshold_compaction_runs_during_runner_flow(self) -> None:
+        underlying = SimpleListSession()
+        compacted = SimpleNamespace(
+            output=[{"type": "compaction", "encrypted_content": "enc"}],
+        )
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=compacted)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_input_token_threshold=100,
+        )
+
+        model = FakeModel(initial_output=[get_text_message("ok")])
+        model.set_hardcoded_usage(Usage(input_tokens=100, total_tokens=125))
+        agent = Agent(name="assistant", model=model)
+
+        await Runner.run(agent, "hello", session=session)
+
+        mock_client.responses.compact.assert_awaited_once()
+        items = await session.get_items()
+        assert any(isinstance(item, dict) and item.get("type") == "compaction" for item in items)
+
+    @pytest.mark.asyncio
     async def test_compaction_skips_when_tool_outputs_present(self) -> None:
         underlying = SimpleListSession()
         mock_client = MagicMock()
@@ -853,6 +986,43 @@ class TestOpenAIResponsesCompactionSession:
 
         tool = get_function_tool(name="do_thing", return_value="done")
         model = FakeModel()
+        model.add_multiple_turn_outputs(
+            [
+                [get_function_tool_call("do_thing")],
+                [get_text_message("ok")],
+            ]
+        )
+        agent = Agent(
+            name="assistant",
+            model=model,
+            tools=[tool],
+            tool_use_behavior="stop_on_first_tool",
+        )
+
+        await Runner.run(agent, "hello", session=session)
+        await Runner.run(agent, "followup", session=session)
+
+        mock_client.responses.compact.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_token_threshold_deferred_compaction_runs_after_tool_outputs(self) -> None:
+        underlying = SimpleListSession()
+        compacted = SimpleNamespace(
+            output=[{"type": "compaction", "summary": "compacted"}],
+        )
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=compacted)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_input_token_threshold=100,
+        )
+
+        tool = get_function_tool(name="do_thing", return_value="done")
+        model = FakeModel()
+        model.set_hardcoded_usage(Usage(input_tokens=100, total_tokens=125))
         model.add_multiple_turn_outputs(
             [
                 [get_function_tool_call("do_thing")],

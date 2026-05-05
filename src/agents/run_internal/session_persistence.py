@@ -24,6 +24,7 @@ from ..memory import (
 )
 from ..memory.openai_conversations_session import OpenAIConversationsSession
 from ..run_state import RunState
+from ..usage import Usage
 from .items import (
     ReasoningItemIdPolicy,
     copy_input_items,
@@ -237,6 +238,7 @@ async def save_result_to_session(
     response_id: str | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
+    usage: Usage | None = None,
 ) -> int:
     """
     Persist a turn to the session store, keeping track of what was already saved so retries
@@ -317,12 +319,8 @@ async def save_result_to_session(
             serialized_to_save_counts[serialized] -= 1
             saved_run_items_count += 1
 
-    if len(items_to_save) == 0:
-        if run_state:
-            run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
-        return saved_run_items_count
-
-    await session.add_items(items_to_save)
+    if len(items_to_save) > 0:
+        await session.add_items(items_to_save)
 
     if run_state:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
@@ -334,7 +332,7 @@ async def save_result_to_session(
         if has_local_tool_outputs:
             defer_compaction = getattr(session, "_defer_compaction", None)
             if callable(defer_compaction):
-                result = defer_compaction(response_id, store=store)
+                result = defer_compaction(response_id, store=store, usage=usage)
                 if inspect.isawaitable(result):
                     await result
             logger.debug(
@@ -360,6 +358,8 @@ async def save_result_to_session(
         }
         if store is not None:
             compaction_args["store"] = store
+        if usage is not None:
+            compaction_args["usage"] = usage
         await session.run_compaction(compaction_args)
 
     return saved_run_items_count
@@ -373,6 +373,7 @@ async def save_resumed_turn_items(
     response_id: str | None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
+    usage: Usage | None = None,
 ) -> int:
     """Persist resumed turn items and return the updated persisted count."""
     if session is None or not items:
@@ -385,6 +386,7 @@ async def save_resumed_turn_items(
         response_id=response_id,
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
+        usage=usage,
     )
     return persisted_count + saved_count
 

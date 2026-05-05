@@ -276,9 +276,27 @@ print(result.final_output)
 
 By default, compaction runs after each turn once the candidate threshold is reached.
 
+You can also trigger automatic compaction from the latest model response token usage. This uses
+the response's `usage.input_tokens` value, so it works when the model provider returns token usage:
+
+```python
+session = OpenAIResponsesCompactionSession(
+    session_id="conversation_123",
+    underlying_session=underlying,
+    compaction_input_token_threshold=120_000,
+)
+```
+
+If you pass `should_trigger_compaction`, that callback controls the decision instead. The callback
+receives a `usage` entry in its context when the latest model response usage is available.
+
 `compaction_mode="previous_response_id"` works best when you are already chaining turns with Responses API response IDs. `compaction_mode="input"` rebuilds the compaction request from the current session items instead, which is useful when the response chain is unavailable or you want the session contents to be the source of truth. The default `"auto"` chooses the safest available option.
 
 If your agent runs with `ModelSettings(store=False)`, the Responses API does not retain the last response for later lookup. In that stateless setup, the default `"auto"` mode falls back to input-based compaction instead of relying on `previous_response_id`. See [`examples/memory/compaction_session_stateless_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/compaction_session_stateless_example.py) for a complete example.
+
+For Azure OpenAI, pass an Azure OpenAI client and use your deployment name as `model`. The deployment
+name must follow an OpenAI-style model name accepted by the SDK's compaction model validation, such
+as `gpt-5.5`.
 
 #### auto-compaction can block streaming
 
