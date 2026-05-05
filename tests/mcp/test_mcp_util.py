@@ -207,6 +207,41 @@ async def test_to_function_tool_merges_static_mcp_meta_with_resolver():
 
 
 @pytest.mark.asyncio
+async def test_to_function_tool_does_not_reuse_nested_static_mcp_meta():
+    class MutatingMetaServer(FakeMCPServer):
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None = None,
+        ) -> CallToolResult:
+            if meta is not None:
+                meta["nested"]["headers"].append("mutated")
+            return await super().call_tool(tool_name, arguments, meta=meta)
+
+    server = MutatingMetaServer()
+    tool = MCPTool(
+        name="test_tool_1",
+        inputSchema={},
+        _meta={"nested": {"headers": ["original"]}},
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+    tool_context = ToolContext(
+        context=None,
+        tool_name="test_tool_1",
+        tool_call_id="test_call_static_meta",
+        tool_arguments="{}",
+    )
+
+    await function_tool.on_invoke_tool(tool_context, "{}")
+    await function_tool.on_invoke_tool(tool_context, "{}")
+
+    assert server.tool_metas[0] == {"nested": {"headers": ["original", "mutated"]}}
+    assert server.tool_metas[1] == {"nested": {"headers": ["original", "mutated"]}}
+
+
+@pytest.mark.asyncio
 async def test_mcp_invoke_bad_json_errors(caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.DEBUG)
 
