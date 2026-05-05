@@ -122,6 +122,7 @@ from .run_state import RunState
 from .stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
+    ReasoningDeltaEvent,
     RunItemStreamEvent,
     StreamEvent,
 )
@@ -438,6 +439,7 @@ __all__ = [
     "RawResponsesStreamEvent",
     "RunItemStreamEvent",
     "AgentUpdatedStreamEvent",
+    "ReasoningDeltaEvent",
     "StreamEvent",
     "FunctionTool",
     "FunctionToolResult",

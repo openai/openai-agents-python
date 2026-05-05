@@ -339,7 +339,7 @@ async def test_complete_streaming_events():
     async for event in result.stream_events():
         events.append(event)
 
-    assert len(events) == 27, f"Expected 27 events but got {len(events)}"
+    assert len(events) == 28, f"Expected 28 events but got {len(events)}"
 
     # Event 0: agent_updated_stream_event
     assert events[0].type == "agent_updated_stream_event"
@@ -365,93 +365,99 @@ async def test_complete_streaming_events():
     assert events[5].type == "raw_response_event"
     assert isinstance(events[5].data, ResponseReasoningSummaryTextDeltaEvent)
 
-    # Event 6: ResponseReasoningSummaryTextDoneEvent
-    assert events[6].type == "raw_response_event"
-    assert isinstance(events[6].data, ResponseReasoningSummaryTextDoneEvent)
+    # Event 6: ReasoningDeltaEvent (emitted alongside the raw delta)
+    from agents.stream_events import ReasoningDeltaEvent
 
-    # Event 7: ResponseReasoningSummaryPartDoneEvent
+    assert events[6].type == "reasoning_delta"
+    assert isinstance(events[6], ReasoningDeltaEvent)
+
+    # Event 7: ResponseReasoningSummaryTextDoneEvent
     assert events[7].type == "raw_response_event"
-    assert isinstance(events[7].data, ResponseReasoningSummaryPartDoneEvent)
+    assert isinstance(events[7].data, ResponseReasoningSummaryTextDoneEvent)
 
-    # Event 8: ResponseOutputItemDoneEvent (reasoning item)
+    # Event 8: ResponseReasoningSummaryPartDoneEvent
     assert events[8].type == "raw_response_event"
-    assert isinstance(events[8].data, ResponseOutputItemDoneEvent)
+    assert isinstance(events[8].data, ResponseReasoningSummaryPartDoneEvent)
 
-    # Event 9: ReasoningItem run_item_stream_event
-    assert events[9].type == "run_item_stream_event"
-    assert events[9].name == "reasoning_item_created"
-    assert isinstance(events[9].item, ReasoningItem)
+    # Event 9: ResponseOutputItemDoneEvent (reasoning item)
+    assert events[9].type == "raw_response_event"
+    assert isinstance(events[9].data, ResponseOutputItemDoneEvent)
 
-    # Event 10: ResponseOutputItemAddedEvent (function call)
-    assert events[10].type == "raw_response_event"
-    assert isinstance(events[10].data, ResponseOutputItemAddedEvent)
+    # Event 10: ReasoningItem run_item_stream_event
+    assert events[10].type == "run_item_stream_event"
+    assert events[10].name == "reasoning_item_created"
+    assert isinstance(events[10].item, ReasoningItem)
 
-    # Event 11: ResponseFunctionCallArgumentsDeltaEvent
+    # Event 11: ResponseOutputItemAddedEvent (function call)
     assert events[11].type == "raw_response_event"
-    assert isinstance(events[11].data, ResponseFunctionCallArgumentsDeltaEvent)
+    assert isinstance(events[11].data, ResponseOutputItemAddedEvent)
 
-    # Event 12: ResponseFunctionCallArgumentsDoneEvent
+    # Event 12: ResponseFunctionCallArgumentsDeltaEvent
     assert events[12].type == "raw_response_event"
-    assert isinstance(events[12].data, ResponseFunctionCallArgumentsDoneEvent)
+    assert isinstance(events[12].data, ResponseFunctionCallArgumentsDeltaEvent)
 
-    # Event 13: ResponseOutputItemDoneEvent (function call)
+    # Event 13: ResponseFunctionCallArgumentsDoneEvent
     assert events[13].type == "raw_response_event"
-    assert isinstance(events[13].data, ResponseOutputItemDoneEvent)
+    assert isinstance(events[13].data, ResponseFunctionCallArgumentsDoneEvent)
 
-    # Event 14: ToolCallItem run_item_stream_event
-    assert events[14].type == "run_item_stream_event"
-    assert events[14].name == "tool_called"
-    assert isinstance(events[14].item, ToolCallItem)
+    # Event 14: ResponseOutputItemDoneEvent (function call)
+    assert events[14].type == "raw_response_event"
+    assert isinstance(events[14].data, ResponseOutputItemDoneEvent)
 
-    # Event 15: ResponseCompletedEvent (first turn ended)
-    assert events[15].type == "raw_response_event"
-    assert isinstance(events[15].data, ResponseCompletedEvent)
+    # Event 15: ToolCallItem run_item_stream_event
+    assert events[15].type == "run_item_stream_event"
+    assert events[15].name == "tool_called"
+    assert isinstance(events[15].item, ToolCallItem)
 
-    # Event 16: ToolCallOutputItem run_item_stream_event
-    assert events[16].type == "run_item_stream_event"
-    assert events[16].name == "tool_output"
-    assert isinstance(events[16].item, ToolCallOutputItem)
+    # Event 16: ResponseCompletedEvent (first turn ended)
+    assert events[16].type == "raw_response_event"
+    assert isinstance(events[16].data, ResponseCompletedEvent)
 
-    # Event 17: ResponseCreatedEvent (second turn started)
-    assert events[17].type == "raw_response_event"
-    assert isinstance(events[17].data, ResponseCreatedEvent)
+    # Event 17: ToolCallOutputItem run_item_stream_event
+    assert events[17].type == "run_item_stream_event"
+    assert events[17].name == "tool_output"
+    assert isinstance(events[17].item, ToolCallOutputItem)
 
-    # Event 18: ResponseInProgressEvent
+    # Event 18: ResponseCreatedEvent (second turn started)
     assert events[18].type == "raw_response_event"
-    assert isinstance(events[18].data, ResponseInProgressEvent)
+    assert isinstance(events[18].data, ResponseCreatedEvent)
 
-    # Event 19: ResponseOutputItemAddedEvent
+    # Event 19: ResponseInProgressEvent
     assert events[19].type == "raw_response_event"
-    assert isinstance(events[19].data, ResponseOutputItemAddedEvent)
+    assert isinstance(events[19].data, ResponseInProgressEvent)
 
-    # Event 20: ResponseContentPartAddedEvent
+    # Event 20: ResponseOutputItemAddedEvent
     assert events[20].type == "raw_response_event"
-    assert isinstance(events[20].data, ResponseContentPartAddedEvent)
+    assert isinstance(events[20].data, ResponseOutputItemAddedEvent)
 
-    # Event 21: ResponseTextDeltaEvent
+    # Event 21: ResponseContentPartAddedEvent
     assert events[21].type == "raw_response_event"
-    assert isinstance(events[21].data, ResponseTextDeltaEvent)
+    assert isinstance(events[21].data, ResponseContentPartAddedEvent)
 
-    # Event 22: ResponseTextDoneEvent
+    # Event 22: ResponseTextDeltaEvent
     assert events[22].type == "raw_response_event"
-    assert isinstance(events[22].data, ResponseTextDoneEvent)
+    assert isinstance(events[22].data, ResponseTextDeltaEvent)
 
-    # Event 23: ResponseContentPartDoneEvent
+    # Event 23: ResponseTextDoneEvent
     assert events[23].type == "raw_response_event"
-    assert isinstance(events[23].data, ResponseContentPartDoneEvent)
+    assert isinstance(events[23].data, ResponseTextDoneEvent)
 
-    # Event 24: ResponseOutputItemDoneEvent
+    # Event 24: ResponseContentPartDoneEvent
     assert events[24].type == "raw_response_event"
-    assert isinstance(events[24].data, ResponseOutputItemDoneEvent)
+    assert isinstance(events[24].data, ResponseContentPartDoneEvent)
 
-    # Event 25: ResponseCompletedEvent (second turn ended)
+    # Event 25: ResponseOutputItemDoneEvent
     assert events[25].type == "raw_response_event"
-    assert isinstance(events[25].data, ResponseCompletedEvent)
+    assert isinstance(events[25].data, ResponseOutputItemDoneEvent)
 
-    # Event 26: MessageOutputItem run_item_stream_event
-    assert events[26].type == "run_item_stream_event"
-    assert events[26].name == "message_output_created"
-    assert isinstance(events[26].item, MessageOutputItem)
+    # Event 26: ResponseCompletedEvent (second turn ended)
+    assert events[26].type == "raw_response_event"
+    assert isinstance(events[26].data, ResponseCompletedEvent)
+
+    # Event 27: MessageOutputItem run_item_stream_event
+    assert events[27].type == "run_item_stream_event"
+    assert events[27].name == "message_output_created"
+    assert isinstance(events[27].item, MessageOutputItem)
 
 
 @pytest.mark.asyncio
