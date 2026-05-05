@@ -35,6 +35,45 @@ def _raise_if_windows_member_path(member_name: str) -> None:
         raise UnsafeTarMemberError(member=member_name, reason="windows path separator")
 
 
+def _normalize_posix_path_without_root(path: PurePosixPath) -> tuple[str, ...] | None:
+    normalized: list[str] = []
+    for part in path.parts:
+        if part in ("", ".", "/"):
+            continue
+        if part == "..":
+            if not normalized:
+                return None
+            normalized.pop()
+            continue
+        normalized.append(part)
+    return tuple(normalized)
+
+
+def _validate_symlink_target(
+    member: tarfile.TarInfo,
+    *,
+    rel_path: Path,
+    allow_external_symlink_targets: bool,
+) -> None:
+    if not member.issym() or allow_external_symlink_targets:
+        return
+
+    target = PurePosixPath(member.linkname)
+    if target.is_absolute():
+        raise UnsafeTarMemberError(
+            member=member.name,
+            reason=f"absolute symlink target not allowed: {member.linkname}",
+        )
+
+    member_parent = PurePosixPath(rel_path.as_posix()).parent
+    normalized = _normalize_posix_path_without_root(member_parent / target)
+    if normalized is None:
+        raise UnsafeTarMemberError(
+            member=member.name,
+            reason=f"symlink target escapes archive root: {member.linkname}",
+        )
+
+
 def safe_tar_member_rel_path(
     member: tarfile.TarInfo,
     *,
@@ -199,6 +238,7 @@ def validate_tarfile(
     skip_rel_paths: Iterable[str | Path] = (),
     root_name: str | None = None,
     allow_symlinks: bool = True,
+    allow_external_symlink_targets: bool = True,
 ) -> None:
     """Validate a workspace tar before handing it to a local or remote extractor.
 
@@ -235,6 +275,11 @@ def validate_tarfile(
         members_by_rel_path[rel_path] = member
 
         if member.issym():
+            _validate_symlink_target(
+                member,
+                rel_path=rel_path,
+                allow_external_symlink_targets=allow_external_symlink_targets,
+            )
             if rel_path in rejected_symlink_rel_paths:
                 raise UnsafeTarMemberError(
                     member=member.name,
@@ -266,6 +311,7 @@ def validate_tar_bytes(
     reject_symlink_rel_paths: Iterable[str | Path] = (),
     skip_rel_paths: Iterable[str | Path] = (),
     root_name: str | None = None,
+    allow_external_symlink_targets: bool = True,
 ) -> None:
     """Validate raw workspace tar bytes with the shared safe tar policy."""
 
@@ -276,6 +322,7 @@ def validate_tar_bytes(
                 reject_symlink_rel_paths=reject_symlink_rel_paths,
                 skip_rel_paths=skip_rel_paths,
                 root_name=root_name,
+                allow_external_symlink_targets=allow_external_symlink_targets,
             )
     except UnsafeTarMemberError:
         raise
@@ -283,7 +330,12 @@ def validate_tar_bytes(
         raise UnsafeTarMemberError(member="<tar>", reason="invalid tar stream") from e
 
 
-def safe_extract_tarfile(tar: tarfile.TarFile, *, root: Path) -> None:
+def safe_extract_tarfile(
+    tar: tarfile.TarFile,
+    *,
+    root: Path,
+    allow_external_symlink_targets: bool = True,
+) -> None:
     """
     Safely extract a tar archive into `root`.
 
@@ -302,7 +354,10 @@ def safe_extract_tarfile(tar: tarfile.TarFile, *, root: Path) -> None:
     root_resolved = root.resolve()
 
     members = tar.getmembers()
-    validate_tarfile(tar)
+    validate_tarfile(
+        tar,
+        allow_external_symlink_targets=allow_external_symlink_targets,
+    )
 
     def _prepare_replaceable_leaf(*, dest: Path, rel_path: Path, name: str) -> None:
         _ensure_no_symlink_parents(root=root_resolved, dest=dest, check_leaf=False)

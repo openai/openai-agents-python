@@ -1717,6 +1717,7 @@ class ModalSandboxSession(BaseSandboxSession):
             validate_tar_bytes(
                 bytes(raw),
                 skip_rel_paths=self.state.manifest.ephemeral_persistence_paths(),
+                allow_external_symlink_targets=False,
             )
         except UnsafeTarMemberError as e:
             raise WorkspaceArchiveWriteError(

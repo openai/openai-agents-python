@@ -1243,7 +1243,10 @@ class DockerSandboxSession(BaseSandboxSession):
             try:
                 archive.seek(0)
                 with tarfile.open(fileobj=archive, mode="r:*") as tar:
-                    validate_tarfile(tar)
+                    validate_tarfile(
+                        tar,
+                        allow_external_symlink_targets=False,
+                    )
             except UnsafeTarMemberError as e:
                 raise WorkspaceArchiveWriteError(
                     path=error_root,

@@ -141,6 +141,26 @@ def test_validate_tar_bytes_rejects_member_under_non_directory_member() -> None:
         validate_tar_bytes(raw)
 
 
+def test_validate_tar_bytes_rejects_absolute_symlink_target_in_strict_mode() -> None:
+    raw = _tar_bytes(_symlink("leak", "/etc/passwd"))
+
+    with pytest.raises(UnsafeTarMemberError, match="absolute symlink target not allowed"):
+        validate_tar_bytes(raw, allow_external_symlink_targets=False)
+
+
+def test_validate_tar_bytes_rejects_parent_escape_symlink_target_in_strict_mode() -> None:
+    raw = _tar_bytes(_dir("nested"), _symlink("nested/leak", "../../etc/passwd"))
+
+    with pytest.raises(UnsafeTarMemberError, match="symlink target escapes archive root"):
+        validate_tar_bytes(raw, allow_external_symlink_targets=False)
+
+
+def test_validate_tar_bytes_allows_internal_symlink_target_in_strict_mode() -> None:
+    raw = _tar_bytes(_dir("nested"), _symlink("nested/python", "../bin/python3"))
+
+    validate_tar_bytes(raw, allow_external_symlink_targets=False)
+
+
 def test_strip_tar_member_prefix_returns_workspace_relative_archive() -> None:
     raw = _tar_bytes(
         _dir("workspace"),
@@ -183,6 +203,20 @@ def test_safe_extract_tarfile_can_rehydrate_existing_leaf_symlink(tmp_path: Path
 
     _safe_extract(raw, tmp_path)
     assert os.readlink(tmp_path / "link.txt") == "target-v2.txt"
+
+
+def test_safe_extract_tarfile_rejects_external_symlink_target_in_strict_mode(
+    tmp_path: Path,
+) -> None:
+    raw = _tar_bytes(_symlink("link.txt", "/etc/passwd"))
+
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tar:
+        with pytest.raises(UnsafeTarMemberError, match="absolute symlink target not allowed"):
+            safe_extract_tarfile(
+                tar,
+                root=tmp_path,
+                allow_external_symlink_targets=False,
+            )
 
 
 def test_safe_extract_tarfile_can_replace_existing_leaf_file_with_symlink(
