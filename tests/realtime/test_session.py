@@ -216,9 +216,7 @@ async def test_realtime_function_tool_calls_create_function_spans():
         await session.on_event(RealtimeModelTurnEndedEvent())
 
     span_exports = _export_finished_spans()
-    function_span = next(
-        span for span in span_exports if span["span_data"]["type"] == "function"
-    )
+    function_span = next(span for span in span_exports if span["span_data"]["type"] == "function")
 
     assert function_span["span_data"]["name"] == "lookup"
 
