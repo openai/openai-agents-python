@@ -87,6 +87,7 @@ from ..tool_guardrails import (
 from ..tracing import Span, SpanError, function_span, get_current_trace
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
+from ..util._tool_errors import get_trace_tool_error
 from ..util._types import MaybeAwaitable
 from ._asyncio_progress import get_function_tool_task_progress_deadline
 from .agent_bindings import AgentBindings, bind_public_agent
@@ -152,7 +153,6 @@ __all__ = [
     "execute_approved_tools",
 ]
 
-REDACTED_TOOL_ERROR_MESSAGE = "Tool execution failed. Error details are redacted."
 TToolSpanResult = TypeVar("TToolSpanResult")
 _FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS = 0.25
 _FUNCTION_TOOL_CANCELLED_IMMEDIATE_STEP_LIMIT = 64
@@ -1013,11 +1013,6 @@ def format_shell_error(error: Exception | BaseException | Any) -> str:
         return repr(error)
 
 
-def get_trace_tool_error(*, trace_include_sensitive_data: bool, error_message: str) -> str:
-    """Return a trace-safe tool error string based on the sensitive-data setting."""
-    return error_message if trace_include_sensitive_data else REDACTED_TOOL_ERROR_MESSAGE
-
-
 async def with_tool_function_span(
     *,
     config: RunConfig,
@@ -1585,10 +1580,14 @@ class _FunctionToolBatchExecutor:
                         agent_hooks=agent_hooks,
                     )
             except Exception as e:
+                trace_error = get_trace_tool_error(
+                    trace_include_sensitive_data=self.config.trace_include_sensitive_data,
+                    error_message=str(e),
+                )
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Error running tool",
-                        data={"tool_name": func_tool.name, "error": str(e)},
+                        data={"tool_name": func_tool.name, "error": trace_error},
                     )
                 )
                 if isinstance(e, AgentsException):
@@ -1747,10 +1746,14 @@ class _FunctionToolBatchExecutor:
             if result is None:
                 raise
 
+            trace_error = get_trace_tool_error(
+                trace_include_sensitive_data=self.config.trace_include_sensitive_data,
+                error_message=str(e),
+            )
             _error_tracing.attach_error_to_current_span(
                 SpanError(
                     message="Tool execution cancelled",
-                    data={"tool_name": func_tool.name, "error": str(e)},
+                    data={"tool_name": func_tool.name, "error": trace_error},
                 )
             )
             real_result = result

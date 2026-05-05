@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal, TypeAlias, cast
 from openai import Omit as _Omit
 from openai._types import Body, Query
 from openai.types.responses import ResponseIncludable
+from openai.types.responses.response_create_params import ContextManagement
 from openai.types.shared import Reasoning
 from pydantic import GetCoreSchemaHandler, TypeAdapter
 from pydantic.dataclasses import dataclass
@@ -161,6 +162,13 @@ class ModelSettings:
 
     retry: ModelRetrySettings | None = None
     """Opt-in runner-managed retry settings for model calls."""
+
+    context_management: list[ContextManagement] | None = None
+    """Context management entries for OpenAI Responses API requests.
+
+    For example, use ``[{"type": "compaction", "compact_threshold": 200000}]``
+    to enable server-side compaction when the rendered context crosses a token threshold.
+    """
 
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the
