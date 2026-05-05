@@ -1,6 +1,7 @@
 import json
 from dataclasses import fields
 
+from openai.types.responses.response_create_params import ContextManagement
 from openai.types.shared import Reasoning
 from pydantic import TypeAdapter
 from pydantic_core import to_json
@@ -311,3 +312,29 @@ def test_retry_backoff_validate_python_preserves_falsey_values() -> None:
         "multiplier": None,
         "jitter": False,
     }
+
+
+def test_context_management_resolve_overrides_base() -> None:
+    """Test that context_management from override fully replaces the base value."""
+    base_entry: ContextManagement = {"type": "compaction", "compact_threshold": 100000}
+    override_entry: ContextManagement = {"type": "compaction", "compact_threshold": 200000}
+
+    base_settings = ModelSettings(context_management=[base_entry])
+    override_settings = ModelSettings(context_management=[override_entry])
+
+    resolved = base_settings.resolve(override_settings)
+
+    assert resolved.context_management == [override_entry]
+
+
+def test_context_management_resolve_preserves_base_when_override_is_none() -> None:
+    """Test that base context_management is kept when override does not set it."""
+    entry: ContextManagement = {"type": "compaction", "compact_threshold": 100000}
+
+    base_settings = ModelSettings(context_management=[entry])
+    override_settings = ModelSettings(temperature=0.5)
+
+    resolved = base_settings.resolve(override_settings)
+
+    assert resolved.context_management == [entry]
+    assert resolved.temperature == 0.5
