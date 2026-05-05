@@ -406,9 +406,7 @@ class SpritesSandboxSession(BaseSandboxSession):
 
         client = self._ensure_client_sync()
         try:
-            sprite: Sprite = await asyncio.to_thread(
-                client.get_sprite, self.state.sprite_name
-            )
+            sprite: Sprite = await asyncio.to_thread(client.get_sprite, self.state.sprite_name)
         except NotFoundError:
             return None
         # Re-bind a Sprite handle with the live status snapshot as ``_sprite``;

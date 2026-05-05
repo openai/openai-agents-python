@@ -136,7 +136,12 @@ async def _verify_mount_active(session: BaseSandboxSession, mount_path: Path) ->
     time to bind.
     """
 
-    quoted = shlex.quote(str(mount_path))
+    # ``Path.as_posix()`` gives forward-slash form regardless of host OS,
+    # which matters because the mount target lives inside the sprite VM
+    # (POSIX) — running on a Windows agent would otherwise emit
+    # ``\workspace\tigris`` here.
+    posix_path = mount_path.as_posix()
+    quoted = shlex.quote(posix_path)
     probe_cmd = (
         f"for _ in 1 2 3 4 5 6 7 8 9 10; do "
         f"if mountpoint -q {quoted}; then echo {_MOUNTED}; exit 0; fi; "
@@ -147,7 +152,7 @@ async def _verify_mount_active(session: BaseSandboxSession, mount_path: Path) ->
     if not _stdout_says(probe, _MOUNTED):
         raise MountConfigError(
             message="rclone mount completed but the path is not a live mountpoint",
-            context={"path": str(mount_path)},
+            context={"path": posix_path},
         )
 
     # Force rclone to materialize the root directory listing before we hand
