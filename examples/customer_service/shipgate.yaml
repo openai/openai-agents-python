@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ThreeMoonsLab/agents-shipgate/main/docs/manifest-v0.1.json
+# Optional Agents Shipgate manifest for this example.
+version: "0.1"
+
+project:
+  name: customer_service
+
+agent:
+  name: airline-customer-service
+  declared_purpose:
+    - answer airline FAQ questions
+    - route customers to the right specialist agent
+    - update seat assignments in the local demo context
+  prohibited_actions: []
+
+environment:
+  target: local
+
+tool_sources:
+  - id: openai_sdk_main
+    type: openai_agents_sdk
+    path: main.py
+
+policies:
+  require_approval_for_tools: []
+  require_confirmation_for_tools:
+    - tool: update_seat
+      reason: "Customer-facing seat changes should be confirmed before release use."
+  require_idempotency_for_tools: []
+
+permissions:
+  scopes: []
+  notes: "This example updates only local demo context and does not model a real airline API credential."
+
+ci:
+  mode: advisory
+
+output:
+  directory: agents-shipgate-reports
+  formats:
+    - markdown
+    - json
