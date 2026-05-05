@@ -65,7 +65,9 @@ class StreamingState:
     function_calls: dict[int, ResponseFunctionToolCall] = field(default_factory=dict)
     # Fields for real-time function call streaming
     function_call_streaming: dict[int, bool] = field(default_factory=dict)
+    function_call_events_emitted: dict[int, bool] = field(default_factory=dict)
     function_call_output_idx: dict[int, int] = field(default_factory=dict)
+    function_call_pending_argument_deltas: dict[int, list[str]] = field(default_factory=dict)
     # Store accumulated thinking text and signature for Anthropic compatibility
     thinking_text: str = ""
     thinking_signature: str | None = None
@@ -104,6 +106,84 @@ class ChatCmplStreamHandler:
                 return cls._function_call_output_base(state) + offset
 
         raise KeyError(f"Function call index {function_call_index} has not been tracked")
+
+    @staticmethod
+    def _merged_provider_data(
+        state: StreamingState,
+        function_call: ResponseFunctionToolCall,
+    ) -> dict[str, Any] | None:
+        if not (
+            state.provider_data
+            or (hasattr(function_call, "provider_data") and function_call.provider_data)
+        ):
+            return None
+
+        merged_provider_data = state.provider_data.copy() if state.provider_data else {}
+        if hasattr(function_call, "provider_data") and function_call.provider_data:
+            merged_provider_data.update(function_call.provider_data)
+        return merged_provider_data
+
+    @classmethod
+    def _function_call_item(
+        cls,
+        state: StreamingState,
+        function_call: ResponseFunctionToolCall,
+        *,
+        arguments: str,
+    ) -> ResponseFunctionToolCall:
+        function_call_kwargs: dict[str, Any] = {
+            "id": FAKE_RESPONSES_ID,
+            "call_id": function_call.call_id,
+            "arguments": arguments,
+            "name": function_call.name,
+            "type": "function_call",
+        }
+
+        if merged_provider_data := cls._merged_provider_data(state, function_call):
+            function_call_kwargs["provider_data"] = merged_provider_data
+
+        return ResponseFunctionToolCall(**function_call_kwargs)
+
+    @staticmethod
+    def _can_emit_function_call_events(state: StreamingState) -> bool:
+        return bool(state.text_content_index_and_output or state.refusal_content_index_and_output)
+
+    @classmethod
+    def _flush_pending_function_call_events(
+        cls,
+        state: StreamingState,
+        sequence_number: SequenceNumber,
+        *,
+        force: bool = False,
+    ) -> Iterator[TResponseStreamEvent]:
+        if not (force or cls._can_emit_function_call_events(state)):
+            return
+
+        for index, function_call in state.function_calls.items():
+            if not state.function_call_streaming.get(index, False):
+                continue
+            if state.function_call_events_emitted.get(index, False):
+                continue
+
+            output_index = cls._function_call_output_index(state, index)
+            state.function_call_output_idx[index] = output_index
+            state.function_call_events_emitted[index] = True
+
+            yield ResponseOutputItemAddedEvent(
+                item=cls._function_call_item(state, function_call, arguments=""),
+                output_index=output_index,
+                type="response.output_item.added",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+
+            for delta in state.function_call_pending_argument_deltas.pop(index, []):
+                yield ResponseFunctionCallArgumentsDeltaEvent(
+                    delta=delta,
+                    item_id=FAKE_RESPONSES_ID,
+                    output_index=output_index,
+                    type="response.function_call_arguments.delta",
+                    sequence_number=sequence_number.get_and_increment(),
+                )
 
     @classmethod
     def _finish_reasoning_summary_part(
@@ -405,6 +485,11 @@ class ChatCmplStreamHandler:
                     state.text_content_index_and_output[1].logprobs = (
                         existing_logprobs + output_logprobs
                     )
+                for event in cls._flush_pending_function_call_events(
+                    state,
+                    sequence_number,
+                ):
+                    yield event
 
             # Handle refusals (model declines to answer)
             # This is always set by the OpenAI API, but not by others e.g. LiteLLM
@@ -459,6 +544,11 @@ class ChatCmplStreamHandler:
                 )
                 # Accumulate the refusal string in the output part
                 state.refusal_content_index_and_output[1].refusal += delta.refusal
+                for event in cls._flush_pending_function_call_events(
+                    state,
+                    sequence_number,
+                ):
+                    yield event
 
             # Handle tool calls with real-time streaming support
             if delta.tool_calls:
@@ -472,6 +562,8 @@ class ChatCmplStreamHandler:
                             call_id="",
                         )
                         state.function_call_streaming[tc_delta.index] = False
+                        state.function_call_events_emitted[tc_delta.index] = False
+                        state.function_call_pending_argument_deltas[tc_delta.index] = []
 
                     tc_function = tc_delta.function
 
@@ -543,41 +635,7 @@ class ChatCmplStreamHandler:
                         and function_call.name
                         and function_call.call_id
                     ):
-                        # Mark this function call as streaming and store its output index
                         state.function_call_streaming[tc_delta.index] = True
-                        function_call_output_index = cls._function_call_output_index(
-                            state,
-                            tc_delta.index,
-                        )
-                        state.function_call_output_idx[tc_delta.index] = function_call_output_index
-
-                        # Send initial function call added event
-                        func_call_item = ResponseFunctionToolCall(
-                            id=FAKE_RESPONSES_ID,
-                            call_id=function_call.call_id,
-                            arguments="",  # Start with empty arguments
-                            name=function_call.name,
-                            type="function_call",
-                        )
-                        # Merge provider_data from state and function_call (e.g. thought_signature)
-                        if state.provider_data or (
-                            hasattr(function_call, "provider_data") and function_call.provider_data
-                        ):
-                            merged_provider_data = (
-                                state.provider_data.copy() if state.provider_data else {}
-                            )
-                            if (
-                                hasattr(function_call, "provider_data")
-                                and function_call.provider_data
-                            ):
-                                merged_provider_data.update(function_call.provider_data)
-                            func_call_item.provider_data = merged_provider_data  # type: ignore[attr-defined]
-                        yield ResponseOutputItemAddedEvent(
-                            item=func_call_item,
-                            output_index=function_call_output_index,
-                            type="response.output_item.added",
-                            sequence_number=sequence_number.get_and_increment(),
-                        )
 
                     # Stream arguments if we've started streaming this function call
                     if (
@@ -585,16 +643,34 @@ class ChatCmplStreamHandler:
                         and tc_function
                         and tc_function.arguments
                     ):
-                        output_index = state.function_call_output_idx[tc_delta.index]
-                        yield ResponseFunctionCallArgumentsDeltaEvent(
-                            delta=tc_function.arguments,
-                            item_id=FAKE_RESPONSES_ID,
-                            output_index=output_index,
-                            type="response.function_call_arguments.delta",
-                            sequence_number=sequence_number.get_and_increment(),
-                        )
+                        if state.function_call_events_emitted.get(tc_delta.index, False):
+                            output_index = state.function_call_output_idx[tc_delta.index]
+                            yield ResponseFunctionCallArgumentsDeltaEvent(
+                                delta=tc_function.arguments,
+                                item_id=FAKE_RESPONSES_ID,
+                                output_index=output_index,
+                                type="response.function_call_arguments.delta",
+                                sequence_number=sequence_number.get_and_increment(),
+                            )
+                        else:
+                            state.function_call_pending_argument_deltas[tc_delta.index].append(
+                                tc_function.arguments
+                            )
+
+                    for event in cls._flush_pending_function_call_events(
+                        state,
+                        sequence_number,
+                    ):
+                        yield event
 
         for event in cls._finish_reasoning_item(state, sequence_number):
+            yield event
+
+        for event in cls._flush_pending_function_call_events(
+            state,
+            sequence_number,
+            force=True,
+        ):
             yield event
 
         if state.text_content_index_and_output:
@@ -625,26 +701,12 @@ class ChatCmplStreamHandler:
                 # Function call was streamed, just send the completion event
                 output_index = state.function_call_output_idx[index]
 
-                # Build function call kwargs, include provider_data if present
-                func_call_kwargs: dict[str, Any] = {
-                    "id": FAKE_RESPONSES_ID,
-                    "call_id": function_call.call_id,
-                    "arguments": function_call.arguments,
-                    "name": function_call.name,
-                    "type": "function_call",
-                }
-
-                # Merge provider_data from state and function_call (e.g. thought_signature)
-                if state.provider_data or (
-                    hasattr(function_call, "provider_data") and function_call.provider_data
-                ):
-                    merged_provider_data = state.provider_data.copy() if state.provider_data else {}
-                    if hasattr(function_call, "provider_data") and function_call.provider_data:
-                        merged_provider_data.update(function_call.provider_data)
-                    func_call_kwargs["provider_data"] = merged_provider_data
-
                 yield ResponseOutputItemDoneEvent(
-                    item=ResponseFunctionToolCall(**func_call_kwargs),
+                    item=cls._function_call_item(
+                        state,
+                        function_call,
+                        arguments=function_call.arguments,
+                    ),
                     output_index=output_index,
                     type="response.output_item.done",
                     sequence_number=sequence_number.get_and_increment(),
@@ -653,28 +715,15 @@ class ChatCmplStreamHandler:
                 # Function call was not streamed (fallback to old behavior)
                 # This handles edge cases where function name never arrived
                 fallback_output_index = cls._function_call_output_index(state, index)
-
-                # Build function call kwargs, include provider_data if present
-                fallback_func_call_kwargs: dict[str, Any] = {
-                    "id": FAKE_RESPONSES_ID,
-                    "call_id": function_call.call_id,
-                    "arguments": function_call.arguments,
-                    "name": function_call.name,
-                    "type": "function_call",
-                }
-
-                # Merge provider_data from state and function_call (e.g. thought_signature)
-                if state.provider_data or (
-                    hasattr(function_call, "provider_data") and function_call.provider_data
-                ):
-                    merged_provider_data = state.provider_data.copy() if state.provider_data else {}
-                    if hasattr(function_call, "provider_data") and function_call.provider_data:
-                        merged_provider_data.update(function_call.provider_data)
-                    fallback_func_call_kwargs["provider_data"] = merged_provider_data
+                fallback_func_call_item = cls._function_call_item(
+                    state,
+                    function_call,
+                    arguments=function_call.arguments,
+                )
 
                 # Send all events at once (backward compatibility)
                 yield ResponseOutputItemAddedEvent(
-                    item=ResponseFunctionToolCall(**fallback_func_call_kwargs),
+                    item=fallback_func_call_item,
                     output_index=fallback_output_index,
                     type="response.output_item.added",
                     sequence_number=sequence_number.get_and_increment(),
@@ -687,7 +736,7 @@ class ChatCmplStreamHandler:
                     sequence_number=sequence_number.get_and_increment(),
                 )
                 yield ResponseOutputItemDoneEvent(
-                    item=ResponseFunctionToolCall(**fallback_func_call_kwargs),
+                    item=fallback_func_call_item,
                     output_index=fallback_output_index,
                     type="response.output_item.done",
                     sequence_number=sequence_number.get_and_increment(),
