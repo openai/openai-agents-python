@@ -10,7 +10,7 @@ from typing import Any, cast
 from pydantic import BaseModel
 from typing_extensions import assert_never
 
-from .._tool_identity import get_function_tool_lookup_key_for_tool
+from .._tool_identity import get_function_tool_lookup_key_for_tool, get_tool_trace_name_for_tool
 from ..agent import Agent
 from ..exceptions import UserError
 from ..handoffs import Handoff
@@ -20,6 +20,8 @@ from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, invoke_function_tool
 from ..tool_context import ToolContext
+from ..tracing import Span, agent_span, function_span, handoff_span
+from ..tracing.span_data import AgentSpanData
 from ..util._approvals import evaluate_needs_approval_setting
 from .agent import RealtimeAgent
 from .config import RealtimeRunConfig, RealtimeSessionModelSettings, RealtimeUserInput
@@ -161,6 +163,9 @@ class RealtimeSession(RealtimeModelListener):
         self._guardrail_tasks: set[asyncio.Task[Any]] = set()
         self._tool_call_tasks: set[asyncio.Task[Any]] = set()
         self._async_tool_calls: bool = bool(self._run_config.get("async_tool_calls", True))
+        self._current_agent_span: Span[AgentSpanData] | None = None
+        self._current_agent_trace_tools: list[str] | None = None
+        self._current_agent_trace_handoffs: list[str] | None = None
 
     @property
     def model(self) -> RealtimeModel:
@@ -395,6 +400,7 @@ class RealtimeSession(RealtimeModelListener):
         elif event.type == "connection_status":
             pass
         elif event.type == "turn_started":
+            self._start_agent_span()
             await self._put_event(
                 RealtimeAgentStartEvent(
                     agent=self._current_agent,
@@ -412,6 +418,7 @@ class RealtimeSession(RealtimeModelListener):
                     info=self._event_info,
                 )
             )
+            self._finish_agent_span(reset_current=True)
         elif event.type == "exception":
             # Store the exception to be raised in __aiter__
             self._stored_exception = event.exception
@@ -646,11 +653,20 @@ class RealtimeSession(RealtimeModelListener):
                 tool_arguments=event.arguments,
                 agent=agent,
             )
-            result = await invoke_function_tool(
-                function_tool=func_tool,
-                context=tool_context,
-                arguments=event.arguments,
-            )
+            trace_tool_name = get_tool_trace_name_for_tool(func_tool) or func_tool.name
+            if self._tracing_enabled():
+                with function_span(trace_tool_name):
+                    result = await invoke_function_tool(
+                        function_tool=func_tool,
+                        context=tool_context,
+                        arguments=event.arguments,
+                    )
+            else:
+                result = await invoke_function_tool(
+                    function_tool=func_tool,
+                    context=tool_context,
+                    arguments=event.arguments,
+                )
 
             await self._model.send_event(
                 RealtimeModelSendToolOutput(
@@ -681,11 +697,20 @@ class RealtimeSession(RealtimeModelListener):
             )
 
             # Execute the handoff to get the new agent
-            result = await handoff.on_invoke_handoff(self._context_wrapper, event.arguments)
-            if not isinstance(result, RealtimeAgent):
-                raise UserError(
-                    f"Handoff {handoff.tool_name} returned invalid result: {type(result)}"
-                )
+            if self._tracing_enabled():
+                with handoff_span(from_agent=agent.name) as span:
+                    result = await handoff.on_invoke_handoff(self._context_wrapper, event.arguments)
+                    if not isinstance(result, RealtimeAgent):
+                        raise UserError(
+                            f"Handoff {handoff.tool_name} returned invalid result: {type(result)}"
+                        )
+                    span.span_data.to_agent = result.name
+            else:
+                result = await handoff.on_invoke_handoff(self._context_wrapper, event.arguments)
+                if not isinstance(result, RealtimeAgent):
+                    raise UserError(
+                        f"Handoff {handoff.tool_name} returned invalid result: {type(result)}"
+                    )
 
             # Store previous agent for event
             previous_agent = agent
@@ -1039,11 +1064,38 @@ class RealtimeSession(RealtimeModelListener):
                 task.cancel()
         self._tool_call_tasks.clear()
 
+    def _tracing_enabled(self) -> bool:
+        return not self._run_config.get("tracing_disabled", False)
+
+    def _start_agent_span(self) -> None:
+        if not self._tracing_enabled():
+            return
+
+        if self._current_agent_span is not None:
+            self._finish_agent_span(reset_current=True)
+
+        current_span = agent_span(
+            name=self._current_agent.name,
+            handoffs=self._current_agent_trace_handoffs,
+            tools=self._current_agent_trace_tools,
+            output_type="str",
+        )
+        current_span.start(mark_as_current=True)
+        self._current_agent_span = current_span
+
+    def _finish_agent_span(self, *, reset_current: bool) -> None:
+        if self._current_agent_span is None:
+            return
+
+        self._current_agent_span.finish(reset_current=reset_current)
+        self._current_agent_span = None
+
     async def _cleanup(self) -> None:
         """Clean up all resources and mark session as closed."""
         # Cancel and cleanup guardrail tasks
         self._cleanup_guardrail_tasks()
         self._cleanup_tool_call_tasks()
+        self._finish_agent_span(reset_current=False)
 
         # Remove ourselves as a listener
         self._model.remove_listener(self)
@@ -1076,6 +1128,17 @@ class RealtimeSession(RealtimeModelListener):
         updated_settings["instructions"] = instructions or ""
         updated_settings["tools"] = tools or []
         updated_settings["handoffs"] = handoffs or []
+        if agent is self._current_agent:
+            self._current_agent_trace_tools = [
+                tool_name
+                for tool in tools
+                if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
+            ]
+            self._current_agent_trace_handoffs = [
+                trace_name
+                for handoff in handoffs
+                if (trace_name := self._get_handoff_trace_name(handoff)) is not None
+            ]
 
         # Apply starting settings (from model config) next
         if starting_settings:
@@ -1110,3 +1173,12 @@ class RealtimeSession(RealtimeModelListener):
         results = await asyncio.gather(*(_check_handoff_enabled(h) for h in handoffs))
         enabled = [h for h, ok in zip(handoffs, results, strict=False) if ok]
         return enabled
+
+    @staticmethod
+    def _get_handoff_trace_name(handoff: Handoff[Any, Any]) -> str | None:
+        agent_name = getattr(handoff, "agent_name", None)
+        if isinstance(agent_name, str) and agent_name:
+            return agent_name
+
+        tool_name = getattr(handoff, "tool_name", None)
+        return tool_name if isinstance(tool_name, str) and tool_name else None
