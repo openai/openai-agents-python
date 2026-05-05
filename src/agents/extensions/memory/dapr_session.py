@@ -232,7 +232,12 @@ class DaprSession(SessionABC):
     # Session protocol implementation
     # ------------------------------------------------------------------
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: Any = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -271,7 +276,12 @@ class DaprSession(SessionABC):
                     continue
             return items
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: Any = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:
@@ -324,7 +334,7 @@ class DaprSession(SessionABC):
                 options=self._get_state_options(),
             )
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(self, *, wrapper: Any = None) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
 
         Returns:

@@ -10,11 +10,15 @@ import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from agents.memory.session import Session
 from agents.memory.session_settings import SessionSettings
+
+if TYPE_CHECKING:
+    from agents.items import TResponseInputItem
+    from agents.run_context import RunContextWrapper
 
 
 class FileSession(Session):
@@ -43,14 +47,26 @@ class FileSession(Session):
         """Return the session id, creating one if needed."""
         return await self._ensure_session_id()
 
-    async def get_items(self, limit: int | None = None) -> list[Any]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
+        del wrapper
         session_id = await self._ensure_session_id()
         items = await self._read_items(session_id)
         if limit is not None and limit >= 0:
             return items[-limit:]
         return items
 
-    async def add_items(self, items: list[Any]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        del wrapper
         if not items:
             return
         session_id = await self._ensure_session_id()
@@ -59,7 +75,12 @@ class FileSession(Session):
         cloned = json.loads(json.dumps(items))
         await self._write_items(session_id, current + cloned)
 
-    async def pop_item(self) -> Any | None:
+    async def pop_item(
+        self,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> TResponseInputItem | None:
+        del wrapper
         session_id = await self._ensure_session_id()
         items = await self._read_items(session_id)
         if not items:
@@ -89,7 +110,7 @@ class FileSession(Session):
     def _state_path(self, session_id: str) -> Path:
         return self._dir / f"{session_id}-state.json"
 
-    async def _read_items(self, session_id: str) -> list[Any]:
+    async def _read_items(self, session_id: str) -> list[TResponseInputItem]:
         file_path = self._items_path(session_id)
         try:
             data = await asyncio.to_thread(file_path.read_text, "utf-8")
@@ -98,7 +119,7 @@ class FileSession(Session):
         except FileNotFoundError:
             return []
 
-    async def _write_items(self, session_id: str, items: list[Any]) -> None:
+    async def _write_items(self, session_id: str, items: list[TResponseInputItem]) -> None:
         file_path = self._items_path(session_id)
         payload = json.dumps(items, indent=2, ensure_ascii=False)
         await asyncio.to_thread(self._dir.mkdir, parents=True, exist_ok=True)

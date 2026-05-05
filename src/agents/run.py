@@ -29,6 +29,7 @@ from .items import (
 from .lifecycle import RunHooks
 from .logger import logger
 from .memory import Session
+from .memory.session import get_session_items
 from .result import RunResult, RunResultStreaming
 from .run_config import (
     DEFAULT_MAX_TURNS,
@@ -491,6 +492,8 @@ class AgentRunner:
 
             max_turns = run_state._max_turns
         else:
+            context_wrapper = ensure_context_wrapper(context)
+            set_agent_tool_state_scope(context_wrapper, None)
             raw_input = cast(str | list[TResponseInputItem], input)
             original_user_input = raw_input
 
@@ -513,6 +516,7 @@ class AgentRunner:
                     session,
                     run_config.session_input_callback,
                     run_config.session_settings,
+                    wrapper=context_wrapper,
                     include_history_in_prepared_input=False,
                     preserve_dropped_new_items=True,
                 )
@@ -527,6 +531,7 @@ class AgentRunner:
                     session,
                     run_config.session_input_callback,
                     run_config.session_settings,
+                    wrapper=context_wrapper,
                 )
                 original_input_for_state = prepared_input
 
@@ -563,7 +568,10 @@ class AgentRunner:
             session_input_items: list[TResponseInputItem] | None = None
             if session is not None:
                 try:
-                    session_input_items = await session.get_items()
+                    session_input_items = await get_session_items(
+                        session,
+                        wrapper=context_wrapper,
+                    )
                 except Exception:
                     session_input_items = None
             server_conversation_tracker.hydrate_from_state(
@@ -612,8 +620,6 @@ class AgentRunner:
                 generated_items = []
                 session_items = []
                 model_responses = []
-                context_wrapper = ensure_context_wrapper(context)
-                set_agent_tool_state_scope(context_wrapper, None)
                 run_state = RunState(
                     context=context_wrapper,
                     original_input=original_input,

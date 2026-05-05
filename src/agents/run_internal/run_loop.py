@@ -58,6 +58,7 @@ from ..items import (
 from ..lifecycle import RunHooks
 from ..logger import logger
 from ..memory import Session
+from ..memory.session import get_session_items
 from ..models._response_terminal import (
     response_error_event_failure_error,
     response_terminal_failure_error,
@@ -304,6 +305,7 @@ async def _save_resumed_stream_items(
     server_conversation_tracker: OpenAIServerConversationTracker | None,
     streamed_result: RunResultStreaming,
     run_state: RunState | None,
+    context_wrapper: RunContextWrapper[TContext],
     items: list[RunItem],
     response_id: str | None,
     store: bool | None = None,
@@ -318,6 +320,7 @@ async def _save_resumed_stream_items(
         session=session,
         items=items,
         persisted_count=streamed_result._current_turn_persisted_item_count,
+        wrapper=context_wrapper,
         response_id=response_id,
         reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
         store=store,
@@ -574,7 +577,10 @@ async def start_streaming(
             session_items: list[TResponseInputItem] | None = None
             if session is not None:
                 try:
-                    session_items = await session.get_items()
+                    session_items = await get_session_items(
+                        session,
+                        wrapper=context_wrapper,
+                    )
                 except Exception:
                     session_items = None
             server_conversation_tracker.hydrate_from_state(
@@ -600,6 +606,7 @@ async def start_streaming(
                 session,
                 run_config.session_input_callback,
                 run_config.session_settings,
+                wrapper=context_wrapper,
                 include_history_in_prepared_input=not server_manages_conversation,
                 preserve_dropped_new_items=True,
             )
@@ -620,6 +627,7 @@ async def start_streaming(
                 server_conversation_tracker=server_conversation_tracker,
                 streamed_result=streamed_result,
                 run_state=run_state,
+                context_wrapper=context_wrapper,
                 items=items,
                 response_id=response_id,
                 store=store_setting,
@@ -1450,7 +1458,12 @@ async def run_single_turn_streamed(
 
     async def rewind_model_request() -> None:
         items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
-        await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
+        await rewind_session_items(
+            session,
+            items_to_rewind,
+            server_conversation_tracker,
+            wrapper=context_wrapper,
+        )
         if server_conversation_tracker is not None:
             server_conversation_tracker.rewind_input(filtered.input)
 
@@ -1874,7 +1887,12 @@ async def get_new_response(
 
     async def rewind_model_request() -> None:
         items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
-        await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
+        await rewind_session_items(
+            session,
+            items_to_rewind,
+            server_conversation_tracker,
+            wrapper=context_wrapper,
+        )
         if server_conversation_tracker is not None:
             server_conversation_tracker.rewind_input(filtered.input)
 

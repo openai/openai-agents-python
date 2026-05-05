@@ -5,7 +5,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import aiosqlite
 
@@ -102,7 +102,12 @@ class AsyncSQLiteSession(SessionABC):
             conn = await self._get_connection()
             yield conn
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: Any = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -150,7 +155,12 @@ class AsyncSQLiteSession(SessionABC):
 
         return items
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: Any = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:
@@ -186,7 +196,7 @@ class AsyncSQLiteSession(SessionABC):
 
             await conn.commit()
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(self, *, wrapper: Any = None) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
 
         Returns:

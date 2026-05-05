@@ -14,6 +14,9 @@ from .session import (
     OpenAIResponsesCompactionArgs,
     OpenAIResponsesCompactionAwareSession,
     SessionABC,
+    add_session_items,
+    get_session_items,
+    pop_session_item,
 )
 
 if TYPE_CHECKING:
@@ -229,8 +232,17 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             f"candidates={len(self._compaction_candidate_items)})"
         )
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
-        return await self.underlying_session.get_items(limit)
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: Any = None,
+    ) -> list[TResponseInputItem]:
+        return await get_session_items(
+            self.underlying_session,
+            limit,
+            wrapper=cast(Any, wrapper),
+        )
 
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         if self._deferred_response_id is not None:
@@ -258,8 +270,17 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     def _clear_deferred_compaction(self) -> None:
         self._deferred_response_id = None
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
-        await self.underlying_session.add_items(items)
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: Any = None,
+    ) -> None:
+        await add_session_items(
+            self.underlying_session,
+            items,
+            wrapper=cast(Any, wrapper),
+        )
         if self._compaction_candidate_items is not None:
             new_items = _normalize_compaction_session_items(items)
             new_candidates = select_compaction_candidate_items(new_items)
@@ -268,8 +289,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if self._session_items is not None:
             self._session_items.extend(_normalize_compaction_session_items(items))
 
-    async def pop_item(self) -> TResponseInputItem | None:
-        popped = await self.underlying_session.pop_item()
+    async def pop_item(self, *, wrapper: Any = None) -> TResponseInputItem | None:
+        popped = await pop_session_item(self.underlying_session, wrapper=cast(Any, wrapper))
         if popped:
             self._compaction_candidate_items = None
             self._session_items = None
