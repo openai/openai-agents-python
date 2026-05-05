@@ -96,7 +96,9 @@ from agents import Agent, responses_websocket_session
 async def main():
     agent = Agent(name="Assistant", instructions="Be concise.")
 
-    async with responses_websocket_session() as ws:
+    async with responses_websocket_session(
+        responses_websocket_options={"ping_interval": 20.0, "ping_timeout": 60.0},
+    ) as ws:
         first = ws.run_streamed(agent, "Say hello in one short sentence.")
         async for _event in first.stream_events():
             pass
@@ -114,6 +116,8 @@ asyncio.run(main())
 ```
 
 Finish consuming streamed results before the context exits. Exiting the context while a websocket request is still in flight may force-close the shared connection.
+
+If long reasoning turns hit websocket keepalive timeouts, increase `ping_timeout` or set `ping_timeout=None` to disable heartbeat timeouts. Use HTTP/SSE transport for runs where reliability matters more than websocket latency.
 
 ### Run config
 
@@ -410,7 +414,7 @@ Set the hook per run via `run_config` to redact sensitive data, trim long histor
 
 ### Error handlers
 
-All `Runner` entry points accept `error_handlers`, a dict keyed by error kind. Today, the supported key is `"max_turns"`. Use it when you want to return a controlled final output instead of raising `MaxTurnsExceeded`.
+All `Runner` entry points accept `error_handlers`, a dict keyed by error kind. The supported keys are `"max_turns"` and `"model_refusal"`. Use them when you want to return a controlled final output instead of raising `MaxTurnsExceeded` or `ModelRefusalError`.
 
 ```python
 from agents import (
@@ -440,6 +444,38 @@ print(result.final_output)
 ```
 
 Set `include_in_history=False` when you do not want the fallback output appended to conversation history.
+
+Use `"model_refusal"` when a model refusal should produce an application-specific fallback instead of ending the run with `ModelRefusalError`.
+
+```python
+from pydantic import BaseModel
+
+from agents import Agent, ModelRefusalError, RunErrorHandlerInput, Runner
+
+
+class Recipe(BaseModel):
+    ingredients: list[str]
+    refusal_reason: str | None = None
+
+
+def on_model_refusal(data: RunErrorHandlerInput[None]) -> Recipe:
+    assert isinstance(data.error, ModelRefusalError)
+    return Recipe(ingredients=[], refusal_reason=data.error.refusal)
+
+
+agent = Agent(
+    name="Recipe assistant",
+    instructions="Return a structured recipe.",
+    output_type=Recipe,
+)
+
+result = Runner.run_sync(
+    agent,
+    "Make me something unsafe.",
+    error_handlers={"model_refusal": on_model_refusal},
+)
+print(result.final_output)
+```
 
 ## Durable execution integrations and human-in-the-loop
 

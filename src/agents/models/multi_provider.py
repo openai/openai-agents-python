@@ -8,6 +8,7 @@ from ..exceptions import UserError
 from .interface import Model, ModelProvider
 from .openai_agent_registration import OpenAIAgentRegistrationConfig
 from .openai_provider import OpenAIProvider
+from .openai_responses import OpenAIResponsesWebSocketOptions
 
 MultiProviderOpenAIPrefixMode = Literal["alias", "model_id"]
 MultiProviderUnknownPrefixMode = Literal["error", "model_id"]
@@ -86,6 +87,7 @@ class MultiProvider(ModelProvider):
         openai_prefix_mode: MultiProviderOpenAIPrefixMode = "alias",
         unknown_prefix_mode: MultiProviderUnknownPrefixMode = "error",
         openai_agent_registration: OpenAIAgentRegistrationConfig | None = None,
+        openai_responses_websocket_options: OpenAIResponsesWebSocketOptions | None = None,
     ) -> None:
         """Create a new OpenAI provider.
 
@@ -117,6 +119,8 @@ class MultiProvider(ModelProvider):
                 such as ``openrouter/openai/gpt-4o``.
             openai_agent_registration: Optional agent registration configuration for the OpenAI
                 provider.
+            openai_responses_websocket_options: Optional low-level websocket keepalive options for
+                the OpenAI Responses websocket transport.
         """
         self.provider_map = provider_map
         self.openai_provider = OpenAIProvider(
@@ -129,6 +133,7 @@ class MultiProvider(ModelProvider):
             use_responses=openai_use_responses,
             use_responses_websocket=openai_use_responses_websocket,
             agent_registration=openai_agent_registration,
+            responses_websocket_options=openai_responses_websocket_options,
         )
         self._openai_prefix_mode = self._validate_openai_prefix_mode(openai_prefix_mode)
         self._unknown_prefix_mode = self._validate_unknown_prefix_mode(unknown_prefix_mode)

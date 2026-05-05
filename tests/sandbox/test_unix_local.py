@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import signal
 from pathlib import Path
 
 import pytest
@@ -105,6 +106,46 @@ class TestUnixLocalPty:
 
             with pytest.raises(PtySessionNotFoundError):
                 await session.pty_write_stdin(session_id=started.process_id, chars="")
+
+    @pytest.mark.parametrize(
+        ("signum", "chars"),
+        [
+            pytest.param(signal.SIGINT, "\x03", id="sigint"),
+            pytest.param(signal.SIGQUIT, "\x1c", id="sigquit"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_pty_terminal_signals_interrupt_even_if_parent_ignores_signal(
+        self, tmp_path: Path, signum: signal.Signals, chars: str
+    ) -> None:
+        client = UnixLocalSandboxClient()
+        manifest = Manifest(root=str(tmp_path / "workspace"))
+        previous_handler = signal.getsignal(signum)
+
+        signal.signal(signum, signal.SIG_IGN)
+        try:
+            async with await client.create(
+                manifest=manifest, snapshot=None, options=None
+            ) as session:
+                started = await session.pty_exec_start(
+                    "sleep",
+                    "30",
+                    shell=False,
+                    tty=True,
+                    yield_time_s=0.05,
+                )
+                assert started.process_id is not None
+
+                interrupted = await session.pty_write_stdin(
+                    session_id=started.process_id,
+                    chars=chars,
+                    yield_time_s=5.5,
+                )
+
+                assert interrupted.process_id is None
+                assert interrupted.exit_code == -signum
+        finally:
+            signal.signal(signum, previous_handler)
 
     @pytest.mark.asyncio
     async def test_non_tty_pty_session_rejects_stdin_and_can_still_be_polled(

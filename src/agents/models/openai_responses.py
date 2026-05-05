@@ -30,6 +30,7 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.tool_param import LocalShell
+from typing_extensions import NotRequired
 
 from .. import _debug
 from .._tool_identity import (
@@ -38,7 +39,7 @@ from .._tool_identity import (
 )
 from ..agent_output import AgentOutputSchemaBase
 from ..computer import AsyncComputer, Computer
-from ..exceptions import UserError
+from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import logger
@@ -67,6 +68,7 @@ from ..usage import Usage, model_usage_to_span_usage
 from ..util._json import _to_dump_compatible
 from ..version import __version__
 from ._openai_retry import get_openai_retry_advice
+from ._response_terminal import response_error_event_failure_error, response_terminal_failure_error
 from ._retry_runtime import (
     should_disable_provider_managed_retries,
     should_disable_websocket_pre_event_retries,
@@ -189,6 +191,24 @@ class _WebsocketRequestTimeouts:
     connect: float | None
     send: float | None
     recv: float | None
+
+
+class OpenAIResponsesWebSocketOptions(TypedDict):
+    """Low-level OpenAI Responses websocket connection options."""
+
+    ping_interval: NotRequired[float | None]
+    """Time in seconds between keepalive pings sent by the client.
+
+    The underlying ``websockets`` library usually defaults to 20.0. Set to ``None`` to
+    disable keepalive pings.
+    """
+
+    ping_timeout: NotRequired[float | None]
+    """Time in seconds to wait for a pong response before disconnecting.
+
+    Set to ``None`` to keep pings enabled but disable heartbeat timeouts during large latency
+    spikes.
+    """
 
 
 class _ResponseStreamWithRequestId:
@@ -536,6 +556,7 @@ class OpenAIResponsesModel(Model):
                 )
 
                 final_response: Response | None = None
+                terminal_failure_error: ModelBehaviorError | None = None
                 yielded_terminal_event = False
                 close_stream_in_background = False
                 try:
@@ -548,12 +569,22 @@ class OpenAIResponsesModel(Model):
                             "response.incomplete",
                         }:
                             terminal_response = getattr(chunk, "response", None)
-                            if isinstance(terminal_response, Response):
-                                final_response = terminal_response
+                            terminal_failure_error = response_terminal_failure_error(
+                                cast(str, chunk_type),
+                                terminal_response
+                                if isinstance(terminal_response, Response)
+                                else None,
+                            )
+                        elif chunk_type in {"error", "response.error"}:
+                            terminal_failure_error = response_error_event_failure_error(
+                                cast(str, chunk_type),
+                                chunk,
+                            )
                         if chunk_type in {
                             "response.completed",
                             "response.failed",
                             "response.incomplete",
+                            "error",
                             "response.error",
                         }:
                             yielded_terminal_event = True
@@ -573,6 +604,8 @@ class OpenAIResponsesModel(Model):
                                 )
                             else:
                                 raise
+                if terminal_failure_error is not None:
+                    raise terminal_failure_error
 
                 if final_response and tracing.include_data():
                     span_response.span_data.response = final_response
@@ -911,9 +944,13 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
         openai_client: AsyncOpenAI,
         *,
         model_is_explicit: bool = True,
+        websocket_options: OpenAIResponsesWebSocketOptions | None = None,
     ) -> None:
         super().__init__(
             model=model, openai_client=openai_client, model_is_explicit=model_is_explicit
+        )
+        self._websocket_options = cast(
+            OpenAIResponsesWebSocketOptions, dict(websocket_options or {})
         )
         self._ws_connection: Any | None = None
         self._ws_connection_identity: tuple[str, tuple[tuple[str, str], ...]] | None = None
@@ -1066,8 +1103,10 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
             elif event_type in {"response.incomplete", "response.failed"}:
                 terminal_event_type = cast(str, event_type)
                 terminal_response = getattr(event, "response", None)
-                if isinstance(terminal_response, Response):
-                    final_response = terminal_response
+                raise response_terminal_failure_error(
+                    terminal_event_type,
+                    terminal_response if isinstance(terminal_response, Response) else None,
+                )
 
         if final_response is None:
             terminal_event_hint = (
@@ -1531,12 +1570,20 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                 "Install `websockets` or `openai[realtime]`."
             ) from exc
 
+        connect_kwargs: dict[str, Any] = {
+            "user_agent_header": None,
+            "additional_headers": dict(headers),
+            "max_size": None,
+            "open_timeout": connect_timeout,
+        }
+        if "ping_interval" in self._websocket_options:
+            connect_kwargs["ping_interval"] = self._websocket_options["ping_interval"]
+        if "ping_timeout" in self._websocket_options:
+            connect_kwargs["ping_timeout"] = self._websocket_options["ping_timeout"]
+
         return await connect(
             ws_url,
-            user_agent_header=None,
-            additional_headers=dict(headers),
-            max_size=None,
-            open_timeout=connect_timeout,
+            **connect_kwargs,
         )
 
 

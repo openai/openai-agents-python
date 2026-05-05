@@ -32,7 +32,7 @@ def _assert_must_pass_tool_arguments() -> str:
 _MISSING = object()
 
 
-@dataclass
+@dataclass(eq=False)
 class ToolContext(RunContextWrapper[TContext]):
     """The context of a tool call."""
 

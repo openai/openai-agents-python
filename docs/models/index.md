@@ -123,6 +123,8 @@ provider = OpenAIProvider(
     use_responses_websocket=True,
     # Optional; if omitted, OPENAI_WEBSOCKET_BASE_URL is used when set.
     websocket_base_url="wss://your-proxy.example/v1",
+    # Optional low-level websocket keepalive settings.
+    responses_websocket_options={"ping_interval": 20.0, "ping_timeout": 60.0},
 )
 
 agent = Agent(name="Assistant")
@@ -203,6 +205,7 @@ If you use a custom OpenAI-compatible endpoint or proxy, websocket transport als
 -   This is the Responses API over websocket transport, not the [Realtime API](../realtime/guide.md). It does not apply to Chat Completions or non-OpenAI providers unless they support the Responses websocket `/responses` endpoint.
 -   Install the `websockets` package if it is not already available in your environment.
 -   You can use [`Runner.run_streamed()`][agents.run.Runner.run_streamed] directly after enabling websocket transport. For multi-turn workflows where you want to reuse the same websocket connection across turns (and nested agent-as-tool calls), the [`responses_websocket_session()`][agents.responses_websocket_session] helper is recommended. See the [Running agents](../running_agents.md) guide and [`examples/basic/stream_ws.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/stream_ws.py).
+-   For long reasoning turns or networks with latency spikes, customize websocket keepalive behavior with `responses_websocket_options`. Increase `ping_timeout` to tolerate delayed pong frames, or set `ping_timeout=None` to disable heartbeat timeouts while keeping pings enabled. Prefer HTTP/SSE transport when reliability is more important than websocket latency.
 
 ## Non-OpenAI models
 
