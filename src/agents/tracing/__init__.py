@@ -56,7 +56,6 @@ __all__ = [
     "handoff_span",
     "response_span",
     "set_trace_processors",
-    "set_auto_replace_trace_processor_on_add",
     "set_trace_provider",
     "set_tracing_disabled",
     "TracingConfig",
@@ -104,13 +103,6 @@ def set_trace_processors(processors: list[TracingProcessor]) -> None:
     Set the list of trace processors. This will replace the current list of processors.
     """
     get_trace_provider().set_processors(processors)
-
-
-def set_auto_replace_trace_processor_on_add(enabled: bool) -> None:
-    """
-    Configure whether add_trace_processor() replaces the default OpenAI exporter.
-    """
-    get_trace_provider().set_auto_replace_trace_processor_on_add(enabled)
 
 
 def set_tracing_disabled(disabled: bool) -> None:

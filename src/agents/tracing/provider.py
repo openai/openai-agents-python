@@ -65,16 +65,6 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
         with self._lock:
             self._processors = tuple(processors)
 
-    def get_processors(self) -> tuple[TracingProcessor, ...]:
-        """Return the registered processors in registration order."""
-        with self._lock:
-            return self._processors
-
-    def has_processor(self, processor: TracingProcessor) -> bool:
-        """Check whether ``processor`` is currently registered."""
-        with self._lock:
-            return any(registered is processor for registered in self._processors)
-
     def on_trace_start(self, trace: Trace) -> None:
         """
         Called when a trace is started.
@@ -214,10 +204,6 @@ class TraceProvider(ABC):
         """
         return None
 
-    def set_auto_replace_trace_processor_on_add(self, enabled: bool) -> None:
-        """Configure whether add-trace-processor should replace default OpenAI tracing."""
-        return None
-
 
 class DefaultTraceProvider(TraceProvider):
     def __init__(self) -> None:
@@ -226,38 +212,12 @@ class DefaultTraceProvider(TraceProvider):
         self._env_disabled: bool | None = None
         self._manual_disabled: bool | None = None
         self._disabled = False
-        self._auto_replace_trace_processor_on_add = False
 
     def register_processor(self, processor: TracingProcessor):
         """
         Add a processor to the list of processors. Each processor will receive all traces/spans.
         """
-        from .processors import default_processor
-
-        default = default_processor()
-        if processor is default:
-            self._multi_processor.add_tracing_processor(processor)
-            return
-
-        default_is_active = self._multi_processor.has_processor(default)
-        auto_replace_default = self._auto_replace_trace_processor_on_add
-
-        if default_is_active and auto_replace_default:
-            # Keep existing custom processors, drop the default OpenAI exporter, then append.
-            processors_without_default = [
-                registered
-                for registered in self._multi_processor.get_processors()
-                if registered is not default
-            ]
-            processors_without_default.append(processor)
-            self._multi_processor.set_processors(processors_without_default)
-            return
-
         self._multi_processor.add_tracing_processor(processor)
-
-    def set_auto_replace_trace_processor_on_add(self, enabled: bool) -> None:
-        """Configure whether custom processors replace the default OpenAI exporter when added."""
-        self._auto_replace_trace_processor_on_add = enabled
 
     def set_processors(self, processors: list[TracingProcessor]):
         """
