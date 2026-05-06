@@ -186,7 +186,7 @@ class RealtimeSession(RealtimeModelListener):
         # Emit initial history update
         await self._put_event(
             RealtimeHistoryUpdated(
-                history=self._history,
+                history=list(self._history),
                 info=self._event_info,
             )
         )
@@ -290,7 +290,7 @@ class RealtimeSession(RealtimeModelListener):
                 await self._put_event(RealtimeHistoryAdded(info=self._event_info, item=new_item))
             else:
                 await self._put_event(
-                    RealtimeHistoryUpdated(info=self._event_info, history=self._history)
+                    RealtimeHistoryUpdated(info=self._event_info, history=list(self._history))
                 )
         elif event.type == "input_audio_timeout_triggered":
             await self._put_event(
@@ -312,6 +312,9 @@ class RealtimeSession(RealtimeModelListener):
                     item_id=item_id,
                     content=[AssistantAudio(transcript=self._item_transcripts[item_id])],
                 ),
+            )
+            await self._put_event(
+                RealtimeHistoryUpdated(info=self._event_info, history=list(self._history))
             )
 
             # Check if we should run guardrails based on debounce threshold
@@ -384,13 +387,13 @@ class RealtimeSession(RealtimeModelListener):
                 await self._put_event(RealtimeHistoryAdded(info=self._event_info, item=new_item))
             else:
                 await self._put_event(
-                    RealtimeHistoryUpdated(info=self._event_info, history=self._history)
+                    RealtimeHistoryUpdated(info=self._event_info, history=list(self._history))
                 )
         elif event.type == "item_deleted":
             deleted_id = event.item_id
             self._history = [item for item in self._history if item.item_id != deleted_id]
             await self._put_event(
-                RealtimeHistoryUpdated(info=self._event_info, history=self._history)
+                RealtimeHistoryUpdated(info=self._event_info, history=list(self._history))
             )
         elif event.type == "connection_status":
             pass
