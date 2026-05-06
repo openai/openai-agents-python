@@ -222,7 +222,7 @@ def make_state(
     *,
     context: RunContextWrapper[TContext],
     original_input: str | list[Any] = "input",
-    max_turns: int = 3,
+    max_turns: int | None = 3,
 ) -> RunState[TContext, Agent[Any]]:
     """Create a RunState with common defaults used across tests."""
 
@@ -308,6 +308,19 @@ class TestRunState:
         str_data = state.to_string()
         assert isinstance(str_data, str)
         assert json.loads(str_data) == json_data
+
+    @pytest.mark.asyncio
+    async def test_max_turns_none_round_trips(self):
+        """RunState should preserve disabled max_turns across serialization."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="Agent1")
+        state = make_state(agent, context=context, original_input="input1", max_turns=None)
+
+        json_data = state.to_json()
+        assert json_data["max_turns"] is None
+
+        restored = await RunState.from_json(agent, json_data)
+        assert restored._max_turns is None
 
     @pytest.mark.asyncio
     async def test_from_json_restores_duplicate_name_current_agent_by_identity(self):
@@ -4505,6 +4518,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.6",
                 "1.7",
                 "1.8",
+                "1.9",
                 CURRENT_SCHEMA_VERSION,
             }
         )
