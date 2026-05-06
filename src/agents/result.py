@@ -362,8 +362,8 @@ class RunResult(RunResultBase):
         default=None, init=False, repr=False
     )
     """How reasoning IDs should be represented when converting to input history."""
-    max_turns: int = 10
-    """The maximum number of turns allowed for this run."""
+    max_turns: int | None = 10
+    """The maximum number of turns allowed for this run, or ``None`` for no limit."""
     interruptions: list[ToolApprovalItem] = field(default_factory=list)
     """Pending tool approval requests (interruptions) for this run."""
 
@@ -457,8 +457,8 @@ class RunResultStreaming(RunResultBase):
     current_turn: int
     """The current turn number."""
 
-    max_turns: int
-    """The maximum number of turns the agent can run for."""
+    max_turns: int | None
+    """The maximum number of turns the agent can run for, or ``None`` for no limit."""
 
     final_output: Any
     """The final output of the agent. This is None until the agent has finished running."""
@@ -791,7 +791,11 @@ class RunResultStreaming(RunResultBase):
         )
 
     def _check_errors(self):
-        if self.current_turn > self.max_turns and not self._max_turns_handled:
+        if (
+            self.max_turns is not None
+            and self.current_turn > self.max_turns
+            and not self._max_turns_handled
+        ):
             max_turns_exc = MaxTurnsExceeded(f"Max turns ({self.max_turns}) exceeded")
             max_turns_exc.run_data = self._create_error_details()
             self._stored_exception = max_turns_exc

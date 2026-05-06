@@ -385,7 +385,7 @@ def build_interruption_result(
     interruptions: list[ToolApprovalItem],
     processed_response: ProcessedResponse | None,
     tool_use_tracker: AgentToolUseTracker,
-    max_turns: int,
+    max_turns: int | None,
     current_turn: int,
     generated_items: list[RunItem],
     run_state: RunState | None,

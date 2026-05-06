@@ -440,7 +440,7 @@ async def start_streaming(
     starting_input: str | list[TResponseInputItem],
     streamed_result: RunResultStreaming,
     starting_agent: Agent[TContext],
-    max_turns: int,
+    max_turns: int | None,
     hooks: RunHooks[TContext],
     context_wrapper: RunContextWrapper[TContext],
     run_config: RunConfig,
@@ -877,7 +877,7 @@ async def start_streaming(
             if run_state:
                 run_state._current_turn_persisted_item_count = 0
 
-            if current_turn > max_turns:
+            if max_turns is not None and current_turn > max_turns:
                 _error_tracing.attach_error_to_span(
                     current_span,
                     SpanError(

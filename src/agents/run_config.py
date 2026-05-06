@@ -262,8 +262,8 @@ class RunOptions(TypedDict, Generic[TContext]):
     context: NotRequired[TContext | None]
     """The context for the run."""
 
-    max_turns: NotRequired[int]
-    """The maximum number of turns to run for."""
+    max_turns: NotRequired[int | None]
+    """The maximum number of turns to run for. Set to ``None`` to disable the limit."""
 
     hooks: NotRequired[RunHooks[TContext] | None]
     """Lifecycle hooks for the run."""

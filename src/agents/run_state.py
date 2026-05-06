@@ -128,7 +128,7 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.9"
+CURRENT_SCHEMA_VERSION = "1.10"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -144,6 +144,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.8": "Persists SDK-generated prompt cache keys across resume flows.",
     "1.9": "Persists pending custom tool calls and tool origin metadata across resume flows.",
+    "1.10": "Allows serialized RunState snapshots to disable max_turns with null.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -219,8 +220,8 @@ class RunState(Generic[TContext, TAgent]):
     _session_items: list[RunItem] = field(default_factory=list)
     """Full, unfiltered run items for session history."""
 
-    _max_turns: int = 10
-    """Maximum allowed turns before forcing termination."""
+    _max_turns: int | None = 10
+    """Maximum allowed turns before forcing termination, or ``None`` for no limit."""
 
     _conversation_id: str | None = None
     """Conversation identifier for server-managed conversation tracking."""
@@ -281,7 +282,7 @@ class RunState(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         original_input: str | list[Any],
         starting_agent: TAgent,
-        max_turns: int = 10,
+        max_turns: int | None = 10,
         *,
         conversation_id: str | None = None,
         previous_response_id: str | None = None,
