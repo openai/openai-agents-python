@@ -223,10 +223,11 @@ class MCPUtil:
                 failure_error_function=failure_error_function,
             )
             server_tool_names = {tool.name for tool in server_tools}
-            if len(server_tool_names & tool_names) > 0:
+            duplicate_tool_names = sorted(server_tool_names & tool_names)
+            if duplicate_tool_names:
                 raise UserError(
-                    f"Duplicate tool names found across MCP servers: "
-                    f"{server_tool_names & tool_names}"
+                    "Duplicate tool names found across MCP servers: "
+                    f"{', '.join(duplicate_tool_names)}"
                 )
             tool_names.update(server_tool_names)
             tools.extend(server_tools)
@@ -286,7 +287,7 @@ class MCPUtil:
         effective_failure_error_function = server._get_failure_error_function(
             failure_error_function
         )
-        schema, is_strict = tool.inputSchema, False
+        schema, is_strict = copy.deepcopy(tool.inputSchema), False
 
         # MCP spec doesn't require the inputSchema to have `properties`, but OpenAI spec does.
         if "properties" not in schema:
@@ -378,7 +379,7 @@ class MCPUtil:
         """Invoke an MCP tool and return the result as ToolOutput."""
         json_decode_error: Exception | None = None
         try:
-            json_data: dict[str, Any] = json.loads(input_json) if input_json else {}
+            json_data = json.loads(input_json) if input_json else {}
         except Exception as e:
             json_decode_error = e
 
@@ -391,6 +392,11 @@ class MCPUtil:
                 error_message = f"{error_message}: {input_json}"
                 logger.debug(error_message)
             raise ModelBehaviorError(error_message) from json_decode_error
+
+        if not isinstance(json_data, dict):
+            raise ModelBehaviorError(
+                f"Invalid JSON input for tool {tool.name}: expected a JSON object"
+            )
 
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug(f"Invoking MCP tool {tool.name}")
