@@ -565,16 +565,37 @@ class TestEventHandling:
         assert len(history_event.history) == 1
 
     @pytest.mark.asyncio
-    async def test_ignored_events_only_generate_raw_events(self, mock_model, mock_agent):
-        """Test that ignored events (transcript_delta, connection_status, other) only generate raw
-        events"""
+    async def test_transcript_delta_updates_history_and_emits_history_updated(
+        self, mock_model, mock_agent
+    ):
+        """Test that transcript delta events update history and emit history_updated."""
         session = RealtimeSession(mock_model, mock_agent, None)
 
-        # Test transcript delta (should be ignored per TODO comment)
         transcript_event = RealtimeModelTranscriptDeltaEvent(
             item_id="item_1", delta="hello", response_id="resp_1"
         )
         await session.on_event(transcript_event)
+
+        assert session._event_queue.qsize() == 2
+
+        raw_event = await session._event_queue.get()
+        assert isinstance(raw_event, RealtimeRawModelEvent)
+        assert raw_event.data == transcript_event
+
+        history_event = await session._event_queue.get()
+        assert isinstance(history_event, RealtimeHistoryUpdated)
+        assert history_event.history == session._history
+        assert len(history_event.history) == 1
+
+        updated_item = cast(AssistantMessageItem, history_event.history[0])
+        assert updated_item.item_id == "item_1"
+        assert isinstance(updated_item.content[0], AssistantAudio)
+        assert updated_item.content[0].transcript == "hello"
+
+    @pytest.mark.asyncio
+    async def test_ignored_events_only_generate_raw_events(self, mock_model, mock_agent):
+        """Test that connection_status and other events only generate raw events."""
+        session = RealtimeSession(mock_model, mock_agent, None)
 
         # Test connection status (should be ignored)
         connection_event = RealtimeModelConnectionStatusEvent(status="connected")
@@ -584,10 +605,10 @@ class TestEventHandling:
         other_event = RealtimeModelOtherEvent(data={"custom": "data"})
         await session.on_event(other_event)
 
-        # Should only have 3 raw events (no transformed events)
-        assert session._event_queue.qsize() == 3
+        # Should only have 2 raw events (no transformed events)
+        assert session._event_queue.qsize() == 2
 
-        for _ in range(3):
+        for _ in range(2):
             event = await session._event_queue.get()
             assert isinstance(event, RealtimeRawModelEvent)
 

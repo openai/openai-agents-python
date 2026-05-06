@@ -313,6 +313,9 @@ class RealtimeSession(RealtimeModelListener):
                     content=[AssistantAudio(transcript=self._item_transcripts[item_id])],
                 ),
             )
+            await self._put_event(
+                RealtimeHistoryUpdated(info=self._event_info, history=self._history)
+            )
 
             # Check if we should run guardrails based on debounce threshold
             current_length = len(self._item_transcripts[item_id])
