@@ -59,6 +59,55 @@ Tool guardrails wrap **function tools** and let you validate or block tool calls
 - Output tool guardrails run after the tool executes and can replace the output or raise a tripwire.
 - Tool guardrails apply only to function tools created with [`function_tool`][agents.tool.function_tool]. Handoffs run through the SDK's handoff pipeline rather than the normal function-tool pipeline, so tool guardrails do not apply to the handoff call itself. Hosted tools (`WebSearchTool`, `FileSearchTool`, `HostedMCPTool`, `CodeInterpreterTool`, `ImageGenerationTool`) and built-in execution tools (`ComputerTool`, `ShellTool`, `ApplyPatchTool`, `LocalShellTool`) also do not use this guardrail pipeline, and [`Agent.as_tool()`][agents.agent.Agent.as_tool] does not currently expose tool-guardrail options directly.
 
+For deterministic checks at the execution boundary, put the policy in a `tool_input_guardrail`
+on the function tool. The guardrail receives the exact tool name and serialized arguments
+that are about to execute, so it is the right place to enforce local policies such as:
+
+- checking the tool name against an allowlist
+- validating required arguments and argument value constraints
+- checking caller-specific context from `data.context.context`
+- rejecting stale, replayed, or out-of-scope requests before the function body runs
+
+For example:
+
+```python
+import json
+from agents import (
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrailData,
+    function_tool,
+    tool_input_guardrail,
+)
+
+ALLOWED_TOOLS = {"refund_order"}
+ALLOWED_REASONS = {"damaged", "duplicate", "requested_by_customer"}
+
+
+@tool_input_guardrail
+def validate_refund_request(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+    if data.context.tool_name not in ALLOWED_TOOLS:
+        return ToolGuardrailFunctionOutput.reject_content("Tool is not allowed.")
+
+    try:
+        args = json.loads(data.context.tool_arguments or "{}")
+    except json.JSONDecodeError:
+        return ToolGuardrailFunctionOutput.reject_content("Tool arguments must be valid JSON.")
+
+    if not args.get("order_id"):
+        return ToolGuardrailFunctionOutput.reject_content("Refund requires an order_id.")
+
+    if args.get("reason") not in ALLOWED_REASONS:
+        return ToolGuardrailFunctionOutput.reject_content("Refund reason is not allowed.")
+
+    return ToolGuardrailFunctionOutput.allow()
+
+
+@function_tool(tool_input_guardrails=[validate_refund_request])
+def refund_order(order_id: str, reason: str) -> str:
+    """Refund an order after the tool guardrail validates the request."""
+    return f"Refunded {order_id} for reason: {reason}"
+```
+
 See the code snippet below for details.
 
 ## Tripwires
