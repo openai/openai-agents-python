@@ -10,7 +10,14 @@ from mcp.types import CallToolResult, ImageContent, TextContent, Tool as MCPTool
 from pydantic import BaseModel, TypeAdapter
 
 import agents._debug as _debug
-from agents import Agent, FunctionTool, RunContextWrapper, default_tool_error_function, handoff
+from agents import (
+    Agent,
+    FunctionTool,
+    Handoff,
+    RunContextWrapper,
+    default_tool_error_function,
+    handoff,
+)
 from agents.exceptions import (
     AgentsException,
     MCPToolCancellationError,
@@ -414,6 +421,47 @@ async def test_agent_get_mcp_tools_reserves_handoff_tool_names_when_prefixing():
     )
     await tool.on_invoke_tool(tool_context, "{}")
     assert server.tool_calls == ["search"]
+
+
+@pytest.mark.asyncio
+async def test_agent_get_mcp_tools_reserves_plain_agent_handoff_names_when_prefixing():
+    handoff_agent = Agent(name="calendar_agent", instructions="Calendar agent")
+    agent = Agent(
+        name="test_agent",
+        instructions="Test agent",
+        handoffs=[handoff_agent],
+        mcp_config={"include_server_in_tool_names": True},
+    )
+
+    reserved_names = await agent._get_mcp_tool_reserved_names(RunContextWrapper(context=None))
+
+    assert Handoff.default_tool_name(handoff_agent) in reserved_names
+
+
+@pytest.mark.asyncio
+async def test_agent_get_mcp_tools_ignores_disabled_handoff_tool_names_when_prefixing():
+    server = FakeMCPServer(server_name="calendar")
+    server.add_tool("search", {})
+
+    handoff_agent = Agent(name="calendar_agent", instructions="Calendar agent")
+    agent = Agent(
+        name="test_agent",
+        instructions="Test agent",
+        handoffs=[
+            handoff(
+                handoff_agent,
+                tool_name_override="mcp_calendar__search",
+                is_enabled=False,
+            )
+        ],
+        mcp_servers=[server],
+        mcp_config={"include_server_in_tool_names": True},
+    )
+
+    tools = await agent.get_mcp_tools(RunContextWrapper(context=None))
+
+    assert len(tools) == 1
+    assert tools[0].name == "mcp_calendar__search"
 
 
 @pytest.mark.asyncio
