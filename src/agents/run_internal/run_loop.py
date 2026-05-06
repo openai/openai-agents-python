@@ -179,6 +179,7 @@ from .turn_preparation import (
     get_all_tools,
     get_handoffs,
     get_model,
+    get_model_settings,
     get_output_schema,
     maybe_filter_model_input,
     validate_run_hooks,
@@ -1341,7 +1342,7 @@ async def run_single_turn_streamed(
 
     handoffs = await get_handoffs(execution_agent, context_wrapper)
     model = get_model(execution_agent, run_config)
-    model_settings = execution_agent.model_settings.resolve(run_config.model_settings)
+    model_settings = get_model_settings(execution_agent, run_config)
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
     final_response: ModelResponse | None = None
@@ -1825,7 +1826,7 @@ async def get_new_response(
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 
     model = get_model(execution_agent, run_config)
-    model_settings = execution_agent.model_settings.resolve(run_config.model_settings)
+    model_settings = get_model_settings(execution_agent, run_config)
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
     if server_conversation_tracker is not None:
