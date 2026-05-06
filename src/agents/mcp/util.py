@@ -37,6 +37,7 @@ from ..tool import (
 )
 from ..tool_context import ToolContext
 from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
+from ..util._transforms import transform_string_function_style
 from ..util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
@@ -211,8 +212,13 @@ class MCPUtil:
         agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     ) -> list[Tool]:
-        """Get all function tools from a list of MCP servers."""
-        tools = []
+        """Get all function tools from a list of MCP servers.
+
+        When multiple MCP servers have tools with the same name, the duplicate tools
+        are automatically renamed with a server prefix to avoid collisions. A warning
+        is logged to inform the user about the renaming.
+        """
+        tools: list[Tool] = []
         tool_names: set[str] = set()
         for server in servers:
             server_tools = await cls.get_function_tools(
@@ -223,15 +229,66 @@ class MCPUtil:
                 failure_error_function=failure_error_function,
             )
             server_tool_names = {tool.name for tool in server_tools}
-            if len(server_tool_names & tool_names) > 0:
-                raise UserError(
-                    f"Duplicate tool names found across MCP servers: "
-                    f"{server_tool_names & tool_names}"
+            duplicates = server_tool_names & tool_names
+            if duplicates:
+                logger.warning(
+                    f"Duplicate tool names found across MCP servers: {duplicates}. "
+                    f"Renaming tools from server '{server.name}' with prefix."
                 )
-            tool_names.update(server_tool_names)
-            tools.extend(server_tools)
+                renamed_tools: list[Tool] = []
+                for tool in server_tools:
+                    if tool.name in duplicates:
+                        original_name = tool.name
+                        new_name = cls._build_renamed_tool_name(
+                            server.name,
+                            original_name,
+                            tool_names,
+                        )
+                        logger.warning(
+                            f"Renamed MCP tool '{original_name}' from server "
+                            f"'{server.name}' to '{new_name}'"
+                        )
+                        # Create a renamed copy of the tool
+                        renamed_tool = cls._rename_tool(tool, new_name)
+                        renamed_tools.append(renamed_tool)
+                        tool_names.add(new_name)
+                    else:
+                        renamed_tools.append(tool)
+                        tool_names.add(tool.name)
+                tools.extend(renamed_tools)
+            else:
+                tool_names.update(server_tool_names)
+                tools.extend(server_tools)
 
         return tools
+
+    @staticmethod
+    def _build_renamed_tool_name(
+        server_name: str,
+        original_name: str,
+        existing_names: set[str],
+    ) -> str:
+        """Build a function-calling-safe renamed tool name for duplicate MCP tools."""
+        normalized_server_name = transform_string_function_style(server_name)
+        new_name = f"{normalized_server_name}__{original_name}"
+        while new_name in existing_names:
+            new_name = f"{new_name}_"
+        return new_name
+
+    @staticmethod
+    def _rename_tool(tool: Tool, new_name: str) -> Tool:
+        """Create a copy of a tool with a new name.
+
+        For FunctionTool instances, uses the built-in __copy__ method to ensure all
+        internal fields (including _mcp_title, _tool_origin, etc.) are properly copied.
+        """
+        if isinstance(tool, FunctionTool):
+            renamed = tool.__copy__()
+            renamed.name = new_name
+            return renamed
+        # For other tool types, try to set name directly
+        tool.name = new_name
+        return tool
 
     @classmethod
     async def get_function_tools(

@@ -8,7 +8,6 @@ from agents import (
     ModelBehaviorError,
     RunContextWrapper,
     Runner,
-    UserError,
     default_tool_error_function,
 )
 from agents.exceptions import AgentsException
@@ -125,14 +124,14 @@ async def test_runner_works_with_multiple_mcp_servers(streaming: bool):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
-async def test_runner_errors_when_mcp_tools_clash(streaming: bool):
-    """Test that the runner errors when multiple servers have the same tool name."""
+async def test_runner_renames_mcp_tools_when_names_clash(streaming: bool):
+    """Test that the runner auto-renames tools when multiple servers have same name."""
     server1 = FakeMCPServer()
     server1.add_tool("test_tool_1", {})
     server1.add_tool("test_tool_2", {})
 
     server2 = FakeMCPServer()
-    server2.add_tool("test_tool_2", {})
+    server2.add_tool("test_tool_2", {})  # duplicate name
     server2.add_tool("test_tool_3", {})
 
     model = FakeModel()
@@ -145,19 +144,58 @@ async def test_runner_errors_when_mcp_tools_clash(streaming: bool):
     model.add_multiple_turn_outputs(
         [
             # First turn: a message and tool call
+            # test_tool_3 is unique to server2, so it should work without renaming
             [get_text_message("a_message"), get_function_tool_call("test_tool_3", "")],
             # Second turn: text message
             [get_text_message("done")],
         ]
     )
 
-    with pytest.raises(UserError):
-        if streaming:
-            result = Runner.run_streamed(agent, input="user_message")
-            async for _ in result.stream_events():
-                pass
-        else:
-            await Runner.run(agent, input="user_message")
+    if streaming:
+        result = Runner.run_streamed(agent, input="user_message")
+        async for _ in result.stream_events():
+            pass
+    else:
+        await Runner.run(agent, input="user_message")
+
+    # server2's test_tool_3 should be called successfully (no rename needed)
+    assert server2.tool_calls == ["test_tool_3"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_runner_renamed_mcp_tool_can_be_called(streaming: bool):
+    """Test that renamed MCP tools can still be invoked by the model."""
+    server1 = FakeMCPServer(server_name="server1")
+    server1.add_tool("search", {})
+
+    server2 = FakeMCPServer(server_name="server2")
+    server2.add_tool("search", {})  # duplicate name
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        mcp_servers=[server1, server2],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # The model should use the renamed tool name
+            [get_text_message("a_message"), get_function_tool_call("server2__search", "")],
+            [get_text_message("done")],
+        ]
+    )
+
+    if streaming:
+        result = Runner.run_streamed(agent, input="user_message")
+        async for _ in result.stream_events():
+            pass
+    else:
+        await Runner.run(agent, input="user_message")
+
+    # The renamed tool from server2 should be called
+    assert server2.tool_calls == ["search"]
 
 
 class Foo(BaseModel):
