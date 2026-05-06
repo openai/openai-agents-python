@@ -1400,6 +1400,56 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert payload_types.count("response.create") == 2
         assert payload_types[-1] == "response.create"
 
+    @pytest.mark.asyncio
+    async def test_raw_response_create_is_sequenced_with_follow_up_tool_output(
+        self, model, monkeypatch
+    ):
+        """Raw response.create should block later tool follow-up response.create."""
+        payload_types: list[str] = []
+        response_create_started = asyncio.Event()
+        allow_response_create_send = asyncio.Event()
+
+        async def fake_send_raw(event):
+            payload_types.append(event.type)
+            if event.type == "response.create" and not response_create_started.is_set():
+                response_create_started.set()
+                await allow_response_create_send.wait()
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+
+        await model.send_event(
+            RealtimeModelSendRawMessage(
+                message={
+                    "type": "response.create",
+                    "other_data": {"response": {"instructions": "Say hello."}},
+                }
+            )
+        )
+        await response_create_started.wait()
+
+        await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(name="t", call_id="c", arguments="{}"),
+                output="ok",
+                start_response=True,
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert payload_types == ["response.create", "conversation.item.create"]
+
+        allow_response_create_send.set()
+        await asyncio.sleep(0)
+
+        assert payload_types.count("response.create") == 1
+
+        await model._mark_response_created()
+        await model._mark_response_done()
+        await asyncio.sleep(0)
+
+        assert payload_types.count("response.create") == 2
+        assert payload_types[-1] == "response.create"
+
     def test_add_remove_listener_and_tools_conversion(self, model):
         listener = AsyncMock()
         model.add_listener(listener)
