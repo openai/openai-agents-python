@@ -94,6 +94,7 @@ def agent_span(
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Span[AgentSpanData]:
     """Create a new agent span. The span will not be started automatically, you should either do
     `with agent_span() ...` or call `span.start()` + `span.finish()` manually.
@@ -109,12 +110,20 @@ def agent_span(
         parent: The parent span or trace. If not provided, we will automatically use the current
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
+        metadata: Optional dictionary of custom metadata to attach to the span. Surfaces under
+            the exported payload's top-level ``metadata`` field.
 
     Returns:
         The newly created agent span.
     """
     return get_trace_provider().create_span(
-        span_data=AgentSpanData(name=name, handoffs=handoffs, tools=tools, output_type=output_type),
+        span_data=AgentSpanData(
+            name=name,
+            handoffs=handoffs,
+            tools=tools,
+            output_type=output_type,
+            metadata=metadata,
+        ),
         span_id=span_id,
         parent=parent,
         disabled=disabled,
@@ -126,10 +135,11 @@ def task_span(
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Span[TaskSpanData]:
     """Create a new task span. This represents one top-level Runner invocation."""
     return get_trace_provider().create_span(
-        span_data=TaskSpanData(name=name),
+        span_data=TaskSpanData(name=name, metadata=metadata),
         span_id=span_id,
         parent=parent,
         disabled=disabled,
@@ -142,10 +152,11 @@ def turn_span(
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Span[TurnSpanData]:
     """Create a new turn span. This represents one agent loop turn."""
     return get_trace_provider().create_span(
-        span_data=TurnSpanData(turn=turn, agent_name=agent_name),
+        span_data=TurnSpanData(turn=turn, agent_name=agent_name, metadata=metadata),
         span_id=span_id,
         parent=parent,
         disabled=disabled,
@@ -159,6 +170,7 @@ def function_span(
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Span[FunctionSpanData]:
     """Create a new function span. The span will not be started automatically, you should either do
     `with function_span() ...` or call `span.start()` + `span.finish()` manually.
@@ -173,12 +185,14 @@ def function_span(
         parent: The parent span or trace. If not provided, we will automatically use the current
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
+        metadata: Optional dictionary of custom metadata to attach to the span. Surfaces under
+            the exported payload's top-level ``metadata`` field.
 
     Returns:
         The newly created function span.
     """
     return get_trace_provider().create_span(
-        span_data=FunctionSpanData(name=name, input=input, output=output),
+        span_data=FunctionSpanData(name=name, input=input, output=output, metadata=metadata),
         span_id=span_id,
         parent=parent,
         disabled=disabled,
@@ -194,6 +208,7 @@ def generation_span(
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Span[GenerationSpanData]:
     """Create a new generation span. The span will not be started automatically, you should either
     do `with generation_span() ...` or call `span.start()` + `span.finish()` manually.
@@ -215,6 +230,8 @@ def generation_span(
         parent: The parent span or trace. If not provided, we will automatically use the current
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
+        metadata: Optional dictionary of custom metadata to attach to the span. Surfaces under
+            the exported payload's top-level ``metadata`` field.
 
     Returns:
         The newly created generation span.
@@ -226,6 +243,7 @@ def generation_span(
             model=model,
             model_config=model_config,
             usage=usage,
+            metadata=metadata,
         ),
         span_id=span_id,
         parent=parent,
@@ -238,6 +256,7 @@ def response_span(
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Span[ResponseSpanData]:
     """Create a new response span. The span will not be started automatically, you should either do
     `with response_span() ...` or call `span.start()` + `span.finish()` manually.
@@ -250,9 +269,11 @@ def response_span(
         parent: The parent span or trace. If not provided, we will automatically use the current
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
+        metadata: Optional dictionary of custom metadata to attach to the span. Surfaces under
+            the exported payload's top-level ``metadata`` field.
     """
     return get_trace_provider().create_span(
-        span_data=ResponseSpanData(response=response),
+        span_data=ResponseSpanData(response=response, metadata=metadata),
         span_id=span_id,
         parent=parent,
         disabled=disabled,
@@ -265,6 +286,7 @@ def handoff_span(
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Span[HandoffSpanData]:
     """Create a new handoff span. The span will not be started automatically, you should either do
     `with handoff_span() ...` or call `span.start()` + `span.finish()` manually.
@@ -278,12 +300,14 @@ def handoff_span(
         parent: The parent span or trace. If not provided, we will automatically use the current
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
+        metadata: Optional dictionary of custom metadata to attach to the span. Surfaces under
+            the exported payload's top-level ``metadata`` field.
 
     Returns:
         The newly created handoff span.
     """
     return get_trace_provider().create_span(
-        span_data=HandoffSpanData(from_agent=from_agent, to_agent=to_agent),
+        span_data=HandoffSpanData(from_agent=from_agent, to_agent=to_agent, metadata=metadata),
         span_id=span_id,
         parent=parent,
         disabled=disabled,
@@ -296,6 +320,7 @@ def custom_span(
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Span[CustomSpanData]:
     """Create a new custom span, to which you can add your own metadata. The span will not be
     started automatically, you should either do `with custom_span() ...` or call
@@ -303,19 +328,22 @@ def custom_span(
 
     Args:
         name: The name of the custom span.
-        data: Arbitrary structured data to associate with the span.
+        data: Arbitrary structured data to associate with the span. Lives inside ``span_data``
+            in the exported payload.
         span_id: The ID of the span. Optional. If not provided, we will generate an ID. We
             recommend using `util.gen_span_id()` to generate a span ID, to guarantee that IDs are
             correctly formatted.
         parent: The parent span or trace. If not provided, we will automatically use the current
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
+        metadata: Optional dictionary of custom metadata to attach to the span. Surfaces under
+            the exported payload's top-level ``metadata`` field, distinct from ``data``.
 
     Returns:
         The newly created custom span.
     """
     return get_trace_provider().create_span(
-        span_data=CustomSpanData(name=name, data=data or {}),
+        span_data=CustomSpanData(name=name, data=data or {}, metadata=metadata),
         span_id=span_id,
         parent=parent,
         disabled=disabled,
@@ -328,6 +356,7 @@ def guardrail_span(
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Span[GuardrailSpanData]:
     """Create a new guardrail span. The span will not be started automatically, you should either
     do `with guardrail_span() ...` or call `span.start()` + `span.finish()` manually.
@@ -341,9 +370,11 @@ def guardrail_span(
         parent: The parent span or trace. If not provided, we will automatically use the current
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
+        metadata: Optional dictionary of custom metadata to attach to the span. Surfaces under
+            the exported payload's top-level ``metadata`` field.
     """
     return get_trace_provider().create_span(
-        span_data=GuardrailSpanData(name=name, triggered=triggered),
+        span_data=GuardrailSpanData(name=name, triggered=triggered, metadata=metadata),
         span_id=span_id,
         parent=parent,
         disabled=disabled,
@@ -359,6 +390,7 @@ def transcription_span(
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Span[TranscriptionSpanData]:
     """Create a new transcription span. The span will not be started automatically, you should
     either do `with transcription_span() ...` or call `span.start()` + `span.finish()` manually.
@@ -376,6 +408,8 @@ def transcription_span(
         parent: The parent span or trace. If not provided, we will automatically use the current
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
+        metadata: Optional dictionary of custom metadata to attach to the span. Surfaces under
+            the exported payload's top-level ``metadata`` field.
 
     Returns:
         The newly created speech-to-text span.
@@ -387,6 +421,7 @@ def transcription_span(
             output=output,
             model=model,
             model_config=model_config,
+            metadata=metadata,
         ),
         span_id=span_id,
         parent=parent,
@@ -404,6 +439,7 @@ def speech_span(
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Span[SpeechSpanData]:
     """Create a new speech span. The span will not be started automatically, you should either do
     `with speech_span() ...` or call `span.start()` + `span.finish()` manually.
@@ -421,6 +457,8 @@ def speech_span(
         parent: The parent span or trace. If not provided, we will automatically use the current
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
+        metadata: Optional dictionary of custom metadata to attach to the span. Surfaces under
+            the exported payload's top-level ``metadata`` field.
     """
     return get_trace_provider().create_span(
         span_data=SpeechSpanData(
@@ -430,6 +468,7 @@ def speech_span(
             output_format=output_format,
             model_config=model_config,
             first_content_at=first_content_at,
+            metadata=metadata,
         ),
         span_id=span_id,
         parent=parent,
@@ -442,6 +481,7 @@ def speech_group_span(
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Span[SpeechGroupSpanData]:
     """Create a new speech group span. The span will not be started automatically, you should
     either do `with speech_group_span() ...` or call `span.start()` + `span.finish()` manually.
@@ -454,9 +494,11 @@ def speech_group_span(
         parent: The parent span or trace. If not provided, we will automatically use the current
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
+        metadata: Optional dictionary of custom metadata to attach to the span. Surfaces under
+            the exported payload's top-level ``metadata`` field.
     """
     return get_trace_provider().create_span(
-        span_data=SpeechGroupSpanData(input=input),
+        span_data=SpeechGroupSpanData(input=input, metadata=metadata),
         span_id=span_id,
         parent=parent,
         disabled=disabled,
@@ -469,6 +511,7 @@ def mcp_tools_span(
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Span[MCPListToolsSpanData]:
     """Create a new MCP list tools span. The span will not be started automatically, you should
     either do `with mcp_tools_span() ...` or call `span.start()` + `span.finish()` manually.
@@ -482,9 +525,11 @@ def mcp_tools_span(
         parent: The parent span or trace. If not provided, we will automatically use the current
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
+        metadata: Optional dictionary of custom metadata to attach to the span. Surfaces under
+            the exported payload's top-level ``metadata`` field.
     """
     return get_trace_provider().create_span(
-        span_data=MCPListToolsSpanData(server=server, result=result),
+        span_data=MCPListToolsSpanData(server=server, result=result, metadata=metadata),
         span_id=span_id,
         parent=parent,
         disabled=disabled,

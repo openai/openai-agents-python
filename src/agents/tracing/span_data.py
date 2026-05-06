@@ -138,7 +138,7 @@ class FunctionSpanData(SpanData):
     Includes input, output and MCP data (if applicable).
     """
 
-    __slots__ = ("name", "input", "output", "mcp_data")
+    __slots__ = ("name", "input", "output", "mcp_data", "metadata")
 
     def __init__(
         self,
@@ -146,11 +146,13 @@ class FunctionSpanData(SpanData):
         input: str | None,
         output: Any | None,
         mcp_data: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         self.name = name
         self.input = input
         self.output = output
         self.mcp_data = mcp_data
+        self.metadata = metadata
 
     @property
     def type(self) -> str:
@@ -178,6 +180,7 @@ class GenerationSpanData(SpanData):
         "model",
         "model_config",
         "usage",
+        "metadata",
     )
 
     def __init__(
@@ -187,12 +190,14 @@ class GenerationSpanData(SpanData):
         model: str | None = None,
         model_config: Mapping[str, Any] | None = None,
         usage: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         self.input = input
         self.output = output
         self.model = model
         self.model_config = model_config
         self.usage = usage
+        self.metadata = metadata
 
     @property
     def type(self) -> str:
@@ -215,19 +220,21 @@ class ResponseSpanData(SpanData):
     Includes response and input.
     """
 
-    __slots__ = ("response", "input", "usage")
+    __slots__ = ("response", "input", "usage", "metadata")
 
     def __init__(
         self,
         response: Response | None = None,
         input: str | list[ResponseInputItemParam] | None = None,
         usage: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         self.response = response
         # This is not used by the OpenAI trace processors, but is useful for other tracing
         # processor implementations
         self.input = input
         self.usage = usage
+        self.metadata = metadata
 
     @property
     def type(self) -> str:
@@ -247,11 +254,17 @@ class HandoffSpanData(SpanData):
     Includes source and destination agents.
     """
 
-    __slots__ = ("from_agent", "to_agent")
+    __slots__ = ("from_agent", "to_agent", "metadata")
 
-    def __init__(self, from_agent: str | None, to_agent: str | None):
+    def __init__(
+        self,
+        from_agent: str | None,
+        to_agent: str | None,
+        metadata: dict[str, Any] | None = None,
+    ):
         self.from_agent = from_agent
         self.to_agent = to_agent
+        self.metadata = metadata
 
     @property
     def type(self) -> str:
@@ -271,11 +284,17 @@ class CustomSpanData(SpanData):
     Includes name and data property bag.
     """
 
-    __slots__ = ("name", "data")
+    __slots__ = ("name", "data", "metadata")
 
-    def __init__(self, name: str, data: dict[str, Any]):
+    def __init__(
+        self,
+        name: str,
+        data: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+    ):
         self.name = name
         self.data = data
+        self.metadata = metadata
 
     @property
     def type(self) -> str:
@@ -295,11 +314,17 @@ class GuardrailSpanData(SpanData):
     Includes name and triggered status.
     """
 
-    __slots__ = ("name", "triggered")
+    __slots__ = ("name", "triggered", "metadata")
 
-    def __init__(self, name: str, triggered: bool = False):
+    def __init__(
+        self,
+        name: str,
+        triggered: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ):
         self.name = name
         self.triggered = triggered
+        self.metadata = metadata
 
     @property
     def type(self) -> str:
@@ -324,6 +349,7 @@ class TranscriptionSpanData(SpanData):
         "output",
         "model",
         "model_config",
+        "metadata",
     )
 
     def __init__(
@@ -333,12 +359,14 @@ class TranscriptionSpanData(SpanData):
         output: str | None = None,
         model: str | None = None,
         model_config: Mapping[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         self.input = input
         self.input_format = input_format
         self.output = output
         self.model = model
         self.model_config = model_config
+        self.metadata = metadata
 
     @property
     def type(self) -> str:
@@ -363,7 +391,7 @@ class SpeechSpanData(SpanData):
     Includes input, output, model, model configuration, and first content timestamp.
     """
 
-    __slots__ = ("input", "output", "model", "model_config", "first_content_at")
+    __slots__ = ("input", "output", "model", "model_config", "first_content_at", "metadata")
 
     def __init__(
         self,
@@ -373,6 +401,7 @@ class SpeechSpanData(SpanData):
         model: str | None = None,
         model_config: Mapping[str, Any] | None = None,
         first_content_at: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         self.input = input
         self.output = output
@@ -380,6 +409,7 @@ class SpeechSpanData(SpanData):
         self.model = model
         self.model_config = model_config
         self.first_content_at = first_content_at
+        self.metadata = metadata
 
     @property
     def type(self) -> str:
@@ -404,13 +434,15 @@ class SpeechGroupSpanData(SpanData):
     Represents a Speech Group Span in the trace.
     """
 
-    __slots__ = "input"
+    __slots__ = ("input", "metadata")
 
     def __init__(
         self,
         input: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         self.input = input
+        self.metadata = metadata
 
     @property
     def type(self) -> str:
@@ -432,11 +464,18 @@ class MCPListToolsSpanData(SpanData):
     __slots__ = (
         "server",
         "result",
+        "metadata",
     )
 
-    def __init__(self, server: str | None = None, result: list[str] | None = None):
+    def __init__(
+        self,
+        server: str | None = None,
+        result: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ):
         self.server = server
         self.result = result
+        self.metadata = metadata
 
     @property
     def type(self) -> str:
