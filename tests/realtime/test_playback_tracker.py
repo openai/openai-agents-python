@@ -98,6 +98,27 @@ class TestPlaybackTracker:
         assert truncate_events
         assert truncate_events[0].audio_end_ms == 2000
 
+    def test_audio_delta_before_set_audio_format_does_not_raise(self):
+        """ModelAudioTracker must tolerate audio deltas before a format is negotiated.
+
+        For transcription-only sessions or session payloads that omit an audio
+        format, ``set_audio_format`` is never called. Previously, the first
+        ``on_audio_delta`` call raised ``AttributeError`` because ``self._format``
+        was unset. The length calculator already accepts ``None`` as the
+        unknown-format fallback, so the tracker should pass that through.
+        """
+
+        tracker = ModelAudioTracker()
+        # Intentionally do NOT call set_audio_format here.
+        tracker.on_audio_delta("item_1", 0, b"test")
+
+        state = tracker.get_state("item_1", 0)
+        assert state is not None
+        # With no format, calculate_audio_length_ms falls back to PCM math.
+        expected_length = (4 / (24_000 * 2)) * 1000
+        assert state.audio_length_ms == pytest.approx(expected_length, rel=0, abs=1e-6)
+        assert tracker.get_last_audio_item() == ("item_1", 0)
+
     def test_audio_state_accumulation_across_deltas(self):
         """Test ModelAudioTracker accumulates audio length across multiple deltas."""
 
