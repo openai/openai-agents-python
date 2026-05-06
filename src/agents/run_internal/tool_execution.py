@@ -1378,6 +1378,9 @@ class _FunctionToolBatchExecutor:
         self.pending_tasks: set[asyncio.Task[Any]] = set()
         self.propagating_failure: BaseException | None = None
         self.available_function_tools: list[FunctionTool] = []
+        self.max_function_tool_concurrency = (
+            config.tool_execution.max_function_tool_concurrency if config.tool_execution else None
+        )
 
     async def execute(
         self,
@@ -1406,11 +1409,11 @@ class _FunctionToolBatchExecutor:
             if function_tool_id not in enabled_function_tool_ids:
                 self.available_function_tools.append(tool_run.function_tool)
                 enabled_function_tool_ids.add(function_tool_id)
-        for order, tool_run in enumerate(self.tool_runs):
-            self._create_tool_task(tool_run, order)
+        pending_tool_runs = list(enumerate(self.tool_runs))
+        self._fill_tool_task_slots(pending_tool_runs)
 
         try:
-            await self._drain_pending_tasks()
+            await self._drain_pending_tasks(pending_tool_runs)
         except asyncio.CancelledError as exc:
             if self.propagating_failure is exc:
                 raise
@@ -1422,6 +1425,18 @@ class _FunctionToolBatchExecutor:
             self.tool_input_guardrail_results,
             self.tool_output_guardrail_results,
         )
+
+    def _fill_tool_task_slots(self, pending_tool_runs: list[tuple[int, ToolRunFunction]]) -> None:
+        max_concurrency = self.max_function_tool_concurrency
+        available_slots = (
+            len(pending_tool_runs)
+            if max_concurrency is None
+            else max_concurrency - len(self.pending_tasks)
+        )
+        while available_slots > 0 and pending_tool_runs:
+            order, tool_run = pending_tool_runs.pop(0)
+            self._create_tool_task(tool_run, order)
+            available_slots -= 1
 
     def _create_tool_task(self, tool_run: ToolRunFunction, order: int) -> None:
         task_state = _FunctionToolTaskState(tool_run=tool_run, order=order)
@@ -1435,7 +1450,10 @@ class _FunctionToolBatchExecutor:
         self.task_states[task] = task_state
         self.pending_tasks.add(task)
 
-    async def _drain_pending_tasks(self) -> None:
+    async def _drain_pending_tasks(
+        self,
+        pending_tool_runs: list[tuple[int, ToolRunFunction]],
+    ) -> None:
         while self.pending_tasks:
             done_tasks, self.pending_tasks = await asyncio.wait(
                 self.pending_tasks,
@@ -1448,6 +1466,7 @@ class _FunctionToolBatchExecutor:
             )
             if failure is not None:
                 await self._raise_failure_after_draining_siblings(failure)
+            self._fill_tool_task_slots(pending_tool_runs)
 
     async def _raise_failure_after_draining_siblings(
         self,
