@@ -9,8 +9,14 @@ from inline_snapshot import snapshot
 from mcp.types import CallToolResult, ImageContent, TextContent, Tool as MCPTool
 from pydantic import BaseModel, TypeAdapter
 
+import agents._debug as _debug
 from agents import Agent, FunctionTool, RunContextWrapper, default_tool_error_function
-from agents.exceptions import AgentsException, MCPToolCancellationError, ModelBehaviorError
+from agents.exceptions import (
+    AgentsException,
+    MCPToolCancellationError,
+    ModelBehaviorError,
+    UserError,
+)
 from agents.mcp import MCPServer, MCPUtil
 from agents.tool_context import ToolContext
 
@@ -80,6 +86,25 @@ async def test_get_all_function_tools():
     tools = await MCPUtil.get_all_function_tools(servers, True, run_context, agent)
     assert len(tools) == 5
     assert all(tool.name in names for tool in tools)
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_duplicate_error_is_deterministic():
+    server1 = FakeMCPServer(server_name="server_1")
+    server1.add_tool("zeta", {})
+    server1.add_tool("alpha", {})
+
+    server2 = FakeMCPServer(server_name="server_2")
+    server2.add_tool("alpha", {})
+    server2.add_tool("zeta", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
+    with pytest.raises(UserError) as exc_info:
+        await MCPUtil.get_all_function_tools([server1, server2], False, run_context, agent)
+
+    assert str(exc_info.value) == "Duplicate tool names found across MCP servers: alpha, zeta"
 
 
 @pytest.mark.asyncio
@@ -206,6 +231,41 @@ async def test_to_function_tool_merges_static_mcp_meta_with_resolver():
 
 
 @pytest.mark.asyncio
+async def test_to_function_tool_does_not_reuse_nested_static_mcp_meta():
+    class MutatingMetaServer(FakeMCPServer):
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None = None,
+        ) -> CallToolResult:
+            if meta is not None:
+                meta["nested"]["headers"].append("mutated")
+            return await super().call_tool(tool_name, arguments, meta=meta)
+
+    server = MutatingMetaServer()
+    tool = MCPTool(
+        name="test_tool_1",
+        inputSchema={},
+        _meta={"nested": {"headers": ["original"]}},
+    )
+
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+    tool_context = ToolContext(
+        context=None,
+        tool_name="test_tool_1",
+        tool_call_id="test_call_static_meta",
+        tool_arguments="{}",
+    )
+
+    await function_tool.on_invoke_tool(tool_context, "{}")
+    await function_tool.on_invoke_tool(tool_context, "{}")
+
+    assert server.tool_metas[0] == {"nested": {"headers": ["original", "mutated"]}}
+    assert server.tool_metas[1] == {"nested": {"headers": ["original", "mutated"]}}
+
+
+@pytest.mark.asyncio
 async def test_mcp_invoke_bad_json_errors(caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.DEBUG)
 
@@ -220,6 +280,69 @@ async def test_mcp_invoke_bad_json_errors(caplog: pytest.LogCaptureFixture):
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "not_json")
 
     assert "Invalid JSON input for tool test_tool_1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_invoke_bad_json_redacts_payload_when_dont_log_tool_data(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+
+    server = FakeMCPServer()
+    server.add_tool("test_tool_1", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+    bad_json = '{"secret":"SECRET_TOKEN_123"'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, bad_json)
+
+    assert str(exc_info.value) == "Invalid JSON input for tool test_tool_1"
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    assert "SECRET_TOKEN_123" not in str(exc_info.value)
+    assert "SECRET_TOKEN_123" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_invoke_bad_json_includes_payload_when_tool_logging_enabled(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
+    server = FakeMCPServer()
+    server.add_tool("test_tool_1", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+    bad_json = '{"secret":"SECRET_TOKEN_123"'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, bad_json)
+
+    assert str(exc_info.value) == f"Invalid JSON input for tool test_tool_1: {bad_json}"
+    assert isinstance(exc_info.value.__cause__, json.JSONDecodeError)
+    assert exc_info.value.__cause__.doc == bad_json
+    assert "SECRET_TOKEN_123" in str(exc_info.value)
+    assert "SECRET_TOKEN_123" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_json", ["[]", '"value"', "123", "null"])
+async def test_mcp_invoke_rejects_non_object_json_input(input_json: str):
+    server = FakeMCPServer()
+    server.add_tool("test_tool_1", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    with pytest.raises(ModelBehaviorError, match="expected a JSON object"):
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, input_json)
+
+    assert server.tool_calls == []
 
 
 class CrashingFakeMCPServer(FakeMCPServer):
@@ -1100,6 +1223,21 @@ async def test_util_adds_properties():
     assert tool.params_json_schema == snapshot(
         {"type": "object", "description": "Test tool", "properties": {}}
     )
+
+
+def test_to_function_tool_does_not_mutate_mcp_input_schema():
+    schema = {"type": "object", "description": "Test tool"}
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=False)
+
+    assert function_tool.params_json_schema == {
+        "type": "object",
+        "description": "Test tool",
+        "properties": {},
+    }
+    assert schema == {"type": "object", "description": "Test tool"}
+    assert tool.inputSchema == {"type": "object", "description": "Test tool"}
 
 
 class StructuredContentTestServer(FakeMCPServer):

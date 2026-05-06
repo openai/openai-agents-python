@@ -16,6 +16,16 @@ if TYPE_CHECKING:
 
 from .util._pretty_print import pretty_print_run_error_details
 
+_DRAIN_STREAM_EVENTS_ATTR = "_agents_drain_queued_stream_events"
+
+
+def _mark_error_to_drain_stream_events(error: Exception) -> None:
+    setattr(error, _DRAIN_STREAM_EVENTS_ATTR, True)
+
+
+def _should_drain_stream_events_before_raising(error: Exception) -> bool:
+    return bool(getattr(error, _DRAIN_STREAM_EVENTS_ATTR, False))
+
 
 @dataclass
 class RunErrorDetails:
