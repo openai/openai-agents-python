@@ -693,9 +693,11 @@ class RealtimeSession(RealtimeModelListener):
             # Update current agent
             self._current_agent = result
 
-            # Get updated model settings from new agent
+            # Get updated model settings from new agent, preserving transport-configured
+            # settings (e.g. audio format) from initial_model_settings so they are not
+            # reset to defaults during the handoff session update.
             updated_settings = await self._get_updated_model_settings_from_agent(
-                starting_settings=None,
+                starting_settings=self._model_config.get("initial_model_settings", None),
                 agent=self._current_agent,
             )
 
