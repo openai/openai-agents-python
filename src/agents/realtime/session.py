@@ -306,6 +306,7 @@ class RealtimeSession(RealtimeModelListener):
                 self._item_guardrail_run_counts[item_id] = 0
 
             self._item_transcripts[item_id] += event.delta
+            prev_len = len(self._history)
             self._history = self._get_new_history(
                 self._history,
                 AssistantMessageItem(
@@ -313,6 +314,18 @@ class RealtimeSession(RealtimeModelListener):
                     content=[AssistantAudio(transcript=self._item_transcripts[item_id])],
                 ),
             )
+            # Surface a high-level history event so UIs that follow the
+            # documented `history_added` / `history_updated` contract see live
+            # partial-transcript changes. Mirrors the pattern already used for
+            # `input_audio_transcription_completed` above. (closes #2940)
+            if len(self._history) > prev_len and len(self._history) > 0:
+                await self._put_event(
+                    RealtimeHistoryAdded(info=self._event_info, item=self._history[-1])
+                )
+            else:
+                await self._put_event(
+                    RealtimeHistoryUpdated(info=self._event_info, history=self._history)
+                )
 
             # Check if we should run guardrails based on debounce threshold
             current_length = len(self._item_transcripts[item_id])
