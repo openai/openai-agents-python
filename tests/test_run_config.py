@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from agents import Agent, RunConfig, Runner
+from agents.model_settings import ModelSettings
 from agents.models.interface import Model, ModelProvider
 
 from .fake_model import FakeModel
@@ -54,6 +55,52 @@ async def test_run_config_model_name_override_takes_precedence() -> None:
     # We should have requested the override name, not the agent.model
     assert provider.last_requested == "override-name"
     assert result.final_output == "override-name"
+
+
+@pytest.mark.asyncio
+async def test_run_config_model_name_override_uses_model_specific_default_settings(
+    monkeypatch,
+) -> None:
+    """
+    When RunConfig sets a model name, implicit settings should match that model name rather
+    than the default fallback model.
+    """
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.4-mini")
+    fake_model = FakeModel(initial_output=[get_text_message("override-name")])
+    provider = DummyProvider(model_to_return=fake_model)
+    agent = Agent(name="test")
+    run_config = RunConfig(model="gpt-5", model_provider=provider)
+    result = await Runner.run(agent, input="any", run_config=run_config)
+    assert result.final_output == "override-name"
+    assert fake_model.first_turn_args is not None
+    model_settings = fake_model.first_turn_args["model_settings"]
+    assert model_settings.reasoning.effort == "low"
+    assert model_settings.verbosity == "low"
+
+
+@pytest.mark.asyncio
+async def test_run_config_model_settings_override_implicit_model_specific_defaults(
+    monkeypatch,
+) -> None:
+    """
+    RunConfig model settings should overlay the implicit defaults for the resolved model name.
+    """
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.4-mini")
+    fake_model = FakeModel(initial_output=[get_text_message("override-name")])
+    provider = DummyProvider(model_to_return=fake_model)
+    agent = Agent(name="test")
+    run_config = RunConfig(
+        model="gpt-5",
+        model_provider=provider,
+        model_settings=ModelSettings(temperature=0.3),
+    )
+    result = await Runner.run(agent, input="any", run_config=run_config)
+    assert result.final_output == "override-name"
+    assert fake_model.first_turn_args is not None
+    model_settings = fake_model.first_turn_args["model_settings"]
+    assert model_settings.reasoning.effort == "low"
+    assert model_settings.verbosity == "low"
+    assert model_settings.temperature == 0.3
 
 
 @pytest.mark.asyncio
