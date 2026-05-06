@@ -771,10 +771,25 @@ class RealtimeSession(RealtimeModelListener):
         )
         if existing_index is not None:
             new_history = old_history.copy()
-            if event.type == "message" and event.content is not None and len(event.content) > 0:
-                existing_item = old_history[existing_index]
-                if existing_item.type == "message":
-                    # Merge content preserving existing transcript/text when incoming entry is empty
+            existing_item = old_history[existing_index]
+
+            # If it's a message, try to merge/preserve content while applying new status.
+            if event.type == "message" and existing_item.type == "message":
+                # Start with the incoming event but ensure we don't lose content if it's empty.
+                incoming_item = event
+                if not event.content:
+                    # Preserve existing content but update status and other metadata.
+                    update_fields: dict[str, Any] = {}
+                    if hasattr(event, "status") and hasattr(existing_item, "status"):
+                        update_fields["status"] = event.status
+                    if getattr(event, "previous_item_id", None):
+                        update_fields["previous_item_id"] = event.previous_item_id
+                    elif getattr(existing_item, "previous_item_id", None):
+                        update_fields["previous_item_id"] = existing_item.previous_item_id
+                        
+                    incoming_item = existing_item.model_copy(update=update_fields)
+                else:
+                    # Specialized merge logic for non-empty content
                     if event.role == "assistant" and existing_item.role == "assistant":
                         assistant_existing_content = existing_item.content
                         assistant_incoming = event.content
@@ -799,10 +814,9 @@ class RealtimeSession(RealtimeModelListener):
                                     assistant_new_content.append(assistant_current)
                                 else:
                                     assistant_new_content.append(ac)
-                        updated_assistant = event.model_copy(
+                        incoming_item = event.model_copy(
                             update={"content": assistant_new_content}
                         )
-                        new_history[existing_index] = updated_assistant
                     elif event.role == "user" and existing_item.role == "user":
                         user_existing_content = existing_item.content
                         user_incoming = event.content
@@ -860,8 +874,7 @@ class RealtimeSession(RealtimeModelListener):
                             else:
                                 merged.append(uc)
 
-                        updated_user = event.model_copy(update={"content": merged})
-                        new_history[existing_index] = updated_user
+                        incoming_item = event.model_copy(update={"content": merged})
                     elif event.role == "system" and existing_item.role == "system":
                         system_existing_content = existing_item.content
                         system_incoming = event.content
@@ -877,14 +890,13 @@ class RealtimeSession(RealtimeModelListener):
                                 system_new_content.append(system_current)
                             else:
                                 system_new_content.append(sc)
-                        updated_system = event.model_copy(update={"content": system_new_content})
-                        new_history[existing_index] = updated_system
-                    else:
-                        # Role changed or mismatched; just replace
-                        new_history[existing_index] = event
-                else:
-                    # If the existing item is not a message, just replace it.
-                    new_history[existing_index] = event
+                        incoming_item = event.model_copy(update={"content": system_new_content})
+
+                new_history[existing_index] = incoming_item
+            else:
+                # For non-messages (e.g. tool calls) or mismatches, just replace.
+                # This ensures status updates for tool calls are applied.
+                new_history[existing_index] = event
             return new_history
 
         # Otherwise, insert it after the previous_item_id if that is set
