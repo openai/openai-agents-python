@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import functools
+import hashlib
 import inspect
 import json
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, Union
@@ -51,6 +53,20 @@ if TYPE_CHECKING:
 
     from ..agent import AgentBase
     from .server import MCPServer
+
+
+_MCP_FUNCTION_TOOL_NAME_MAX_LENGTH = 64
+_MCP_FUNCTION_TOOL_HASH_LENGTH = 8
+
+
+@dataclass(frozen=True)
+class _PrefixedToolNameCandidate:
+    batch_key: tuple[int, int]
+    base_name: str
+    seed: str
+    initial_name: str
+    server_index: int
+    tool_index: int
 
 
 class HttpClientFactory(Protocol):
@@ -210,10 +226,49 @@ class MCPUtil:
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        include_server_in_tool_names: bool = False,
+        reserved_tool_names: set[str] | None = None,
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
-        tools = []
+        tools: list[Tool] = []
         tool_names: set[str] = set()
+
+        if include_server_in_tool_names:
+            server_tool_batches = []
+            for server_index, server in enumerate(servers):
+                listed_tools = await cls._list_tools_with_span(server, run_context, agent)
+                server_tool_batches.append((server_index, server, listed_tools))
+
+            prefixed_tool_name_overrides = cls._build_prefixed_tool_name_overrides(
+                server_tool_batches,
+                reserved_names=set(reserved_tool_names or set()),
+            )
+
+            for server_index, server, mcp_tools in server_tool_batches:
+                tool_name_overrides = [
+                    prefixed_tool_name_overrides[(server_index, tool_index)]
+                    for tool_index in range(len(mcp_tools))
+                ]
+                function_tools = cls._convert_mcp_tools_to_function_tools(
+                    mcp_tools,
+                    server,
+                    convert_schemas_to_strict,
+                    agent,
+                    failure_error_function=failure_error_function,
+                    tool_name_overrides=tool_name_overrides,
+                )
+                server_tool_names = {tool.name for tool in function_tools}
+                duplicate_tool_names = sorted(server_tool_names & tool_names)
+                if duplicate_tool_names:
+                    raise UserError(
+                        "Duplicate tool names found across MCP servers: "
+                        f"{', '.join(duplicate_tool_names)}"
+                    )
+                tool_names.update(server_tool_names)
+                tools.extend(function_tools)
+
+            return tools
+
         for server in servers:
             server_tools = await cls.get_function_tools(
                 server,
@@ -235,20 +290,27 @@ class MCPUtil:
         return tools
 
     @classmethod
-    async def get_function_tools(
+    async def _list_tools_with_span(
         cls,
         server: MCPServer,
-        convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
-        failure_error_function: ToolErrorFunction | None = default_tool_error_function,
-    ) -> list[Tool]:
-        """Get all function tools from a single MCP server."""
-
+    ) -> list[MCPTool]:
         with mcp_tools_span(server=server.name) as span:
             tools = await server.list_tools(run_context, agent)
             span.span_data.result = [tool.name for tool in tools]
+            return tools
 
+    @classmethod
+    def _convert_mcp_tools_to_function_tools(
+        cls,
+        tools: list[MCPTool],
+        server: MCPServer,
+        convert_schemas_to_strict: bool,
+        agent: AgentBase,
+        failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        tool_name_overrides: list[str] | None = None,
+    ) -> list[Tool]:
         return [
             cls.to_function_tool(
                 tool,
@@ -256,9 +318,142 @@ class MCPUtil:
                 convert_schemas_to_strict,
                 agent,
                 failure_error_function=failure_error_function,
+                tool_name_override=(
+                    tool_name_overrides[index] if tool_name_overrides is not None else None
+                ),
             )
+            for index, tool in enumerate(tools)
+        ]
+
+    @classmethod
+    async def get_function_tools(
+        cls,
+        server: MCPServer,
+        convert_schemas_to_strict: bool,
+        run_context: RunContextWrapper[Any],
+        agent: AgentBase,
+        failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        include_server_in_tool_names: bool = False,
+        tool_name_override: Callable[[MCPTool], str] | None = None,
+        reserved_tool_names: set[str] | None = None,
+        server_index: int = 0,
+    ) -> list[Tool]:
+        """Get all function tools from a single MCP server."""
+
+        tools = await cls._list_tools_with_span(server, run_context, agent)
+
+        tool_name_overrides: list[str] | None = None
+        if tool_name_override is not None:
+            tool_name_overrides = [tool_name_override(tool) for tool in tools]
+        elif include_server_in_tool_names:
+            prefixed_tool_name_overrides = cls._build_prefixed_tool_name_overrides(
+                [(server_index, server, tools)],
+                reserved_names=set(reserved_tool_names or set()),
+            )
+            tool_name_overrides = [
+                prefixed_tool_name_overrides[(server_index, tool_index)]
+                for tool_index in range(len(tools))
+            ]
+
+        return cls._convert_mcp_tools_to_function_tools(
+            tools,
+            server,
+            convert_schemas_to_strict,
+            agent,
+            failure_error_function=failure_error_function,
+            tool_name_overrides=tool_name_overrides,
+        )
+
+    @staticmethod
+    def _safe_tool_name_part(value: str, fallback: str) -> str:
+        safe = "".join(
+            char if char.isascii() and (char.isalnum() or char in {"_", "-"}) else "_"
+            for char in value
+        )
+        safe = safe.strip("_-")
+        return safe or fallback
+
+    @staticmethod
+    def _shorten_tool_name(base_name: str, seed: str, *, force_hash: bool = False) -> str:
+        if not force_hash and len(base_name) <= _MCP_FUNCTION_TOOL_NAME_MAX_LENGTH:
+            return base_name
+
+        hash_suffix = hashlib.sha1(seed.encode("utf-8")).hexdigest()[
+            :_MCP_FUNCTION_TOOL_HASH_LENGTH
+        ]
+        suffix = f"_{hash_suffix}"
+        stem_length = _MCP_FUNCTION_TOOL_NAME_MAX_LENGTH - len(suffix)
+        stem = base_name[:stem_length].rstrip("_-") or "mcp"
+        return f"{stem}{suffix}"
+
+    @classmethod
+    def _build_prefixed_tool_base_name(cls, server_name: str, tool_name: str) -> str:
+        server_part = cls._safe_tool_name_part(server_name, "server")
+        tool_part = cls._safe_tool_name_part(tool_name, "tool")
+        return f"mcp_{server_part}__{tool_part}"
+
+    @classmethod
+    def _build_prefixed_tool_name_overrides(
+        cls,
+        server_tool_batches: list[tuple[int, MCPServer, list[MCPTool]]],
+        *,
+        reserved_names: set[str],
+    ) -> dict[tuple[int, int], str]:
+        """Allocate public tool names for one in-memory MCP listing batch.
+
+        Keys are batch-local `(server_index, tool_index)` coordinates, so this mapping does
+        not depend on object identity or cross any serialization boundary.
+        """
+        base_names = [
+            cls._build_prefixed_tool_base_name(server.name, tool.name)
+            for _, server, tools in server_tool_batches
             for tool in tools
         ]
+        base_name_counts = Counter(base_names)
+
+        candidates: list[_PrefixedToolNameCandidate] = []
+        for server_index, server, tools in server_tool_batches:
+            for tool_index, tool in enumerate(tools):
+                base_name = cls._build_prefixed_tool_base_name(server.name, tool.name)
+                seed = f"{server.name}\0{tool.name}"
+                force_hash = base_name_counts[base_name] > 1 or base_name in reserved_names
+                initial_name = cls._shorten_tool_name(base_name, seed, force_hash=force_hash)
+                candidates.append(
+                    _PrefixedToolNameCandidate(
+                        batch_key=(server_index, tool_index),
+                        base_name=base_name,
+                        seed=seed,
+                        initial_name=initial_name,
+                        server_index=server_index,
+                        tool_index=tool_index,
+                    )
+                )
+
+        used_names = set(reserved_names)
+        tool_name_overrides: dict[tuple[int, int], str] = {}
+        for candidate in sorted(
+            candidates,
+            key=lambda item: (
+                item.initial_name,
+                item.seed,
+                item.server_index,
+                item.tool_index,
+            ),
+        ):
+            public_name = candidate.initial_name
+            collision_index = 1
+            while public_name in used_names:
+                public_name = cls._shorten_tool_name(
+                    candidate.base_name,
+                    f"{candidate.seed}\0{collision_index}",
+                    force_hash=True,
+                )
+                collision_index += 1
+
+            used_names.add(public_name)
+            tool_name_overrides[candidate.batch_key] = public_name
+
+        return tool_name_overrides
 
     @classmethod
     def to_function_tool(
@@ -268,6 +463,7 @@ class MCPUtil:
         convert_schemas_to_strict: bool,
         agent: AgentBase | None = None,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        tool_name_override: str | None = None,
     ) -> FunctionTool:
         """Convert an MCP tool to an Agents SDK function tool.
 
@@ -277,11 +473,13 @@ class MCPUtil:
         policies. If the server uses a callable approval policy, approvals default
         to required to avoid bypassing dynamic checks.
         """
+        tool_public_name = tool_name_override or tool.name
         static_meta = cls._extract_static_meta(tool)
         invoke_func_impl = functools.partial(
             cls.invoke_mcp_tool,
             server,
             tool,
+            tool_display_name=tool_public_name,
             meta=static_meta,
         )
         effective_failure_error_function = server._get_failure_error_function(
@@ -305,7 +503,7 @@ class MCPUtil:
         ) = server._get_needs_approval_for_tool(tool, agent)
 
         function_tool = _build_wrapped_function_tool(
-            name=tool.name,
+            name=tool_public_name,
             description=resolve_mcp_tool_description_for_model(tool),
             params_json_schema=schema,
             invoke_tool_impl=invoke_func_impl,
@@ -375,8 +573,10 @@ class MCPUtil:
         input_json: str,
         *,
         meta: dict[str, Any] | None = None,
+        tool_display_name: str | None = None,
     ) -> ToolOutput:
         """Invoke an MCP tool and return the result as ToolOutput."""
+        tool_name_for_display = tool_display_name or tool.name
         json_decode_error: Exception | None = None
         try:
             json_data = json.loads(input_json) if input_json else {}
@@ -384,7 +584,7 @@ class MCPUtil:
             json_decode_error = e
 
         if json_decode_error is not None:
-            error_message = f"Invalid JSON input for tool {tool.name}"
+            error_message = f"Invalid JSON input for tool {tool_name_for_display}"
             if _debug.DONT_LOG_TOOL_DATA:
                 logger.debug(error_message)
                 raise ModelBehaviorError(error_message)
@@ -395,13 +595,13 @@ class MCPUtil:
 
         if not isinstance(json_data, dict):
             raise ModelBehaviorError(
-                f"Invalid JSON input for tool {tool.name}: expected a JSON object"
+                f"Invalid JSON input for tool {tool_name_for_display}: expected a JSON object"
             )
 
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug(f"Invoking MCP tool {tool.name}")
+            logger.debug(f"Invoking MCP tool {tool_name_for_display}")
         else:
-            logger.debug(f"Invoking MCP tool {tool.name} with input {input_json}")
+            logger.debug(f"Invoking MCP tool {tool_name_for_display} with input {input_json}")
 
         try:
             resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
@@ -441,20 +641,22 @@ class MCPUtil:
                 # failure_error_function=None will have the error raised as documented.
                 error_text = e.error.message if hasattr(e, "error") and e.error else str(e)
                 logger.warning(
-                    f"MCP tool {tool.name} on server '{server.name}' returned an error: "
-                    f"{error_text}"
+                    f"MCP tool {tool_name_for_display} on server '{server.name}' "
+                    f"returned an error: {error_text}"
                 )
                 raise
 
-            logger.error(f"Error invoking MCP tool {tool.name} on server '{server.name}': {e}")
+            logger.error(
+                f"Error invoking MCP tool {tool_name_for_display} on server '{server.name}': {e}"
+            )
             raise AgentsException(
-                f"Error invoking MCP tool {tool.name} on server '{server.name}': {e}"
+                f"Error invoking MCP tool {tool_name_for_display} on server '{server.name}': {e}"
             ) from e
 
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug(f"MCP tool {tool.name} completed.")
+            logger.debug(f"MCP tool {tool_name_for_display} completed.")
         else:
-            logger.debug(f"MCP tool {tool.name} returned {result}")
+            logger.debug(f"MCP tool {tool_name_for_display} returned {result}")
 
         # If structured content is requested and available, use it exclusively
         tool_output: ToolOutput
