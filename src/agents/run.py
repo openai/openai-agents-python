@@ -40,6 +40,7 @@ from .run_config import (
     RunOptions,
     ToolErrorFormatter,
     ToolErrorFormatterArgs,
+    ToolExecutionConfig,
 )
 from .run_context import RunContextWrapper, TContext
 from .run_error_handlers import RunErrorHandlers
@@ -136,6 +137,7 @@ __all__ = [
     "CallModelData",
     "CallModelInputFilter",
     "ReasoningItemIdPolicy",
+    "ToolExecutionConfig",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "DEFAULT_MAX_TURNS",

@@ -89,6 +89,24 @@ ToolErrorFormatter = Callable[[ToolErrorFormatterArgs[Any]], MaybeAwaitable[str 
 
 
 @dataclass
+class ToolExecutionConfig:
+    """Grouped SDK-side execution settings for local tool calls."""
+
+    max_function_tool_concurrency: int | None = None
+    """Maximum number of local function tool calls to execute concurrently.
+
+    Set to `None` to preserve the default behavior, which starts all function tool calls
+    emitted in a turn. This does not change provider-side `parallel_tool_calls` behavior.
+    """
+
+    def __post_init__(self) -> None:
+        if self.max_function_tool_concurrency is not None and (
+            self.max_function_tool_concurrency < 1
+        ):
+            raise ValueError("tool_execution.max_function_tool_concurrency must be at least 1")
+
+
+@dataclass
 class SandboxConcurrencyLimits:
     """Concurrency limits for sandbox materialization work."""
 
@@ -255,6 +273,9 @@ class RunConfig:
     sandbox: SandboxRunConfig | None = None
     """Optional sandbox runtime configuration for `SandboxAgent` execution."""
 
+    tool_execution: ToolExecutionConfig | None = None
+    """Optional SDK-side execution settings for local tool calls."""
+
 
 class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
@@ -297,6 +318,7 @@ __all__ = [
     "RunOptions",
     "SandboxConcurrencyLimits",
     "SandboxRunConfig",
+    "ToolExecutionConfig",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "_default_trace_include_sensitive_data",

@@ -37,6 +37,7 @@ from agents import (
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    ToolExecutionConfig,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrail,
     ToolOutputGuardrailData,
@@ -230,6 +231,122 @@ async def test_plaintext_agent_with_tool_call_is_run_again():
     assert_item_is_function_tool_call_output(items[2], "123")
 
     assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_function_tool_concurrency_default_starts_all_calls():
+    active_count = 0
+    max_seen_count = 0
+
+    async def tracked_tool(value: int) -> str:
+        nonlocal active_count, max_seen_count
+        active_count += 1
+        max_seen_count = max(max_seen_count, active_count)
+        try:
+            await asyncio.sleep(0.01)
+            return f"ok-{value}"
+        finally:
+            active_count -= 1
+
+    tool = function_tool(tracked_tool, name_override="tracked_tool")
+    agent = Agent(name="test", tools=[tool])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("tracked_tool", json.dumps({"value": 1}), call_id="call_1"),
+            get_function_tool_call("tracked_tool", json.dumps({"value": 2}), call_id="call_2"),
+            get_function_tool_call("tracked_tool", json.dumps({"value": 3}), call_id="call_3"),
+        ],
+        usage=Usage(),
+        response_id="resp",
+    )
+
+    result = await get_execute_result(agent, response)
+
+    assert active_count == 0
+    assert max_seen_count == 3
+    assert_item_is_function_tool_call_output(result.generated_items[3], "ok-1")
+    assert_item_is_function_tool_call_output(result.generated_items[4], "ok-2")
+    assert_item_is_function_tool_call_output(result.generated_items[5], "ok-3")
+
+
+@pytest.mark.asyncio
+async def test_function_tool_concurrency_cap_limits_calls_and_preserves_output_order():
+    active_count = 0
+    max_seen_count = 0
+
+    async def tracked_tool(value: int) -> str:
+        nonlocal active_count, max_seen_count
+        active_count += 1
+        max_seen_count = max(max_seen_count, active_count)
+        try:
+            await asyncio.sleep(0.03 if value == 1 else 0.001)
+            return f"ok-{value}"
+        finally:
+            active_count -= 1
+
+    tool = function_tool(tracked_tool, name_override="tracked_tool")
+    agent = Agent(name="test", tools=[tool])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("tracked_tool", json.dumps({"value": 1}), call_id="call_1"),
+            get_function_tool_call("tracked_tool", json.dumps({"value": 2}), call_id="call_2"),
+            get_function_tool_call("tracked_tool", json.dumps({"value": 3}), call_id="call_3"),
+        ],
+        usage=Usage(),
+        response_id="resp",
+    )
+
+    result = await get_execute_result(
+        agent,
+        response,
+        run_config=RunConfig(tool_execution=ToolExecutionConfig(max_function_tool_concurrency=2)),
+    )
+
+    assert active_count == 0
+    assert max_seen_count == 2
+    assert_item_is_function_tool_call_output(result.generated_items[3], "ok-1")
+    assert_item_is_function_tool_call_output(result.generated_items[4], "ok-2")
+    assert_item_is_function_tool_call_output(result.generated_items[5], "ok-3")
+
+
+@pytest.mark.asyncio
+async def test_function_tool_concurrency_cap_leaves_queued_calls_unstarted_after_failure():
+    started_tools: list[str] = []
+
+    async def failing_tool() -> str:
+        started_tools.append("failing_tool")
+        raise RuntimeError("boom")
+
+    async def queued_tool() -> str:
+        started_tools.append("queued_tool")
+        return "should-not-run"
+
+    failing = function_tool(
+        failing_tool,
+        name_override="failing_tool",
+        failure_error_function=None,
+    )
+    queued = function_tool(queued_tool, name_override="queued_tool")
+    agent = Agent(name="test", tools=[failing, queued])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("failing_tool", "{}", call_id="call_1"),
+            get_function_tool_call("queued_tool", "{}", call_id="call_2"),
+        ],
+        usage=Usage(),
+        response_id="resp",
+    )
+
+    with pytest.raises(UserError, match="Error running tool failing_tool: boom"):
+        await get_execute_result(
+            agent,
+            response,
+            run_config=RunConfig(
+                tool_execution=ToolExecutionConfig(max_function_tool_concurrency=1)
+            ),
+        )
+
+    assert started_tools == ["failing_tool"]
 
 
 @pytest.mark.asyncio
