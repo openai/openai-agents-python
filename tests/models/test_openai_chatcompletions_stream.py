@@ -553,3 +553,91 @@ async def test_stream_response_yields_real_time_function_call_arguments(monkeypa
     assert isinstance(function_call_output, ResponseFunctionToolCall)
     assert function_call_output.name == "write_file"
     assert function_call_output.arguments == '{"filename": "test.py", "content": "print(hello)"}'
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fallback_function_calls_have_unique_output_indexes(monkeypatch) -> None:
+    tool_call_delta1 = ChoiceDeltaToolCall(
+        index=0,
+        function=ChoiceDeltaToolCallFunction(
+            name="first_tool",
+            arguments='{"a": 1}',
+        ),
+        type="function",
+    )
+    tool_call_delta2 = ChoiceDeltaToolCall(
+        index=1,
+        function=ChoiceDeltaToolCallFunction(
+            name="second_tool",
+            arguments='{"b": 2}',
+        ),
+        type="function",
+    )
+
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta1]))],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta2]))],
+        usage=CompletionUsage(completion_tokens=1, prompt_tokens=1, total_tokens=2),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for c in (chunk1, chunk2):
+            yield c
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    output_events = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        output_events.append(event)
+
+    added_indexes = [
+        event.output_index for event in output_events if event.type == "response.output_item.added"
+    ]
+    delta_indexes = [
+        event.output_index
+        for event in output_events
+        if event.type == "response.function_call_arguments.delta"
+    ]
+    done_indexes = [
+        event.output_index for event in output_events if event.type == "response.output_item.done"
+    ]
+
+    assert added_indexes == [0, 1]
+    assert delta_indexes == [0, 1]
+    assert done_indexes == [0, 1]

@@ -624,6 +624,9 @@ class ChatCmplStreamHandler:
             )
 
         # Send completion events for function calls
+        next_fallback_output_index = function_call_starting_index + sum(
+            1 for streaming in state.function_call_streaming.values() if streaming
+        )
         for index, function_call in state.function_calls.items():
             if state.function_call_streaming.get(index, False):
                 # Function call was streamed, just send the completion event
@@ -656,18 +659,8 @@ class ChatCmplStreamHandler:
             else:
                 # Function call was not streamed (fallback to old behavior)
                 # This handles edge cases where function name never arrived
-                fallback_starting_index = 0
-                if state.reasoning_content_index_and_output:
-                    fallback_starting_index += 1
-                if state.text_content_index_and_output:
-                    fallback_starting_index += 1
-                if state.refusal_content_index_and_output:
-                    fallback_starting_index += 1
-
-                # Add offset for already started function calls
-                fallback_starting_index += sum(
-                    1 for streaming in state.function_call_streaming.values() if streaming
-                )
+                fallback_output_index = next_fallback_output_index
+                next_fallback_output_index += 1
 
                 # Build function call kwargs, include provider_data if present
                 fallback_func_call_kwargs: dict[str, Any] = {
@@ -690,20 +683,20 @@ class ChatCmplStreamHandler:
                 # Send all events at once (backward compatibility)
                 yield ResponseOutputItemAddedEvent(
                     item=ResponseFunctionToolCall(**fallback_func_call_kwargs),
-                    output_index=fallback_starting_index,
+                    output_index=fallback_output_index,
                     type="response.output_item.added",
                     sequence_number=sequence_number.get_and_increment(),
                 )
                 yield ResponseFunctionCallArgumentsDeltaEvent(
                     delta=function_call.arguments,
                     item_id=FAKE_RESPONSES_ID,
-                    output_index=fallback_starting_index,
+                    output_index=fallback_output_index,
                     type="response.function_call_arguments.delta",
                     sequence_number=sequence_number.get_and_increment(),
                 )
                 yield ResponseOutputItemDoneEvent(
                     item=ResponseFunctionToolCall(**fallback_func_call_kwargs),
-                    output_index=fallback_starting_index,
+                    output_index=fallback_output_index,
                     type="response.output_item.done",
                     sequence_number=sequence_number.get_and_increment(),
                 )
