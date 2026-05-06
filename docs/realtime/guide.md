@@ -261,6 +261,12 @@ agent = RealtimeAgent(
 )
 ```
 
+When a realtime output guardrail trips, the session interrupts the active response, forces
+`response.cancel`, emits `guardrail_tripped`, and sends a follow-up user message that names the
+triggered guardrail so the model can produce a replacement response. Your audio player should still
+listen for `audio_interrupted` and stop local playback immediately, because guardrails run on
+debounced transcript text and some audio may already be buffered when the tripwire fires.
+
 ## SIP and telephony
 
 The Python SDK includes a first-class SIP attach flow via [`OpenAIRealtimeSIPModel`][agents.realtime.openai_realtime.OpenAIRealtimeSIPModel].
