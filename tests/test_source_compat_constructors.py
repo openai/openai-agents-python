@@ -9,6 +9,8 @@ from agents import (
     FunctionTool,
     HandoffInputData,
     ItemHelpers,
+    ModelRetrySettings,
+    ModelSettings,
     MultiProvider,
     RunConfig,
     RunContextWrapper,
@@ -90,6 +92,36 @@ def test_run_config_reasoning_item_id_policy_positional_binding() -> None:
 
     assert config.session_settings == session_settings
     assert config.reasoning_item_id_policy == "omit"
+
+
+def test_model_settings_context_management_append_preserves_retry_position() -> None:
+    retry = ModelRetrySettings(max_retries=1)
+    settings = ModelSettings(
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        retry,
+    )
+
+    assert settings.retry is retry
+    assert settings.context_management is None
 
 
 def test_function_tool_positional_arguments_keep_guardrail_positions() -> None:

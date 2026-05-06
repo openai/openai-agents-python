@@ -19,6 +19,22 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.15.0
+
+In this version, model refusals are now surfaced explicitly as `ModelRefusalError` instead of being treated as empty text output or, for structured outputs, causing the run loop to retry until `MaxTurnsExceeded`.
+
+This affects code that previously expected a refusal-only model response to complete with `final_output == ""`. To handle refusals without raising, provide a `model_refusal` run error handler:
+
+```python
+result = Runner.run_sync(
+    agent,
+    input,
+    error_handlers={"model_refusal": lambda data: data.error.refusal},
+)
+```
+
+For structured-output agents, the handler can return a value matching the agent's output schema, and the SDK will validate it like other run error handler final outputs.
+
 ### 0.14.0
 
 This minor release does **not** introduce a breaking change, but it adds a major new beta feature area: Sandbox Agents, plus the runtime, backend, and documentation support needed to use them across local, containerized, and hosted environments.

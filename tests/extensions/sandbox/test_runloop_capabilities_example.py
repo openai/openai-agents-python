@@ -11,14 +11,14 @@ import pytest
 
 def _load_example_module() -> Any:
     path = (
-        Path(__file__).resolve().parents[2]
+        Path(__file__).resolve().parents[3]
         / "examples"
         / "sandbox"
         / "extensions"
         / "runloop"
         / "capabilities.py"
     )
-    module_name = "tests.extensions.runloop_capabilities_example"
+    module_name = "tests.extensions.sandbox.runloop_capabilities_example"
     spec = importlib.util.spec_from_file_location(module_name, path)
     assert spec is not None
     assert spec.loader is not None

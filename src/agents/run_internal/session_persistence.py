@@ -86,6 +86,7 @@ async def prepare_input_with_session(
         history = await session.get_items(limit=resolved_settings.limit)
     else:
         history = await session.get_items()
+    is_openai_conversation_session = isinstance(session, OpenAIConversationsSession)
     converted_history = [
         strip_internal_input_item_metadata(ensure_input_item_format(item)) for item in history
     ]
@@ -122,28 +123,38 @@ async def prepare_input_with_session(
         # The callback may reorder, drop, or duplicate items. Keep separate reference maps for
         # the copied history and copied new-input lists so we can reconstruct which output items
         # belong to the new turn and therefore still need to be persisted.
-        history_refs = _build_reference_map(history_for_callback)
+        history_refs = _build_reference_map(
+            history_for_callback,
+            ignore_openai_conversation_item_ids=is_openai_conversation_session,
+        )
         new_refs = _build_reference_map(new_items_for_callback)
-        history_counts = _build_frequency_map(history_for_callback)
+        history_counts = _build_frequency_map(
+            history_for_callback,
+            ignore_openai_conversation_item_ids=is_openai_conversation_session,
+        )
         new_counts = _build_frequency_map(new_items_for_callback)
 
         appended: list[Any] = []
         for combined_index, item in enumerate(combined):
-            key = _session_item_key(item)
-            if _consume_reference(new_refs, key, item):
-                new_counts[key] = max(new_counts.get(key, 0) - 1, 0)
+            history_key = _session_item_key(
+                item,
+                ignore_openai_conversation_item_ids=is_openai_conversation_session,
+            )
+            new_key = _session_item_key(item)
+            if _consume_reference(new_refs, new_key, item):
+                new_counts[new_key] = max(new_counts.get(new_key, 0) - 1, 0)
                 appended.append(item)
                 continue
-            if _consume_reference(history_refs, key, item):
-                history_counts[key] = max(history_counts.get(key, 0) - 1, 0)
+            if _consume_reference(history_refs, history_key, item):
+                history_counts[history_key] = max(history_counts.get(history_key, 0) - 1, 0)
                 prune_history_indexes.add(combined_index)
                 continue
-            if history_counts.get(key, 0) > 0:
-                history_counts[key] = history_counts.get(key, 0) - 1
+            if history_counts.get(history_key, 0) > 0:
+                history_counts[history_key] = history_counts.get(history_key, 0) - 1
                 prune_history_indexes.add(combined_index)
                 continue
-            if new_counts.get(key, 0) > 0:
-                new_counts[key] = max(new_counts.get(key, 0) - 1, 0)
+            if new_counts.get(new_key, 0) > 0:
+                new_counts[new_key] = max(new_counts.get(new_key, 0) - 1, 0)
                 appended.append(item)
                 continue
             appended.append(item)
@@ -159,6 +170,11 @@ async def prepare_input_with_session(
 
     # Normalize exactly as the runtime does elsewhere so the prepared model input and the
     # persisted session items are derived from the same item shape and dedupe rules.
+    if is_openai_conversation_session and prune_history_indexes:
+        prepared_items_raw = _sanitize_openai_conversation_history_items_for_model_input(
+            prepared_items_raw,
+            prune_history_indexes,
+        )
     prepared_as_inputs = [ensure_input_item_format(item) for item in prepared_items_raw]
     filtered = drop_orphan_function_calls(
         prepared_as_inputs,
@@ -424,58 +440,24 @@ async def rewind_session_items(
         logger.debug("Rewind target %d (first 300 chars): %s", i, target[:300])
 
     snapshot_serializations = target_serializations.copy()
+    rewound = await _rewind_session_tail_suffix(
+        session=session,
+        pop_item=pop_item,
+        expected_serializations=target_serializations,
+        ignore_ids_for_matching=ignore_ids_for_matching,
+        mismatch_warning=(
+            "Skipping session rewind because the current tail does not match the retry-owned suffix"
+        ),
+        pop_failure_warning="Failed to rewind session item: %s",
+    )
+    if not rewound:
+        return
 
-    remaining = target_serializations.copy()
-
-    while remaining:
-        try:
-            result = pop_item()
-            if inspect.isawaitable(result):
-                result = await result
-        except Exception as exc:
-            logger.warning("Failed to rewind session item: %s", exc)
-            break
-        else:
-            if result is None:
-                break
-
-            popped_serialized = fingerprint_input_item(
-                result, ignore_ids_for_matching=ignore_ids_for_matching
-            )
-
-            logger.debug("Popped item type during rewind: %s", type(result).__name__)
-            if popped_serialized:
-                logger.debug("Popped serialized (first 300 chars): %s", popped_serialized[:300])
-            else:
-                logger.debug("Popped serialized: None")
-
-            logger.debug("Number of remaining targets: %d", len(remaining))
-            if remaining and popped_serialized:
-                logger.debug("First target (first 300 chars): %s", remaining[0][:300])
-                logger.debug("Match found: %s", popped_serialized in remaining)
-                if len(remaining) > 0:
-                    first_target = remaining[0]
-                    if abs(len(first_target) - len(popped_serialized)) < 50:
-                        logger.debug(
-                            "Length comparison - popped: %d, target: %d",
-                            len(popped_serialized),
-                            len(first_target),
-                        )
-
-            if popped_serialized and popped_serialized in remaining:
-                remaining.remove(popped_serialized)
-
-    if remaining:
-        logger.warning(
-            "Unable to fully rewind session; %d items still unmatched after retry",
-            len(remaining),
-        )
-    else:
-        await wait_for_session_cleanup(
-            session,
-            snapshot_serializations,
-            ignore_ids_for_matching=ignore_ids_for_matching,
-        )
+    await wait_for_session_cleanup(
+        session,
+        snapshot_serializations,
+        ignore_ids_for_matching=ignore_ids_for_matching,
+    )
 
     if session is None or server_tracker is None:
         return
@@ -493,22 +475,36 @@ async def rewind_session_items(
     if isinstance(latest_id, str) and latest_id in server_tracker.server_item_ids:
         return
 
-    logger.debug("Stripping stray conversation items until we reach a known server item")
-    while True:
-        try:
-            result = pop_item()
-            if inspect.isawaitable(result):
-                result = await result
-        except Exception as exc:
-            logger.warning("Failed to strip stray session item: %s", exc)
-            break
+    try:
+        session_items = await session.get_items()
+    except Exception as exc:
+        logger.debug("Failed to inspect session tail while stripping stray items: %s", exc)
+        return
 
-        if result is None:
-            break
+    stray_serializations = _collect_retry_owned_tail_serializations(
+        session_items,
+        server_tracker=server_tracker,
+        ignore_ids_for_matching=ignore_ids_for_matching,
+    )
+    if not stray_serializations:
+        return
 
-        stripped_id = result.get("id") if isinstance(result, dict) else getattr(result, "id", None)
-        if isinstance(stripped_id, str) and stripped_id in server_tracker.server_item_ids:
-            break
+    logger.debug(
+        "Stripping %d retry-owned conversation items until the session tail reaches "
+        "a known server item",
+        len(stray_serializations),
+    )
+    await _rewind_session_tail_suffix(
+        session=session,
+        pop_item=pop_item,
+        expected_serializations=stray_serializations,
+        ignore_ids_for_matching=ignore_ids_for_matching,
+        mismatch_warning=(
+            "Skipping stray session cleanup because the current tail no longer matches "
+            "retry-owned conversation items"
+        ),
+        pop_failure_warning="Failed to strip stray session item: %s",
+    )
 
 
 async def wait_for_session_cleanup(
@@ -575,6 +571,32 @@ def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInp
     return item
 
 
+def _sanitize_openai_conversation_history_items_for_model_input(
+    items: Sequence[TResponseInputItem],
+    history_indexes: set[int],
+) -> list[TResponseInputItem]:
+    """Remove Conversation item metadata only from session-history items sent to the model."""
+    sanitized_items: list[TResponseInputItem] = []
+    for index, item in enumerate(items):
+        if index in history_indexes:
+            sanitized_items.append(_sanitize_openai_conversation_history_item_for_model_input(item))
+        else:
+            sanitized_items.append(item)
+    return sanitized_items
+
+
+def _sanitize_openai_conversation_history_item_for_model_input(
+    item: TResponseInputItem,
+) -> TResponseInputItem:
+    """Remove Conversation replay metadata from assistant messages only."""
+    if isinstance(item, dict) and item.get("type") == "message" and item.get("role") == "assistant":
+        clean_item = cast(dict[str, Any], strip_internal_input_item_metadata(item))
+        clean_item.pop("id", None)
+        clean_item.pop("provider_data", None)
+        return cast(TResponseInputItem, clean_item)
+    return item
+
+
 def _fingerprint_or_repr(item: TResponseInputItem, *, ignore_ids_for_matching: bool) -> str:
     """Fingerprint an item or fall back to repr when unavailable."""
     return fingerprint_input_item(item, ignore_ids_for_matching=ignore_ids_for_matching) or repr(
@@ -582,7 +604,122 @@ def _fingerprint_or_repr(item: TResponseInputItem, *, ignore_ids_for_matching: b
     )
 
 
-def _session_item_key(item: Any) -> str:
+async def _rewind_session_tail_suffix(
+    *,
+    session: Session,
+    pop_item: Any,
+    expected_serializations: Sequence[str],
+    ignore_ids_for_matching: bool,
+    mismatch_warning: str,
+    pop_failure_warning: str,
+) -> bool:
+    """Remove an exact serialized suffix from the session tail, aborting when the tail diverges."""
+    if not expected_serializations:
+        return True
+
+    try:
+        tail_items = await session.get_items(limit=len(expected_serializations))
+    except Exception as exc:
+        logger.warning(pop_failure_warning, exc)
+        return False
+
+    if len(tail_items) != len(expected_serializations):
+        logger.warning(mismatch_warning)
+        return False
+
+    tail_serializations: list[str] = []
+    for item in tail_items:
+        serialized = fingerprint_input_item(item, ignore_ids_for_matching=ignore_ids_for_matching)
+        if not serialized:
+            logger.warning(mismatch_warning)
+            return False
+        tail_serializations.append(serialized)
+
+    if tail_serializations != list(expected_serializations):
+        logger.warning(mismatch_warning)
+        return False
+
+    popped_items: list[TResponseInputItem] = []
+    for expected in reversed(expected_serializations):
+        try:
+            result = pop_item()
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            await _restore_popped_session_items(session, popped_items)
+            logger.warning(pop_failure_warning, exc)
+            return False
+
+        if result is None:
+            await _restore_popped_session_items(session, popped_items)
+            logger.warning(mismatch_warning)
+            return False
+
+        popped_items.append(result)
+        popped_serialized = fingerprint_input_item(
+            result, ignore_ids_for_matching=ignore_ids_for_matching
+        )
+        if popped_serialized != expected:
+            await _restore_popped_session_items(session, popped_items)
+            logger.warning(mismatch_warning)
+            return False
+
+    return True
+
+
+async def _restore_popped_session_items(
+    session: Session, popped_items: Sequence[TResponseInputItem]
+) -> None:
+    """Best-effort restoration for items popped during a failed rewind attempt."""
+    if not popped_items:
+        return
+
+    add_items = getattr(session, "add_items", None)
+    if not callable(add_items):
+        return
+
+    try:
+        result = add_items(list(reversed(popped_items)))
+        if inspect.isawaitable(result):
+            await result
+    except Exception as exc:
+        logger.warning("Failed to restore session items after a rewind mismatch: %s", exc)
+
+
+def _collect_retry_owned_tail_serializations(
+    session_items: Sequence[TResponseInputItem],
+    *,
+    server_tracker: OpenAIServerConversationTracker,
+    ignore_ids_for_matching: bool,
+) -> list[str]:
+    """Return the contiguous retry-owned tail suffix that can be safely stripped."""
+    stray_tail: list[str] = []
+
+    for item in reversed(session_items):
+        item_id = item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
+        if isinstance(item_id, str) and item_id in server_tracker.server_item_ids:
+            return list(reversed(stray_tail))
+
+        serialized = fingerprint_input_item(item, ignore_ids_for_matching=ignore_ids_for_matching)
+        if serialized and serialized in server_tracker.sent_item_fingerprints:
+            stray_tail.append(serialized)
+            continue
+
+        logger.warning(
+            "Skipping stray session cleanup because the current tail contains items unrelated "
+            "to this retry"
+        )
+        return []
+
+    if stray_tail:
+        logger.warning(
+            "Skipping stray session cleanup because no known server item was found before the "
+            "session boundary"
+        )
+    return []
+
+
+def _session_item_key(item: Any, *, ignore_openai_conversation_item_ids: bool = False) -> str:
     """Return a stable representation of a session item for comparison."""
     try:
         if hasattr(item, "model_dump"):
@@ -596,16 +733,30 @@ def _session_item_key(item: Any) -> str:
                 dict[str, Any],
                 strip_internal_input_item_metadata(cast(TResponseInputItem, payload)),
             )
+            if ignore_openai_conversation_item_ids:
+                payload = cast(
+                    dict[str, Any],
+                    _sanitize_openai_conversation_history_item_for_model_input(
+                        cast(TResponseInputItem, payload)
+                    ),
+                )
         return json.dumps(payload, sort_keys=True, default=str)
     except Exception:
         return repr(item)
 
 
-def _build_reference_map(items: Sequence[Any]) -> dict[str, list[Any]]:
+def _build_reference_map(
+    items: Sequence[Any],
+    *,
+    ignore_openai_conversation_item_ids: bool = False,
+) -> dict[str, list[Any]]:
     """Map serialized keys to the concrete session items used to build them."""
     refs: dict[str, list[Any]] = {}
     for item in items:
-        key = _session_item_key(item)
+        key = _session_item_key(
+            item,
+            ignore_openai_conversation_item_ids=ignore_openai_conversation_item_ids,
+        )
         refs.setdefault(key, []).append(item)
     return refs
 
@@ -624,10 +775,17 @@ def _consume_reference(ref_map: dict[str, list[Any]], key: str, candidate: Any) 
     return False
 
 
-def _build_frequency_map(items: Sequence[Any]) -> dict[str, int]:
+def _build_frequency_map(
+    items: Sequence[Any],
+    *,
+    ignore_openai_conversation_item_ids: bool = False,
+) -> dict[str, int]:
     """Count how many times each serialized key appears in a collection."""
     freq: dict[str, int] = {}
     for item in items:
-        key = _session_item_key(item)
+        key = _session_item_key(
+            item,
+            ignore_openai_conversation_item_ids=ignore_openai_conversation_item_ids,
+        )
         freq[key] = freq.get(key, 0) + 1
     return freq

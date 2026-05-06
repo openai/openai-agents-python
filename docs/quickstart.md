@@ -14,8 +14,16 @@ python -m venv .venv
 
 Do this every time you start a new terminal session.
 
+On macOS or Linux:
+
 ```bash
 source .venv/bin/activate
+```
+
+On Windows:
+
+```cmd
+.venv\Scripts\activate
 ```
 
 ### Install the Agents SDK
@@ -28,8 +36,24 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 If you don't have one, follow [these instructions](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key) to create an OpenAI API key.
 
+These commands set the key for your current terminal session.
+
+On macOS or Linux:
+
 ```bash
 export OPENAI_API_KEY=sk-...
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:OPENAI_API_KEY = "sk-..."
+```
+
+On Windows Command Prompt:
+
+```cmd
+set "OPENAI_API_KEY=sk-..."
 ```
 
 ## Create your first agent

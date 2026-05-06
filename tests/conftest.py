@@ -20,12 +20,12 @@ if sys.platform == "win32":
         [
             "test_example_workflows.py",
             "test_run_state.py",
-            "test_sandbox_memory.py",
             "sandbox/capabilities/test_filesystem_capability.py",
             "sandbox/integration_tests/test_runner_pause_resume.py",
             "sandbox/test_client_options.py",
             "sandbox/test_exposed_ports.py",
             "sandbox/test_extract.py",
+            "sandbox/test_memory.py",
             "sandbox/test_runtime.py",
             "sandbox/test_session_manager.py",
             "sandbox/test_session_sinks.py",

@@ -87,6 +87,7 @@ from ..tool_guardrails import (
 from ..tracing import Span, SpanError, function_span, get_current_trace
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
+from ..util._tool_errors import get_trace_tool_error
 from ..util._types import MaybeAwaitable
 from ._asyncio_progress import get_function_tool_task_progress_deadline
 from .agent_bindings import AgentBindings, bind_public_agent
@@ -152,7 +153,6 @@ __all__ = [
     "execute_approved_tools",
 ]
 
-REDACTED_TOOL_ERROR_MESSAGE = "Tool execution failed. Error details are redacted."
 TToolSpanResult = TypeVar("TToolSpanResult")
 _FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS = 0.25
 _FUNCTION_TOOL_CANCELLED_IMMEDIATE_STEP_LIMIT = 64
@@ -619,8 +619,12 @@ def coerce_shell_call(tool_call: Any) -> ShellCallData:
         raise ModelBehaviorError("Shell call is missing an action payload.")
 
     commands_value = get_mapping_or_attr(action_payload, "commands")
-    if not isinstance(commands_value, Sequence):
-        raise ModelBehaviorError("Shell call action is missing commands.")
+    if isinstance(commands_value, str | bytes | bytearray) or not isinstance(
+        commands_value, Sequence
+    ):
+        raise ModelBehaviorError(
+            "Shell call action commands must be a sequence of command strings."
+        )
     commands: list[str] = []
     for entry in commands_value:
         if entry is None:
@@ -1009,11 +1013,6 @@ def format_shell_error(error: Exception | BaseException | Any) -> str:
         return repr(error)
 
 
-def get_trace_tool_error(*, trace_include_sensitive_data: bool, error_message: str) -> str:
-    """Return a trace-safe tool error string based on the sensitive-data setting."""
-    return error_message if trace_include_sensitive_data else REDACTED_TOOL_ERROR_MESSAGE
-
-
 async def with_tool_function_span(
     *,
     config: RunConfig,
@@ -1389,9 +1388,24 @@ class _FunctionToolBatchExecutor:
             self.execution_agent,
             self.context_wrapper,
         )
+        enabled_function_tool_ids = {id(tool) for tool in self.available_function_tools}
+        configured_function_tool_ids = {
+            id(tool) for tool in self.execution_agent.tools if isinstance(tool, FunctionTool)
+        }
         for tool_run in self.tool_runs:
-            if tool_run.function_tool not in self.available_function_tools:
+            function_tool = tool_run.function_tool
+            function_tool_id = id(function_tool)
+            if (
+                function_tool_id in configured_function_tool_ids
+                and function_tool_id not in enabled_function_tool_ids
+            ):
+                raise ModelBehaviorError(
+                    f"Tool {function_tool.name} is currently disabled for agent "
+                    f"{self.public_agent.name}."
+                )
+            if function_tool_id not in enabled_function_tool_ids:
                 self.available_function_tools.append(tool_run.function_tool)
+                enabled_function_tool_ids.add(function_tool_id)
         for order, tool_run in enumerate(self.tool_runs):
             self._create_tool_task(tool_run, order)
 
@@ -1566,10 +1580,14 @@ class _FunctionToolBatchExecutor:
                         agent_hooks=agent_hooks,
                     )
             except Exception as e:
+                trace_error = get_trace_tool_error(
+                    trace_include_sensitive_data=self.config.trace_include_sensitive_data,
+                    error_message=str(e),
+                )
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Error running tool",
-                        data={"tool_name": func_tool.name, "error": str(e)},
+                        data={"tool_name": func_tool.name, "error": trace_error},
                     )
                 )
                 if isinstance(e, AgentsException):
@@ -1728,10 +1746,14 @@ class _FunctionToolBatchExecutor:
             if result is None:
                 raise
 
+            trace_error = get_trace_tool_error(
+                trace_include_sensitive_data=self.config.trace_include_sensitive_data,
+                error_message=str(e),
+            )
             _error_tracing.attach_error_to_current_span(
                 SpanError(
                     message="Tool execution cancelled",
-                    data={"tool_name": func_tool.name, "error": str(e)},
+                    data={"tool_name": func_tool.name, "error": trace_error},
                 )
             )
             real_result = result

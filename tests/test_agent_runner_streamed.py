@@ -9,6 +9,7 @@ import pytest
 from openai import APIConnectionError, BadRequestError
 from openai.types.responses import (
     ResponseCompletedEvent,
+    ResponseErrorEvent,
     ResponseFailedEvent,
     ResponseFunctionToolCall,
     ResponseIncompleteEvent,
@@ -24,6 +25,7 @@ from agents import (
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
+    ModelBehaviorError,
     ModelRetrySettings,
     ModelSettings,
     OpenAIResponsesWSModel,
@@ -41,7 +43,7 @@ from agents.memory.openai_conversations_session import OpenAIConversationsSessio
 from agents.run import RunConfig
 from agents.run_internal import run_loop
 from agents.run_internal.run_loop import QueueCompleteSentinel
-from agents.stream_events import AgentUpdatedStreamEvent, StreamEvent
+from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, StreamEvent
 from agents.usage import Usage
 
 from .fake_model import FakeModel, get_response_obj
@@ -144,7 +146,7 @@ async def test_simple_first_run():
         ("response.failed", ResponseFailedEvent),
     ],
 )
-async def test_streamed_run_accepts_terminal_response_payload_events(
+async def test_streamed_run_rejects_failed_terminal_response_payload_events(
     terminal_event_type: str, terminal_event_cls: type[Any]
 ) -> None:
     class TerminalPayloadFakeModel(FakeModel):
@@ -187,12 +189,73 @@ async def test_streamed_run_accepts_terminal_response_payload_events(
     agent = Agent(name="test", model=model)
 
     result = Runner.run_streamed(agent, input="test")
-    async for _ in result.stream_events():
-        pass
+    stream_events: list[StreamEvent] = []
+    with pytest.raises(ModelBehaviorError, match=terminal_event_type):
+        async for event in result.stream_events():
+            stream_events.append(event)
 
-    assert result.final_output == "partial final"
-    assert len(result.raw_responses) == 1
-    assert result.raw_responses[0].response_id == "resp-partial"
+    assert len(stream_events) == 2
+    assert isinstance(stream_events[0], AgentUpdatedStreamEvent)
+    assert isinstance(stream_events[1], RawResponsesStreamEvent)
+    assert stream_events[1].data.type == terminal_event_type
+    assert result.final_output is None
+    assert result.raw_responses == []
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_rejects_response_error_terminal_event() -> None:
+    class TerminalErrorFakeModel(FakeModel):
+        async def stream_response(
+            self,
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            *,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            self.last_turn_args = {
+                "system_instructions": system_instructions,
+                "input": input,
+                "model_settings": model_settings,
+                "tools": tools,
+                "output_schema": output_schema,
+                "previous_response_id": previous_response_id,
+                "conversation_id": conversation_id,
+            }
+            if self.first_turn_args is None:
+                self.first_turn_args = self.last_turn_args.copy()
+
+            yield ResponseErrorEvent(
+                type="error",
+                code="invalid_request_error",
+                message="bad request",
+                param=None,
+                sequence_number=0,
+            )
+
+    model = TerminalErrorFakeModel()
+    agent = Agent(name="test", model=model)
+
+    result = Runner.run_streamed(agent, input="test")
+    stream_events: list[StreamEvent] = []
+    with pytest.raises(ModelBehaviorError, match="error"):
+        async for event in result.stream_events():
+            stream_events.append(event)
+
+    assert len(stream_events) == 2
+    assert isinstance(stream_events[0], AgentUpdatedStreamEvent)
+    assert isinstance(stream_events[1], RawResponsesStreamEvent)
+    assert stream_events[1].data.type == "error"
+    assert stream_events[1].data.code == "invalid_request_error"
+    assert stream_events[1].data.message == "bad request"
+    assert result.final_output is None
+    assert result.raw_responses == []
 
 
 @pytest.mark.asyncio
@@ -323,7 +386,7 @@ async def test_streamed_run_preserves_request_usage_entries_after_conversation_l
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal_event_type", ["response.incomplete", "response.failed"])
-async def test_streamed_run_accepts_terminal_response_payload_events_from_ws_model(
+async def test_streamed_run_rejects_failed_terminal_response_payload_events_from_ws_model(
     monkeypatch, terminal_event_type: str
 ) -> None:
     class DummyWSConnection:
@@ -372,12 +435,17 @@ async def test_streamed_run_accepts_terminal_response_payload_events_from_ws_mod
 
     agent = Agent(name="test", model=model)
     result = Runner.run_streamed(agent, input="test")
-    async for _ in result.stream_events():
-        pass
+    stream_events: list[StreamEvent] = []
+    with pytest.raises(ModelBehaviorError, match=terminal_event_type):
+        async for event in result.stream_events():
+            stream_events.append(event)
 
-    assert result.final_output == "partial final"
-    assert len(result.raw_responses) == 1
-    assert result.raw_responses[0].response_id == "resp-ws"
+    assert len(stream_events) == 2
+    assert isinstance(stream_events[0], AgentUpdatedStreamEvent)
+    assert isinstance(stream_events[1], RawResponsesStreamEvent)
+    assert stream_events[1].data.type == terminal_event_type
+    assert result.final_output is None
+    assert result.raw_responses == []
 
 
 @pytest.mark.asyncio

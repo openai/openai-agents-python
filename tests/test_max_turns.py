@@ -11,6 +11,7 @@ from agents import (
     ItemHelpers,
     MaxTurnsExceeded,
     MessageOutputItem,
+    ModelRefusalError,
     RunErrorHandlerResult,
     Runner,
     UserError,
@@ -18,7 +19,12 @@ from agents import (
 from agents.stream_events import RunItemStreamEvent
 
 from .fake_model import FakeModel
-from .test_responses import get_function_tool, get_function_tool_call, get_text_message
+from .test_responses import (
+    get_function_tool,
+    get_function_tool_call,
+    get_refusal_message,
+    get_text_message,
+)
 
 
 @pytest.mark.asyncio
@@ -91,6 +97,86 @@ class Foo(TypedDict):
 
 class FooModel(BaseModel):
     summary: str
+
+
+@pytest.mark.asyncio
+async def test_non_streamed_structured_output_refusal_raises_without_retry():
+    model = FakeModel(initial_output=[get_refusal_message("I cannot help with that request.")])
+    agent = Agent(name="test_1", model=model, output_type=FooModel)
+
+    with pytest.raises(ModelRefusalError) as exc_info:
+        await Runner.run(agent, input="user_message", max_turns=3)
+
+    assert exc_info.value.refusal == "I cannot help with that request."
+    assert not model.turn_outputs
+
+
+@pytest.mark.asyncio
+async def test_non_streamed_refusal_handler_returns_structured_output():
+    model = FakeModel(initial_output=[get_refusal_message("I cannot help with that request.")])
+    agent = Agent(name="test_1", model=model, output_type=FooModel)
+
+    def handler(data):
+        assert isinstance(data.error, ModelRefusalError)
+        assert data.error.refusal == "I cannot help with that request."
+        assert data.run_data.raw_responses
+        return FooModel(summary="safe fallback")
+
+    result = await Runner.run(
+        agent,
+        input="user_message",
+        max_turns=3,
+        error_handlers={"model_refusal": handler},
+    )
+
+    assert isinstance(result.final_output, FooModel)
+    assert result.final_output.summary == "safe fallback"
+    assert ItemHelpers.text_message_outputs(result.new_items).endswith(
+        '{"summary":"safe fallback"}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_streamed_refusal_handler_can_skip_history():
+    model = FakeModel(initial_output=[get_refusal_message("I cannot help with that request.")])
+    agent = Agent(name="test_1", model=model)
+
+    result = await Runner.run(
+        agent,
+        input="user_message",
+        error_handlers={
+            "model_refusal": lambda data: RunErrorHandlerResult(
+                final_output="safe fallback",
+                include_in_history=False,
+            ),
+        },
+    )
+
+    assert result.final_output == "safe fallback"
+    assert ItemHelpers.text_message_outputs(result.new_items) == ""
+
+
+@pytest.mark.asyncio
+async def test_streamed_refusal_handler_returns_output():
+    model = FakeModel(initial_output=[get_refusal_message("I cannot help with that request.")])
+    agent = Agent(name="test_1", model=model)
+
+    result = Runner.run_streamed(
+        agent,
+        input="user_message",
+        error_handlers={"model_refusal": lambda data: "safe fallback"},
+    )
+
+    events = [event async for event in result.stream_events()]
+
+    assert result.final_output == "safe fallback"
+    run_item_events = [event for event in events if isinstance(event, RunItemStreamEvent)]
+    assert any(
+        event.name == "message_output_created"
+        and isinstance(event.item, MessageOutputItem)
+        and ItemHelpers.text_message_output(event.item) == "safe fallback"
+        for event in run_item_events
+    )
 
 
 @pytest.mark.asyncio

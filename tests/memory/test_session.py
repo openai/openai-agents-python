@@ -8,9 +8,8 @@ from pathlib import Path
 import pytest
 
 from agents import Agent, RunConfig, Runner, SQLiteSession, TResponseInputItem
-
-from .fake_model import FakeModel
-from .test_responses import get_text_message
+from tests.fake_model import FakeModel
+from tests.test_responses import get_text_message
 
 
 # Helper functions for parametrized testing of different Runner methods

@@ -31,7 +31,7 @@ jobs:
 
       - name: Resolve PR context
         id: pr
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         env:
           MANUAL_PR_NUMBER: ${{ inputs.pr_number || '' }}
         with:
@@ -124,7 +124,7 @@ jobs:
       - name: Run Codex labeling
         id: run_codex
         if: ${{ (github.event_name == 'workflow_dispatch' || steps.pr.outputs.is_fork != 'true') && github.actor != 'dependabot[bot]' }}
-        uses: openai/codex-action@c25d10f3f498316d4b2496cc4c6dd58057a7b031
+        uses: openai/codex-action@e0fdf01220eb9a88167c4898839d273e3f2609d1
         with:
           openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
           prompt-file: .github/codex/prompts/pr-labels.md
@@ -148,7 +148,7 @@ jobs:
 
       - name: Comment on manual run failure
         if: ${{ github.event_name == 'workflow_dispatch' && always() }}
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         env:
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           JOB_STATUS: ${{ job.status }}

@@ -25,8 +25,7 @@ from agents.retry import (
 )
 from agents.run_internal.model_retry import get_response_with_retry, stream_response_with_retry
 from agents.usage import Usage
-
-from .test_responses import get_text_message
+from tests.test_responses import get_text_message
 
 
 def _connection_error(message: str = "connection error") -> APIConnectionError:
