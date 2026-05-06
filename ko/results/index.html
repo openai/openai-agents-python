@@ -1,0 +1,2086 @@
+
+<!doctype html>
+<html lang="ko" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+        <link rel="prev" href="../handoffs/">
+      
+      
+        <link rel="next" href="../human_in_the_loop/">
+      
+      
+      <link rel="icon" href="../../images/favicon-platform.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.6.16">
+    
+    
+      
+        <title>결과 - OpenAI Agents SDK</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.7e37652d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.06af60db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#_1" class="md-skip">
+          콘텐츠로 이동
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="상단/헤더">
+    <a href="../" title="OpenAI Agents SDK" class="md-header__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            OpenAI Agents SDK
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              결과
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+      <div class="md-header__option">
+  <div class="md-select">
+    
+    <button class="md-header__button md-icon" aria-label="언어설정">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m12.87 15.07-2.54-2.51.03-.03A17.5 17.5 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2zm-2.62 7 1.62-4.33L19.12 17z"/></svg>
+    </button>
+    <div class="md-select__inner">
+      <ul class="md-select__list">
+        
+          <li class="md-select__item">
+            <a href="../../results/" hreflang="en" class="md-select__link">
+              English
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../ja/results/" hreflang="ja" class="md-select__link">
+              日本語
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="./" hreflang="ko" class="md-select__link">
+              한국어
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../zh/results/" hreflang="zh" class="md-select__link">
+              简体中文
+            </a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+</div>
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="검색" placeholder="검색" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="검색">
+        
+        <button type="reset" class="md-search__icon md-icon" title="지우기" aria-label="지우기" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            검색 초기화
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/openai/openai-agents-python" title="저장소로 이동" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="네비게이션" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../" title="OpenAI Agents SDK" class="md-nav__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    OpenAI Agents SDK
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/openai/openai-agents-python" title="저장소로 이동" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    소개
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    빠른 시작
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    구성
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    문서
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            문서
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    에이전트
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_2" id="__nav_4_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Sandbox 에이전트
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_2">
+            <span class="md-nav__icon md-icon"></span>
+            Sandbox 에이전트
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    빠른 시작
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    개념
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    샌드박스 클라이언트
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    에이전트 메모리
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../models/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    모델
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    도구
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guardrails/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    가드레일
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../running_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    에이전트 실행
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    스트리밍
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi_agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    에이전트 오케스트레이션
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handoffs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    핸드오프
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    결과
+    
+  </span>
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    결과
+    
+  </span>
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="목차">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      목차
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      적절한 결과 표면 선택
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      최종 출력
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      입력, 다음 턴 히스토리, 새 항목
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="입력, 다음 턴 히스토리, 새 항목">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      새 항목
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      대화 계속 또는 재개
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="대화 계속 또는 재개">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      다음 턴 에이전트
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      인터럽션(중단 처리) 및 실행 상태
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      서버 관리 계속
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#agent-as-tool" class="md-nav__link">
+    <span class="md-ellipsis">
+      Agent-as-tool 메타데이터
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_10" class="md-nav__link">
+    <span class="md-ellipsis">
+      스트리밍 수명 주기 및 진단
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="스트리밍 수명 주기 및 진단">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_11" class="md-nav__link">
+    <span class="md-ellipsis">
+      원문 응답
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_12" class="md-nav__link">
+    <span class="md-ellipsis">
+      가드레일 결과
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_13" class="md-nav__link">
+    <span class="md-ellipsis">
+      컨텍스트 및 사용량
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../human_in_the_loop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    휴먼인더루프 (HITL)
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_12" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_12" id="__nav_4_12_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    세션
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_12_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_12">
+            <span class="md-nav__icon md-icon"></span>
+            세션
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    세션
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/sqlalchemy_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    SQLAlchemy 세션
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/advanced_sqlite_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    고급 SQLite 세션
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/encrypted_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    암호화된 세션
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../context/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    컨텍스트 관리
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    사용
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Model context protocol (MCP)
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    트레이싱
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_17" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_17" id="__nav_4_17_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    실시간 에이전트
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_17_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_17">
+            <span class="md-nav__icon md-icon"></span>
+            실시간 에이전트
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    빠른 시작
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    실시간 에이전트 가이드
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_18" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_18" id="__nav_4_18_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    음성 에이전트
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_18_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_18">
+            <span class="md-nav__icon md-icon"></span>
+            음성 에이전트
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    빠른 시작
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    파이프라인과 워크플로
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    트레이싱
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../visualization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    에이전트 시각화
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../repl/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    REPL 유틸리티
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    코드 예제
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../release/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    릴리스 프로세스/변경 로그
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="목차">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      목차
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      적절한 결과 표면 선택
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      최종 출력
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      입력, 다음 턴 히스토리, 새 항목
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="입력, 다음 턴 히스토리, 새 항목">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      새 항목
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      대화 계속 또는 재개
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="대화 계속 또는 재개">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      다음 턴 에이전트
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      인터럽션(중단 처리) 및 실행 상태
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      서버 관리 계속
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#agent-as-tool" class="md-nav__link">
+    <span class="md-ellipsis">
+      Agent-as-tool 메타데이터
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_10" class="md-nav__link">
+    <span class="md-ellipsis">
+      스트리밍 수명 주기 및 진단
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="스트리밍 수명 주기 및 진단">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_11" class="md-nav__link">
+    <span class="md-ellipsis">
+      원문 응답
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_12" class="md-nav__link">
+    <span class="md-ellipsis">
+      가드레일 결과
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_13" class="md-nav__link">
+    <span class="md-ellipsis">
+      컨텍스트 및 사용량
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="_1">결과</h1>
+<p><code>Runner.run</code> 메서드를 호출하면 두 가지 결과 타입 중 하나를 받습니다.</p>
+<ul>
+<li><code>Runner.run(...)</code> 또는 <code>Runner.run_sync(...)</code>의 <a class="autorefs autorefs-internal" title="RunResult
+
+
+  
+      dataclass
+  " href="../../ref/result/#agents.result.RunResult"><code>RunResult</code></a></li>
+<li><code>Runner.run_streamed(...)</code>의 <a class="autorefs autorefs-internal" title="RunResultStreaming
+
+
+  
+      dataclass
+  " href="../../ref/result/#agents.result.RunResultStreaming"><code>RunResultStreaming</code></a></li>
+</ul>
+<p>둘 다 <a class="autorefs autorefs-internal" title="RunResultBase
+
+
+  
+      dataclass
+  " href="../../ref/result/#agents.result.RunResultBase"><code>RunResultBase</code></a>를 상속하며, <code>final_output</code>, <code>new_items</code>, <code>last_agent</code>, <code>raw_responses</code>, <code>to_state()</code> 같은 공통 결과 표면을 노출합니다.</p>
+<p><code>RunResultStreaming</code>은 <a class="autorefs autorefs-internal" title="stream_events
+
+
+  
+      async
+  " href="../../ref/result/#agents.result.RunResultStreaming.stream_events"><code>stream_events()</code></a>, <a class="autorefs autorefs-internal" title="current_agent
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultStreaming.current_agent"><code>current_agent</code></a>, <a class="autorefs autorefs-internal" title="is_complete
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultStreaming.is_complete"><code>is_complete</code></a>, <a class="autorefs autorefs-internal" title="cancel" href="../../ref/result/#agents.result.RunResultStreaming.cancel"><code>cancel(...)</code></a> 같은 스트리밍 전용 제어를 추가합니다.</p>
+<h2 id="_2">적절한 결과 표면 선택</h2>
+<p>대부분의 애플리케이션에는 몇 가지 결과 속성이나 헬퍼만 필요합니다.</p>
+<table>
+<thead>
+<tr>
+<th>필요한 경우...</th>
+<th>사용</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>사용자에게 보여줄 최종 답변</td>
+<td><code>final_output</code></td>
+</tr>
+<tr>
+<td>전체 로컬 transcript가 포함된, 재생 준비가 된 다음 턴 입력 목록</td>
+<td><code>to_input_list()</code></td>
+</tr>
+<tr>
+<td>에이전트, 도구, 핸드오프, 승인 메타데이터가 포함된 풍부한 실행 항목</td>
+<td><code>new_items</code></td>
+</tr>
+<tr>
+<td>일반적으로 다음 사용자 턴을 처리해야 하는 에이전트</td>
+<td><code>last_agent</code></td>
+</tr>
+<tr>
+<td><code>previous_response_id</code>를 사용한 OpenAI Responses API 체이닝</td>
+<td><code>last_response_id</code></td>
+</tr>
+<tr>
+<td>대기 중인 승인과 재개 가능한 스냅샷</td>
+<td><code>interruptions</code> 및 <code>to_state()</code></td>
+</tr>
+<tr>
+<td>현재 중첩된 <code>Agent.as_tool()</code> 호출에 대한 메타데이터</td>
+<td><code>agent_tool_invocation</code></td>
+</tr>
+<tr>
+<td>원문 모델 호출 또는 가드레일 진단</td>
+<td><code>raw_responses</code> 및 가드레일 결과 배열</td>
+</tr>
+</tbody>
+</table>
+<h2 id="_3">최종 출력</h2>
+<p><a class="autorefs autorefs-internal" title="final_output
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.final_output"><code>final_output</code></a> 속성에는 마지막으로 실행된 에이전트의 최종 출력이 들어 있습니다. 이는 다음 중 하나입니다.</p>
+<ul>
+<li>마지막 에이전트에 정의된 <code>output_type</code>이 없는 경우 <code>str</code></li>
+<li>마지막 에이전트에 정의된 출력 타입이 있는 경우 <code>last_agent.output_type</code> 타입의 객체</li>
+<li>예를 들어 승인 인터럽션(중단 처리)에서 일시 중지되어 최종 출력이 생성되기 전에 실행이 중단된 경우 <code>None</code></li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><code>final_output</code>은 <code>Any</code>로 타입이 지정되어 있습니다. 핸드오프는 어떤 에이전트가 실행을 완료하는지 바꿀 수 있으므로, SDK는 가능한 전체 출력 타입 집합을 정적으로 알 수 없습니다.</p>
+</div>
+<p>스트리밍 모드에서는 스트림 처리가 완료될 때까지 <code>final_output</code>이 <code>None</code>으로 유지됩니다. 이벤트별 흐름은 <a href="../streaming/">스트리밍</a>을 참조하세요.</p>
+<h2 id="_4">입력, 다음 턴 히스토리, 새 항목</h2>
+<p>이 표면들은 서로 다른 질문에 답합니다.</p>
+<table>
+<thead>
+<tr>
+<th>속성 또는 헬퍼</th>
+<th>포함 내용</th>
+<th>최적의 용도</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a class="autorefs autorefs-internal" title="input
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.input"><code>input</code></a></td>
+<td>이 실행 구간의 기본 입력입니다. 핸드오프 입력 필터가 히스토리를 다시 썼다면, 실행이 계속된 필터링된 입력을 반영합니다.</td>
+<td>이 실행이 실제로 입력으로 사용한 내용을 감사</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="to_input_list" href="../../ref/result/#agents.result.RunResultBase.to_input_list"><code>to_input_list()</code></a></td>
+<td>실행의 입력 항목 뷰입니다. 기본 <code>mode="preserve_all"</code>은 <code>new_items</code>에서 변환된 전체 히스토리를 유지합니다. <code>mode="normalized"</code>는 핸드오프 필터링이 모델 히스토리를 다시 쓸 때 표준 계속 입력을 우선합니다.</td>
+<td>수동 채팅 루프, 클라이언트 관리 대화 상태, 일반 항목 히스토리 검사</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="new_items
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.new_items"><code>new_items</code></a></td>
+<td>에이전트, 도구, 핸드오프, 승인 메타데이터가 포함된 풍부한 <a class="autorefs autorefs-internal" title="RunItem
+
+
+  
+      module-attribute
+  " href="../../ref/items/#agents.items.RunItem"><code>RunItem</code></a> 래퍼입니다.</td>
+<td>로그, UI, 감사, 디버깅</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="raw_responses
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.raw_responses"><code>raw_responses</code></a></td>
+<td>실행 중 각 모델 호출에서 나온 원문 <a class="autorefs autorefs-internal" title="ModelResponse" href="../../ref/items/#agents.items.ModelResponse"><code>ModelResponse</code></a> 객체입니다.</td>
+<td>제공자 수준 진단 또는 원문 응답 검사</td>
+</tr>
+</tbody>
+</table>
+<p>실제로는 다음과 같습니다.</p>
+<ul>
+<li>실행의 일반 입력 항목 뷰가 필요할 때는 <code>to_input_list()</code>를 사용하세요.</li>
+<li>핸드오프 필터링 또는 중첩 핸드오프 히스토리 재작성 후 다음 <code>Runner.run(..., input=...)</code> 호출을 위한 표준 로컬 입력이 필요할 때는 <code>to_input_list(mode="normalized")</code>를 사용하세요.</li>
+<li>SDK가 히스토리를 로드하고 저장해 주기를 원할 때는 <a href="../sessions/"><code>session=...</code></a>을 사용하세요.</li>
+<li><code>conversation_id</code> 또는 <code>previous_response_id</code>로 OpenAI 서버 관리 상태를 사용하는 경우, 일반적으로 <code>to_input_list()</code>를 다시 보내는 대신 새 사용자 입력만 전달하고 저장된 ID를 재사용하세요.</li>
+<li>로그, UI, 감사에 사용할 전체 변환 히스토리가 필요할 때는 기본 <code>to_input_list()</code> 모드 또는 <code>new_items</code>를 사용하세요.</li>
+</ul>
+<p>JavaScript SDK와 달리 Python은 모델 형태의 델타만을 위한 별도의 <code>output</code> 속성을 노출하지 않습니다. SDK 메타데이터가 필요할 때는 <code>new_items</code>를 사용하고, 원문 모델 페이로드가 필요할 때는 <code>raw_responses</code>를 검사하세요.</p>
+<p>컴퓨터 도구 재생은 원문 Responses 페이로드 형태를 따릅니다. 프리뷰 모델 <code>computer_call</code> 항목은 단일 <code>action</code>을 보존하는 반면, <code>gpt-5.5</code> 컴퓨터 호출은 배치된 <code>actions[]</code>를 보존할 수 있습니다. <a class="autorefs autorefs-internal" title="to_input_list" href="../../ref/result/#agents.result.RunResultBase.to_input_list"><code>to_input_list()</code></a>와 <a class="autorefs autorefs-internal" title="RunState
+
+
+  
+      dataclass
+  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a>는 모델이 생성한 형태를 그대로 유지하므로, 수동 재생, 일시 중지/재개 흐름, 저장된 transcript가 프리뷰 및 GA 컴퓨터 도구 호출 모두에서 계속 작동합니다. 로컬 실행 결과는 여전히 <code>new_items</code>에 <code>computer_call_output</code> 항목으로 표시됩니다.</p>
+<h3 id="_5">새 항목</h3>
+<p><a class="autorefs autorefs-internal" title="new_items
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.new_items"><code>new_items</code></a>는 실행 중 일어난 일을 가장 풍부하게 보여줍니다. 일반적인 항목 타입은 다음과 같습니다.</p>
+<ul>
+<li>어시스턴트 메시지용 <a class="autorefs autorefs-internal" title="MessageOutputItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.MessageOutputItem"><code>MessageOutputItem</code></a></li>
+<li>추론 항목용 <a class="autorefs autorefs-internal" title="ReasoningItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.ReasoningItem"><code>ReasoningItem</code></a></li>
+<li>Responses 도구 검색 요청 및 로드된 도구 검색 결과용 <a class="autorefs autorefs-internal" title="ToolSearchCallItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.ToolSearchCallItem"><code>ToolSearchCallItem</code></a> 및 <a class="autorefs autorefs-internal" title="ToolSearchOutputItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.ToolSearchOutputItem"><code>ToolSearchOutputItem</code></a></li>
+<li>도구 호출 및 그 결과용 <a class="autorefs autorefs-internal" title="ToolCallItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.ToolCallItem"><code>ToolCallItem</code></a> 및 <a class="autorefs autorefs-internal" title="ToolCallOutputItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.ToolCallOutputItem"><code>ToolCallOutputItem</code></a></li>
+<li>승인 대기 중 일시 중지된 도구 호출용 <a class="autorefs autorefs-internal" title="ToolApprovalItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.ToolApprovalItem"><code>ToolApprovalItem</code></a></li>
+<li>핸드오프 요청 및 완료된 전환용 <a class="autorefs autorefs-internal" title="HandoffCallItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.HandoffCallItem"><code>HandoffCallItem</code></a> 및 <a class="autorefs autorefs-internal" title="HandoffOutputItem
+
+
+  
+      dataclass
+  " href="../../ref/items/#agents.items.HandoffOutputItem"><code>HandoffOutputItem</code></a></li>
+</ul>
+<p>에이전트 연결, 도구 출력, 핸드오프 경계 또는 승인 경계가 필요할 때마다 <code>to_input_list()</code> 대신 <code>new_items</code>를 선택하세요.</p>
+<p>호스티드 툴 검색을 사용할 때는 모델이 내보낸 검색 요청을 보려면 <code>ToolSearchCallItem.raw_item</code>을 검사하고, 해당 턴에 로드된 네임스페이스, 함수 또는 호스티드 MCP 서버를 보려면 <code>ToolSearchOutputItem.raw_item</code>을 검사하세요.</p>
+<h2 id="_6">대화 계속 또는 재개</h2>
+<h3 id="_7">다음 턴 에이전트</h3>
+<p><a class="autorefs autorefs-internal" title="last_agent
+
+
+  
+      abstractmethod
+      property
+  " href="../../ref/result/#agents.result.RunResultBase.last_agent"><code>last_agent</code></a>에는 마지막으로 실행된 에이전트가 들어 있습니다. 이는 핸드오프 후 다음 사용자 턴에 재사용하기 가장 좋은 에이전트인 경우가 많습니다.</p>
+<p>스트리밍 모드에서는 <a class="autorefs autorefs-internal" title="current_agent
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultStreaming.current_agent"><code>RunResultStreaming.current_agent</code></a>가 실행 진행에 따라 업데이트되므로, 스트림이 끝나기 전에 핸드오프를 관찰할 수 있습니다.</p>
+<h3 id="_8">인터럽션(중단 처리) 및 실행 상태</h3>
+<p>도구에 승인이 필요한 경우, 대기 중인 승인은 <a class="autorefs autorefs-internal" title="interruptions
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResult.interruptions"><code>RunResult.interruptions</code></a> 또는 <a class="autorefs autorefs-internal" title="interruptions
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultStreaming.interruptions"><code>RunResultStreaming.interruptions</code></a>에 노출됩니다. 여기에는 직접 도구, 핸드오프 후 도달한 도구 또는 중첩 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 실행에서 발생한 승인이 포함될 수 있습니다.</p>
+<p><a class="autorefs autorefs-internal" title="to_state" href="../../ref/result/#agents.result.RunResult.to_state"><code>to_state()</code></a>를 호출해 재개 가능한 <a class="autorefs autorefs-internal" title="RunState
+
+
+  
+      dataclass
+  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a>를 캡처하고, 대기 중인 항목을 승인하거나 거부한 다음 <code>Runner.run(...)</code> 또는 <code>Runner.run_streamed(...)</code>로 재개하세요.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span> <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Use tools when needed.&quot;</span><span class="p">)</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Delete temp files that are no longer needed.&quot;</span><span class="p">)</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">interruptions</span><span class="p">:</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">state</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">to_state</span><span class="p">()</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="k">for</span> <span class="n">interruption</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">interruptions</span><span class="p">:</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>        <span class="n">state</span><span class="o">.</span><span class="n">approve</span><span class="p">(</span><span class="n">interruption</span><span class="p">)</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="n">state</span><span class="p">)</span>
+</span></code></pre></div>
+<p>스트리밍 실행의 경우 먼저 <a class="autorefs autorefs-internal" title="stream_events
+
+
+  
+      async
+  " href="../../ref/result/#agents.result.RunResultStreaming.stream_events"><code>stream_events()</code></a> 소비를 완료한 다음 <code>result.interruptions</code>를 검사하고 <code>result.to_state()</code>에서 재개하세요. 전체 승인 흐름은 <a href="../human_in_the_loop/">휴먼인더루프 (HITL)</a>를 참조하세요.</p>
+<h3 id="_9">서버 관리 계속</h3>
+<p><a class="autorefs autorefs-internal" title="last_response_id
+
+
+  
+      property
+  " href="../../ref/result/#agents.result.RunResultBase.last_response_id"><code>last_response_id</code></a>는 실행의 최신 모델 응답 ID입니다. OpenAI Responses API 체인을 계속하려면 다음 턴에서 <code>previous_response_id</code>로 다시 전달하세요.</p>
+<p>이미 <code>to_input_list()</code>, <code>session</code> 또는 <code>conversation_id</code>로 대화를 계속하고 있다면 일반적으로 <code>last_response_id</code>가 필요하지 않습니다. 다단계 실행의 모든 모델 응답이 필요하다면 대신 <code>raw_responses</code>를 검사하세요.</p>
+<h2 id="agent-as-tool">Agent-as-tool 메타데이터</h2>
+<p>결과가 중첩 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 실행에서 온 경우, <a class="autorefs autorefs-internal" title="agent_tool_invocation
+
+
+  
+      property
+  " href="../../ref/result/#agents.result.RunResultBase.agent_tool_invocation"><code>agent_tool_invocation</code></a>은 외부 도구 호출에 대한 불변 메타데이터를 노출합니다.</p>
+<ul>
+<li><code>tool_name</code></li>
+<li><code>tool_call_id</code></li>
+<li><code>tool_arguments</code></li>
+</ul>
+<p>일반적인 최상위 실행의 경우 <code>agent_tool_invocation</code>은 <code>None</code>입니다.</p>
+<p>이는 중첩 결과를 후처리하는 동안 외부 도구 이름, 호출 ID 또는 원문 인수가 필요할 수 있는 <code>custom_output_extractor</code> 내부에서 특히 유용합니다. 관련 <code>Agent.as_tool()</code> 패턴은 <a href="../tools/">도구</a>를 참조하세요.</p>
+<p>해당 중첩 실행의 파싱된 structured input도 필요하다면 <code>context_wrapper.tool_input</code>을 읽으세요. 이는 <a class="autorefs autorefs-internal" title="RunState
+
+
+  
+      dataclass
+  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a>가 중첩 도구 입력을 일반적으로 직렬화하는 필드이며, <code>agent_tool_invocation</code>은 현재 중첩 호출에 대한 실시간 결과 접근자입니다.</p>
+<h2 id="_10">스트리밍 수명 주기 및 진단</h2>
+<p><a class="autorefs autorefs-internal" title="RunResultStreaming
+
+
+  
+      dataclass
+  " href="../../ref/result/#agents.result.RunResultStreaming"><code>RunResultStreaming</code></a>은 위와 동일한 결과 표면을 상속하지만, 스트리밍 전용 제어를 추가합니다.</p>
+<ul>
+<li>의미론적 스트림 이벤트를 소비하기 위한 <a class="autorefs autorefs-internal" title="stream_events
+
+
+  
+      async
+  " href="../../ref/result/#agents.result.RunResultStreaming.stream_events"><code>stream_events()</code></a></li>
+<li>실행 중 활성 에이전트를 추적하기 위한 <a class="autorefs autorefs-internal" title="current_agent
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultStreaming.current_agent"><code>current_agent</code></a></li>
+<li>스트리밍된 실행이 완전히 완료되었는지 확인하기 위한 <a class="autorefs autorefs-internal" title="is_complete
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultStreaming.is_complete"><code>is_complete</code></a></li>
+<li>실행을 즉시 또는 현재 턴 이후 중지하기 위한 <a class="autorefs autorefs-internal" title="cancel" href="../../ref/result/#agents.result.RunResultStreaming.cancel"><code>cancel(...)</code></a></li>
+</ul>
+<p>비동기 이터레이터가 끝날 때까지 <code>stream_events()</code> 소비를 계속하세요. 스트리밍 실행은 해당 이터레이터가 종료되기 전까지 완료되지 않으며, <code>final_output</code>, <code>interruptions</code>, <code>raw_responses</code> 같은 요약 속성과 세션 지속성 부작용은 마지막으로 보이는 토큰이 도착한 후에도 아직 정리 중일 수 있습니다.</p>
+<p><code>cancel()</code>을 호출했다면 취소와 정리가 올바르게 완료될 수 있도록 <code>stream_events()</code> 소비를 계속하세요.</p>
+<p>Python은 별도의 스트리밍된 <code>completed</code> promise나 <code>error</code> 속성을 노출하지 않습니다. 최종 스트리밍 실패는 <code>stream_events()</code>에서 예외를 발생시키는 방식으로 표시되며, <code>is_complete</code>는 실행이 최종 상태에 도달했는지 여부를 반영합니다.</p>
+<h3 id="_11">원문 응답</h3>
+<p><a class="autorefs autorefs-internal" title="raw_responses
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.raw_responses"><code>raw_responses</code></a>에는 실행 중 수집된 원문 모델 응답이 들어 있습니다. 다단계 실행은 예를 들어 핸드오프 또는 반복되는 모델/도구/모델 사이클 전반에서 둘 이상의 응답을 생성할 수 있습니다.</p>
+<p><a class="autorefs autorefs-internal" title="last_response_id
+
+
+  
+      property
+  " href="../../ref/result/#agents.result.RunResultBase.last_response_id"><code>last_response_id</code></a>는 <code>raw_responses</code>의 마지막 항목에서 나온 ID일 뿐입니다.</p>
+<h3 id="_12">가드레일 결과</h3>
+<p>에이전트 수준 가드레일은 <a class="autorefs autorefs-internal" title="input_guardrail_results
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.input_guardrail_results"><code>input_guardrail_results</code></a> 및 <a class="autorefs autorefs-internal" title="output_guardrail_results
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.output_guardrail_results"><code>output_guardrail_results</code></a>로 노출됩니다.</p>
+<p>도구 가드레일은 <a class="autorefs autorefs-internal" title="tool_input_guardrail_results
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.tool_input_guardrail_results"><code>tool_input_guardrail_results</code></a> 및 <a class="autorefs autorefs-internal" title="tool_output_guardrail_results
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.tool_output_guardrail_results"><code>tool_output_guardrail_results</code></a>로 별도로 노출됩니다.</p>
+<p>이 배열들은 실행 전반에 걸쳐 누적되므로, 의사결정 로깅, 추가 가드레일 메타데이터 저장 또는 실행이 차단된 이유 디버깅에 유용합니다.</p>
+<h3 id="_13">컨텍스트 및 사용량</h3>
+<p><a class="autorefs autorefs-internal" title="context_wrapper
+
+
+  
+      instance-attribute
+  " href="../../ref/result/#agents.result.RunResultBase.context_wrapper"><code>context_wrapper</code></a>는 승인, 사용량, 중첩 <code>tool_input</code> 같은 SDK 관리 런타임 메타데이터와 함께 앱 컨텍스트를 노출합니다.</p>
+<p>사용량은 <code>context_wrapper.usage</code>에서 추적됩니다. 스트리밍 실행의 경우 사용량 합계는 스트림의 마지막 청크가 처리될 때까지 지연될 수 있습니다. 전체 래퍼 형태와 지속성 관련 주의사항은 <a href="../context/">컨텍스트 관리</a>를 참조하세요.</p>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      <script id="__config" type="application/json">{"base": "../..", "features": ["content.code.copy", "content.code.select", "navigation.path", "navigation.sections", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.d50fe291.min.js", "tags": null, "translations": {"clipboard.copied": "\ud074\ub9bd\ubcf4\ub4dc\uc5d0 \ubcf5\uc0ac\ub428", "clipboard.copy": "\ud074\ub9bd\ubcf4\ub4dc\ub85c \ubcf5\uc0ac", "search.result.more.one": "\uc774 \ubb38\uc11c\uc5d0\uc11c 1\uac1c\uc758 \uac80\uc0c9 \uacb0\uacfc \ub354 \ubcf4\uae30", "search.result.more.other": "\uc774 \ubb38\uc11c\uc5d0\uc11c #\uac1c\uc758 \uac80\uc0c9 \uacb0\uacfc \ub354 \ubcf4\uae30", "search.result.none": "\uac80\uc0c9\uc5b4\uc640 \uc77c\uce58\ud558\ub294 \ubb38\uc11c\uac00 \uc5c6\uc2b5\ub2c8\ub2e4", "search.result.one": "1\uac1c\uc758 \uc77c\uce58\ud558\ub294 \ubb38\uc11c", "search.result.other": "#\uac1c\uc758 \uc77c\uce58\ud558\ub294 \ubb38\uc11c", "search.result.placeholder": "\uac80\uc0c9\uc5b4\ub97c \uc785\ub825\ud558\uc138\uc694", "search.result.term.missing": "\ud3ec\ud568\ub418\uc9c0 \uc54a\uc740 \uac80\uc0c9\uc5b4", "select.version": "\ubc84\uc804 \uc120\ud0dd"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.50899def.min.js"></script>
+      
+    
+  </body>
+</html>
