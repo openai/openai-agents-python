@@ -854,7 +854,9 @@ class OpenAIResponsesModel(Model):
             "metadata": self._non_null_or_omit(model_settings.metadata),
             "context_management": self._non_null_or_omit(model_settings.context_management),
         }
-        duplicate_extra_arg_keys = sorted(set(create_kwargs).intersection(extra_args))
+        duplicate_extra_arg_keys = sorted(
+            k for k in extra_args if k in create_kwargs and create_kwargs[k] is not omit
+        )
         if duplicate_extra_arg_keys:
             if len(duplicate_extra_arg_keys) == 1:
                 key = duplicate_extra_arg_keys[0]
