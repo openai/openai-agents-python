@@ -733,6 +733,33 @@ async def test_copied_function_tool_invalid_input_uses_current_name(copy_style: 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("input_json", ["[]", '"value"', "123", "null", "true"])
+async def test_function_tool_rejects_non_object_json_input(input_json: str) -> None:
+    def echo(value: str) -> str:
+        return value
+
+    tool = function_tool(
+        echo,
+        name_override="echo_tool",
+        failure_error_function=None,
+    )
+
+    with pytest.raises(
+        ModelBehaviorError,
+        match="Invalid JSON input for tool echo_tool: expected a JSON object",
+    ):
+        await tool.on_invoke_tool(
+            ToolContext(
+                None,
+                tool_name="echo_tool",
+                tool_call_id="1",
+                tool_arguments=input_json,
+            ),
+            input_json,
+        )
+
+
+@pytest.mark.asyncio
 async def test_default_failure_error_function_survives_deepcopy() -> None:
     def boom() -> None:
         raise RuntimeError("kapow")
