@@ -1450,13 +1450,18 @@ def _build_handled_function_tool_error_handler(
 def _parse_function_tool_json_input(*, tool_name: str, input_json: str) -> dict[str, Any]:
     """Decode raw tool arguments with consistent diagnostics."""
     try:
-        return json.loads(input_json) if input_json else {}
+        parsed = json.loads(input_json) if input_json else {}
     except Exception as exc:
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug(f"Invalid JSON input for tool {tool_name}")
         else:
             logger.debug(f"Invalid JSON input for tool {tool_name}: {input_json}")
         raise ModelBehaviorError(f"Invalid JSON input for tool {tool_name}: {input_json}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ModelBehaviorError(f"Invalid JSON input for tool {tool_name}: expected a JSON object")
+
+    return parsed
 
 
 def _log_function_tool_invocation(*, tool_name: str, input_json: str) -> None:
