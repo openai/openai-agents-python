@@ -869,6 +869,30 @@ def test_build_response_create_kwargs_includes_context_management():
 
 
 @pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_allows_extra_arg_when_explicit_arg_is_omitted():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+    context_management: list[ContextManagement] = [
+        {"type": "compaction", "compact_threshold": 200000}
+    ]
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(extra_args={"context_management": context_management}),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert kwargs["context_management"] == context_management
+
+
+@pytest.mark.allow_call_model_methods
 def test_build_response_create_kwargs_rejects_duplicate_context_management_extra_args():
     client = DummyWSClient()
     model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
