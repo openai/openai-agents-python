@@ -478,3 +478,32 @@ change frequently. To force a fresh list later, call `invalidate_tools_cache()` 
 - [Model Context Protocol](https://modelcontextprotocol.io/) – the specification and design guides.
 - [examples/mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp) – runnable stdio, SSE, and Streamable HTTP samples.
 - [examples/hosted_mcp](https://github.com/openai/openai-agents-python/tree/main/examples/hosted_mcp) – complete hosted MCP demonstrations including approvals and connectors.
+
+## Community MCP servers
+
+The MCP ecosystem includes community-built servers that work with the Agents SDK over stdio transport.
+
+### Works With Agents (`wwa-mcp`)
+
+[Works With Agents](https://workswithagents.dev) provides 14 native MCP tools for AI agent infrastructure — facts, pitfalls, skills, handoff protocol, blueprint registry, trust scores, identity verification, SLA validation, and compliance-as-code.
+
+```bash
+pip install wwa-mcp
+```
+
+```python
+from agents import Agent, MCPServerStdio
+
+async with MCPServerStdio(
+    params={
+        "command": "python3.11",
+        "args": ["-m", "wwa_mcp.server"],
+    },
+) as server:
+    agent = Agent(
+        name="Assistant",
+        mcp_servers=[server],
+    )
+```
+
+Available tools: `wwa_facts_query`, `wwa_pitfalls_lookup`, `wwa_skills_search`, `wwa_handoff_create`, `wwa_handoff_verify`, `wwa_blueprint_search`, `wwa_trust_score_calculate`, `wwa_identity_verify`, `wwa_sla_validate`, `wwa_compliance_check`, and more. All specifications are CC BY 4.0.
