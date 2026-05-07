@@ -160,6 +160,24 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
     assert content_delta_events[0].delta == "The answer"
     assert content_delta_events[1].delta == " is 42"
 
+    assistant_message_index_events = []
+    for event in output_events:
+        event_any = cast(Any, event)
+        if event.type in {"response.output_item.added", "response.output_item.done"}:
+            if event_any.item.type == "message":
+                assistant_message_index_events.append(event_any)
+        elif event.type in {
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.content_part.done",
+        }:
+            assistant_message_index_events.append(event_any)
+
+    assert assistant_message_index_events
+    for event in assistant_message_index_events:
+        assert event.output_index == 1
+        assert type(event.output_index) is int
+
     # verify the final response contains both types of content
     response_event = output_events[-1]
     assert response_event.type == "response.completed"
