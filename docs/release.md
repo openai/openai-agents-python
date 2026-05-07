@@ -19,6 +19,21 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.16.0
+
+In this version, the SDK default model is now `gpt-5.4-mini` instead of `gpt-4.1`. This affects agents and runs that do not explicitly set a model. Because the new default is a GPT-5 model, implicit default model settings now include GPT-5 defaults such as `reasoning.effort="none"` and `verbosity="low"`.
+
+If you need to keep the previous default model behavior, set a model explicitly on the agent or run config, or set the `OPENAI_DEFAULT_MODEL` environment variable:
+
+```python
+agent = Agent(name="Assistant", model="gpt-4.1")
+```
+
+Highlights:
+
+-   `Runner.run`, `Runner.run_sync`, and `Runner.run_streamed` now accept `max_turns=None` to disable the turn limit.
+-   Sandbox workspace hydration now rejects tar archives with symlinks that point outside the archive root, including absolute symlink targets, across local, Docker, and provider-backed sandbox implementations.
+
 ### 0.15.0
 
 In this version, model refusals are now surfaced explicitly as `ModelRefusalError` instead of being treated as empty text output or, for structured outputs, causing the run loop to retry until `MaxTurnsExceeded`.
