@@ -652,41 +652,44 @@ class GitRepo(BaseEntry):
         url = f"https://{self.host}/{self.repo}.git"
 
         _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
-        clone_error: ExecResult | None = None
-        if self._looks_like_commit_ref(self.ref):
-            clone = await self._fetch_commit_ref(session=session, url=url, tmp_dir=tmp_dir)
-            if not clone.ok():
-                clone_error = clone
-                _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
+        try:
+            clone_error: ExecResult | None = None
+            if self._looks_like_commit_ref(self.ref):
+                clone = await self._fetch_commit_ref(session=session, url=url, tmp_dir=tmp_dir)
+                if not clone.ok():
+                    clone_error = clone
+                    _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
+                    clone = await self._clone_named_ref(session=session, url=url, tmp_dir=tmp_dir)
+            else:
                 clone = await self._clone_named_ref(session=session, url=url, tmp_dir=tmp_dir)
-        else:
-            clone = await self._clone_named_ref(session=session, url=url, tmp_dir=tmp_dir)
-        if not clone.ok():
-            if clone_error is not None:
-                clone = clone_error
-            raise GitCloneError(
-                url=url,
-                ref=self.ref,
-                stderr=clone.stderr.decode("utf-8", errors="replace"),
-                context={"repo": self.repo, "subpath": self.subpath},
+            if not clone.ok():
+                if clone_error is not None:
+                    clone = clone_error
+                raise GitCloneError(
+                    url=url,
+                    ref=self.ref,
+                    stderr=clone.stderr.decode("utf-8", errors="replace"),
+                    context={"repo": self.repo, "subpath": self.subpath},
+                )
+
+            git_src_root: str = tmp_dir
+            if self.subpath is not None:
+                git_src_root = f"{tmp_dir}/{self.subpath.lstrip('/')}"
+
+            # Copy into destination in the container.
+            await session.mkdir(dest, parents=True)
+            copy = await session.exec(
+                "cp", "-R", "--", f"{git_src_root}/.", f"{dest}/", shell=False
             )
-
-        git_src_root: str = tmp_dir
-        if self.subpath is not None:
-            git_src_root = f"{tmp_dir}/{self.subpath.lstrip('/')}"
-
-        # Copy into destination in the container.
-        await session.mkdir(dest, parents=True)
-        copy = await session.exec("cp", "-R", "--", f"{git_src_root}/.", f"{dest}/", shell=False)
-        if not copy.ok():
-            raise GitCopyError(
-                src_root=git_src_root,
-                dest=dest,
-                stderr=copy.stderr.decode("utf-8", errors="replace"),
-                context={"repo": self.repo, "ref": self.ref, "subpath": self.subpath},
-            )
-
-        _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
+            if not copy.ok():
+                raise GitCopyError(
+                    src_root=git_src_root,
+                    dest=dest,
+                    stderr=copy.stderr.decode("utf-8", errors="replace"),
+                    context={"repo": self.repo, "ref": self.ref, "subpath": self.subpath},
+                )
+        finally:
+            _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
         await self._apply_metadata(session, dest)
 
         # Receipt: leave checksums empty for now. (Computing them would

@@ -13,6 +13,8 @@ from agents.sandbox import SandboxConcurrencyLimits
 from agents.sandbox.entries import Dir, File, GitRepo, LocalDir, LocalFile, resolve_workspace_path
 from agents.sandbox.errors import (
     ExecNonZeroError,
+    GitCloneError,
+    GitCopyError,
     InvalidManifestPathError,
     LocalDirReadError,
     LocalFileReadError,
@@ -78,6 +80,28 @@ class _GitRefSession(_RecordingSession):
             return ExecResult(stdout=b"/usr/bin/git\n", stderr=b"", exit_code=0)
         if cmd[:2] == ("git", "clone"):
             return ExecResult(stdout=b"", stderr=b"unexpected clone path", exit_code=1)
+        return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+
+class _GitFailureSession(_RecordingSession):
+    def __init__(self, *, fail_on: str) -> None:
+        super().__init__()
+        self.fail_on = fail_on
+
+    async def _exec_internal(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        _ = timeout
+        cmd = tuple(str(part) for part in command)
+        self.exec_calls.append(cmd)
+        if cmd == ("command -v git >/dev/null 2>&1",):
+            return ExecResult(stdout=b"/usr/bin/git\n", stderr=b"", exit_code=0)
+        if self.fail_on == "clone" and cmd[:2] == ("git", "clone"):
+            return ExecResult(stdout=b"", stderr=b"clone failed", exit_code=1)
+        if self.fail_on == "copy" and cmd[:1] == ("cp",):
+            return ExecResult(stdout=b"", stderr=b"copy failed", exit_code=1)
         return ExecResult(stdout=b"", stderr=b"", exit_code=0)
 
 
@@ -669,6 +693,48 @@ async def test_git_repo_uses_fetch_checkout_path_for_commit_refs() -> None:
         and call[3:5] == ("checkout", "--detach")
         and call[-1] == "FETCH_HEAD"
         for call in session.exec_calls
+    )
+
+
+def _git_temp_cleanup_calls(session: _RecordingSession) -> list[tuple[str, ...]]:
+    return [call for call in session.exec_calls if call[:3] == ("rm", "-rf", "--")]
+
+
+def _git_temp_cleanup_call_indices(session: _RecordingSession) -> list[int]:
+    return [i for i, call in enumerate(session.exec_calls) if call[:3] == ("rm", "-rf", "--")]
+
+
+@pytest.mark.asyncio
+async def test_git_repo_cleans_temp_clone_after_copy_failure() -> None:
+    session = _GitFailureSession(fail_on="copy")
+    repo = GitRepo(repo="openai/example", ref="main")
+
+    with pytest.raises(GitCopyError):
+        await repo.apply(session, Path("/workspace/repo"), Path("/ignored"))
+
+    cleanup_calls = _git_temp_cleanup_calls(session)
+    cleanup_indices = _git_temp_cleanup_call_indices(session)
+    assert len(cleanup_calls) == 2
+    assert cleanup_calls[0] == cleanup_calls[1]
+    assert cleanup_indices[1] > next(
+        i for i, call in enumerate(session.exec_calls) if call[:1] == ("cp",)
+    )
+
+
+@pytest.mark.asyncio
+async def test_git_repo_cleans_temp_clone_after_clone_failure() -> None:
+    session = _GitFailureSession(fail_on="clone")
+    repo = GitRepo(repo="openai/example", ref="main")
+
+    with pytest.raises(GitCloneError):
+        await repo.apply(session, Path("/workspace/repo"), Path("/ignored"))
+
+    cleanup_calls = _git_temp_cleanup_calls(session)
+    cleanup_indices = _git_temp_cleanup_call_indices(session)
+    assert len(cleanup_calls) == 2
+    assert cleanup_calls[0] == cleanup_calls[1]
+    assert cleanup_indices[1] > next(
+        i for i, call in enumerate(session.exec_calls) if call[:2] == ("git", "clone")
     )
 
 
