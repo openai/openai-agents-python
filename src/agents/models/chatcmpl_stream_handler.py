@@ -65,6 +65,7 @@ class StreamingState:
     function_calls: dict[int, ResponseFunctionToolCall] = field(default_factory=dict)
     # Fields for real-time function call streaming
     function_call_streaming: dict[int, bool] = field(default_factory=dict)
+    # Stable output indexes for function calls, including fallback calls.
     function_call_output_idx: dict[int, int] = field(default_factory=dict)
     # Store accumulated thinking text and signature for Anthropic compatibility
     thinking_text: str = ""
@@ -144,6 +145,17 @@ class ChatCmplStreamHandler:
             sequence_number=sequence_number.get_and_increment(),
         )
         state.reasoning_item_done = True
+
+    @staticmethod
+    def _function_call_starting_index(state: StreamingState) -> int:
+        starting_index = 0
+        if state.reasoning_content_index_and_output:
+            starting_index += 1
+        if state.text_content_index_and_output:
+            starting_index += 1
+        if state.refusal_content_index_and_output:
+            starting_index += 1
+        return starting_index
 
     @classmethod
     async def handle_stream(
@@ -456,6 +468,10 @@ class ChatCmplStreamHandler:
                             call_id="",
                         )
                         state.function_call_streaming[tc_delta.index] = False
+                        state.function_call_output_idx[tc_delta.index] = (
+                            cls._function_call_starting_index(state)
+                            + len(state.function_call_output_idx)
+                        )
 
                     tc_function = tc_delta.function
 
@@ -527,25 +543,10 @@ class ChatCmplStreamHandler:
                         and function_call.name
                         and function_call.call_id
                     ):
-                        # Calculate the output index for this function call
-                        function_call_starting_index = 0
-                        if state.reasoning_content_index_and_output:
-                            function_call_starting_index += 1
-                        if state.text_content_index_and_output:
-                            function_call_starting_index += 1
-                        if state.refusal_content_index_and_output:
-                            function_call_starting_index += 1
+                        output_index = state.function_call_output_idx[tc_delta.index]
 
-                        # Add offset for already started function calls
-                        function_call_starting_index += sum(
-                            1 for streaming in state.function_call_streaming.values() if streaming
-                        )
-
-                        # Mark this function call as streaming and store its output index
+                        # Mark this function call as streaming.
                         state.function_call_streaming[tc_delta.index] = True
-                        state.function_call_output_idx[tc_delta.index] = (
-                            function_call_starting_index
-                        )
 
                         # Send initial function call added event
                         func_call_item = ResponseFunctionToolCall(
@@ -570,7 +571,7 @@ class ChatCmplStreamHandler:
                             func_call_item.provider_data = merged_provider_data  # type: ignore[attr-defined]
                         yield ResponseOutputItemAddedEvent(
                             item=func_call_item,
-                            output_index=function_call_starting_index,
+                            output_index=output_index,
                             type="response.output_item.added",
                             sequence_number=sequence_number.get_and_increment(),
                         )
@@ -593,12 +594,7 @@ class ChatCmplStreamHandler:
         for event in cls._finish_reasoning_item(state, sequence_number):
             yield event
 
-        function_call_starting_index = 0
-        if state.reasoning_content_index_and_output:
-            function_call_starting_index += 1
-
         if state.text_content_index_and_output:
-            function_call_starting_index += 1
             # Send end event for this content part
             yield ResponseContentPartDoneEvent(
                 content_index=state.text_content_index_and_output[0],
@@ -611,7 +607,6 @@ class ChatCmplStreamHandler:
             )
 
         if state.refusal_content_index_and_output:
-            function_call_starting_index += 1
             # Send end event for this content part
             yield ResponseContentPartDoneEvent(
                 content_index=state.refusal_content_index_and_output[0],
@@ -656,18 +651,7 @@ class ChatCmplStreamHandler:
             else:
                 # Function call was not streamed (fallback to old behavior)
                 # This handles edge cases where function name never arrived
-                fallback_starting_index = 0
-                if state.reasoning_content_index_and_output:
-                    fallback_starting_index += 1
-                if state.text_content_index_and_output:
-                    fallback_starting_index += 1
-                if state.refusal_content_index_and_output:
-                    fallback_starting_index += 1
-
-                # Add offset for already started function calls
-                fallback_starting_index += sum(
-                    1 for streaming in state.function_call_streaming.values() if streaming
-                )
+                output_index = state.function_call_output_idx[index]
 
                 # Build function call kwargs, include provider_data if present
                 fallback_func_call_kwargs: dict[str, Any] = {
@@ -690,20 +674,20 @@ class ChatCmplStreamHandler:
                 # Send all events at once (backward compatibility)
                 yield ResponseOutputItemAddedEvent(
                     item=ResponseFunctionToolCall(**fallback_func_call_kwargs),
-                    output_index=fallback_starting_index,
+                    output_index=output_index,
                     type="response.output_item.added",
                     sequence_number=sequence_number.get_and_increment(),
                 )
                 yield ResponseFunctionCallArgumentsDeltaEvent(
                     delta=function_call.arguments,
                     item_id=FAKE_RESPONSES_ID,
-                    output_index=fallback_starting_index,
+                    output_index=output_index,
                     type="response.function_call_arguments.delta",
                     sequence_number=sequence_number.get_and_increment(),
                 )
                 yield ResponseOutputItemDoneEvent(
                     item=ResponseFunctionToolCall(**fallback_func_call_kwargs),
-                    output_index=fallback_starting_index,
+                    output_index=output_index,
                     type="response.output_item.done",
                     sequence_number=sequence_number.get_and_increment(),
                 )

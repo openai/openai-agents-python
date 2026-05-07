@@ -38,7 +38,7 @@ The runner then runs a loop:
     1. If the LLM returns a `final_output`, the loop ends and we return the result.
     2. If the LLM does a handoff, we update the current agent and input, and re-run the loop.
     3. If the LLM produces tool calls, we run those tool calls, append the results, and re-run the loop.
-3. If we exceed the `max_turns` passed, we raise a [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded] exception.
+3. If we exceed the `max_turns` passed, we raise a [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded] exception. Pass `max_turns=None` to disable this turn limit.
 
 !!! note
 
@@ -500,7 +500,7 @@ You can use the Agents SDK [DBOS](https://dbos.dev/) integration to run reliable
 The SDK raises exceptions in certain cases. The full list is in [`agents.exceptions`][]. As an overview:
 
 -   [`AgentsException`][agents.exceptions.AgentsException]: This is the base class for all exceptions raised within the SDK. It serves as a generic type from which all other specific exceptions are derived.
--   [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded]: This exception is raised when the agent's run exceeds the `max_turns` limit passed to the `Runner.run`, `Runner.run_sync`, or `Runner.run_streamed` methods. It indicates that the agent could not complete its task within the specified number of interaction turns.
+-   [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded]: This exception is raised when the agent's run exceeds the `max_turns` limit passed to the `Runner.run`, `Runner.run_sync`, or `Runner.run_streamed` methods. It indicates that the agent could not complete its task within the specified number of interaction turns. Set `max_turns=None` to disable the limit.
 -   [`ModelBehaviorError`][agents.exceptions.ModelBehaviorError]: This exception occurs when the underlying model (LLM) produces unexpected or invalid outputs. This can include:
     -   Malformed JSON: When the model provides a malformed JSON structure for tool calls or in its direct output, especially if a specific `output_type` is defined.
     -   Unexpected tool-related failures: When the model fails to use tools in an expected manner

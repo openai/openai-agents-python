@@ -9,6 +9,7 @@ import httpx
 import pytest
 from openai import NOT_GIVEN, APIConnectionError, RateLimitError, omit
 from openai.types.responses import ResponseCompletedEvent, ResponseErrorEvent
+from openai.types.responses.response_create_params import ContextManagement
 from openai.types.shared.reasoning import Reasoning
 
 from agents import (
@@ -841,6 +842,53 @@ def test_build_response_create_kwargs_includes_extra_args_prompt_cache_key():
     )
 
     assert kwargs["prompt_cache_key"] == "cache-key"
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_includes_context_management():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+    context_management: list[ContextManagement] = [
+        {"type": "compaction", "compact_threshold": 200000}
+    ]
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(context_management=context_management),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert kwargs["context_management"] == context_management
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_rejects_duplicate_context_management_extra_args():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="multiple values.*context_management"):
+        model._build_response_create_kwargs(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(
+                context_management=[{"type": "compaction", "compact_threshold": 200000}],
+                extra_args={"context_management": [{"type": "compaction"}]},
+            ),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            previous_response_id=None,
+            conversation_id=None,
+            stream=False,
+            prompt=None,
+        )
 
 
 @pytest.mark.allow_call_model_methods

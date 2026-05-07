@@ -124,6 +124,9 @@ class Permissions(BaseModel):
             return NotImplemented
         return self.to_mode() == other.to_mode()
 
+    def __hash__(self) -> int:
+        return hash(self.to_mode())
+
 
 class FileMode(IntEnum):
     ALL = 0o7

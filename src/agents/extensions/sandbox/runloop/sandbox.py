@@ -1282,7 +1282,10 @@ class RunloopSandboxSession(BaseSandboxSession):
         archive_path = root / f".sandbox-runloop-hydrate-{self.state.session_id.hex}.tar"
 
         try:
-            validate_tar_bytes(payload)
+            validate_tar_bytes(
+                payload,
+                allow_external_symlink_targets=False,
+            )
         except UnsafeTarMemberError as e:
             raise WorkspaceArchiveWriteError(
                 path=root,

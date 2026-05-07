@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from agents import Agent, RunConfig, Runner
+from agents import Agent, RunConfig, Runner, ToolExecutionConfig
+from agents.model_settings import ModelSettings
 from agents.models.interface import Model, ModelProvider
 
 from .fake_model import FakeModel
@@ -54,6 +55,52 @@ async def test_run_config_model_name_override_takes_precedence() -> None:
     # We should have requested the override name, not the agent.model
     assert provider.last_requested == "override-name"
     assert result.final_output == "override-name"
+
+
+@pytest.mark.asyncio
+async def test_run_config_model_name_override_uses_model_specific_default_settings(
+    monkeypatch,
+) -> None:
+    """
+    When RunConfig sets a model name, implicit settings should match that model name rather
+    than the default fallback model.
+    """
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.4-mini")
+    fake_model = FakeModel(initial_output=[get_text_message("override-name")])
+    provider = DummyProvider(model_to_return=fake_model)
+    agent = Agent(name="test")
+    run_config = RunConfig(model="gpt-5", model_provider=provider)
+    result = await Runner.run(agent, input="any", run_config=run_config)
+    assert result.final_output == "override-name"
+    assert fake_model.first_turn_args is not None
+    model_settings = fake_model.first_turn_args["model_settings"]
+    assert model_settings.reasoning.effort == "low"
+    assert model_settings.verbosity == "low"
+
+
+@pytest.mark.asyncio
+async def test_run_config_model_settings_override_implicit_model_specific_defaults(
+    monkeypatch,
+) -> None:
+    """
+    RunConfig model settings should overlay the implicit defaults for the resolved model name.
+    """
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.4-mini")
+    fake_model = FakeModel(initial_output=[get_text_message("override-name")])
+    provider = DummyProvider(model_to_return=fake_model)
+    agent = Agent(name="test")
+    run_config = RunConfig(
+        model="gpt-5",
+        model_provider=provider,
+        model_settings=ModelSettings(temperature=0.3),
+    )
+    result = await Runner.run(agent, input="any", run_config=run_config)
+    assert result.final_output == "override-name"
+    assert fake_model.first_turn_args is not None
+    model_settings = fake_model.first_turn_args["model_settings"]
+    assert model_settings.reasoning.effort == "low"
+    assert model_settings.verbosity == "low"
+    assert model_settings.temperature == 0.3
 
 
 @pytest.mark.asyncio
@@ -138,3 +185,18 @@ def test_trace_include_sensitive_data_explicit_override_takes_precedence(monkeyp
     monkeypatch.setenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "true")
     config = RunConfig(trace_include_sensitive_data=False)
     assert config.trace_include_sensitive_data is False
+
+
+def test_tool_execution_config_rejects_invalid_function_tool_concurrency() -> None:
+    with pytest.raises(
+        ValueError,
+        match="tool_execution.max_function_tool_concurrency must be at least 1",
+    ):
+        ToolExecutionConfig(max_function_tool_concurrency=0)
+
+
+def test_tool_execution_config_is_public_from_agents_package() -> None:
+    config = RunConfig(tool_execution=ToolExecutionConfig(max_function_tool_concurrency=2))
+
+    assert config.tool_execution is not None
+    assert config.tool_execution.max_function_tool_concurrency == 2
