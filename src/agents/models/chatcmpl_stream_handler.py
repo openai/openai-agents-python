@@ -63,9 +63,12 @@ class StreamingState:
     active_reasoning_summary_index: int | None = None
     reasoning_item_done: bool = False
     function_calls: dict[int, ResponseFunctionToolCall] = field(default_factory=dict)
+    assistant_message_output_idx: int | None = None
+    function_calls_before_message_count: int = 0
     # Fields for real-time function call streaming
     function_call_streaming: dict[int, bool] = field(default_factory=dict)
     function_call_events_emitted: dict[int, bool] = field(default_factory=dict)
+    # Stable output indexes for function calls, including fallback calls.
     function_call_output_idx: dict[int, int] = field(default_factory=dict)
     function_call_pending_argument_deltas: dict[int, list[str]] = field(default_factory=dict)
     # Store accumulated thinking text and signature for Anthropic compatibility
@@ -87,23 +90,32 @@ class SequenceNumber:
 
 class ChatCmplStreamHandler:
     @staticmethod
-    def _assistant_message_output_index(state: StreamingState) -> int:
+    def _reasoning_output_count(state: StreamingState) -> int:
         return 1 if state.reasoning_content_index_and_output is not None else 0
 
-    @staticmethod
-    def _function_call_output_base(state: StreamingState) -> int:
-        output_index = 0
-        if state.reasoning_content_index_and_output:
-            output_index += 1
-        if state.text_content_index_and_output or state.refusal_content_index_and_output:
-            output_index += 1
-        return output_index
+    @classmethod
+    def _assistant_message_output_index(cls, state: StreamingState) -> int:
+        if state.assistant_message_output_idx is None:
+            output_index = cls._reasoning_output_count(state)
+            if any(state.function_call_events_emitted.values()):
+                state.function_calls_before_message_count = len(state.function_calls)
+                output_index += state.function_calls_before_message_count
+            else:
+                state.function_calls_before_message_count = 0
+            state.assistant_message_output_idx = output_index
+
+        return state.assistant_message_output_idx
 
     @classmethod
     def _function_call_output_index(cls, state: StreamingState, function_call_index: int) -> int:
         for offset, index in enumerate(state.function_calls):
             if index == function_call_index:
-                return cls._function_call_output_base(state) + offset
+                output_index = cls._reasoning_output_count(state)
+                if state.assistant_message_output_idx is None:
+                    return output_index + offset
+                if offset < state.function_calls_before_message_count:
+                    return output_index + offset
+                return output_index + 1 + offset
 
         raise KeyError(f"Function call index {function_call_index} has not been tracked")
 
@@ -146,7 +158,7 @@ class ChatCmplStreamHandler:
 
     @staticmethod
     def _can_emit_function_call_events(state: StreamingState) -> bool:
-        return bool(state.text_content_index_and_output or state.refusal_content_index_and_output)
+        return True
 
     @classmethod
     def _flush_pending_function_call_events(
@@ -245,6 +257,17 @@ class ChatCmplStreamHandler:
             sequence_number=sequence_number.get_and_increment(),
         )
         state.reasoning_item_done = True
+
+    @staticmethod
+    def _function_call_starting_index(state: StreamingState) -> int:
+        starting_index = 0
+        if state.reasoning_content_index_and_output:
+            starting_index += 1
+        if state.text_content_index_and_output:
+            starting_index += 1
+        if state.refusal_content_index_and_output:
+            starting_index += 1
+        return starting_index
 
     @classmethod
     async def handle_stream(
@@ -761,6 +784,16 @@ class ChatCmplStreamHandler:
                 reasoning_item.encrypted_content = state.thinking_signature
             outputs.append(reasoning_item)
 
+        function_call_outputs = list(state.function_calls.values())
+        function_calls_before_message = function_call_outputs[
+            : state.function_calls_before_message_count
+        ]
+        function_calls_after_message = function_call_outputs[
+            state.function_calls_before_message_count :
+        ]
+
+        outputs.extend(function_calls_before_message)
+
         # include text or refusal content if they exist
         if state.text_content_index_and_output or state.refusal_content_index_and_output:
             assistant_msg = ResponseOutputMessage(
@@ -786,8 +819,7 @@ class ChatCmplStreamHandler:
                 sequence_number=sequence_number.get_and_increment(),
             )
 
-        for function_call in state.function_calls.values():
-            outputs.append(function_call)
+        outputs.extend(function_calls_after_message)
 
         final_response = response.model_copy()
         final_response.output = outputs

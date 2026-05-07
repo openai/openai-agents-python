@@ -22,11 +22,11 @@ def _gpt_5_default_settings(
     return ModelSettings(reasoning=Reasoning(effort=reasoning_effort), verbosity="low")
 
 
-def test_default_model_is_gpt_4_1():
-    assert get_default_model() == "gpt-4.1"
-    assert is_gpt_5_default() is False
-    assert gpt_5_reasoning_settings_required(get_default_model()) is False
-    assert get_default_model_settings().reasoning is None
+def test_default_model_is_gpt_5_4_mini():
+    assert get_default_model() == "gpt-5.4-mini"
+    assert is_gpt_5_default() is True
+    assert gpt_5_reasoning_settings_required(get_default_model()) is True
+    assert get_default_model_settings() == _gpt_5_default_settings("none")
 
 
 @patch.dict(os.environ, {"OPENAI_DEFAULT_MODEL": "gpt-5.4"})
@@ -137,6 +137,39 @@ def test_agent_uses_gpt_5_default_model_settings():
     assert agent.model is None
     assert agent.model_settings.reasoning.effort == "low"  # type: ignore[union-attr]
     assert agent.model_settings.verbosity == "low"
+
+
+def test_agent_uses_model_specific_settings_for_explicit_gpt_5_models():
+    """Agent should not apply the fallback model's GPT-5 settings to explicit GPT-5 models."""
+    agent = Agent(name="test", model="gpt-5")
+    assert agent.model == "gpt-5"
+    assert agent.model_settings == get_default_model_settings("gpt-5")
+    assert agent.model_settings.reasoning.effort == "low"  # type: ignore[union-attr]
+
+
+def test_agent_uses_empty_settings_for_explicit_non_gpt_5_models():
+    """Agent should not apply GPT-5 defaults to explicit non-GPT-5 models."""
+    agent = Agent(name="test", model="gpt-4.1")
+    assert agent.model == "gpt-4.1"
+    assert agent.model_settings == ModelSettings()
+
+
+def test_agent_clone_recomputes_implicit_settings_when_model_changes():
+    """Agent.clone should keep implicit model settings aligned with the cloned model."""
+    agent = Agent(name="test", model="gpt-5")
+    cloned = agent.clone(model="gpt-5.4-mini")
+    assert cloned.model == "gpt-5.4-mini"
+    assert cloned.model_settings == get_default_model_settings("gpt-5.4-mini")
+    assert cloned.model_settings.reasoning.effort == "none"  # type: ignore[union-attr]
+
+
+def test_agent_clone_preserves_explicit_settings_when_model_changes():
+    """Agent.clone should not recompute model settings that were explicitly customized."""
+    model_settings = ModelSettings(temperature=0.3)
+    agent = Agent(name="test", model="gpt-5", model_settings=model_settings)
+    cloned = agent.clone(model="gpt-5.4-mini")
+    assert cloned.model == "gpt-5.4-mini"
+    assert cloned.model_settings == model_settings
 
 
 @patch.dict(os.environ, {"OPENAI_DEFAULT_MODEL": "gpt-5"})

@@ -356,16 +356,16 @@ async def test_stream_response_reasoning_then_streamed_tool_before_text_uses_fin
         event for event in done_events if isinstance(event.item, ResponseFunctionToolCall)
     )
 
-    assert added_message_event.output_index == 1
-    assert added_tool_event.output_index == 2
-    assert [event.output_index for event in delta_events] == [2]
-    assert done_message_event.output_index == 1
-    assert done_tool_event.output_index == 2
+    assert added_tool_event.output_index == 1
+    assert added_message_event.output_index == 2
+    assert [event.output_index for event in delta_events] == [1]
+    assert done_tool_event.output_index == 1
+    assert done_message_event.output_index == 2
 
     assert isinstance(completed_event.response.output[0], ResponseReasoningItem)
-    assert isinstance(completed_event.response.output[1], ResponseOutputMessage)
-    assert isinstance(completed_event.response.output[2], ResponseFunctionToolCall)
-    assert completed_event.response.output[2].name == "lookup_tool"
+    assert isinstance(completed_event.response.output[1], ResponseFunctionToolCall)
+    assert isinstance(completed_event.response.output[2], ResponseOutputMessage)
+    assert completed_event.response.output[1].name == "lookup_tool"
 
 
 @pytest.mark.allow_call_model_methods

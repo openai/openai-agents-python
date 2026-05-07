@@ -1764,8 +1764,14 @@ class TestGuardrailFunctionality:
 
         # Should have triggered guardrail and interrupted
         assert mock_model.interrupts_called == 1
+        interrupt_event = next(
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendInterrupt)
+        )
+        assert interrupt_event.force_response_cancel is True
         assert len(mock_model.sent_messages) == 1
-        assert "triggered_guardrail" in mock_model.sent_messages[0]
+        assert mock_model.sent_messages[0] == "guardrail triggered: triggered_guardrail"
 
         # Should have emitted guardrail_tripped event
         events = []

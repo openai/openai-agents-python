@@ -52,6 +52,33 @@ async def test_non_streamed_max_turns():
 
 
 @pytest.mark.asyncio
+async def test_non_streamed_max_turns_none_disables_limit():
+    model = FakeModel()
+    agent = Agent(
+        name="test_1",
+        model=model,
+        tools=[get_function_tool("some_function", "result")],
+    )
+
+    func_output = json.dumps({"a": "b"})
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_text_message("1"), get_function_tool_call("some_function", func_output)],
+            [get_text_message("2"), get_function_tool_call("some_function", func_output)],
+            [get_text_message("3"), get_function_tool_call("some_function", func_output)],
+            [get_text_message("4"), get_function_tool_call("some_function", func_output)],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="user_message", max_turns=None)
+
+    assert result.final_output == "done"
+    assert result.max_turns is None
+
+
+@pytest.mark.asyncio
 async def test_streamed_max_turns():
     model = FakeModel()
     agent = Agent(
@@ -89,6 +116,34 @@ async def test_streamed_max_turns():
         output = Runner.run_streamed(agent, input="user_message", max_turns=3)
         async for _ in output.stream_events():
             pass
+
+
+@pytest.mark.asyncio
+async def test_streamed_max_turns_none_disables_limit():
+    model = FakeModel()
+    agent = Agent(
+        name="test_1",
+        model=model,
+        tools=[get_function_tool("some_function", "result")],
+    )
+    func_output = json.dumps({"a": "b"})
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_text_message("1"), get_function_tool_call("some_function", func_output)],
+            [get_text_message("2"), get_function_tool_call("some_function", func_output)],
+            [get_text_message("3"), get_function_tool_call("some_function", func_output)],
+            [get_text_message("4"), get_function_tool_call("some_function", func_output)],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="user_message", max_turns=None)
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+    assert result.max_turns is None
 
 
 class Foo(TypedDict):

@@ -285,10 +285,18 @@ class VercelSandboxSession(BaseSandboxSession):
     def _runtime_helpers(self) -> tuple[RuntimeHelperScript, ...]:
         return (RESOLVE_WORKSPACE_PATH_HELPER,)
 
-    def _validate_tar_bytes(self, raw: bytes) -> None:
+    def _validate_tar_bytes(
+        self,
+        raw: bytes,
+        *,
+        allow_external_symlink_targets: bool = True,
+    ) -> None:
         try:
             with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tar:
-                validate_tarfile(tar)
+                validate_tarfile(
+                    tar,
+                    allow_external_symlink_targets=allow_external_symlink_targets,
+                )
         except UnsafeTarMemberError as exc:
             raise ValueError(str(exc)) from exc
         except (tarfile.TarError, OSError) as exc:
@@ -608,7 +616,7 @@ class VercelSandboxSession(BaseSandboxSession):
         )
         tar_command = ("tar", "xf", archive_path.as_posix(), "-C", root.as_posix())
         try:
-            self._validate_tar_bytes(raw)
+            self._validate_tar_bytes(raw, allow_external_symlink_targets=False)
             await self.mkdir(root, parents=True)
             await self._write_files_with_retry([{"path": archive_path.as_posix(), "content": raw}])
             result = await self.exec(*tar_command, shell=False)

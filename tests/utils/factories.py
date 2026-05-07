@@ -107,7 +107,7 @@ def make_run_state(
     *,
     context: RunContextWrapper[TContext] | dict[str, Any] | None = None,
     original_input: Any = "input",
-    max_turns: int = 3,
+    max_turns: int | None = 3,
 ) -> RunState[TContext, Agent[Any]]:
     """Create a RunState with sensible defaults for tests."""
 

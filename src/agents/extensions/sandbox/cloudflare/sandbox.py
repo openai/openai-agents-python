@@ -1161,7 +1161,10 @@ class CloudflareSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveWriteError(path=root, context={"reason": "non_bytes_payload"})
 
         try:
-            validate_tar_bytes(bytes(raw))
+            validate_tar_bytes(
+                bytes(raw),
+                allow_external_symlink_targets=False,
+            )
         except UnsafeTarMemberError as e:
             raise WorkspaceArchiveWriteError(
                 path=root,

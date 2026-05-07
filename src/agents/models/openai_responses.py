@@ -852,6 +852,7 @@ class OpenAIResponsesModel(Model):
             "prompt_cache_retention": self._non_null_or_omit(model_settings.prompt_cache_retention),
             "reasoning": self._non_null_or_omit(model_settings.reasoning),
             "metadata": self._non_null_or_omit(model_settings.metadata),
+            "context_management": self._non_null_or_omit(model_settings.context_management),
         }
         duplicate_extra_arg_keys = sorted(set(create_kwargs).intersection(extra_args))
         if duplicate_extra_arg_keys:
