@@ -669,32 +669,40 @@ async def test_internal_client_ownership(fake_dapr_client: FakeDaprClient):
         assert fake_dapr_client._closed is True
 
 
-async def test_corrupted_data_handling(fake_dapr_client: FakeDaprClient):
-    """Test that corrupted JSON data is handled gracefully."""
+@pytest.mark.parametrize(
+    "raw_state",
+    [
+        b"invalid json data",
+        b"\xff",
+        json.dumps({"some": "object"}).encode("utf-8"),
+    ],
+)
+async def test_add_items_rejects_corrupted_aggregate_state(
+    fake_dapr_client: FakeDaprClient,
+    raw_state: bytes,
+):
+    """Test that corrupted aggregate state is not overwritten by add_items."""
     session = await _create_test_session(fake_dapr_client, "corruption_test")
 
     try:
         await session.clear_session()
 
-        # Add some valid data first
+        # Add some valid data first.
         await session.add_items([{"role": "user", "content": "valid message"}])
 
-        # Inject corrupted data directly into state store
+        # Inject corrupted data directly into state store.
         messages_key = "corruption_test:messages"
-        fake_dapr_client._state[messages_key] = b"invalid json data"
+        fake_dapr_client._state[messages_key] = raw_state
 
-        # get_items should handle corrupted data gracefully
+        # get_items should handle corrupted data gracefully.
         items = await session.get_items()
         assert len(items) == 0  # Corrupted data returns empty list
 
-        # Should be able to add new valid items after corruption
+        # add_items should not overwrite the corrupted aggregate state.
         valid_item: TResponseInputItem = {"role": "user", "content": "valid after corruption"}
-        await session.add_items([valid_item])
-
-        # Should now have valid items
-        items = await session.get_items()
-        assert len(items) == 1
-        assert items[0].get("content") == "valid after corruption"
+        with pytest.raises(ValueError, match="stored Dapr session messages"):
+            await session.add_items([valid_item])
+        assert fake_dapr_client._state[messages_key] == raw_state
 
     finally:
         await session.close()

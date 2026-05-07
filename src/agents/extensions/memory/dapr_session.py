@@ -177,7 +177,7 @@ class DaprSession(SessionABC):
         """Deserialize a JSON string to an item. Can be overridden by subclasses."""
         return json.loads(item)  # type: ignore[no-any-return]
 
-    def _decode_messages(self, data: bytes | None) -> list[Any]:
+    def _decode_messages(self, data: bytes | None, *, strict: bool = False) -> list[Any]:
         if not data:
             return []
         try:
@@ -185,9 +185,22 @@ class DaprSession(SessionABC):
             messages = json.loads(messages_json)
             if isinstance(messages, list):
                 return list(messages)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            if strict:
+                raise ValueError(
+                    "The stored Dapr session messages are not valid JSON and cannot be "
+                    "safely updated."
+                ) from error
             return []
+        if strict:
+            raise ValueError(
+                "The stored Dapr session messages must be a JSON list and cannot be safely updated."
+            )
         return []
+
+    def _decode_messages_for_update(self, data: bytes | None) -> list[Any]:
+        """Decode aggregate state before an operation that rewrites it."""
+        return self._decode_messages(data, strict=True)
 
     def _calculate_retry_delay(self, attempt: int) -> float:
         base: float = _RETRY_BASE_DELAY_SECONDS * (2 ** max(0, attempt - 1))
@@ -290,7 +303,7 @@ class DaprSession(SessionABC):
                     key=self._messages_key,
                     state_metadata=self._get_read_metadata(),
                 )
-                existing_messages = self._decode_messages(response.data)
+                existing_messages = self._decode_messages_for_update(response.data)
                 updated_messages = existing_messages + serialized_items
                 messages_json = json.dumps(updated_messages, separators=(",", ":"))
                 etag = response.etag
