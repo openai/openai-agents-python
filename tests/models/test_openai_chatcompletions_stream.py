@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from openai.types.chat.chat_completion_chunk import (
@@ -622,32 +623,48 @@ async def test_stream_response_yields_tool_call_arguments_before_stream_end(
 
     monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
     model = OpenAIProvider(use_responses=False).get_model("gpt-4")
-    events = model.stream_response(
-        system_instructions=None,
-        input="",
-        model_settings=ModelSettings(),
-        tools=[],
-        output_schema=None,
-        handoffs=[],
-        tracing=ModelTracing.DISABLED,
-        previous_response_id=None,
-        conversation_id=None,
-        prompt=None,
-    )
+    observed_events: asyncio.Queue[Any] = asyncio.Queue()
+    output_events = []
 
-    assert (await asyncio.wait_for(anext(events), timeout=1)).type == "response.created"
-    added_event = await asyncio.wait_for(anext(events), timeout=1)
-    assert added_event.type == "response.output_item.added"
-    assert isinstance(added_event.item, ResponseFunctionToolCall)
-    assert added_event.item.name == "write_file"
-    delta_event = await asyncio.wait_for(anext(events), timeout=1)
-    assert delta_event.type == "response.function_call_arguments.delta"
-    assert delta_event.delta == '{"filename": "'
+    async def collect_events() -> None:
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            output_events.append(event)
+            await observed_events.put(event)
 
-    allow_finish.set()
-    remaining_events = []
-    async for event in events:
-        remaining_events.append(event)
+    collect_task = asyncio.create_task(collect_events())
+    try:
+        assert (await asyncio.wait_for(observed_events.get(), timeout=1)).type == "response.created"
+        added_event = await asyncio.wait_for(observed_events.get(), timeout=1)
+        assert added_event.type == "response.output_item.added"
+        assert isinstance(added_event.item, ResponseFunctionToolCall)
+        assert added_event.item.name == "write_file"
+        delta_event = await asyncio.wait_for(observed_events.get(), timeout=1)
+        assert delta_event.type == "response.function_call_arguments.delta"
+        assert delta_event.delta == '{"filename": "'
+        assert not collect_task.done()
+
+        allow_finish.set()
+        await asyncio.wait_for(collect_task, timeout=1)
+    finally:
+        if not collect_task.done():
+            collect_task.cancel()
+            try:
+                await collect_task
+            except asyncio.CancelledError:
+                pass
+
+    remaining_events = output_events[3:]
 
     assert [event.type for event in remaining_events] == [
         "response.function_call_arguments.delta",
