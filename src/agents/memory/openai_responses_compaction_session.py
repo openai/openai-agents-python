@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("openai-agents.openai.compaction")
 
 DEFAULT_COMPACTION_THRESHOLD = 10
+_ALL_SESSION_ITEMS_LIMIT = 2_147_483_647
 
 OpenAIResponsesCompactionMode = Literal["previous_response_id", "input", "auto"]
 
@@ -217,7 +218,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             _normalize_compaction_output_items(compacted.output or [])
         )
 
-        previous_items = await self.underlying_session.get_items()
+        previous_items = await self._get_all_underlying_session_items()
         await self._replace_underlying_session_items(
             output_items=output_items,
             previous_items=previous_items,
@@ -234,6 +235,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit)
+
+    async def _get_all_underlying_session_items(self) -> list[TResponseInputItem]:
+        return await self.underlying_session.get_items(limit=_ALL_SESSION_ITEMS_LIMIT)
 
     async def _replace_underlying_session_items(
         self,
@@ -262,7 +266,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         clear_error: Exception,
     ) -> None:
         try:
-            current_items = await self.underlying_session.get_items()
+            current_items = await self._get_all_underlying_session_items()
         except Exception:
             logger.warning(
                 "Failed to inspect session history after compaction replacement clear failed.",
@@ -273,15 +277,20 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if current_items == previous_items:
             return
 
-        await self._restore_underlying_session_items(previous_items, clear_error)
+        await self._restore_underlying_session_items(
+            previous_items, clear_error, clear_existing_items=False
+        )
 
     async def _restore_underlying_session_items(
         self,
         previous_items: list[TResponseInputItem],
         replacement_error: Exception,
+        *,
+        clear_existing_items: bool = True,
     ) -> None:
         try:
-            await self.underlying_session.clear_session()
+            if clear_existing_items:
+                await self.underlying_session.clear_session()
             if previous_items:
                 await self.underlying_session.add_items(list(previous_items))
         except Exception:
