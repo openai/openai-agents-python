@@ -391,8 +391,43 @@ class MCPServer(abc.ABC):
         if require_approval is None:
             return False
 
-        def _to_bool(value: str) -> bool:
-            return value == "always"
+        def _to_bool(value: object, *, location: str) -> bool:
+            if value == "always":
+                return True
+            if value == "never":
+                return False
+            raise UserError(
+                f"Invalid require_approval value at {location}: "
+                f"expected 'always' or 'never', got {value!r}."
+            )
+
+        def _validate_tool_names(value: object, *, location: str) -> list[str]:
+            if not isinstance(value, list):
+                raise UserError(
+                    f"Invalid require_approval tool_names at {location}: "
+                    f"expected a list of strings, got {type(value).__name__}."
+                )
+
+            tool_names: list[str] = []
+            for index, tool_name in enumerate(value):
+                if not isinstance(tool_name, str):
+                    raise UserError(
+                        f"Invalid require_approval tool name at {location}[{index}]: "
+                        f"expected a string, got {type(tool_name).__name__}."
+                    )
+                tool_names.append(tool_name)
+            return tool_names
+
+        def _get_tool_names_entry(value: object, *, policy: str) -> list[str]:
+            if not isinstance(value, dict):
+                raise UserError(
+                    f"Invalid require_approval.{policy}: "
+                    f"expected an object with tool_names, got {type(value).__name__}."
+                )
+            return _validate_tool_names(
+                value.get("tool_names", []),
+                location=f"require_approval.{policy}.tool_names",
+            )
 
         def _is_tool_list_schema(value: object) -> bool:
             if not isinstance(value, dict):
@@ -408,15 +443,25 @@ class MCPServer(abc.ABC):
         if isinstance(require_approval, dict) and _is_tool_list_schema(require_approval):
             always_entry: RequireApprovalToolList | Any = require_approval.get("always", {})
             never_entry: RequireApprovalToolList | Any = require_approval.get("never", {})
-            always_names = (
-                always_entry.get("tool_names", []) if isinstance(always_entry, dict) else []
-            )
-            never_names = never_entry.get("tool_names", []) if isinstance(never_entry, dict) else []
+            invalid_keys = sorted(set(require_approval) - {"always", "never"})
+            if invalid_keys:
+                raise UserError(
+                    "Invalid require_approval tool list policy: "
+                    f"unexpected keys {invalid_keys!r}; expected only 'always' and 'never'."
+                )
+            always_names = _get_tool_names_entry(always_entry, policy="always")
+            never_names = _get_tool_names_entry(never_entry, policy="never")
+            overlapping_names = sorted(set(always_names) & set(never_names))
+            if overlapping_names:
+                raise UserError(
+                    "Invalid require_approval tool list policy: "
+                    f"tool names cannot appear in both always and never: {overlapping_names!r}."
+                )
             tool_list_mapping: dict[str, bool] = {}
             for name in always_names:
-                tool_list_mapping[str(name)] = True
+                tool_list_mapping[name] = True
             for name in never_names:
-                tool_list_mapping[str(name)] = False
+                tool_list_mapping[name] = False
             return tool_list_mapping
 
         if isinstance(require_approval, dict):
@@ -424,8 +469,10 @@ class MCPServer(abc.ABC):
             for name, value in require_approval.items():
                 if isinstance(value, bool):
                     tool_mapping[str(name)] = value
-                elif isinstance(value, str) and value in ("always", "never"):
-                    tool_mapping[str(name)] = _to_bool(value)
+                else:
+                    tool_mapping[str(name)] = _to_bool(
+                        value, location=f"require_approval[{name!r}]"
+                    )
             return tool_mapping
 
         if callable(require_approval):
@@ -434,7 +481,7 @@ class MCPServer(abc.ABC):
         if isinstance(require_approval, bool):
             return require_approval
 
-        return _to_bool(require_approval)
+        return _to_bool(require_approval, location="require_approval")
 
     def _get_needs_approval_for_tool(
         self,
