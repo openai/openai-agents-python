@@ -10,7 +10,15 @@ import pytest
 
 import agents.sandbox.entries.artifacts as artifacts_module
 from agents.sandbox import SandboxConcurrencyLimits
-from agents.sandbox.entries import Dir, File, GitRepo, LocalDir, LocalFile, resolve_workspace_path
+from agents.sandbox.entries import (
+    BaseEntry,
+    Dir,
+    File,
+    GitRepo,
+    LocalDir,
+    LocalFile,
+    resolve_workspace_path,
+)
 from agents.sandbox.errors import (
     ExecNonZeroError,
     GitCloneError,
@@ -266,6 +274,47 @@ async def test_local_file_allows_explicit_outside_base_dir_source(tmp_path: Path
 
     assert result[0].path == Path("/workspace/copied.txt")
     assert session.writes[Path("/workspace/copied.txt")] == b"secret"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "local_file", "src": "/tmp/secret.txt", "allow_outside_base_dir": True},
+        {"type": "local_dir", "src": "/tmp/secret", "allow_outside_base_dir": True},
+    ],
+)
+def test_local_artifact_opt_in_is_rejected_from_manifest_data(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="trusted-only field"):
+        BaseEntry.parse(payload)
+
+
+def test_manifest_data_cannot_opt_out_of_local_artifact_base_dir() -> None:
+    with pytest.raises(ValueError, match="trusted-only field"):
+        Manifest.model_validate(
+            {
+                "entries": {
+                    "copied.txt": {
+                        "type": "local_file",
+                        "src": "/tmp/secret.txt",
+                        "allow_outside_base_dir": True,
+                    }
+                }
+            }
+        )
+
+
+def test_local_artifact_opt_in_is_not_serialized(tmp_path: Path) -> None:
+    local_file = LocalFile(src=tmp_path / "secret.txt", allow_outside_base_dir=True)
+    local_dir = LocalDir(src=tmp_path / "secret", allow_outside_base_dir=True)
+    manifest = Manifest(entries={"copied.txt": local_file, "copied": local_dir})
+
+    assert "allow_outside_base_dir" not in local_file.model_dump(mode="json")
+    assert "allow_outside_base_dir" not in local_dir.model_dump(mode="json")
+    payload = manifest.model_dump(mode="json")
+    assert "allow_outside_base_dir" not in payload["entries"]["copied.txt"]
+    assert "allow_outside_base_dir" not in payload["entries"]["copied"]
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ import stat
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 from pydantic import Field, field_serializer, field_validator
 
@@ -104,8 +104,10 @@ class File(BaseEntry):
 
 class LocalFile(BaseEntry):
     type: Literal["local_file"] = "local_file"
+    _manifest_data_forbidden_fields: ClassVar[set[str]] = {"allow_outside_base_dir"}
+
     src: Path
-    allow_outside_base_dir: bool = False
+    allow_outside_base_dir: bool = Field(default=False, exclude=True)
 
     async def apply(
         self,
@@ -151,9 +153,11 @@ class LocalFile(BaseEntry):
 
 class LocalDir(BaseEntry):
     type: Literal["local_dir"] = "local_dir"
+    _manifest_data_forbidden_fields: ClassVar[set[str]] = {"allow_outside_base_dir"}
+
     is_dir: bool = True
     src: Path | None = Field(default=None)
-    allow_outside_base_dir: bool = False
+    allow_outside_base_dir: bool = Field(default=False, exclude=True)
 
     def model_post_init(self, context: object, /) -> None:
         _ = context
