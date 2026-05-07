@@ -119,7 +119,7 @@ def build_policy_sandbox_agent(*, skills_root: Path) -> SandboxAgent[HealthcareS
                 lazy_from=LocalDirLazySkillSource(
                     # This is a host path read by the SDK process.
                     # Requested skills are copied into `skills_path` in the sandbox.
-                    source=LocalDir(src=skills_root),
+                    source=LocalDir(src=skills_root, allow_outside_base_dir=True),
                 )
             ),
         ],

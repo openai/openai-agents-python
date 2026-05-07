@@ -189,8 +189,14 @@ def build_manifest_with_all_entry_types(*, workspace_root: Path, source_root: Pa
                     ),
                 }
             ),
-            "copied_file.txt": LocalFile(src=source_root / "local-file.txt"),
-            "copied_dir": LocalDir(src=source_root / "local-dir"),
+            "copied_file.txt": LocalFile(
+                src=source_root / "local-file.txt",
+                allow_outside_base_dir=True,
+            ),
+            "copied_dir": LocalDir(
+                src=source_root / "local-dir",
+                allow_outside_base_dir=True,
+            ),
             "repo": GitRepo(repo="openai/mock-sandbox-fixture", ref="main"),
             "mounts/s3": S3Mount(
                 bucket="s3-bucket",

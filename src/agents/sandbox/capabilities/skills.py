@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from ...tool import FunctionTool, Tool
 from ..entries import BaseEntry, Dir, File, LocalDir, LocalFile
-from ..errors import SkillsConfigError
+from ..errors import LocalDirReadError, SkillsConfigError
 from ..manifest import Manifest
 from ..session.base_sandbox_session import BaseSandboxSession
 from ..types import User
@@ -132,7 +132,10 @@ class LocalDirLazySkillSource(LazySkillSource):
     def _src_root(self) -> Path | None:
         if self.source.src is None:
             return None
-        src_root = (Path.cwd() / self.source.src).resolve()
+        try:
+            src_root = self.source._resolve_local_dir_src_root(Path.cwd())
+        except LocalDirReadError:
+            return None
         if not src_root.exists() or not src_root.is_dir():
             return None
         return src_root
@@ -213,7 +216,10 @@ class LocalDirLazySkillSource(LazySkillSource):
                 "path": str(metadata.path).replace("\\", "/"),
             }
 
-        await LocalDir(src=src_root / metadata.path.name).apply(
+        await LocalDir(
+            src=src_root / metadata.path.name,
+            allow_outside_base_dir=self.source.allow_outside_base_dir,
+        ).apply(
             session,
             skill_dest,
             base_dir=Path.cwd(),

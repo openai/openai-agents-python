@@ -33,6 +33,10 @@ _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _HAS_O_DIRECTORY = hasattr(os, "O_DIRECTORY")
 
 
+def _absolute_without_symlink_resolution(path: Path) -> Path:
+    return Path(os.path.abspath(path))
+
+
 def _sha256_handle(handle: io.BufferedReader) -> str:
     digest = hashlib.sha256()
     while True:
@@ -101,6 +105,7 @@ class File(BaseEntry):
 class LocalFile(BaseEntry):
     type: Literal["local_file"] = "local_file"
     src: Path
+    allow_outside_base_dir: bool = False
 
     async def apply(
         self,
@@ -108,9 +113,11 @@ class LocalFile(BaseEntry):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
-        src = base_dir / self.src
-        src = src if src.is_absolute() else src.absolute()
-        local_dir = LocalDir(src=self.src.parent)
+        src = _absolute_without_symlink_resolution(base_dir / self.src)
+        local_dir = LocalDir(
+            src=self.src.parent,
+            allow_outside_base_dir=self.allow_outside_base_dir,
+        )
         rel_child = Path(self.src.name)
         fd: int | None = None
         try:
@@ -146,6 +153,7 @@ class LocalDir(BaseEntry):
     type: Literal["local_dir"] = "local_dir"
     is_dir: bool = True
     src: Path | None = Field(default=None)
+    allow_outside_base_dir: bool = False
 
     def model_post_init(self, context: object, /) -> None:
         _ = context
@@ -198,13 +206,13 @@ class LocalDir(BaseEntry):
 
     def _resolve_local_dir_src_root(self, base_dir: Path) -> Path:
         assert self.src is not None
-        src_input = base_dir / self.src
+        src_input = self._resolved_src_input(base_dir)
         for current in self._iter_local_dir_source_paths(base_dir):
             try:
                 current_stat = current.lstat()
             except FileNotFoundError:
                 raise LocalDirReadError(
-                    src=src_input if src_input.is_absolute() else src_input.absolute(),
+                    src=src_input,
                     context={"reason": "path_not_found"},
                 ) from None
             except OSError as e:
@@ -217,7 +225,24 @@ class LocalDir(BaseEntry):
                         "child": self._local_dir_source_child_label(base_dir, current),
                     },
                 )
-        return src_input if src_input.is_absolute() else src_input.absolute()
+        return src_input
+
+    def _resolved_src_input(self, base_dir: Path) -> Path:
+        assert self.src is not None
+        src_input = _absolute_without_symlink_resolution(base_dir / self.src)
+        if self.allow_outside_base_dir:
+            return src_input
+
+        base = _absolute_without_symlink_resolution(base_dir)
+        try:
+            src_input.relative_to(base)
+        except ValueError as exc:
+            raise LocalDirReadError(
+                src=src_input,
+                context={"reason": "outside_base_dir", "base_dir": str(base)},
+                cause=exc,
+            ) from exc
+        return src_input
 
     def _iter_local_dir_source_paths(self, base_dir: Path) -> list[Path]:
         assert self.src is not None
@@ -462,6 +487,8 @@ class LocalDir(BaseEntry):
 
     def _open_local_dir_src_root_fd(self, *, base_dir: Path, src_root: Path) -> int:
         assert self.src is not None
+        if not self.allow_outside_base_dir:
+            self._resolved_src_input(base_dir)
 
         dir_flags = (
             os.O_RDONLY
@@ -563,7 +590,10 @@ class LocalDir(BaseEntry):
     ) -> int:
         assert self.src is not None
         src = src_root / rel_child
-        validation_dir = LocalDir(src=self.src / rel_child.parent)
+        validation_dir = LocalDir(
+            src=self.src / rel_child.parent,
+            allow_outside_base_dir=self.allow_outside_base_dir,
+        )
         try:
             src_stat = src.lstat()
         except FileNotFoundError:

@@ -209,6 +209,84 @@ async def test_base_sandbox_session_uses_current_working_directory_for_local_fil
 
 
 @pytest.mark.asyncio
+async def test_local_file_rejects_absolute_source_outside_base_dir(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=outside / "secret.txt").apply(
+            session,
+            Path("/workspace/copied.txt"),
+            base,
+        )
+
+    assert excinfo.value.context["reason"] == "outside_base_dir"
+    assert excinfo.value.context["base_dir"] == str(base)
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_file_rejects_relative_source_outside_base_dir(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=Path("../outside/secret.txt")).apply(
+            session,
+            Path("/workspace/copied.txt"),
+            base,
+        )
+
+    assert excinfo.value.context["reason"] == "outside_base_dir"
+    assert excinfo.value.context["base_dir"] == str(base)
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_file_allows_explicit_outside_base_dir_source(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+
+    result = await LocalFile(
+        src=outside / "secret.txt",
+        allow_outside_base_dir=True,
+    ).apply(session, Path("/workspace/copied.txt"), base)
+
+    assert result[0].path == Path("/workspace/copied.txt")
+    assert session.writes[Path("/workspace/copied.txt")] == b"secret"
+
+
+@pytest.mark.asyncio
+async def test_local_file_allows_absolute_source_inside_base_dir(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    source_dir = base / "source"
+    source_dir.mkdir(parents=True)
+    (source_dir / "safe.txt").write_text("safe", encoding="utf-8")
+    session = _RecordingSession()
+
+    result = await LocalFile(src=source_dir / "safe.txt").apply(
+        session,
+        Path("/workspace/copied.txt"),
+        base,
+    )
+
+    assert result[0].path == Path("/workspace/copied.txt")
+    assert session.writes[Path("/workspace/copied.txt")] == b"safe"
+
+
+@pytest.mark.asyncio
 async def test_local_file_rejects_symlinked_source_ancestors(tmp_path: Path) -> None:
     target_dir = tmp_path / "secret-dir"
     target_dir.mkdir()
@@ -591,6 +669,73 @@ async def test_local_dir_apply_uses_configured_file_copy_fanout(
         Path("/workspace/copied/a.txt"): b"a",
         Path("/workspace/copied/b.txt"): b"b",
     }
+
+
+@pytest.mark.asyncio
+async def test_local_dir_rejects_absolute_source_outside_base_dir(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+
+    with pytest.raises(LocalDirReadError) as excinfo:
+        await LocalDir(src=outside).apply(session, Path("/workspace/copied"), base)
+
+    assert excinfo.value.context["reason"] == "outside_base_dir"
+    assert excinfo.value.context["base_dir"] == str(base)
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_dir_rejects_relative_source_outside_base_dir(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+
+    with pytest.raises(LocalDirReadError) as excinfo:
+        await LocalDir(src=Path("../outside")).apply(session, Path("/workspace/copied"), base)
+
+    assert excinfo.value.context["reason"] == "outside_base_dir"
+    assert excinfo.value.context["base_dir"] == str(base)
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_dir_allows_explicit_outside_base_dir_source(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+
+    result = await LocalDir(src=outside, allow_outside_base_dir=True).apply(
+        session,
+        Path("/workspace/copied"),
+        base,
+    )
+
+    assert result[0].path == Path("/workspace/copied/secret.txt")
+    assert session.writes[Path("/workspace/copied/secret.txt")] == b"secret"
+
+
+@pytest.mark.asyncio
+async def test_local_dir_allows_absolute_source_inside_base_dir(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    source = base / "source"
+    source.mkdir(parents=True)
+    (source / "safe.txt").write_text("safe", encoding="utf-8")
+    session = _RecordingSession()
+
+    result = await LocalDir(src=source).apply(session, Path("/workspace/copied"), base)
+
+    assert result[0].path == Path("/workspace/copied/safe.txt")
+    assert session.writes[Path("/workspace/copied/safe.txt")] == b"safe"
 
 
 @pytest.mark.asyncio
