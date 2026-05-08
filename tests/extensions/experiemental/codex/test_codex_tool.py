@@ -2032,3 +2032,39 @@ def test_codex_tool_coerce_options_rejects_empty_run_context_key() -> None:
                 "run_context_thread_id_key": " ",
             }
         )
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_starts_new_thread_for_whitespace_configured_thread_id() -> None:
+    state = CodexMockState()
+    state.thread_id = "thread-new"
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-new"},
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(codex=cast(Codex, FakeCodex(state)), thread_id="   "),
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "Continue", "path": ""}]}'
+    context = ToolContext(
+        context=None,
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    result = await tool.on_invoke_tool(context, input_json)
+
+    assert isinstance(result, CodexToolResult)
+    # Whitespace-only configured thread_id should not be passed to resume_thread.
+    assert state.resume_calls == 0
+    assert state.start_calls == 1
+    assert state.last_resumed_thread_id is None

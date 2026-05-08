@@ -832,7 +832,7 @@ def _resolve_call_thread_id(
         if context_thread_id:
             return context_thread_id
 
-    return configured_thread_id
+    return _normalize_thread_id(configured_thread_id)
 
 
 def _read_thread_id_from_run_context(ctx: RunContextWrapper[Any], key: str) -> str | None:
