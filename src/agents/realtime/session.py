@@ -723,10 +723,18 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
         else:
+            error_message = f"Tool {event.name} not found"
+            await self._model.send_event(
+                RealtimeModelSendToolOutput(
+                    tool_call=event,
+                    output=error_message,
+                    start_response=True,
+                )
+            )
             await self._put_event(
                 RealtimeError(
                     info=self._event_info,
-                    error={"message": f"Tool {event.name} not found"},
+                    error={"message": error_message},
                 )
             )
 

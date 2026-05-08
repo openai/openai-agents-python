@@ -1264,7 +1264,7 @@ class TestToolCallExecution:
 
     @pytest.mark.asyncio
     async def test_unknown_tool_handling(self, mock_model, mock_agent, mock_function_tool):
-        """Test that unknown tools emit a RealtimeError event"""
+        """Test that unknown tools complete the model call and emit a RealtimeError event"""
         # Set up agent to return different tool than what's called
         mock_function_tool.name = "known_tool"
         mock_agent.get_all_tools.return_value = [mock_function_tool]
@@ -1276,8 +1276,14 @@ class TestToolCallExecution:
             name="unknown_tool", call_id="call_unknown", arguments="{}"
         )
 
-        # Should emit a RealtimeError event for unknown tool
         await session._handle_tool_call(tool_call_event)
+
+        # Should complete the model-visible tool call with an error output
+        assert len(mock_model.sent_tool_outputs) == 1
+        sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_call == tool_call_event
+        assert "Tool unknown_tool not found" in sent_output
+        assert start_response is True
 
         # Should have emitted a RealtimeError event
         assert session._event_queue.qsize() >= 1
