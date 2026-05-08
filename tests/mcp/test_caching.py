@@ -61,3 +61,37 @@ async def test_server_caching_works(
         # Without invalidating the cache, calling list_tools() again should return the cached value
         result_tools = await server.list_tools(run_context, agent)
         assert result_tools == tools
+
+
+@pytest.mark.asyncio
+@patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.list_tools")
+async def test_server_caching_empty_tools_list(
+    mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
+):
+    """An empty tools list should still be cached (regression: empty list was falsy, so the
+    cache check fell through and re-fetched on every call)."""
+    server = MCPServerStdio(
+        params={
+            "command": tee,
+        },
+        cache_tools_list=True,
+    )
+
+    mock_list_tools.return_value = ListToolsResult(tools=[])
+
+    async with server:
+        run_context = RunContextWrapper(context=None)
+        agent = Agent(name="test_agent", instructions="Test agent")
+
+        result_tools = await server.list_tools(run_context, agent)
+        assert result_tools == []
+        assert mock_list_tools.call_count == 1, "list_tools() should have been called once"
+
+        # Empty cached list should NOT trigger a re-fetch.
+        result_tools = await server.list_tools(run_context, agent)
+        assert result_tools == []
+        assert mock_list_tools.call_count == 1, (
+            "empty tools list should be cached and not re-fetched"
+        )
