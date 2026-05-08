@@ -22,7 +22,7 @@ from .span_data import (
     TurnSpanData,
 )
 from .spans import Span
-from .traces import Trace
+from .traces import NoOpTrace, Trace
 
 if TYPE_CHECKING:
     from openai.types.responses import Response
@@ -61,7 +61,10 @@ def trace(
         The newly created trace object.
     """
     current_trace = get_trace_provider().get_current_trace()
-    if current_trace:
+    # Skip the "trace already exists" warning when the active trace is a no-op
+    # (e.g. tracing is globally disabled). Nesting another trace inside a no-op
+    # parent is harmless and the warning is misleading noise.
+    if current_trace and not isinstance(current_trace, NoOpTrace):
         logger.warning(
             "Trace already exists. Creating a new trace, but this is probably a mistake."
         )
