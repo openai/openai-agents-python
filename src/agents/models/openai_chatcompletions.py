@@ -5,7 +5,7 @@ import time
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
-from openai import AsyncOpenAI, AsyncStream, Omit, omit
+from openai import AsyncOpenAI, AsyncStream, NotGiven, Omit, omit
 from openai.types import ChatModel
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice
@@ -423,8 +423,11 @@ class OpenAIChatCompletionsModel(Model):
             "extra_body": model_settings.extra_body,
             "metadata": self._non_null_or_omit(model_settings.metadata),
         }
+        extra_args = model_settings.extra_args or {}
         duplicate_extra_arg_keys = sorted(
-            set(create_kwargs).intersection(model_settings.extra_args or {})
+            k
+            for k in extra_args
+            if k in create_kwargs and not isinstance(create_kwargs[k], Omit | NotGiven)
         )
         if duplicate_extra_arg_keys:
             if len(duplicate_extra_arg_keys) == 1:
@@ -436,7 +439,7 @@ class OpenAIChatCompletionsModel(Model):
             raise TypeError(
                 f"chat.completions.create() got multiple values for keyword arguments {keys}"
             )
-        create_kwargs.update(model_settings.extra_args or {})
+        create_kwargs.update(extra_args)
 
         ret = await self._get_client().chat.completions.create(**create_kwargs)
 

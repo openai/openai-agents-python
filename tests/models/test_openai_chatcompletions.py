@@ -428,6 +428,28 @@ async def test_fetch_response_non_stream(monkeypatch) -> None:
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_fetch_response_allows_extra_arg_when_explicit_arg_is_omitted() -> None:
+    """A user-supplied extra_arg whose first-class field is only present as the
+    `omit` sentinel should pass through, not raise a duplicate-argument error."""
+    kwargs = await _run_chat_completions_model_with_custom_base_url(
+        model_settings=ModelSettings(extra_args={"temperature": 0.25})
+    )
+    assert kwargs["temperature"] == 0.25
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fetch_response_rejects_duplicate_extra_args_with_explicit_value() -> None:
+    """When the first-class field has an explicit (non-omit) value, a colliding
+    extra_arg key should still raise a TypeError to surface the conflict."""
+    with pytest.raises(TypeError, match="multiple values.*temperature"):
+        await _run_chat_completions_model_with_custom_base_url(
+            model_settings=ModelSettings(temperature=0.5, extra_args={"temperature": 0.25})
+        )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_custom_base_url_prompt_cache_key_uses_model_settings_only() -> None:
     default_kwargs = await _run_chat_completions_model_with_custom_base_url()
     explicit_kwargs = await _run_chat_completions_model_with_custom_base_url(
