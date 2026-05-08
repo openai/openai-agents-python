@@ -80,6 +80,50 @@ def test_set_trace_provider_registers_shutdown_once(monkeypatch: pytest.MonkeyPa
 
     assert cast(Any, tracing_setup.GLOBAL_TRACE_PROVIDER) is second
     assert registrations == [tracing_setup._shutdown_global_trace_provider]
+    # The replaced provider should be shut down so it does not leak its
+    # background threads, network clients, or other processor resources.
+    assert first.shutdown_calls == 1
+    assert second.shutdown_calls == 0
+
+
+def test_set_trace_provider_swallows_previous_shutdown_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ExplodingProvider:
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(atexit, "register", lambda callback: callback)
+    monkeypatch.setattr(tracing_setup, "GLOBAL_TRACE_PROVIDER", None)
+    monkeypatch.setattr(tracing_setup, "_SHUTDOWN_HANDLER_REGISTERED", False)
+
+    first = _ExplodingProvider()
+    second = _DummyProvider()
+    tracing_setup.set_trace_provider(cast(Any, first))
+    # Failure inside ``previous.shutdown()`` must not propagate or leave the
+    # global state pointing at the old provider.
+    tracing_setup.set_trace_provider(cast(Any, second))
+
+    assert first.shutdown_calls == 1
+    assert cast(Any, tracing_setup.GLOBAL_TRACE_PROVIDER) is second
+
+
+def test_set_trace_provider_skips_shutdown_when_same_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(atexit, "register", lambda callback: callback)
+    monkeypatch.setattr(tracing_setup, "GLOBAL_TRACE_PROVIDER", None)
+    monkeypatch.setattr(tracing_setup, "_SHUTDOWN_HANDLER_REGISTERED", False)
+
+    provider = _DummyProvider()
+    tracing_setup.set_trace_provider(cast(Any, provider))
+    tracing_setup.set_trace_provider(cast(Any, provider))
+
+    assert provider.shutdown_calls == 0
 
 
 def test_get_trace_provider_returns_existing_provider(monkeypatch: pytest.MonkeyPatch) -> None:
