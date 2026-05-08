@@ -55,5 +55,7 @@ def get_session_id_if_available(session: Session | None) -> str | None:
         session_id = session.session_id
     except Exception:
         return None
+    if not isinstance(session_id, str):
+        return None
     session_id = session_id.strip()
     return session_id if session_id else None
