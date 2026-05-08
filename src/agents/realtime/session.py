@@ -362,7 +362,7 @@ class RealtimeSession(RealtimeModelListener):
 
                                 # If still missing and this is an assistant item, fall back to
                                 # accumulated transcript deltas tracked during the turn.
-                                if incoming_item.role == "assistant":
+                                if not preserved and incoming_item.role == "assistant":
                                     preserved = self._item_transcripts.get(incoming_item.item_id)
 
                                 if preserved:

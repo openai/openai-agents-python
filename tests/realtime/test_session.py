@@ -2447,3 +2447,41 @@ class TestTranscriptPreservation:
         preserved_item = cast(AssistantMessageItem, session._history[0])
         assert isinstance(preserved_item.content[0], AssistantAudio)
         assert preserved_item.content[0].transcript == "partial transcript"
+
+    @pytest.mark.asyncio
+    async def test_existing_transcript_not_overwritten_by_stale_deltas(
+        self, mock_model, mock_agent
+    ):
+        """Existing transcripts must take precedence over leftover delta accumulators.
+
+        ``_item_transcripts`` is keyed by item_id and persists across updates within a
+        turn. When the model retrieves an item without a transcript, the merge should
+        fall back to deltas only when no existing transcript is present – otherwise
+        the complete transcript already in history would be clobbered by partial
+        (or stale) delta state.
+        """
+        session = RealtimeSession(mock_model, mock_agent, None)
+
+        # History already has the completed transcript for the item.
+        initial_item = AssistantMessageItem(
+            item_id="assist_3",
+            role="assistant",
+            content=[AssistantAudio(audio=None, transcript="Final complete transcript")],
+        )
+        session._history = [initial_item]
+
+        # Simulate stale/leftover delta state for the same item id.
+        session._item_transcripts["assist_3"] = "stale partial"
+
+        # Update arrives without transcript populated; merge must keep the existing
+        # complete transcript rather than reverting to the stale delta accumulator.
+        update_without_transcript = AssistantMessageItem(
+            item_id="assist_3",
+            role="assistant",
+            content=[AssistantAudio(audio=None, transcript=None)],
+        )
+        await session.on_event(RealtimeModelItemUpdatedEvent(item=update_without_transcript))
+
+        preserved_item = cast(AssistantMessageItem, session._history[0])
+        assert isinstance(preserved_item.content[0], AssistantAudio)
+        assert preserved_item.content[0].transcript == "Final complete transcript"
