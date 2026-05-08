@@ -169,6 +169,13 @@ class RealtimeSessionModelSettings(TypedDict):
     speed: NotRequired[float]
     """The speed of the model's responses."""
 
+    max_output_tokens: NotRequired[int | Literal["inf"]]
+    """Maximum number of output tokens for a single assistant response, inclusive of tool calls.
+
+    Provide an integer between 1 and 4096 to limit output tokens, or ``"inf"`` for the maximum
+    available tokens for a given model. Defaults to ``"inf"`` server-side.
+    """
+
     input_audio_format: NotRequired[RealtimeAudioFormat | OpenAIRealtimeAudioFormats]
     """The format for input audio streams."""
 
