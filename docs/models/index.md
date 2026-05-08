@@ -22,7 +22,7 @@ Start with the simplest path that fits your setup:
 
 For most OpenAI-only apps, the recommended path is to use string model names with the default OpenAI provider and stay on the Responses model path.
 
-When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-4.1`](https://developers.openai.com/api/docs/models/gpt-4.1) for compatibility and low latency. If you have access, we recommend setting your agents to [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) for higher quality while keeping explicit `model_settings`.
+When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-5.4-mini`](https://developers.openai.com/api/docs/models/gpt-5.4-mini) with `reasoning.effort="none"` and `verbosity="low"` for low-latency agent workflows. If you have access, we recommend setting your agents to [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) for higher quality while keeping explicit `model_settings`.
 
 If you want to switch to other models like [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5), there are two ways to configure your agents.
 
@@ -70,7 +70,7 @@ my_agent = Agent(
 )
 ```
 
-For lower latency, using `reasoning.effort="none"` with `gpt-5.5` is recommended. The gpt-4.1 family (including mini and nano variants) also remains a solid choice for building interactive agent apps.
+For lower latency, using `reasoning.effort="none"` with GPT-5 models is recommended.
 
 #### ComputerTool model selection
 

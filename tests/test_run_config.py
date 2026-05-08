@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agents import Agent, RunConfig, Runner
+from agents import Agent, RunConfig, Runner, ToolExecutionConfig
 from agents.model_settings import ModelSettings
 from agents.models.interface import Model, ModelProvider
 
@@ -185,3 +185,18 @@ def test_trace_include_sensitive_data_explicit_override_takes_precedence(monkeyp
     monkeypatch.setenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "true")
     config = RunConfig(trace_include_sensitive_data=False)
     assert config.trace_include_sensitive_data is False
+
+
+def test_tool_execution_config_rejects_invalid_function_tool_concurrency() -> None:
+    with pytest.raises(
+        ValueError,
+        match="tool_execution.max_function_tool_concurrency must be at least 1",
+    ):
+        ToolExecutionConfig(max_function_tool_concurrency=0)
+
+
+def test_tool_execution_config_is_public_from_agents_package() -> None:
+    config = RunConfig(tool_execution=ToolExecutionConfig(max_function_tool_concurrency=2))
+
+    assert config.tool_execution is not None
+    assert config.tool_execution.max_function_tool_concurrency == 2
