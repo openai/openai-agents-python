@@ -42,6 +42,27 @@ def test_no_op_trace_double_enter_logs_error(caplog) -> None:
     trace.__exit__(None, None, None)
 
 
+def test_no_op_trace_skips_context_reset_on_generator_exit() -> None:
+    """NoOpTrace must skip context reset on GeneratorExit to match TraceImpl/ReattachedTrace.
+
+    When async generators are GC'd from a different task, resetting a contextvars
+    token created in another context raises ValueError. All other Trace/Span types
+    already check for GeneratorExit and skip the reset; NoOpTrace must too.
+    """
+    Scope.set_current_trace(None)
+    trace = NoOpTrace()
+    trace.__enter__()
+    # The token was set in this context; pretend we're unwinding from a different
+    # async task by stashing the token and checking it isn't consumed on GeneratorExit.
+    token = trace._prev_context_token
+    assert token is not None
+    trace.__exit__(GeneratorExit, GeneratorExit(), None)
+    # Token must remain (reset skipped) so the original context owner can reset it.
+    assert trace._prev_context_token is token
+    # Cleanup so subsequent tests have a clean scope.
+    Scope.reset_current_trace(token)
+
+
 def test_trace_impl_lifecycle_sets_scope() -> None:
     Scope.set_current_trace(None)
     processor = DummyProcessor()

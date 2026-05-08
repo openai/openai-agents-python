@@ -399,7 +399,7 @@ class NoOpTrace(Trace):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.finish(reset_current=True)
+        self.finish(reset_current=exc_type is not GeneratorExit)
 
     def start(self, mark_as_current: bool = False):
         if mark_as_current:
