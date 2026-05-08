@@ -190,16 +190,11 @@ class RedisSession(SessionABC):
 
         async with self._lock:
             pipe = self._redis.pipeline()
+            now = str(int(time.time()))
 
-            # Set session metadata with current timestamp
-            pipe.hset(
-                self._session_key,
-                mapping={
-                    "session_id": self.session_id,
-                    "created_at": str(int(time.time())),
-                    "updated_at": str(int(time.time())),
-                },
-            )
+            # Set session metadata, preserving created_at across subsequent writes.
+            pipe.hset(self._session_key, "session_id", self.session_id)
+            pipe.hsetnx(self._session_key, "created_at", now)
 
             # Add all items to the messages list
             serialized_items = []
@@ -211,7 +206,7 @@ class RedisSession(SessionABC):
                 pipe.rpush(self._messages_key, *serialized_items)
 
             # Update the session timestamp
-            pipe.hset(self._session_key, "updated_at", str(int(time.time())))
+            pipe.hset(self._session_key, "updated_at", now)
 
             # Execute all commands
             await pipe.execute()
