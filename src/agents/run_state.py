@@ -1554,11 +1554,11 @@ def _serialize_guardrail_results(
             },
             "output": {
                 "tripwireTriggered": result.output.tripwire_triggered,
-                "outputInfo": result.output.output_info,
+                "outputInfo": _ensure_json_compatible(result.output.output_info),
             },
         }
         if isinstance(result, OutputGuardrailResult):
-            entry["agentOutput"] = result.agent_output
+            entry["agentOutput"] = _ensure_json_compatible(result.agent_output)
             entry["agent"] = _serialize_agent_reference(
                 result.agent,
                 agent_identity_keys_by_id=agent_identity_keys_by_id,
@@ -1584,7 +1584,7 @@ def _serialize_tool_guardrail_results(
             {
                 "guardrail": {"type": type_label, "name": guardrail_name},
                 "output": {
-                    "outputInfo": result.output.output_info,
+                    "outputInfo": _ensure_json_compatible(result.output.output_info),
                     "behavior": result.output.behavior,
                 },
             }
