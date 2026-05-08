@@ -5,6 +5,7 @@ import base64
 import io
 import wave
 from dataclasses import dataclass
+from typing import cast
 
 from ..exceptions import UserError
 from .imports import np, npt
@@ -65,7 +66,7 @@ class AudioInput:
             # convert to int16 without mutating the caller's buffer
             int16_buffer = (np.clip(self.buffer, -1.0, 1.0) * 32767).astype(np.int16)
         elif self.buffer.dtype == np.int16:
-            int16_buffer = self.buffer
+            int16_buffer = cast("npt.NDArray[np.int16]", self.buffer)
         else:
             raise UserError("Buffer must be a numpy array of int16 or float32")
 
