@@ -2747,3 +2747,24 @@ def test_replaced_agent_as_tool_preserves_agent_markers_for_build_agent_map() ->
     agent_map = _build_agent_map(parent_agent)
 
     assert agent_map["nested_agent"] is nested_agent
+
+
+def test_agent_as_tool_normalizes_explicit_tool_name() -> None:
+    """An explicit tool_name with invalid characters must be normalized.
+
+    The function calling API rejects names with spaces or special characters.
+    Without this transform, callers passing ``tool_name="My Tool!"`` would
+    get a tool whose ``.name`` is silently rejected by the model. The default
+    code path (``tool_name=None``) already normalizes via the agent name, so
+    this preserves parity for explicit names.
+    """
+    agent = Agent(name="nested")
+
+    spaced = agent.as_tool(tool_name="My Tool!", tool_description="x")
+    assert spaced.name == "my_tool_"
+
+    valid = agent.as_tool(tool_name="already_valid", tool_description="x")
+    assert valid.name == "already_valid"
+
+    fallback = agent.as_tool(tool_name=None, tool_description="x")
+    assert fallback.name == "nested"

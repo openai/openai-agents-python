@@ -565,7 +565,9 @@ class Agent(AgentBase, Generic[TContext]):
                 return True
             return issubclass(value, BaseModel)
 
-        tool_name_resolved = tool_name or _transforms.transform_string_function_style(self.name)
+        tool_name_resolved = _transforms.transform_string_function_style(
+            tool_name or self.name
+        )
         tool_description_resolved = tool_description or ""
         has_custom_parameters = parameters is not None
         include_schema = bool(include_input_schema and has_custom_parameters)
