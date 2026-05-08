@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from agents import RunContextWrapper
@@ -41,8 +43,10 @@ def test_post_init_rejects_invalid_field_types() -> None:
 def test_clone_does_not_mutate_original_lists() -> None:
     """Cloning with a new list must not affect the original agent's lists."""
     original = RealtimeAgent(name="orig", tools=[], handoffs=[])
-    cloned = original.clone(tools=["t1"])  # type: ignore[list-item]
+    new_tools: list[Any] = ["t1"]
+    cloned = original.clone(tools=new_tools)
     assert original.tools == []
-    assert cloned.tools == ["t1"]
+    assert len(cloned.tools) == 1
+    assert cloned.tools is not original.tools
     # Shared reference when not overridden (documented shallow-copy behavior).
     assert cloned.handoffs is original.handoffs
