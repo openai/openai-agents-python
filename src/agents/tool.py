@@ -1914,9 +1914,13 @@ def function_tool(
 
 
 def _is_computer_provider(candidate: object) -> bool:
-    return isinstance(candidate, ComputerProvider) or (
-        hasattr(candidate, "create") and callable(candidate.create)
-    )
+    if isinstance(candidate, ComputerProvider):
+        return True
+    if isinstance(candidate, Computer | AsyncComputer):
+        # A resolved computer instance is never a provider, even if a subclass
+        # happens to expose a callable `create` attribute.
+        return False
+    return hasattr(candidate, "create") and callable(candidate.create)
 
 
 def _validate_function_tool_timeout_config(tool: FunctionTool) -> None:

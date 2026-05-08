@@ -1427,6 +1427,31 @@ async def test_output_guardrail_tripwire_raises_from_run_loop_task_before_stream
 
 
 @pytest.mark.asyncio
+async def test_output_guardrail_exception_raises_from_run_loop_task_before_stream_consumption():
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        raise RuntimeError("guardrail failed")
+
+    model = FakeModel(initial_output=[get_text_message("first_test")])
+
+    agent = Agent(
+        name="test",
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+        model=model,
+    )
+
+    result = Runner.run_streamed(agent, input="user_message")
+
+    assert result.run_loop_task is not None
+    with pytest.raises(RuntimeError, match="guardrail failed"):
+        await result.run_loop_task
+
+    assert result.final_output is None
+    assert result.is_complete is True
+
+
+@pytest.mark.asyncio
 async def test_run_input_guardrail_tripwire_triggered_causes_exception_streamed():
     def guardrail_function(
         context: RunContextWrapper[Any], agent: Agent[Any], input: Any

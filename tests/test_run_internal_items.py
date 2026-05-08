@@ -73,6 +73,67 @@ def test_drop_orphan_function_calls_preserves_non_mapping_entries() -> None:
     )
 
 
+def test_drop_orphan_function_calls_drops_reasoning_preceding_dropped_tool_call() -> None:
+    # Regression: reasoning items tied to a now-dropped orphan tool call would otherwise be
+    # forwarded to the API and trigger
+    # ``Item 'rs_...' of type 'reasoning' was provided without its required following item``.
+    payload: list[Any] = [
+        cast(TResponseInputItem, {"role": "user", "content": "hi"}),
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_orphan_a", "summary": []}),
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_orphan_b", "summary": []}),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "function_call",
+                "call_id": "orphan_call",
+                "name": "orphan",
+                "arguments": "{}",
+            },
+        ),
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_paired", "summary": []}),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "function_call",
+                "call_id": "paired_call",
+                "name": "paired",
+                "arguments": "{}",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call_output", "call_id": "paired_call", "output": "ok"},
+        ),
+    ]
+
+    filtered = run_items.drop_orphan_function_calls(cast(list[TResponseInputItem], payload))
+
+    reasoning_ids = [
+        entry.get("id")
+        for entry in filtered
+        if isinstance(entry, dict) and entry.get("type") == "reasoning"
+    ]
+    assert reasoning_ids == ["rs_paired"]
+    assert not any(
+        isinstance(entry, dict)
+        and entry.get("type") == "function_call"
+        and entry.get("call_id") == "orphan_call"
+        for entry in filtered
+    )
+
+
+def test_drop_orphan_function_calls_keeps_lone_reasoning_when_no_tool_calls_dropped() -> None:
+    # Server-managed conversations (or compaction) may forward standalone reasoning items whose
+    # required following item lives in the server-side conversation. We must not drop those.
+    payload: list[Any] = [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_lone", "summary": []}),
+    ]
+
+    filtered = run_items.drop_orphan_function_calls(cast(list[TResponseInputItem], payload))
+
+    assert filtered == payload
+
+
 def test_drop_orphan_function_calls_handles_tool_search_calls() -> None:
     payload: list[Any] = [
         cast(

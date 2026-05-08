@@ -1248,6 +1248,64 @@ async def test_resume_honors_permanent_namespaced_function_approval_with_new_cal
 
 
 @pytest.mark.asyncio
+async def test_resume_skips_needs_approval_checker_when_status_resolved() -> None:
+    """Resolved approve/reject decisions must short-circuit needs_approval_checker.
+
+    A user-supplied checker may have side effects (telemetry, network, exceptions).
+    When the approval status is already True or False, we must not invoke it.
+    """
+
+    @function_tool(needs_approval=True)
+    async def approve_me(value: str) -> str:
+        return value
+
+    approved_call = make_function_tool_call(
+        approve_me.name, call_id="approved-call", arguments='{"value":"a"}'
+    )
+    rejected_call = make_function_tool_call(
+        approve_me.name, call_id="rejected-call", arguments='{"value":"b"}'
+    )
+    agent = Agent(name="agent")
+    context_wrapper = make_context_wrapper()
+    context_wrapper.approve_tool(ToolApprovalItem(agent=agent, raw_item=approved_call))
+    context_wrapper.reject_tool(ToolApprovalItem(agent=agent, raw_item=rejected_call))
+
+    runs = [
+        ToolRunFunction(tool_call=approved_call, function_tool=approve_me),
+        ToolRunFunction(tool_call=rejected_call, function_tool=approve_me),
+    ]
+    checker_calls: list[str] = []
+
+    async def _needs_approval_checker(run: ToolRunFunction) -> bool:
+        checker_calls.append(run.tool_call.call_id)
+        raise AssertionError("checker must not run for resolved approvals")
+
+    rejections: list[str | None] = []
+
+    async def _record_rejection(
+        call_id: str | None,
+        _tool_call: ResponseFunctionToolCall,
+        _tool: Any,
+    ) -> None:
+        rejections.append(call_id)
+
+    selected = await _select_function_tool_runs_for_resume(
+        runs,
+        approval_items_by_call_id={},
+        context_wrapper=context_wrapper,
+        needs_approval_checker=_needs_approval_checker,
+        output_exists_checker=lambda _run: False,
+        record_rejection=_record_rejection,
+        pending_interruption_adder=lambda _item: None,
+        pending_item_builder=lambda run: ToolApprovalItem(agent=agent, raw_item=run.tool_call),
+    )
+
+    assert checker_calls == []
+    assert [run.tool_call.call_id for run in selected] == ["approved-call"]
+    assert rejections == ["rejected-call"]
+
+
+@pytest.mark.asyncio
 async def test_resume_rebuilds_function_runs_from_object_approvals() -> None:
     """Rebuild should handle ResponseFunctionToolCall approval items."""
 

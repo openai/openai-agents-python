@@ -3393,6 +3393,46 @@ async def test_execute_handoffs_uses_public_agent_for_ignored_extra_handoffs():
 
 
 @pytest.mark.asyncio
+async def test_execute_handoffs_preserves_tool_input_guardrail_results():
+    """Tool input guardrail results from concurrent function calls must survive a handoff."""
+
+    def guardrail(data) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="checked")
+
+    guardrail_obj: ToolInputGuardrail[Any] = ToolInputGuardrail(guardrail_function=guardrail)
+
+    def _echo(value: str) -> str:
+        return value
+
+    guarded_tool = function_tool(
+        _echo,
+        name_override="guarded",
+        tool_input_guardrails=[guardrail_obj],
+    )
+    target = Agent(name="target")
+    public_agent = Agent(name="triage", tools=[guarded_tool], handoffs=[target])
+    execution_agent = public_agent.clone()
+    set_public_agent(execution_agent, public_agent)
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("guarded", json.dumps({"value": "hi"}), call_id="c1"),
+            get_handoff_tool_call(target),
+        ],
+        usage=Usage(),
+        response_id="resp",
+    )
+
+    result = await get_execute_result(execution_agent, response)
+
+    assert isinstance(result.next_step, NextStepHandoff)
+    assert result.tool_input_guardrail_results, (
+        "Tool input guardrail results should not be dropped when a handoff fires alongside "
+        "a function tool call."
+    )
+    assert result.tool_input_guardrail_results[0].output.output_info == "checked"
+
+
+@pytest.mark.asyncio
 async def test_execute_tools_emits_hosted_mcp_rejection_response():
     """Hosted MCP rejections without callbacks should emit approval responses."""
 

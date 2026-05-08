@@ -385,7 +385,7 @@ async def _run_output_guardrails_for_stream(
         raise
     except Exception:
         logger.error("Unexpected error in output guardrails", exc_info=True)
-        return []
+        raise
 
 
 async def _finalize_streamed_final_output(

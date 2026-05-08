@@ -1641,8 +1641,12 @@ class _ConversionHelper:
                     t = item.get("type")
                     if t == "input_text":
                         _txt = item.get("text")
-                        text_val = _txt if isinstance(_txt, str) else None
-                        content.append(Content(type="input_text", text=text_val))
+                        # Skip parts with missing/non-string text rather than
+                        # forwarding text=None, which produces an invalid item
+                        # the realtime API will reject.
+                        if not isinstance(_txt, str):
+                            continue
+                        content.append(Content(type="input_text", text=_txt))
                     elif t == "input_image":
                         iu = item.get("image_url")
                         if isinstance(iu, str) and iu:

@@ -1509,6 +1509,19 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert payload["parallel_tool_calls"] is False
         assert payload["reasoning"] == {"effort": "low"}
 
+    def test_session_config_passes_max_output_tokens(self, model):
+        # Integer cap is forwarded verbatim to the server payload.
+        cfg = model._get_session_config({"max_output_tokens": 256})
+        assert cfg.max_output_tokens == 256
+
+        # The "inf" sentinel is preserved (e.g., to override an earlier cap).
+        cfg_inf = model._get_session_config({"max_output_tokens": "inf"})
+        assert cfg_inf.max_output_tokens == "inf"
+
+        # Omitting the key leaves the field unset so the server default applies.
+        cfg_default = model._get_session_config({})
+        assert cfg_default.max_output_tokens is None
+
     def test_session_config_allows_tool_search_as_named_function_tool_choice(self, model):
         cfg = model._get_session_config(
             {

@@ -916,6 +916,57 @@ def test_build_response_create_kwargs_rejects_duplicate_context_management_extra
 
 
 @pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_allows_extra_query_and_body_via_extra_args():
+    """Regression: extra_query / extra_body supplied only through extra_args must not
+    falsely trigger the duplicate-keyword guard, which previously fired because the
+    create_kwargs entries were left as ``None`` (rather than ``omit``) when the matching
+    ModelSettings field was unset. Mirrors the fix in #3185 for omitted-kwarg paths."""
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(
+            extra_args={"extra_query": {"a": "b"}, "extra_body": {"c": "d"}},
+        ),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert kwargs["extra_query"] == {"a": "b"}
+    assert kwargs["extra_body"] == {"c": "d"}
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_rejects_duplicate_extra_query_extra_args():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="multiple values.*extra_query"):
+        model._build_response_create_kwargs(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(
+                extra_query={"a": "b"},
+                extra_args={"extra_query": {"a": "z"}},
+            ),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            previous_response_id=None,
+            conversation_id=None,
+            stream=False,
+            prompt=None,
+        )
+
+
+@pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 async def test_custom_base_url_prompt_cache_key_uses_model_settings_only() -> None:
     default_kwargs = await _run_responses_model_with_custom_base_url()

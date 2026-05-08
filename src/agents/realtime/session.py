@@ -362,7 +362,7 @@ class RealtimeSession(RealtimeModelListener):
 
                                 # If still missing and this is an assistant item, fall back to
                                 # accumulated transcript deltas tracked during the turn.
-                                if incoming_item.role == "assistant":
+                                if not preserved and incoming_item.role == "assistant":
                                     preserved = self._item_transcripts.get(incoming_item.item_id)
 
                                 if preserved:
@@ -723,10 +723,18 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
         else:
+            error_message = f"Tool {event.name} not found"
+            await self._model.send_event(
+                RealtimeModelSendToolOutput(
+                    tool_call=event,
+                    output=error_message,
+                    start_response=True,
+                )
+            )
             await self._put_event(
                 RealtimeError(
                     info=self._event_info,
-                    error={"message": f"Tool {event.name} not found"},
+                    error={"message": error_message},
                 )
             )
 

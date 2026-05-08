@@ -27,6 +27,7 @@ from openai.types.responses import (
     ResponseOutputText,
 )
 
+from agents.exceptions import UserError
 from agents.model_settings import ModelSettings
 from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
@@ -132,6 +133,50 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
     assert completed_resp.usage.total_tokens == 12
     assert completed_resp.usage.input_tokens_details.cached_tokens == 2
     assert completed_resp.usage.output_tokens_details.reasoning_tokens == 3
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("previous_response_id", "conversation_id", "expected_param"),
+    [
+        ("resp_123", None, "previous_response_id"),
+        (None, "conv_123", "conversation_id"),
+    ],
+)
+async def test_stream_response_rejects_server_managed_conversation_state(
+    monkeypatch: pytest.MonkeyPatch,
+    previous_response_id: str | None,
+    conversation_id: str | None,
+    expected_param: str,
+) -> None:
+    called = False
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("_fetch_response should not be called")
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    with pytest.raises(UserError, match="server-managed conversation state") as exc_info:
+        async for _event in model.stream_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=None,
+        ):
+            pass
+
+    assert expected_param in str(exc_info.value)
+    assert called is False
 
 
 @pytest.mark.allow_call_model_methods

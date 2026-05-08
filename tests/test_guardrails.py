@@ -21,6 +21,8 @@ from agents import (
     function_tool,
 )
 from agents.guardrail import input_guardrail, output_guardrail
+from agents.result import RunResultStreaming
+from agents.run_internal.guardrails import run_input_guardrails_with_queue
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_text_message
@@ -1640,3 +1642,62 @@ async def test_blocking_guardrail_cancels_remaining_on_trigger_streaming():
     assert model.first_turn_args is None, (
         "Model should not have been called when guardrail triggered"
     )
+
+
+@pytest.mark.asyncio
+async def test_streaming_input_guardrail_exception_awaits_cancelled_siblings():
+    slow_started = asyncio.Event()
+    slow_cleanup_finished = False
+
+    async def slow_guardrail(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        nonlocal slow_cleanup_finished
+        slow_started.set()
+        try:
+            await asyncio.sleep(LONG_DELAY)
+            return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+        except asyncio.CancelledError:
+            await asyncio.sleep(SHORT_DELAY)
+            slow_cleanup_finished = True
+            raise
+
+    async def raising_guardrail(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await slow_started.wait()
+        raise RuntimeError("guardrail failed")
+
+    agent = Agent(name="test_agent", model=FakeModel())
+    context = RunContextWrapper(context=None)
+    streamed_result = RunResultStreaming(
+        "test input",
+        [],
+        [],
+        None,
+        [],
+        [],
+        [],
+        [],
+        context,
+        agent,
+        0,
+        None,
+        None,
+        None,
+    )
+
+    with pytest.raises(RuntimeError, match="guardrail failed"):
+        await run_input_guardrails_with_queue(
+            agent=agent,
+            guardrails=[
+                InputGuardrail(guardrail_function=slow_guardrail),
+                InputGuardrail(guardrail_function=raising_guardrail),
+            ],
+            input="test input",
+            context=context,
+            streamed_result=streamed_result,
+            parent_span=None,
+        )
+
+    assert slow_cleanup_finished is True

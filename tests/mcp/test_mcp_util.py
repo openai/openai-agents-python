@@ -1597,6 +1597,30 @@ def test_to_function_tool_does_not_mutate_mcp_input_schema():
     assert tool.inputSchema == {"type": "object", "description": "Test tool"}
 
 
+def test_to_function_tool_failed_strict_conversion_keeps_original_schema():
+    # ``ensure_strict_json_schema`` mutates the schema in place. Until this is
+    # isolated, a partially-mutated schema would be served as non-strict, leaking
+    # strict-mode artifacts (e.g. ``required`` and ``additionalProperties: false``)
+    # on a tool that is_strict=False.
+    schema = {
+        "type": "object",
+        "properties": {
+            "x": {"type": "object", "additionalProperties": True},
+        },
+    }
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema == {
+        "type": "object",
+        "properties": {
+            "x": {"type": "object", "additionalProperties": True},
+        },
+    }
+
+
 class StructuredContentTestServer(FakeMCPServer):
     """Test server that allows setting both content and structured content for testing."""
 
