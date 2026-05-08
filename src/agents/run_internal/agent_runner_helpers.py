@@ -145,9 +145,17 @@ def attach_usage_to_span(
         span.span_data.usage = task_usage_to_span_data(usage)
         return
 
+    # Span data classes like FunctionSpanData / GenerationSpanData / ResponseSpanData
+    # do not declare a "metadata" slot, so blindly assigning to it would raise
+    # AttributeError on strictly slot-based subclasses. Skip the fallback in that case.
+    if not hasattr(span.span_data, "metadata"):
+        return
     metadata = dict(getattr(span.span_data, "metadata", None) or {})
     metadata["usage"] = total_usage_to_span_metadata(usage)
-    span.span_data.metadata = metadata
+    try:
+        span.span_data.metadata = metadata
+    except AttributeError:
+        return
 
 
 def should_cancel_parallel_model_task_on_input_guardrail_trip() -> bool:
