@@ -112,6 +112,11 @@ class AsyncSQLiteSession(SessionABC):
         Returns:
             List of input items representing the conversation history
         """
+        # SQLite treats a negative LIMIT as "no limit", which would silently return
+        # the full conversation history when the caller asked for a bounded slice.
+        # Match the explicit limit=0 contract instead and short-circuit to an empty list.
+        if limit is not None and limit <= 0:
+            return []
 
         async with self._locked_connection() as conn:
             if limit is None:
