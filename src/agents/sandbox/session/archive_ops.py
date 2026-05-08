@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import io
-import shutil
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-from ..errors import InvalidCompressionSchemeError
+from ..errors import InvalidCompressionSchemeError, WorkspaceArchiveWriteError
 from .archive_extraction import WorkspaceArchiveExtractor, safe_zip_member_rel_path
 
 if TYPE_CHECKING:
     from .base_sandbox_session import BaseSandboxSession
+
+
+MAX_ARCHIVE_INPUT_BYTES = 512 * 1024 * 1024
 
 
 async def extract_archive(
@@ -37,7 +39,7 @@ async def extract_archive(
     # extraction step consume the stream, and zip extraction may require seeking.
     spool = tempfile.SpooledTemporaryFile(max_size=16 * 1024 * 1024, mode="w+b")
     try:
-        shutil.copyfileobj(data, spool)
+        _copy_limited_archive(data, spool, path=normalized_path)
         spool.seek(0)
         await session.write(normalized_path, spool)
         spool.seek(0)
@@ -86,6 +88,25 @@ async def extract_zip_archive(
         destination_root=destination_root,
         data=data,
     )
+
+
+def _copy_limited_archive(data: io.IOBase, out: io.IOBase, *, path: Path) -> None:
+    total = 0
+    while True:
+        chunk = data.read(io.DEFAULT_BUFFER_SIZE)
+        if chunk in ("", b""):
+            return
+        total += len(chunk)
+        if total > MAX_ARCHIVE_INPUT_BYTES:
+            raise WorkspaceArchiveWriteError(
+                path=path,
+                context={
+                    "reason": "archive input size exceeds limit",
+                    "limit": MAX_ARCHIVE_INPUT_BYTES,
+                    "actual": total,
+                },
+            )
+        out.write(chunk)
 
 
 def _build_workspace_archive_extractor(session: BaseSandboxSession) -> WorkspaceArchiveExtractor:
