@@ -95,9 +95,11 @@ async def run_input_guardrails_with_queue(
                     _error_tracing.attach_error_to_current_span(span_error)
                 break
             queue.put_nowait(result)
-    except Exception:
+    except BaseException:
         for t in guardrail_tasks:
-            t.cancel()
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*guardrail_tasks, return_exceptions=True)
         raise
 
     streamed_result.input_guardrail_results = (
