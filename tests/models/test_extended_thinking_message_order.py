@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 from openai.types.chat import ChatCompletionMessageParam
 
 from agents.extensions.models.litellm_model import LitellmModel
@@ -220,15 +222,19 @@ class TestExtendedThinkingMessageOrder:
         history. Only the first split should retain content, thinking_blocks, and
         reasoning_content; subsequent splits should carry the tool_call alone.
         """
-        messages: list[ChatCompletionMessageParam] = [
-            {"role": "user", "content": "Search both"},
+        # Build the assistant message via cast so mypy doesn't reject the
+        # extra keys (`thinking_blocks`, `reasoning_content`) which are not
+        # part of the upstream ChatCompletionAssistantMessageParam TypedDict
+        # but are surfaced by litellm for Anthropic extended thinking.
+        assistant_msg = cast(
+            ChatCompletionMessageParam,
             {
                 "role": "assistant",
                 "content": "Looking up both queries.",
-                "thinking_blocks": [  # type: ignore[typeddict-unknown-key]
+                "thinking_blocks": [
                     {"type": "thinking", "thinking": "plan", "signature": "sig_abc"}
                 ],
-                "reasoning_content": "internal plan",  # type: ignore[typeddict-unknown-key]
+                "reasoning_content": "internal plan",
                 "tool_calls": [
                     {
                         "id": "call_1",
@@ -242,6 +248,10 @@ class TestExtendedThinkingMessageOrder:
                     },
                 ],
             },
+        )
+        messages: list[ChatCompletionMessageParam] = [
+            {"role": "user", "content": "Search both"},
+            assistant_msg,
             {"role": "tool", "tool_call_id": "call_1", "content": "ok1"},
             {"role": "tool", "tool_call_id": "call_2", "content": "ok2"},
         ]
@@ -249,7 +259,7 @@ class TestExtendedThinkingMessageOrder:
         model = LitellmModel("claude-3-5-sonnet")
         result = model._fix_tool_message_ordering(messages)
 
-        assistants = [m for m in result if m.get("role") == "assistant"]
+        assistants = [cast(dict[str, Any], m) for m in result if m.get("role") == "assistant"]
         assert len(assistants) == 2
         # First split keeps the shared fields.
         assert assistants[0].get("content") == "Looking up both queries."
@@ -260,8 +270,8 @@ class TestExtendedThinkingMessageOrder:
         assert "thinking_blocks" not in assistants[1]
         assert "reasoning_content" not in assistants[1]
         # Tool calls are still split one-per-message.
-        assert assistants[0]["tool_calls"][0]["id"] == "call_1"  # type: ignore[index]
-        assert assistants[1]["tool_calls"][0]["id"] == "call_2"  # type: ignore[index]
+        assert assistants[0]["tool_calls"][0]["id"] == "call_1"
+        assert assistants[1]["tool_calls"][0]["id"] == "call_2"
 
     def test_empty_messages_list(self):
         """Test that empty message list is handled correctly."""
