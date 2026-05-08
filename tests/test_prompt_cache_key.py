@@ -214,6 +214,29 @@ async def test_runner_uses_session_id_as_stable_prompt_cache_key_boundary() -> N
 
 
 @pytest.mark.asyncio
+async def test_runner_falls_back_when_session_id_is_not_a_string() -> None:
+    """A session whose session_id is None (or any non-str) must not crash key resolution.
+
+    The runner should fall through to the next grouping option (group_id, then per-run UUID)
+    instead of raising AttributeError when calling .strip() on a non-str session_id.
+    """
+    model = PromptCacheFakeModel()
+    model.set_next_output([get_text_message("done")])
+    agent = Agent(name="test", model=model)
+    session = SimpleListSession(session_id="placeholder")
+    # Simulate a session whose id has not yet been assigned (e.g. lazy DB-backed sessions).
+    session.session_id = None  # type: ignore[assignment]
+
+    await Runner.run(
+        agent, "hi", session=session, run_config=RunConfig(group_id="fallback-group")
+    )
+
+    prompt_cache_key = _sent_prompt_cache_key(model)
+    assert prompt_cache_key is not None
+    assert prompt_cache_key.startswith("agents-sdk:group:")
+
+
+@pytest.mark.asyncio
 async def test_streamed_runner_generates_prompt_cache_key_by_default() -> None:
     model = PromptCacheFakeModel()
     model.set_next_output([get_text_message("done")])
