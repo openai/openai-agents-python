@@ -1393,6 +1393,13 @@ def _extract_tool_argument_json_error(error: Exception) -> json.JSONDecodeError 
     return _extract_json_decode_error(error)
 
 
+def _is_tool_argument_input_error(error: Exception) -> bool:
+    """Return True when an error represents an invalid-JSON-input failure for a function tool."""
+    return isinstance(error, ModelBehaviorError) and str(error).startswith(
+        "Invalid JSON input for tool"
+    )
+
+
 def _build_handled_function_tool_error_handler(
     *,
     span_message: str,
@@ -1413,6 +1420,11 @@ def _build_handled_function_tool_error_handler(
         if json_decode_error is not None and span_message_for_json_decode_error is not None:
             resolved_span_message = span_message_for_json_decode_error
             span_error_detail = str(json_decode_error)
+        elif span_message_for_json_decode_error is not None and _is_tool_argument_input_error(
+            error
+        ):
+            resolved_span_message = span_message_for_json_decode_error
+            span_error_detail = str(error)
         else:
             resolved_span_message = span_message
             span_error_detail = str(error)
@@ -1491,6 +1503,12 @@ def default_tool_error_function(ctx: RunContextWrapper[Any], error: Exception) -
             "An error occurred while parsing tool arguments. "
             "Please try again with valid JSON. "
             f"Error: {json_decode_error}"
+        )
+    if _is_tool_argument_input_error(error):
+        return (
+            "An error occurred while parsing tool arguments. "
+            "Please try again with valid JSON. "
+            f"Error: {error}"
         )
     return f"An error occurred while running the tool. Please try again. Error: {str(error)}"
 
