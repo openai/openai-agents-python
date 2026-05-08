@@ -16,7 +16,11 @@ from pydantic import BaseModel, PrivateAttr
 from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.entries import File, InContainerMountStrategy, Mount, MountpointMountPattern
 from agents.sandbox.entries.mounts.base import InContainerMountAdapter
-from agents.sandbox.errors import ConfigurationError, InvalidManifestPathError
+from agents.sandbox.errors import (
+    ConfigurationError,
+    ExposedPortUnavailableError,
+    InvalidManifestPathError,
+)
 from agents.sandbox.manifest import Environment
 from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
@@ -539,6 +543,29 @@ async def test_vercel_exec_read_write_and_port_resolution(monkeypatch: pytest.Mo
         tls=True,
     )
     assert payload.read() == b"payload"
+
+
+@pytest.mark.asyncio
+async def test_vercel_resolve_exposed_port_rejects_non_https_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+
+    state = vercel_module.VercelSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000099",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sandbox-http",
+        exposed_ports=(3000,),
+    )
+    sandbox = _FakeAsyncSandbox(
+        sandbox_id="sandbox-http",
+        routes=[{"port": 3000, "url": "http://3000-sandbox.vercel.run"}],
+    )
+    session = vercel_module.VercelSandboxSession.from_state(state, sandbox=sandbox)
+
+    with pytest.raises(ExposedPortUnavailableError):
+        await session.resolve_exposed_port(3000)
 
 
 @pytest.mark.asyncio

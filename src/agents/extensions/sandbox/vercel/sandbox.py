@@ -460,18 +460,17 @@ class VercelSandboxSession(BaseSandboxSession):
 
         parsed = urlsplit(domain)
         host = parsed.hostname
-        if not host:
+        if not host or parsed.scheme != "https":
             raise ExposedPortUnavailableError(
                 port=port,
                 exposed_ports=self.state.exposed_ports,
                 reason="backend_unavailable",
                 context={"backend": "vercel", "domain": domain},
             )
-        tls = parsed.scheme == "https"
         return ExposedPortEndpoint(
             host=host,
-            port=parsed.port or (443 if tls else 80),
-            tls=tls,
+            port=parsed.port or 443,
+            tls=True,
         )
 
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
