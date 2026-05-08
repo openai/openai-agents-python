@@ -905,6 +905,39 @@ class TestDaytonaSandbox:
         assert exc_info.value.context["detail"] == "invalid_preview_url"
 
     @pytest.mark.asyncio
+    async def test_resolve_exposed_port_rejects_non_https_preview_url(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify Daytona rejects plaintext preview URLs instead of silently downgrading TLS."""
+
+        daytona_module = _load_daytona_module(monkeypatch)
+
+        async with daytona_module.DaytonaSandboxClient() as client:
+            session = await client.create(
+                options=daytona_module.DaytonaSandboxClientOptions(exposed_ports=(4500,)),
+            )
+            sandbox = _FakeAsyncDaytona.current_sandbox
+            assert sandbox is not None
+
+            async def _http_preview_url(
+                port: int,
+                expires_in_seconds: int | None = None,
+            ) -> object:
+                _ = (port, expires_in_seconds)
+                return types.SimpleNamespace(
+                    url=f"http://{port}-token.daytonaproxy01.net/",
+                    token="signed-token",
+                )
+
+            sandbox.create_signed_preview_url = _http_preview_url  # type: ignore[method-assign]
+
+            with pytest.raises(daytona_module.ExposedPortUnavailableError) as exc_info:
+                await session.resolve_exposed_port(4500)
+
+        assert exc_info.value.context["detail"] == "invalid_preview_url"
+
+    @pytest.mark.asyncio
     async def test_normalize_path_rejects_workspace_escape_and_allows_absolute_in_root(
         self,
         monkeypatch: pytest.MonkeyPatch,

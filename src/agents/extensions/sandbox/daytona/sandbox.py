@@ -343,8 +343,10 @@ class DaytonaSandboxSession(BaseSandboxSession):
             host = split.hostname
             if host is None:
                 raise ValueError("missing hostname")
-            port_value = split.port or (443 if split.scheme == "https" else 80)
-            return ExposedPortEndpoint(host=host, port=port_value, tls=split.scheme == "https")
+            if split.scheme != "https":
+                raise ValueError(f"non-https preview scheme: {split.scheme!r}")
+            port_value = split.port or 443
+            return ExposedPortEndpoint(host=host, port=port_value, tls=True)
         except Exception as e:
             raise ExposedPortUnavailableError(
                 port=port,
