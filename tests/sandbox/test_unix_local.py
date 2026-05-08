@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import signal
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from agents.sandbox.errors import PtySessionNotFoundError
+from agents.sandbox.errors import ExecTimeoutError, PtySessionNotFoundError
 from agents.sandbox.manifest import Manifest
+from agents.sandbox.sandboxes import unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxClient,
     UnixLocalSandboxSession,
@@ -249,3 +251,76 @@ class TestUnixLocalUserScopedFilesystem:
         assert session.exec_commands[0][4:6] == ("sh", "-lc")
         assert session.exec_commands[0][-2:] == (str(target), "0")
         assert not any(part.startswith("rm ") for part in session.exec_commands[0])
+
+
+class TestUnixLocalExecTimeoutCleanup:
+    @pytest.mark.asyncio
+    async def test_timeout_reaps_subprocess_so_returncode_is_set(self, tmp_path: Path) -> None:
+        """After timeout, the killed subprocess must be awaited so its
+        returncode is populated and the asyncio transport is released."""
+        client = UnixLocalSandboxClient()
+        manifest = Manifest(root=str(tmp_path / "workspace"))
+
+        # Capture the asyncio.subprocess.Process used by _exec_internal so we can
+        # assert it was reaped (returncode populated) after the timeout fires.
+        captured: list[object] = []
+        original_create = unix_local_module.asyncio.create_subprocess_exec
+
+        async def _capture_create(*args: object, **kwargs: object) -> object:
+            proc = await original_create(*args, **kwargs)  # type: ignore[arg-type]
+            captured.append(proc)
+            return proc
+
+        async with await client.create(manifest=manifest, snapshot=None, options=None) as session:
+            with patch.object(
+                unix_local_module.asyncio,
+                "create_subprocess_exec",
+                _capture_create,
+            ):
+                with pytest.raises(ExecTimeoutError):
+                    await session.exec("sh", "-c", "sleep 30", timeout=0.1)
+
+        assert len(captured) == 1
+        proc = captured[0]
+        # Without the explicit reap-after-kill the asyncio.Process can outlive
+        # _exec_internal with returncode still None, leaking the transport.
+        assert proc.returncode is not None  # type: ignore[attr-defined]
+        assert proc.returncode != 0  # killed by SIGKILL  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_timeout_skips_killpg_for_already_exited_pid(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the subprocess exited before the timeout handler runs, we must not
+        signal its (potentially reused) pid."""
+        client = UnixLocalSandboxClient()
+        manifest = Manifest(root=str(tmp_path / "workspace"))
+
+        killpg_calls: list[int] = []
+
+        def _record_killpg(pid: int, sig: int) -> None:
+            killpg_calls.append(pid)
+
+        monkeypatch.setattr(unix_local_module.os, "killpg", _record_killpg)
+
+        original_wait_for = unix_local_module.asyncio.wait_for
+
+        async def _wait_for_with_simulated_exit(awaitable: object, timeout: float | None) -> object:
+            # First call (proc.communicate) — race the timeout: let the
+            # subprocess exit naturally and *then* surface a TimeoutError.
+            if not killpg_calls and timeout is not None and timeout < 1.0:
+                # Drive the subprocess to completion (sh -c "true" returns fast),
+                # then raise to enter the timeout handler.
+                try:
+                    await original_wait_for(awaitable, timeout=5.0)  # type: ignore[arg-type]
+                except Exception:
+                    pass
+                raise TimeoutError
+            return await original_wait_for(awaitable, timeout=timeout)  # type: ignore[arg-type]
+
+        async with await client.create(manifest=manifest, snapshot=None, options=None) as session:
+            with patch.object(unix_local_module.asyncio, "wait_for", _wait_for_with_simulated_exit):
+                with pytest.raises(ExecTimeoutError):
+                    await session.exec("sh", "-c", "true", timeout=0.05)
+
+        assert killpg_calls == []
