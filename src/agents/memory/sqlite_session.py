@@ -211,6 +211,12 @@ class SQLiteSession(SessionABC):
         """
         session_limit = resolve_session_limit(limit, self.session_settings)
 
+        # SQLite treats a negative LIMIT as "no limit", which would silently return
+        # the full conversation history when the caller asked for a bounded slice.
+        # Match the explicit limit=0 contract instead and short-circuit to an empty list.
+        if session_limit is not None and session_limit <= 0:
+            return []
+
         def _get_items_sync():
             with self._locked_connection() as conn:
                 if session_limit is None:

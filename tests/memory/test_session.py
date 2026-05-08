@@ -384,6 +384,14 @@ async def test_sqlite_session_get_items_with_limit():
         latest_0 = await session.get_items(limit=0)
         assert len(latest_0) == 0
 
+        # Negative limits must not silently return the full history. SQLite treats
+        # ``LIMIT -1`` as "no limit", so without an explicit guard a caller asking for
+        # ``limit=-1`` would get every message instead of an empty slice.
+        latest_neg_one = await session.get_items(limit=-1)
+        assert latest_neg_one == []
+        latest_neg_many = await session.get_items(limit=-100)
+        assert latest_neg_many == []
+
         session.close()
 
 
