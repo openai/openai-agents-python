@@ -9,9 +9,8 @@ from pathlib import Path, PureWindowsPath
 import pytest
 
 import agents.sandbox.entries.artifacts as artifacts_module
-from agents.sandbox import SandboxConcurrencyLimits
+from agents.sandbox import SandboxConcurrencyLimits, SandboxPathGrant
 from agents.sandbox.entries import (
-    BaseEntry,
     Dir,
     File,
     GitRepo,
@@ -259,62 +258,82 @@ async def test_local_file_rejects_relative_source_outside_base_dir(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_local_file_allows_explicit_outside_base_dir_source(tmp_path: Path) -> None:
+async def test_local_file_allows_extra_path_granted_source_outside_base_dir(
+    tmp_path: Path,
+) -> None:
     base = tmp_path / "base"
     outside = tmp_path / "outside"
     base.mkdir()
     outside.mkdir()
     (outside / "secret.txt").write_text("secret", encoding="utf-8")
-    session = _RecordingSession()
+    session = _RecordingSession(
+        Manifest(extra_path_grants=(SandboxPathGrant(path=str(outside)),)),
+    )
 
-    result = await LocalFile(
-        src=outside / "secret.txt",
-        allow_outside_base_dir=True,
-    ).apply(session, Path("/workspace/copied.txt"), base)
+    result = await LocalFile(src=outside / "secret.txt").apply(
+        session,
+        Path("/workspace/copied.txt"),
+        base,
+    )
 
     assert result[0].path == Path("/workspace/copied.txt")
     assert session.writes[Path("/workspace/copied.txt")] == b"secret"
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"type": "local_file", "src": "/tmp/secret.txt", "allow_outside_base_dir": True},
-        {"type": "local_dir", "src": "/tmp/secret", "allow_outside_base_dir": True},
-    ],
-)
-def test_local_artifact_opt_in_is_rejected_from_manifest_data(
-    payload: dict[str, object],
-) -> None:
-    with pytest.raises(ValueError, match="trusted-only field"):
-        BaseEntry.parse(payload)
+@pytest.mark.asyncio
+async def test_local_file_rejects_source_outside_extra_path_grants(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    other = tmp_path / "other"
+    base.mkdir()
+    outside.mkdir()
+    other.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession(
+        Manifest(extra_path_grants=(SandboxPathGrant(path=str(other)),)),
+    )
 
-
-def test_manifest_data_cannot_opt_out_of_local_artifact_base_dir() -> None:
-    with pytest.raises(ValueError, match="trusted-only field"):
-        Manifest.model_validate(
-            {
-                "entries": {
-                    "copied.txt": {
-                        "type": "local_file",
-                        "src": "/tmp/secret.txt",
-                        "allow_outside_base_dir": True,
-                    }
-                }
-            }
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=outside / "secret.txt").apply(
+            session,
+            Path("/workspace/copied.txt"),
+            base,
         )
 
+    assert excinfo.value.context["reason"] == "outside_base_dir"
+    assert excinfo.value.context["extra_path_grants"] == [str(other)]
+    assert session.writes == {}
 
-def test_local_artifact_opt_in_is_not_serialized(tmp_path: Path) -> None:
-    local_file = LocalFile(src=tmp_path / "secret.txt", allow_outside_base_dir=True)
-    local_dir = LocalDir(src=tmp_path / "secret", allow_outside_base_dir=True)
-    manifest = Manifest(entries={"copied.txt": local_file, "copied": local_dir})
 
-    assert "allow_outside_base_dir" not in local_file.model_dump(mode="json")
-    assert "allow_outside_base_dir" not in local_dir.model_dump(mode="json")
-    payload = manifest.model_dump(mode="json")
-    assert "allow_outside_base_dir" not in payload["entries"]["copied.txt"]
-    assert "allow_outside_base_dir" not in payload["entries"]["copied"]
+@pytest.mark.asyncio
+async def test_serialized_manifest_extra_path_grant_allows_local_file_source(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    manifest = Manifest.model_validate(
+        {
+            "extra_path_grants": [{"path": str(outside)}],
+            "entries": {
+                "copied.txt": {
+                    "type": "local_file",
+                    "src": str(outside / "secret.txt"),
+                }
+            },
+        }
+    )
+    session = _RecordingSession(manifest)
+
+    result = await session._apply_entry_batch(
+        [(Path("/workspace/copied.txt"), manifest.entries["copied.txt"])],
+        base_dir=base,
+    )
+
+    assert result[0].path == Path("/workspace/copied.txt")
+    assert session.writes[Path("/workspace/copied.txt")] == b"secret"
 
 
 @pytest.mark.asyncio
@@ -755,15 +774,19 @@ async def test_local_dir_rejects_relative_source_outside_base_dir(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_local_dir_allows_explicit_outside_base_dir_source(tmp_path: Path) -> None:
+async def test_local_dir_allows_extra_path_granted_source_outside_base_dir(
+    tmp_path: Path,
+) -> None:
     base = tmp_path / "base"
     outside = tmp_path / "outside"
     base.mkdir()
     outside.mkdir()
     (outside / "secret.txt").write_text("secret", encoding="utf-8")
-    session = _RecordingSession()
+    session = _RecordingSession(
+        Manifest(extra_path_grants=(SandboxPathGrant(path=str(outside), read_only=True),)),
+    )
 
-    result = await LocalDir(src=outside, allow_outside_base_dir=True).apply(
+    result = await LocalDir(src=outside).apply(
         session,
         Path("/workspace/copied"),
         base,

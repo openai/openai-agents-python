@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import io
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,7 +16,12 @@ from ..errors import LocalDirReadError, SkillsConfigError
 from ..manifest import Manifest
 from ..session.base_sandbox_session import BaseSandboxSession
 from ..types import User
-from ..workspace_paths import coerce_posix_path, posix_path_as_path, windows_absolute_path
+from ..workspace_paths import (
+    SandboxPathGrant,
+    coerce_posix_path,
+    posix_path_as_path,
+    windows_absolute_path,
+)
 from .capability import Capability
 
 _SKILLS_SECTION_INTRO = (
@@ -111,7 +117,12 @@ class LazySkillSource(BaseModel, abc.ABC):
     """Source of skill metadata and on-demand skill materialization."""
 
     @abc.abstractmethod
-    def list_skill_metadata(self, *, skills_path: str) -> list[SkillMetadata]: ...
+    def list_skill_metadata(
+        self,
+        *,
+        skills_path: str,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
+    ) -> list[SkillMetadata]: ...
 
     @abc.abstractmethod
     async def load_skill(
@@ -129,28 +140,44 @@ class LocalDirLazySkillSource(LazySkillSource):
 
     source: LocalDir
 
-    def _src_root(self) -> Path | None:
+    def _src_root(self, *, source_grants: tuple[SandboxPathGrant, ...] = ()) -> Path | None:
         if self.source.src is None:
             return None
         try:
-            src_root = self.source._resolve_local_dir_src_root(Path.cwd())
+            src_root = self.source._resolve_local_dir_src_root(
+                Path.cwd(),
+                source_grants=source_grants,
+            )
         except LocalDirReadError:
             return None
         if not src_root.exists() or not src_root.is_dir():
             return None
         return src_root
 
-    def list_skill_metadata(self, *, skills_path: str) -> list[SkillMetadata]:
-        src_root = self._src_root()
+    def list_skill_metadata(
+        self,
+        *,
+        skills_path: str,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
+    ) -> list[SkillMetadata]:
+        src_root = self._src_root(source_grants=source_grants)
         if src_root is None:
             return []
 
         metadata: list[SkillMetadata] = []
         for child in sorted(src_root.iterdir(), key=lambda entry: entry.name):
-            if not child.is_dir():
+            try:
+                child_stat = child.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if not stat.S_ISDIR(child_stat.st_mode):
                 continue
             skill_md_path = child / "SKILL.md"
-            if not skill_md_path.is_file():
+            try:
+                skill_md_stat = skill_md_path.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if not stat.S_ISREG(skill_md_stat.st_mode):
                 continue
             try:
                 markdown = skill_md_path.read_text(encoding="utf-8")
@@ -174,7 +201,8 @@ class LocalDirLazySkillSource(LazySkillSource):
         skills_path: str,
         user: str | User | None = None,
     ) -> dict[str, str]:
-        src_root = self._src_root()
+        source_grants = session.state.manifest.extra_path_grants
+        src_root = self._src_root(source_grants=source_grants)
         if src_root is None:
             raise SkillsConfigError(
                 message="lazy skill source directory is unavailable",
@@ -183,7 +211,10 @@ class LocalDirLazySkillSource(LazySkillSource):
 
         matches = [
             skill
-            for skill in self.list_skill_metadata(skills_path=skills_path)
+            for skill in self.list_skill_metadata(
+                skills_path=skills_path,
+                source_grants=source_grants,
+            )
             if skill.name == skill_name or skill.path.name == skill_name
         ]
         if not matches:
@@ -216,10 +247,7 @@ class LocalDirLazySkillSource(LazySkillSource):
                 "path": str(metadata.path).replace("\\", "/"),
             }
 
-        await LocalDir(
-            src=src_root / metadata.path.name,
-            allow_outside_base_dir=self.source.allow_outside_base_dir,
-        ).apply(
+        await LocalDir(src=src_root / metadata.path.name).apply(
             session,
             skill_dest,
             base_dir=Path.cwd(),
@@ -475,6 +503,7 @@ class Skills(Capability):
     skills_path: str = Field(default=".agents")
 
     _skills_metadata: list[SkillMetadata] | None = PrivateAttr(default=None)
+    _skills_metadata_cache_key: tuple[tuple[str, bool], ...] | None = PrivateAttr(default=None)
 
     @field_validator("skills", mode="before")
     @classmethod
@@ -614,6 +643,7 @@ class Skills(Capability):
     def bind(self, session: BaseSandboxSession) -> None:
         super().bind(session)
         self._skills_metadata = None
+        self._skills_metadata_cache_key = None
 
     def tools(self) -> list[Tool]:
         if self.lazy_from is None:
@@ -680,7 +710,8 @@ class Skills(Capability):
         return metadata
 
     async def _skill_metadata(self, manifest: Manifest) -> list[SkillMetadata]:
-        if self._skills_metadata is not None:
+        cache_key = self._metadata_cache_key(manifest)
+        if self._skills_metadata is not None and self._skills_metadata_cache_key == cache_key:
             return self._skills_metadata
 
         metadata: list[SkillMetadata] = []
@@ -695,7 +726,12 @@ class Skills(Capability):
             )
 
         if self.lazy_from is not None:
-            metadata.extend(self.lazy_from.list_skill_metadata(skills_path=self.skills_path))
+            metadata.extend(
+                self.lazy_from.list_skill_metadata(
+                    skills_path=self.skills_path,
+                    source_grants=manifest.extra_path_grants,
+                )
+            )
         elif self.from_ is not None:
             metadata.extend(await self._resolve_runtime_metadata(manifest))
 
@@ -717,7 +753,13 @@ class Skills(Capability):
             deduped[(item.name, str(item.path))] = item
 
         self._skills_metadata = sorted(deduped.values(), key=lambda item: item.name)
+        self._skills_metadata_cache_key = cache_key
         return self._skills_metadata
+
+    def _metadata_cache_key(self, manifest: Manifest) -> tuple[tuple[str, bool], ...]:
+        if self.lazy_from is None:
+            return ()
+        return tuple((grant.path, grant.read_only) for grant in manifest.extra_path_grants)
 
     async def instructions(self, manifest: Manifest) -> str | None:
         skills = await self._skill_metadata(manifest)

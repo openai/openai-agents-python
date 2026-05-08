@@ -84,7 +84,6 @@ class BaseEntry(BaseModel, abc.ABC):
     type: str
     _subclass_registry: ClassVar[dict[str, builtins.type[BaseEntry]]] = {}
     _abstract_entry_base: ClassVar[bool] = False
-    _manifest_data_forbidden_fields: ClassVar[set[str]] = set()
 
     description: str | None = Field(default=None)
     ephemeral: bool = Field(default=False)
@@ -156,14 +155,6 @@ class BaseEntry(BaseModel, abc.ABC):
         if entry_cls is None:
             known = ", ".join(sorted(BaseEntry._subclass_registry)) or "<none>"
             raise ValueError(f"Unknown artifact type `{entry_type}`. Registered types: {known}")
-        forbidden_fields: set[str] = getattr(entry_cls, "_manifest_data_forbidden_fields", set())
-        forbidden_present = sorted(field for field in forbidden_fields if field in payload)
-        if forbidden_present:
-            fields = ", ".join(forbidden_present)
-            raise ValueError(
-                f"Artifact type `{entry_type}` cannot set trusted-only field(s) from "
-                f"manifest data: {fields}"
-            )
         return entry_cls.model_validate(dict(payload))
 
     async def _apply_metadata(
