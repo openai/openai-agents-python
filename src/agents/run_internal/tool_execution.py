@@ -56,6 +56,7 @@ from ..items import (
     ToolApprovalItem,
     ToolCallOutputItem,
 )
+from ..lifecycle import _invoke_tool_hook
 from ..logger import logger
 from ..model_settings import ModelSettings
 from ..run_config import RunConfig, ToolErrorFormatterArgs
@@ -1716,9 +1717,21 @@ class _FunctionToolBatchExecutor:
             return rejected_message
 
         await asyncio.gather(
-            self.hooks.on_tool_start(tool_context, self.public_agent, func_tool),
+            _invoke_tool_hook(
+                self.hooks.on_tool_start,
+                tool_context,
+                self.public_agent,
+                func_tool,
+                tool_call_id=tool_context.tool_call_id,
+            ),
             (
-                agent_hooks.on_tool_start(tool_context, self.public_agent, func_tool)
+                _invoke_tool_hook(
+                    agent_hooks.on_tool_start,
+                    tool_context,
+                    self.public_agent,
+                    func_tool,
+                    tool_call_id=tool_context.tool_call_id,
+                )
                 if agent_hooks
                 else _coro.noop_coroutine()
             ),
@@ -1788,9 +1801,23 @@ class _FunctionToolBatchExecutor:
         )
 
         await asyncio.gather(
-            self.hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result),
+            _invoke_tool_hook(
+                self.hooks.on_tool_end,
+                tool_context,
+                self.public_agent,
+                func_tool,
+                final_result,
+                tool_call_id=tool_context.tool_call_id,
+            ),
             (
-                agent_hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result)
+                _invoke_tool_hook(
+                    agent_hooks.on_tool_end,
+                    tool_context,
+                    self.public_agent,
+                    func_tool,
+                    final_result,
+                    tool_call_id=tool_context.tool_call_id,
+                )
                 if agent_hooks
                 else _coro.noop_coroutine()
             ),

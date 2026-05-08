@@ -1,3 +1,5 @@
+import inspect
+from collections.abc import Awaitable, Callable
 from typing import Any, Generic
 
 from typing_extensions import TypeVar
@@ -8,6 +10,32 @@ from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .tool import Tool
 
 TAgent = TypeVar("TAgent", bound=AgentBase, default=AgentBase)
+
+
+def _hook_supports_tool_call_id(method: Callable[..., Any]) -> bool:
+    """Return True iff ``method`` accepts a ``tool_call_id`` keyword argument."""
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return True
+    if "tool_call_id" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _invoke_tool_hook(
+    method: Callable[..., Awaitable[None]],
+    *args: Any,
+    tool_call_id: str | None,
+) -> Awaitable[None]:
+    """Invoke a tool lifecycle hook, passing ``tool_call_id`` only when supported.
+
+    Lets us extend ``on_tool_start``/``on_tool_end`` without breaking subclasses
+    whose overrides predate the new keyword argument.
+    """
+    if tool_call_id is not None and _hook_supports_tool_call_id(method):
+        return method(*args, tool_call_id=tool_call_id)
+    return method(*args)
 
 
 class RunHooksBase(Generic[TContext, TAgent]):
@@ -72,8 +100,14 @@ class RunHooksBase(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         agent: TAgent,
         tool: Tool,
+        *,
+        tool_call_id: str | None = None,
     ) -> None:
         """Called immediately before a local tool is invoked.
+
+        ``tool_call_id`` identifies the underlying tool-call so subclasses can
+        correlate parallel ``on_tool_start``/``on_tool_end`` invocations. It is
+        the same id exposed by ``ToolContext.tool_call_id`` for function tools.
 
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
@@ -88,8 +122,14 @@ class RunHooksBase(Generic[TContext, TAgent]):
         agent: TAgent,
         tool: Tool,
         result: str,
+        *,
+        tool_call_id: str | None = None,
     ) -> None:
         """Called immediately after a local tool is invoked.
+
+        ``tool_call_id`` identifies the underlying tool-call so subclasses can
+        correlate parallel ``on_tool_start``/``on_tool_end`` invocations. It is
+        the same id exposed by ``ToolContext.tool_call_id`` for function tools.
 
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
@@ -146,8 +186,14 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         agent: TAgent,
         tool: Tool,
+        *,
+        tool_call_id: str | None = None,
     ) -> None:
         """Called immediately before a local tool is invoked.
+
+        ``tool_call_id`` identifies the underlying tool-call so subclasses can
+        correlate parallel ``on_tool_start``/``on_tool_end`` invocations. It is
+        the same id exposed by ``ToolContext.tool_call_id`` for function tools.
 
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
@@ -162,8 +208,14 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         agent: TAgent,
         tool: Tool,
         result: str,
+        *,
+        tool_call_id: str | None = None,
     ) -> None:
         """Called immediately after a local tool is invoked.
+
+        ``tool_call_id`` identifies the underlying tool-call so subclasses can
+        correlate parallel ``on_tool_start``/``on_tool_end`` invocations. It is
+        the same id exposed by ``ToolContext.tool_call_id`` for function tools.
 
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,

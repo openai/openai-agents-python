@@ -386,3 +386,99 @@ async def test_streamed_run_hooks_count_tool_and_handoff_invocations():
     assert hooks.events["on_agent_start"] == 2
     assert hooks.events["on_agent_end"] == 1
     assert len(hooks.tool_context_ids) == 2
+
+
+class _ToolCallIdHooks(RunHooks):
+    """Hooks that capture the new ``tool_call_id`` keyword for both start and end."""
+
+    def __init__(self) -> None:
+        self.start_ids: list[str | None] = []
+        self.end_ids: list[str | None] = []
+
+    async def on_tool_start(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: Agent[TContext],
+        tool: Tool,
+        *,
+        tool_call_id: str | None = None,
+    ) -> None:
+        self.start_ids.append(tool_call_id)
+
+    async def on_tool_end(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: Agent[TContext],
+        tool: Tool,
+        result: str,
+        *,
+        tool_call_id: str | None = None,
+    ) -> None:
+        self.end_ids.append(tool_call_id)
+
+
+@pytest.mark.asyncio
+async def test_run_hooks_receive_tool_call_id_for_parallel_calls():
+    """`on_tool_start`/`on_tool_end` receive matching `tool_call_id`s for parallel calls."""
+    hooks = _ToolCallIdHooks()
+    model = FakeModel()
+    agent = Agent(
+        name="A",
+        model=model,
+        tools=[get_function_tool("f", "result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call("f", json.dumps({"x": 1}), call_id="call_a"),
+                get_function_tool_call("f", json.dumps({"x": 2}), call_id="call_b"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+    await Runner.run(agent, input="hi", hooks=hooks)
+
+    assert sorted(hooks.start_ids) == ["call_a", "call_b"]
+    assert sorted(hooks.end_ids) == ["call_a", "call_b"]
+
+
+class _LegacyToolHooks(RunHooks):
+    """Hooks whose overrides predate the `tool_call_id` keyword (backwards-compat)."""
+
+    def __init__(self) -> None:
+        self.start_calls = 0
+        self.end_calls = 0
+
+    async def on_tool_start(
+        self, context: RunContextWrapper[TContext], agent: Agent[TContext], tool: Tool
+    ) -> None:
+        self.start_calls += 1
+
+    async def on_tool_end(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: Agent[TContext],
+        tool: Tool,
+        result: str,
+    ) -> None:
+        self.end_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_tool_hook_signature_still_works():
+    """Existing subclasses that don't accept `tool_call_id` keep working."""
+    hooks = _LegacyToolHooks()
+    model = FakeModel()
+    agent = Agent(name="A", model=model, tools=[get_function_tool("f", "result")])
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("f", json.dumps({"x": 1}), call_id="call_legacy")],
+            [get_text_message("done")],
+        ]
+    )
+    await Runner.run(agent, input="hi", hooks=hooks)
+
+    assert hooks.start_calls == 1
+    assert hooks.end_calls == 1
