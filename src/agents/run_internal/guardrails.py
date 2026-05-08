@@ -124,20 +124,29 @@ async def run_input_guardrails(
 
     guardrail_results: list[InputGuardrailResult] = []
 
-    for done in asyncio.as_completed(guardrail_tasks):
-        result = await done
-        if result.output.tripwire_triggered:
-            for t in guardrail_tasks:
-                t.cancel()
-            await asyncio.gather(*guardrail_tasks, return_exceptions=True)
-            _error_tracing.attach_error_to_current_span(
-                SpanError(
-                    message="Guardrail tripwire triggered",
-                    data={"guardrail": result.guardrail.get_name()},
+    try:
+        for done in asyncio.as_completed(guardrail_tasks):
+            result = await done
+            if result.output.tripwire_triggered:
+                for t in guardrail_tasks:
+                    t.cancel()
+                await asyncio.gather(*guardrail_tasks, return_exceptions=True)
+                _error_tracing.attach_error_to_current_span(
+                    SpanError(
+                        message="Guardrail tripwire triggered",
+                        data={"guardrail": result.guardrail.get_name()},
+                    )
                 )
-            )
-            raise InputGuardrailTripwireTriggered(result)
-        guardrail_results.append(result)
+                raise InputGuardrailTripwireTriggered(result)
+            guardrail_results.append(result)
+    except BaseException:
+        # On any error (including a guardrail raising or the caller being cancelled),
+        # cancel and await siblings so they don't leak past this function's return.
+        for t in guardrail_tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*guardrail_tasks, return_exceptions=True)
+        raise
 
     return guardrail_results
 
@@ -159,20 +168,29 @@ async def run_output_guardrails(
 
     guardrail_results: list[OutputGuardrailResult] = []
 
-    for done in asyncio.as_completed(guardrail_tasks):
-        result = await done
-        if result.output.tripwire_triggered:
-            for t in guardrail_tasks:
-                t.cancel()
-            await asyncio.gather(*guardrail_tasks, return_exceptions=True)
-            _error_tracing.attach_error_to_current_span(
-                SpanError(
-                    message="Guardrail tripwire triggered",
-                    data={"guardrail": result.guardrail.get_name()},
+    try:
+        for done in asyncio.as_completed(guardrail_tasks):
+            result = await done
+            if result.output.tripwire_triggered:
+                for t in guardrail_tasks:
+                    t.cancel()
+                await asyncio.gather(*guardrail_tasks, return_exceptions=True)
+                _error_tracing.attach_error_to_current_span(
+                    SpanError(
+                        message="Guardrail tripwire triggered",
+                        data={"guardrail": result.guardrail.get_name()},
+                    )
                 )
-            )
-            raise OutputGuardrailTripwireTriggered(result)
-        guardrail_results.append(result)
+                raise OutputGuardrailTripwireTriggered(result)
+            guardrail_results.append(result)
+    except BaseException:
+        # On any error (including a guardrail raising or the caller being cancelled),
+        # cancel and await siblings so they don't leak past this function's return.
+        for t in guardrail_tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*guardrail_tasks, return_exceptions=True)
+        raise
 
     return guardrail_results
 
