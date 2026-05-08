@@ -152,7 +152,7 @@ OpenAIRealtimeAudioOutput = _rt_audio_config.RealtimeAudioConfigOutput  # type: 
 
 
 _USER_AGENT = f"Agents/Python {__version__}"
-DEFAULT_REALTIME_MODEL = "gpt-realtime-1.5"
+DEFAULT_REALTIME_MODEL = "gpt-realtime-2"
 
 DEFAULT_MODEL_SETTINGS: RealtimeSessionModelSettings = {
     "voice": "ash",
@@ -1438,23 +1438,26 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             or DEFAULT_MODEL_SETTINGS.get("modalities")
         )
 
-        # Construct full session object. `type` will be excluded at serialization time for updates.
-        session_create_request = OpenAISessionCreateRequest(
-            type="realtime",
-            model=(model_settings.get("model_name") or self.model) or DEFAULT_REALTIME_MODEL,
-            output_modalities=output_modalities,
-            audio=OpenAIRealtimeAudioConfig(
+        session_create_args: dict[str, Any] = {
+            "type": "realtime",
+            "model": (model_settings.get("model_name") or self.model) or DEFAULT_REALTIME_MODEL,
+            "output_modalities": output_modalities,
+            "audio": OpenAIRealtimeAudioConfig(
                 input=OpenAIRealtimeAudioInput(**audio_input_args),
                 output=OpenAIRealtimeAudioOutput(**audio_output_args),
             ),
-            tools=cast(
-                Any,
-                self._tools_to_session_tools(
-                    tools=model_settings.get("tools", []),
-                    handoffs=model_settings.get("handoffs", []),
-                ),
+            "tools": self._tools_to_session_tools(
+                tools=model_settings.get("tools", []),
+                handoffs=model_settings.get("handoffs", []),
             ),
-        )
+        }
+        if model_settings.get("parallel_tool_calls") is not None:
+            session_create_args["parallel_tool_calls"] = model_settings["parallel_tool_calls"]
+        if model_settings.get("reasoning") is not None:
+            session_create_args["reasoning"] = model_settings["reasoning"]
+
+        # Construct full session object. `type` will be excluded at serialization time for updates.
+        session_create_request = OpenAISessionCreateRequest(**session_create_args)
 
         if "instructions" in model_settings:
             session_create_request.instructions = model_settings.get("instructions")
