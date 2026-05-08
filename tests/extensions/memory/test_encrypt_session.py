@@ -365,6 +365,60 @@ async def test_encrypted_session_get_items_session_settings_limit_skips_invalid_
     underlying_session.close()
 
 
+@pytest.mark.parametrize(
+    "bad_payload",
+    [12345, None, ["not", "a", "string"], {"nested": "dict"}],
+)
+async def test_encrypted_session_get_items_skips_envelope_with_non_string_payload(
+    encryption_key: str, underlying_session: SQLiteSession, bad_payload
+):
+    """Malformed envelopes whose payload is not a string must be skipped, not crash."""
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+    )
+
+    await session.add_items([{"role": "user", "content": "valid"}])
+    malformed = cast(
+        TResponseInputItem,
+        {"__enc__": 1, "v": 1, "kid": "hkdf-v1", "payload": bad_payload},
+    )
+    await underlying_session.add_items([malformed])
+
+    items = await session.get_items()
+    assert [item.get("content") for item in items] == ["valid"]
+
+    underlying_session.close()
+
+
+async def test_encrypted_session_pop_item_skips_envelope_with_non_string_payload(
+    encryption_key: str, underlying_session: SQLiteSession
+):
+    """pop_item must not crash on a malformed envelope below a valid one."""
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+    )
+
+    malformed = cast(
+        TResponseInputItem,
+        {"__enc__": 1, "v": 1, "kid": "hkdf-v1", "payload": None},
+    )
+    await underlying_session.add_items([malformed])
+    await session.add_items([{"role": "user", "content": "valid"}])
+
+    popped = await session.pop_item()
+    assert popped is not None
+    assert popped.get("content") == "valid"
+
+    # Loop drains the malformed envelope without raising.
+    assert await session.pop_item() is None
+
+    underlying_session.close()
+
+
 async def test_encrypted_session_unicode_content(
     encryption_key: str, underlying_session: SQLiteSession
 ):

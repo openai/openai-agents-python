@@ -164,10 +164,13 @@ class EncryptedSession(SessionABC):
             return cast(TResponseInputItem, item)
 
         try:
-            token = item["payload"].encode("utf-8")
+            payload = item["payload"]
+            if not isinstance(payload, str):
+                return None
+            token = payload.encode("utf-8")
             plaintext = self.cipher.decrypt(token, ttl=self.ttl)
             return cast(TResponseInputItem, _from_json_bytes(plaintext))
-        except (InvalidToken, KeyError):
+        except (InvalidToken, KeyError, ValueError, UnicodeDecodeError):
             return None
 
     def _unwrap_valid_items(
