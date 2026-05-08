@@ -7,6 +7,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, BadRequestError
+from pydantic import ValidationError
 
 from agents.items import ModelResponse, TResponseStreamEvent
 from agents.models._openai_retry import get_openai_retry_advice
@@ -21,6 +22,7 @@ from agents.retry import (
     ModelRetrySettings,
     RetryDecision,
     RetryPolicyContext,
+    _coerce_backoff_settings,
     retry_policies,
 )
 from agents.run_internal.model_retry import get_response_with_retry, stream_response_with_retry
@@ -2356,3 +2358,31 @@ async def test_stream_response_with_retry_closes_current_stream_when_consumer_st
     await outer_stream.aclose()
 
     assert stream.close_calls == 1
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"initial_delay": -1.0},
+        {"max_delay": -1.0},
+        {"multiplier": -2.0},
+        {"initial_delay": -0.001},
+        {"max_delay": -0.001},
+        {"multiplier": -0.001},
+    ],
+)
+def test_backoff_settings_rejects_negative_values(kwargs: dict) -> None:
+    with pytest.raises(ValidationError):
+        ModelRetryBackoffSettings(**kwargs)
+
+
+def test_backoff_settings_accepts_zero_values() -> None:
+    settings = ModelRetryBackoffSettings(initial_delay=0.0, max_delay=0.0, multiplier=0.0)
+    assert settings.initial_delay == 0.0
+    assert settings.max_delay == 0.0
+    assert settings.multiplier == 0.0
+
+
+def test_backoff_settings_rejects_negative_via_dict_coercion() -> None:
+    with pytest.raises(ValidationError):
+        _coerce_backoff_settings({"initial_delay": -1.0})
