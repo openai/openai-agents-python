@@ -66,6 +66,16 @@ class OpenAIChatCompletionsModel(Model):
     def _supports_default_prompt_cache_key(self) -> bool:
         return ChatCmplHelpers.is_openai(self._get_client())
 
+    def _validate_prompt_is_supported(self, prompt: ResponsePromptParam | None) -> None:
+        if prompt is None:
+            return
+
+        raise UserError(
+            "Reusable prompts are only supported by the Responses API. "
+            "OpenAIChatCompletionsModel does not support `prompt`; use a Responses model "
+            "instead."
+        )
+
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)
 
@@ -120,6 +130,8 @@ class OpenAIChatCompletionsModel(Model):
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
         )
+        self._validate_prompt_is_supported(prompt)
+
         with generation_span(
             model=str(self.model),
             model_config=model_settings.to_json_dict() | {"base_url": str(self._client.base_url)},
@@ -248,6 +260,8 @@ class OpenAIChatCompletionsModel(Model):
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
         )
+        self._validate_prompt_is_supported(prompt)
+
         with generation_span(
             model=str(self.model),
             model_config=model_settings.to_json_dict() | {"base_url": str(self._client.base_url)},
@@ -361,6 +375,7 @@ class OpenAIChatCompletionsModel(Model):
         stream: bool = False,
         prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
+        self._validate_prompt_is_supported(prompt)
         self._validate_official_openai_input_content_types(input)
         converted_messages = Converter.items_to_messages(
             input,

@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from typing import Any, cast
 
 import pytest
 from openai.types.chat.chat_completion_chunk import (
@@ -177,6 +178,31 @@ async def test_stream_response_rejects_server_managed_conversation_state(
 
     assert expected_param in str(exc_info.value)
     assert called is False
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_rejects_prompt(monkeypatch) -> None:
+    async def patched_fetch_response(self, *args, **kwargs):
+        raise AssertionError("_fetch_response should not run when prompt is unsupported")
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    with pytest.raises(UserError, match="Reusable prompts"):
+        async for _ in model.stream_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=cast(Any, {"id": "pmpt_123"}),
+        ):
+            pass
 
 
 @pytest.mark.allow_call_model_methods
