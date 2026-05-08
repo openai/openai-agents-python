@@ -185,6 +185,25 @@ def test_normalize_input_merges_text_and_images() -> None:
     assert images == ["/tmp/a.png"]
 
 
+def test_normalize_input_coerces_none_text_and_path() -> None:
+    # Defensive: TypedDict shapes don't enforce non-None at runtime, so callers
+    # passing through serialized payloads can hand us None values. The previous
+    # ``item.get("text", "")`` only covered missing keys, leaving None to crash
+    # ``str.join``. Coerce None to "" to keep the helper total.
+    prompt, images = _normalize_input(
+        cast(
+            Any,
+            [
+                {"type": "text", "text": None},
+                {"type": "text", "text": "real"},
+                {"type": "local_image", "path": None},
+            ],
+        )
+    )
+    assert prompt == "\n\nreal"
+    assert images == []
+
+
 def test_normalize_env_stringifies_values() -> None:
     env = _normalize_env(CodexOptions(env=cast(dict[str, str], {"FOO": 1, 2: "bar"})))
     assert env == {"FOO": "1", "2": "bar"}

@@ -197,10 +197,10 @@ def _normalize_input(input: Input) -> tuple[str, list[str]]:
     images: list[str] = []
     for item in input:
         if item["type"] == "text":
-            text = item.get("text", "")
+            text = item.get("text") or ""
             prompt_parts.append(text)
         elif item["type"] == "local_image":
-            path = item.get("path", "")
+            path = item.get("path") or ""
             if path:
                 images.append(path)
 
