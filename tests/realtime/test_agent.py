@@ -25,3 +25,24 @@ async def test_dynamic_instructions():
     agent = RealtimeAgent(name="test", instructions=_instructions)
     instructions = await agent.get_system_prompt(RunContextWrapper(context=None))
     assert instructions == "Dynamic"
+
+
+def test_post_init_rejects_invalid_field_types() -> None:
+    with pytest.raises(TypeError, match="RealtimeAgent name must be a string"):
+        RealtimeAgent(name=1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="RealtimeAgent tools must be a list"):
+        RealtimeAgent(name="x", tools="nope")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="RealtimeAgent handoffs must be a list"):
+        RealtimeAgent(name="x", handoffs="nope")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="RealtimeAgent instructions must be"):
+        RealtimeAgent(name="x", instructions=123)  # type: ignore[arg-type]
+
+
+def test_clone_does_not_mutate_original_lists() -> None:
+    """Cloning with a new list must not affect the original agent's lists."""
+    original = RealtimeAgent(name="orig", tools=[], handoffs=[])
+    cloned = original.clone(tools=["t1"])  # type: ignore[list-item]
+    assert original.tools == []
+    assert cloned.tools == ["t1"]
+    # Shared reference when not overridden (documented shallow-copy behavior).
+    assert cloned.handoffs is original.handoffs

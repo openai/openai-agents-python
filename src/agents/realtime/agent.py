@@ -79,11 +79,39 @@ class RealtimeAgent(AgentBase, Generic[TContext]):
     """A class that receives callbacks on various lifecycle events for this agent.
     """
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str):
+            raise TypeError(f"RealtimeAgent name must be a string, got {type(self.name).__name__}")
+        if not isinstance(self.tools, list):
+            raise TypeError(f"RealtimeAgent tools must be a list, got {type(self.tools).__name__}")
+        if not isinstance(self.handoffs, list):
+            raise TypeError(
+                f"RealtimeAgent handoffs must be a list, got {type(self.handoffs).__name__}"
+            )
+        if (
+            self.instructions is not None
+            and not isinstance(self.instructions, str)
+            and not callable(self.instructions)
+        ):
+            raise TypeError(
+                f"RealtimeAgent instructions must be a string, callable, or None, "
+                f"got {type(self.instructions).__name__}"
+            )
+
     def clone(self, **kwargs: Any) -> RealtimeAgent[TContext]:
-        """Make a copy of the agent, with the given arguments changed. For example, you could do:
-        ```
-        new_agent = agent.clone(instructions="New instructions")
-        ```
+        """Make a copy of the agent, with the given arguments changed.
+
+        Notes:
+            - Uses `dataclasses.replace`, which performs a **shallow copy**.
+            - Mutable attributes like `tools` and `handoffs` are shallow-copied:
+              new list objects are created only if overridden, but their contents
+              (tool functions and handoff objects) are shared with the original.
+            - To modify these independently, pass new lists when calling `clone()`.
+
+        Example:
+            ```python
+            new_agent = agent.clone(instructions="New instructions")
+            ```
         """
         return dataclasses.replace(self, **kwargs)
 
