@@ -38,15 +38,17 @@ class RealtimePlaybackTracker:
         self._current_item: tuple[str, int] | None = None
         self._elapsed_ms: float | None = None
 
-    def on_play_bytes(self, item_id: str, item_content_index: int, bytes: bytes) -> None:
+    def on_play_bytes(
+        self, item_id: str, item_content_index: int, audio_bytes: bytes
+    ) -> None:
         """Called by you when you have played some audio.
 
         Args:
             item_id: The item ID of the audio being played.
             item_content_index: The index of the audio content in `item.content`
-            bytes: The audio bytes that have been fully played.
+            audio_bytes: The audio bytes that have been fully played.
         """
-        ms = calculate_audio_length_ms(self._format, bytes)
+        ms = calculate_audio_length_ms(self._format, audio_bytes)
         self.on_play_ms(item_id, item_content_index, ms)
 
     def on_play_ms(self, item_id: str, item_content_index: int, ms: float) -> None:

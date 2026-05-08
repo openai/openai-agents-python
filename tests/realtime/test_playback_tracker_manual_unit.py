@@ -21,3 +21,16 @@ def test_playback_tracker_on_play_bytes_and_state():
     st3 = tr.get_state()
     assert st3["current_item_id"] is None
     assert st3["elapsed_ms"] is None
+
+
+def test_playback_tracker_on_play_bytes_accepts_audio_bytes_keyword():
+    """on_play_bytes should expose `audio_bytes` (not the shadowed builtin
+    name `bytes`) so callers can reliably pass it as a keyword argument."""
+    tr = RealtimePlaybackTracker()
+    tr.set_audio_format("pcm16")
+
+    tr.on_play_bytes(item_id="item1", item_content_index=0, audio_bytes=b"x" * 24000)
+    state = tr.get_state()
+    assert state["current_item_id"] == "item1"
+    assert state["current_item_content_index"] == 0
+    assert state["elapsed_ms"] and abs(state["elapsed_ms"] - 500.0) < 1e-6
