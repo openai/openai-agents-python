@@ -770,3 +770,81 @@ async def test_user_agent_header_chat_completions(override_ua):
     assert ChatCmplHelpers.get_store_param(client, model_settings) is True, (
         "Should respect explicitly set store=True"
     )
+
+
+def _build_chat_completions_dummy_client() -> tuple[Any, Any]:
+    class DummyCompletions:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] = {}
+
+        async def create(self, **kwargs: Any) -> Any:
+            self.kwargs = kwargs
+            msg = ChatCompletionMessage(role="assistant", content="ok")
+            choice = Choice(index=0, finish_reason="stop", message=msg)
+            return ChatCompletion(
+                id="resp-id",
+                created=0,
+                model="fake",
+                object="chat.completion",
+                choices=[choice],
+            )
+
+    class DummyClient:
+        def __init__(self, completions: DummyCompletions) -> None:
+            self.chat = type("_Chat", (), {"completions": completions})()
+            self.base_url = httpx.URL("http://fake")
+
+    completions = DummyCompletions()
+    return completions, DummyClient(completions)
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fetch_response_chat_completions_allows_extra_arg_when_explicit_arg_is_omitted() -> (
+    None
+):
+    """An extra_args key must not collide with a create_kwargs entry whose
+    value is the OpenAI omit sentinel — the user simply has not set the
+    first-class field, so there is no real duplicate.
+    """
+
+    completions, dummy_client = _build_chat_completions_dummy_client()
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=cast(AsyncOpenAI, dummy_client))
+    with generation_span(disabled=True) as span:
+        await model._fetch_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(extra_args={"reasoning_effort": "high"}),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            span=span,
+            tracing=ModelTracing.DISABLED,
+            stream=False,
+        )
+
+    assert completions.kwargs["reasoning_effort"] == "high"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fetch_response_chat_completions_rejects_duplicate_extra_args_keys() -> None:
+    """When the same key is supplied through both first-class settings and
+    extra_args, the duplicate must still be reported.
+    """
+
+    _completions, dummy_client = _build_chat_completions_dummy_client()
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=cast(AsyncOpenAI, dummy_client))
+    with generation_span(disabled=True) as span:
+        with pytest.raises(TypeError, match="multiple values.*temperature"):
+            await model._fetch_response(
+                system_instructions=None,
+                input="hi",
+                model_settings=ModelSettings(temperature=0.5, extra_args={"temperature": 0.7}),
+                tools=[],
+                output_schema=None,
+                handoffs=[],
+                span=span,
+                tracing=ModelTracing.DISABLED,
+                stream=False,
+            )
