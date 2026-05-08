@@ -24,7 +24,11 @@ from agents.retry import (
     RetryPolicyContext,
     retry_policies,
 )
-from agents.run_internal.model_retry import get_response_with_retry, stream_response_with_retry
+from agents.run_internal.model_retry import (
+    _default_retry_delay,
+    get_response_with_retry,
+    stream_response_with_retry,
+)
 from agents.usage import Usage
 from tests.test_responses import get_text_message
 
@@ -2383,3 +2387,22 @@ async def test_stream_response_with_retry_closes_current_stream_when_consumer_st
     await outer_stream.aclose()
 
     assert stream.close_calls == 1
+
+
+def test_default_retry_delay_caps_overflow_at_max_delay() -> None:
+    # A pathologically large multiplier would overflow `multiplier ** exponent` even
+    # though the result would be capped at max_delay; the helper must not propagate
+    # OverflowError to the retry loop.
+    backoff = ModelRetryBackoffSettings(
+        initial_delay=1.0, max_delay=5.0, multiplier=100.0, jitter=False
+    )
+    assert _default_retry_delay(200, backoff) == 5.0
+
+
+def test_default_retry_delay_handles_large_attempt_with_default_multiplier() -> None:
+    # With the default 2.0 multiplier, attempts above ~1075 overflow `2.0 ** exponent`.
+    # The helper should still return a finite delay capped at max_delay.
+    backoff = ModelRetryBackoffSettings(
+        initial_delay=0.25, max_delay=2.0, multiplier=2.0, jitter=False
+    )
+    assert _default_retry_delay(2000, backoff) == 2.0
