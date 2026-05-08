@@ -977,6 +977,58 @@ async def test_mcp_invocation_mcp_error_reraises(caplog: pytest.LogCaptureFixtur
 
 
 @pytest.mark.asyncio
+async def test_mcp_invocation_is_error_result_surfaces_as_tool_error(
+    caplog: pytest.LogCaptureFixture,
+):
+    """An MCP CallToolResult with ``isError=True`` represents a tool execution failure
+    (per the MCP spec). It must be surfaced through the FunctionTool failure pipeline
+    rather than silently returned as a successful output, otherwise the model sees a
+    fake "success" containing the error text and may proceed as if nothing went wrong.
+    """
+    caplog.set_level(logging.WARNING)
+
+    class IsErrorFakeMCPServer(FakeMCPServer):
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None = None,
+        ) -> CallToolResult:
+            return CallToolResult(
+                content=[TextContent(type="text", text="db connection refused")],
+                isError=True,
+            )
+
+    server = IsErrorFakeMCPServer()
+    server.add_tool("query", {})
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="query", inputSchema={})
+
+    # invoke_mcp_tool itself raises AgentsException so the failure pipeline can shape it
+    with pytest.raises(AgentsException) as exc_info:
+        await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+    assert "db connection refused" in str(exc_info.value)
+    assert "isError=True" in caplog.text
+
+    # Via FunctionTool with the default failure_error_function the error becomes a
+    # string result, not an apparent successful tool output.
+    mcp_tool = MCPTool(name="query", inputSchema={})
+    agent = Agent(name="test-agent")
+    function_tool = MCPUtil.to_function_tool(
+        mcp_tool, server, convert_schemas_to_strict=False, agent=agent
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="query",
+        tool_call_id="test_call_is_error",
+        tool_arguments="{}",
+    )
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+    assert isinstance(result, str)
+    assert "db connection refused" in result or "error" in result.lower()
+
+
+@pytest.mark.asyncio
 async def test_mcp_tool_graceful_error_handling(caplog: pytest.LogCaptureFixture):
     """Test that MCP tool errors are handled gracefully when invoked via FunctionTool.
 

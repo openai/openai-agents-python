@@ -658,6 +658,28 @@ class MCPUtil:
         else:
             logger.debug(f"MCP tool {tool_name_for_display} returned {result}")
 
+        # Per the MCP spec, a server signals tool-execution failure by returning a
+        # CallToolResult with isError=True (rather than raising). Surface this through
+        # the FunctionTool failure pipeline so the model sees a structured error
+        # result instead of a fake "successful" output.
+        if getattr(result, "isError", False):
+            error_text = ""
+            for item in getattr(result, "content", None) or []:
+                if getattr(item, "type", None) == "text":
+                    error_text = item.text
+                    break
+            logger.warning(
+                f"MCP tool {tool_name_for_display} on server '{server.name}' "
+                f"returned isError=True: {error_text}"
+            )
+            raise AgentsException(
+                f"MCP tool {tool_name_for_display} on server '{server.name}' "
+                f"reported an error: {error_text}"
+                if error_text
+                else f"MCP tool {tool_name_for_display} on server '{server.name}' "
+                f"reported an error."
+            )
+
         # If structured content is requested and available, use it exclusively
         tool_output: ToolOutput
         if server.use_structured_content and result.structuredContent:
