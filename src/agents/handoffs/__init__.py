@@ -291,16 +291,14 @@ def handoff(
                 partial=False,
             )
             input_func = cast(OnHandoffWithInput[THandoffInput], on_handoff)
-            if inspect.iscoroutinefunction(input_func):
-                await input_func(ctx, validated_input)
-            else:
-                input_func(ctx, validated_input)
+            result = input_func(ctx, validated_input)
+            if inspect.isawaitable(result):
+                await result
         elif on_handoff is not None:
             no_input_func = cast(OnHandoffWithoutInput, on_handoff)
-            if inspect.iscoroutinefunction(no_input_func):
-                await no_input_func(ctx)
-            else:
-                no_input_func(ctx)
+            result = no_input_func(ctx)
+            if inspect.isawaitable(result):
+                await result
 
         return agent
 
