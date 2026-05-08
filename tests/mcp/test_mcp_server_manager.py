@@ -353,6 +353,21 @@ async def test_manager_reconnect_all_avoids_duplicate_connections() -> None:
 
 
 @pytest.mark.asyncio
+async def test_manager_deduplicates_repeated_servers() -> None:
+    """A server passed multiple times must only connect/cleanup once and
+    appear once in active_servers."""
+
+    server = CleanupAwareServer()
+
+    async with MCPServerManager([server, server]) as manager:
+        assert manager.active_servers == [server]
+        assert manager.all_servers == [server]
+        assert server.connect_calls == 1
+
+    assert server.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_manager_strict_reconnect_refreshes_active_servers() -> None:
     server_a = FlakyServer(failures=1)
     server_b = FlakyServer(failures=2)

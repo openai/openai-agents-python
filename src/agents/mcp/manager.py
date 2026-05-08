@@ -154,8 +154,8 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
         suppress_cancelled_error: bool = True,
         connect_in_parallel: bool = False,
     ) -> None:
-        self._all_servers = list(servers)
-        self._active_servers = list(servers)
+        self._all_servers = self._unique_servers(servers)
+        self._active_servers = list(self._all_servers)
         self.connect_timeout_seconds = connect_timeout_seconds
         self.cleanup_timeout_seconds = cleanup_timeout_seconds
         self.drop_failed_servers = drop_failed_servers
