@@ -181,12 +181,15 @@ def _is_subclass_of_base_model_or_dict(t: Any) -> bool:
 
 
 def _type_to_str(t: type[Any]) -> str:
+    if t is None:
+        return "None"
+
     origin = get_origin(t)
     args = get_args(t)
 
     if origin is None:
         # It's a simple type like `str`, `int`, etc.
-        return t.__name__
+        return getattr(t, "__name__", str(t))
     elif args:
         args_str = ", ".join(_type_to_str(arg) for arg in args)
         return f"{origin.__name__}[{args_str}]"

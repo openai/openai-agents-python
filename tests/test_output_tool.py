@@ -107,6 +107,14 @@ def test_plain_text_obj_doesnt_produce_schema():
         output_wrapper.json_schema()
 
 
+def test_name_returns_string_for_none_output_type():
+    # AgentOutputSchema accepts ``None`` as a plain-text marker; ``name()`` must not crash on it.
+    output_wrapper = AgentOutputSchema(output_type=None)  # type: ignore[arg-type]
+    assert output_wrapper.is_plain_text()
+    assert isinstance(output_wrapper.name(), str)
+    assert output_wrapper.name() == "None"
+
+
 def test_structured_output_is_strict():
     output_wrapper = AgentOutputSchema(output_type=Foo)
     assert output_wrapper.is_strict_json_schema()
