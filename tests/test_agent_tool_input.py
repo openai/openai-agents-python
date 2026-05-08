@@ -125,3 +125,38 @@ def test_private_schema_helper_edge_cases() -> None:
     assert _format_enum_label([]) == "enum"
     assert "..." in _format_enum_label([1, 2, 3, 4, 5, 6])
     assert _format_literal_label({}) == "literal"
+
+
+def test_schema_summary_handles_pydantic_optional_anyof() -> None:
+    # Pydantic emits `T | None` as anyOf:[{type:T},{type:"null"}]; without
+    # support for that shape, a single Optional field nukes the whole summary.
+    schema = {
+        "type": "object",
+        "properties": {
+            "count": {
+                "anyOf": [{"type": "integer"}, {"type": "null"}],
+                "description": "Optional count.",
+            },
+            "name": {"type": "string", "description": "A name."},
+        },
+        "required": ["name"],
+    }
+    summary = _build_schema_summary(schema)
+    assert summary is not None
+    assert "- count (integer | null, optional) - Optional count." in summary
+    assert "- name (string, required) - A name." in summary
+
+    # Non-nullable anyOf shapes (e.g. union of two simple types, or anyOf with
+    # nested objects) should still be rejected.
+    assert (
+        _build_schema_summary(
+            {
+                "type": "object",
+                "description": "x",
+                "properties": {
+                    "u": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
+                },
+            }
+        )
+        is None
+    )

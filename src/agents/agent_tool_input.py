@@ -212,10 +212,21 @@ def _describe_json_schema_field(
     if not isinstance(field_schema, dict):
         return None
 
-    if any(key in field_schema for key in ("properties", "items", "oneOf", "anyOf", "allOf")):
+    if any(key in field_schema for key in ("properties", "items", "oneOf", "allOf")):
         return None
 
     description = _read_schema_description(field_schema)
+
+    # Pydantic renders `T | None` as `anyOf: [{type: T}, {type: "null"}]`.
+    # Treat that exact shape as the same as `type: ["T", "null"]` so optional
+    # simple fields still appear in the schema summary.
+    any_of = field_schema.get("anyOf")
+    if any_of is not None:
+        nullable_label = _describe_nullable_anyof(any_of)
+        if nullable_label is None:
+            return None
+        return _SchemaFieldDescription(type=nullable_label, description=description)
+
     raw_type = field_schema.get("type")
 
     if isinstance(raw_type, list):
@@ -243,6 +254,28 @@ def _describe_json_schema_field(
         )
 
     return None
+
+
+def _describe_nullable_anyof(any_of: Any) -> str | None:
+    """Render a 2-branch `anyOf` of a simple type and `null` as `T | null`."""
+    if not isinstance(any_of, list) or len(any_of) != 2:
+        return None
+    base_type: str | None = None
+    has_null = False
+    for entry in any_of:
+        if not isinstance(entry, dict):
+            return None
+        entry_type = entry.get("type")
+        if entry_type == "null":
+            has_null = True
+            continue
+        if entry_type in _SIMPLE_JSON_SCHEMA_TYPES and base_type is None:
+            base_type = cast(str, entry_type)
+            continue
+        return None
+    if base_type is None or not has_null:
+        return None
+    return f"{base_type} | null"
 
 
 def _read_schema_description(value: Any) -> str | None:
