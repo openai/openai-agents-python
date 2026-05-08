@@ -83,6 +83,10 @@ class OpenAIConversationsSession(SessionABC):
             ):
                 # calling model_dump() to make this serializable
                 all_items.append(item.model_dump(exclude_unset=True))
+        elif session_limit <= 0:
+            # Match SQLiteSession semantics: a non-positive limit yields no history,
+            # without issuing an upstream request that would otherwise reject limit=0.
+            return []
         else:
             async for item in self._openai_client.conversations.items.list(
                 conversation_id=session_id,
@@ -91,7 +95,7 @@ class OpenAIConversationsSession(SessionABC):
             ):
                 # calling model_dump() to make this serializable
                 all_items.append(item.model_dump(exclude_unset=True))
-                if session_limit is not None and len(all_items) >= session_limit:
+                if len(all_items) >= session_limit:
                     break
             all_items.reverse()
 

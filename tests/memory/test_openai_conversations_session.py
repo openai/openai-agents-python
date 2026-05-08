@@ -473,3 +473,35 @@ class TestOpenAIConversationsSessionSettings:
 
         assert session.session_settings is not None
         assert session.session_settings.limit == 5
+
+    @pytest.mark.asyncio
+    async def test_get_items_with_zero_limit_returns_empty(self, mock_openai_client):
+        """get_items(limit=0) should return [] without iterating remote items.
+
+        Matches SQLiteSession semantics for SessionSettings(limit=0).
+        """
+
+        class _FakeAsyncIter:
+            def __init__(self, items):
+                self.items = items
+
+            def __aiter__(self):
+                async def _gen():
+                    for x in self.items:
+                        yield x
+
+                return _gen()
+
+        item = MagicMock()
+        item.model_dump.return_value = {"id": "a", "role": "assistant", "content": "hi"}
+        mock_openai_client.conversations.items.list = MagicMock(
+            return_value=_FakeAsyncIter([item, item, item])
+        )
+
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+
+        assert await session.get_items(limit=0) == []
+        # No upstream list call should be issued for a non-positive limit.
+        mock_openai_client.conversations.items.list.assert_not_called()
