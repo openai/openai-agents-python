@@ -314,6 +314,13 @@ def describe_run_state_step(step: object | None) -> str | int | None:
     return type(step).__name__
 
 
+def _raw_item_field(raw_item: Any, key: str) -> Any:
+    """Read a field from a raw item, supporting both dict and Pydantic shapes."""
+    if isinstance(raw_item, Mapping):
+        return raw_item.get(key)
+    return getattr(raw_item, key, None)
+
+
 def build_generated_items_details(
     items: list[RunItem],
     *,
@@ -323,13 +330,14 @@ def build_generated_items_details(
     details: list[dict[str, object]] = []
     for idx, item in enumerate(items):
         item_info: dict[str, object] = {"index": idx, "type": item.type}
-        if hasattr(item, "raw_item") and isinstance(item.raw_item, dict):
-            item_info["raw_type"] = item.raw_item.get("type")
-            item_info["name"] = item.raw_item.get("name")
-            item_info["call_id"] = item.raw_item.get("call_id")
+        raw_item = getattr(item, "raw_item", None)
+        if raw_item is not None:
+            item_info["raw_type"] = _raw_item_field(raw_item, "type")
+            item_info["name"] = _raw_item_field(raw_item, "name")
+            item_info["call_id"] = _raw_item_field(raw_item, "call_id")
             if item.type == "tool_call_output_item" and include_tool_output:
-                output_str = str(item.raw_item.get("output", ""))[:100]
-                item_info["output"] = output_str
+                output_value = _raw_item_field(raw_item, "output")
+                item_info["output"] = str(output_value if output_value is not None else "")[:100]
         details.append(item_info)
     return details
 
