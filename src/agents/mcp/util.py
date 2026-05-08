@@ -492,8 +492,13 @@ class MCPUtil:
             schema["properties"] = {}
 
         if convert_schemas_to_strict:
+            # ``ensure_strict_json_schema`` mutates the schema in place and may raise
+            # partway through, leaving strict-mode artifacts (e.g. ``required`` or
+            # ``additionalProperties: false``) on a schema we still serve as
+            # non-strict. Convert a separate copy so the non-strict fallback keeps
+            # the original schema intact.
             try:
-                schema = ensure_strict_json_schema(schema)
+                schema = ensure_strict_json_schema(copy.deepcopy(schema))
                 is_strict = True
             except Exception as e:
                 logger.info(f"Error converting MCP schema to strict mode: {e}")
