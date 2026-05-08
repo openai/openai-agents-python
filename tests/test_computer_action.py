@@ -594,6 +594,39 @@ async def test_execute_invokes_hooks_and_returns_tool_call_output() -> None:
 
 
 @pytest.mark.asyncio
+async def test_execute_does_not_double_prefix_data_url_screenshot() -> None:
+    """Drivers that already return a data URL should not be double-wrapped into a broken URL."""
+    pre_encoded = "data:image/png;base64,iVBORw0KGgo="
+    computer = LoggingComputer(screenshot_return=pre_encoded)
+    comptool = ComputerTool(computer=computer)
+    tool_call = ResponseComputerToolCall(
+        id="tool_dataurl",
+        type="computer_call",
+        action=ActionClick(type="click", x=1, y=2, button="left"),
+        call_id="tool_dataurl",
+        pending_safety_checks=[],
+        status="completed",
+    )
+    tool_run = ToolRunComputerAction(tool_call=tool_call, computer_tool=comptool)
+    agent = Agent(name="dataurl_agent", tools=[comptool])
+
+    output_item = await ComputerAction.execute(
+        agent=agent,
+        action=tool_run,
+        hooks=RunHooks[Any](),
+        context_wrapper=RunContextWrapper(context=None),
+        config=RunConfig(),
+    )
+
+    assert isinstance(output_item, ToolCallOutputItem)
+    # The output URL must be the original data URL, not double-prefixed.
+    assert output_item.output == pre_encoded
+    raw = cast(dict[str, Any], output_item.raw_item)
+    assert raw["output"]["image_url"] == pre_encoded
+    assert "data:image/png;base64,data:" not in raw["output"]["image_url"]
+
+
+@pytest.mark.asyncio
 async def test_execute_emits_function_span() -> None:
     computer = LoggingComputer(screenshot_return="trace_img")
     comptool = ComputerTool(computer=computer)

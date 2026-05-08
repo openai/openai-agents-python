@@ -159,7 +159,7 @@ class ComputerAction:
                 ),
             )
 
-            image_url = f"data:image/png;base64,{output}" if output else ""
+            image_url = cls._build_image_url(output)
             if span and config.trace_include_sensitive_data:
                 span.span_data.output = image_url
 
@@ -305,6 +305,16 @@ class ComputerAction:
         if not keys:
             return None
         return cast(list[str], keys)
+
+    @staticmethod
+    def _build_image_url(output: str) -> str:
+        """Wrap raw base64 PNG output in a data URL, tolerating drivers that already do so."""
+        if not output:
+            return ""
+        if output.startswith("data:image/"):
+            # Driver already returned a data URL; avoid double-prefixing it.
+            return output
+        return f"data:image/png;base64,{output}"
 
     @classmethod
     def _filter_supported_kwargs(
