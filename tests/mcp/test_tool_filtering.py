@@ -5,11 +5,13 @@ FakeMCPServer delegates filtering logic to the real _MCPServerWithClientSession 
 """
 
 import asyncio
+from typing import Any, cast
 
 import pytest
 from mcp import Tool as MCPTool
 
 from agents import Agent
+from agents.exceptions import UserError
 from agents.mcp import ToolFilterContext, create_static_tool_filter
 from agents.run_context import RunContextWrapper
 
@@ -75,6 +77,46 @@ async def test_static_tool_filtering():
     tools = await server.list_tools(run_context, agent)
     assert len(tools) == 1
     assert tools[0].name == "tool1"
+
+
+@pytest.mark.asyncio
+async def test_static_tool_filtering_rejects_unknown_keys():
+    """Test that misspelled static filter keys fail closed."""
+    server = FakeMCPServer(server_name="test_server")
+    server.add_tool("read", {})
+    server.add_tool("delete", {})
+
+    run_context = create_test_context()
+    agent = create_test_agent()
+
+    server.tool_filter = cast(Any, {"allowed_tools": ["read"]})
+    with pytest.raises(UserError, match="unexpected keys"):
+        await server.list_tools(run_context, agent)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_filter", "message"),
+    [
+        ({"allowed_tool_names": "read"}, "expected a list of strings"),
+        ({"blocked_tool_names": [123]}, "expected a string"),
+    ],
+)
+async def test_static_tool_filtering_rejects_invalid_tool_name_lists(
+    tool_filter: dict[str, object],
+    message: str,
+):
+    """Test that malformed static filter values fail closed."""
+    server = FakeMCPServer(server_name="test_server")
+    server.add_tool("read", {})
+    server.add_tool("delete", {})
+
+    run_context = create_test_context()
+    agent = create_test_agent()
+
+    server.tool_filter = cast(Any, tool_filter)
+    with pytest.raises(UserError, match=message):
+        await server.list_tools(run_context, agent)
 
 
 # === Dynamic Tool Filtering Core Tests ===

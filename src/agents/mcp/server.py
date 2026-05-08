@@ -633,19 +633,52 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self, tools: list[MCPTool], static_filter: ToolFilterStatic
     ) -> list[MCPTool]:
         """Apply static tool filtering based on allowlist and blocklist."""
+        valid_keys = {"allowed_tool_names", "blocked_tool_names"}
+        invalid_keys = sorted(set(static_filter) - valid_keys)
+        if invalid_keys:
+            raise UserError(
+                "Invalid tool_filter static configuration: "
+                f"unexpected keys {invalid_keys!r}; expected only "
+                "'allowed_tool_names' and 'blocked_tool_names'."
+            )
+
         filtered_tools = tools
 
         # Apply allowed_tool_names filter (whitelist)
         if "allowed_tool_names" in static_filter:
-            allowed_names = static_filter["allowed_tool_names"]
+            allowed_names = self._validate_static_tool_filter_names(
+                static_filter["allowed_tool_names"],
+                key="allowed_tool_names",
+            )
             filtered_tools = [t for t in filtered_tools if t.name in allowed_names]
 
         # Apply blocked_tool_names filter (blacklist)
         if "blocked_tool_names" in static_filter:
-            blocked_names = static_filter["blocked_tool_names"]
+            blocked_names = self._validate_static_tool_filter_names(
+                static_filter["blocked_tool_names"],
+                key="blocked_tool_names",
+            )
             filtered_tools = [t for t in filtered_tools if t.name not in blocked_names]
 
         return filtered_tools
+
+    @staticmethod
+    def _validate_static_tool_filter_names(value: object, *, key: str) -> list[str]:
+        if not isinstance(value, list):
+            raise UserError(
+                f"Invalid tool_filter.{key}: expected a list of strings, "
+                f"got {type(value).__name__}."
+            )
+
+        tool_names: list[str] = []
+        for index, tool_name in enumerate(value):
+            if not isinstance(tool_name, str):
+                raise UserError(
+                    f"Invalid tool_filter.{key}[{index}]: expected a string, "
+                    f"got {type(tool_name).__name__}."
+                )
+            tool_names.append(tool_name)
+        return tool_names
 
     async def _apply_dynamic_tool_filter(
         self,
