@@ -19,6 +19,39 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.17.0
+
+In this version, sandbox local source materialization keeps `LocalFile.src` and `LocalDir.src` within the materialization `base_dir` unless the source path is covered by `Manifest.extra_path_grants`. The `base_dir` is the SDK process current working directory when the manifest is applied; relative local sources are resolved from that directory, while absolute local sources must already be inside it or under an explicit grant. This closes a local artifact boundary issue, but it can affect applications that intentionally copy trusted host files or directories from outside that base directory into a sandbox workspace.
+
+To migrate, grant trusted host roots at the manifest level with `SandboxPathGrant`, preferably as read-only when the sandbox only needs to read those files:
+
+```python
+from pathlib import Path
+
+from agents.sandbox import Manifest, SandboxPathGrant
+from agents.sandbox.entries import Dir, LocalDir
+
+# This is an absolute host path outside the SDK process base_dir.
+TRUSTED_DOCS_ROOT = Path("/opt/my-app/docs")
+
+manifest = Manifest(
+    extra_path_grants=(
+        # This host root is outside the SDK process base_dir, so the manifest must grant it.
+        SandboxPathGrant(path=str(TRUSTED_DOCS_ROOT), read_only=True),
+    ),
+    entries={
+        # No grant is needed for local sources that stay under the SDK process base_dir.
+        "fixtures": LocalDir(src=Path("fixtures"), description="Local test fixtures."),
+        # This entry reads from the granted host root and copies it into the sandbox workspace.
+        "docs": LocalDir(src=TRUSTED_DOCS_ROOT, description="Trusted local documents."),
+        # Dir creates a sandbox workspace directory; it does not read from the host filesystem.
+        "output": Dir(description="Generated artifacts."),
+    },
+)
+```
+
+Treat `extra_path_grants` as trusted application configuration. Do not populate grants from model output or other untrusted manifest input unless your application has already approved those host paths.
+
 ### 0.16.0
 
 In this version, the SDK default model is now `gpt-5.4-mini` instead of `gpt-4.1`. This affects agents and runs that do not explicitly set a model. Because the new default is a GPT-5 model, implicit default model settings now include GPT-5 defaults such as `reasoning.effort="none"` and `verbosity="low"`.
