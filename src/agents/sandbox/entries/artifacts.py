@@ -8,7 +8,7 @@ import re
 import stat
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field, field_serializer, field_validator
@@ -17,6 +17,7 @@ from ..errors import (
     GitCloneError,
     GitCopyError,
     GitMissingInImageError,
+    GitSubpathError,
     LocalChecksumError,
     LocalDirReadError,
     LocalFileReadError,
@@ -786,9 +787,7 @@ class GitRepo(BaseEntry):
                     context={"repo": self.repo, "subpath": self.subpath},
                 )
 
-            git_src_root: str = tmp_dir
-            if self.subpath is not None:
-                git_src_root = f"{tmp_dir}/{self.subpath.lstrip('/')}"
+            git_src_root = self._git_src_root(tmp_dir)
 
             # Copy into destination in the container.
             await session.mkdir(dest, parents=True)
@@ -813,6 +812,24 @@ class GitRepo(BaseEntry):
     @staticmethod
     def _looks_like_commit_ref(ref: str) -> bool:
         return _COMMIT_REF_RE.fullmatch(ref) is not None
+
+    def _git_src_root(self, tmp_dir: str) -> str:
+        if self.subpath is None:
+            return tmp_dir
+
+        subpath = self.subpath
+        posix_subpath = PurePosixPath(subpath)
+        windows_subpath = PureWindowsPath(subpath)
+        if subpath == "" or posix_subpath.as_posix() == ".":
+            raise GitSubpathError(repo=self.repo, subpath=subpath, reason="empty")
+        if posix_subpath.is_absolute():
+            raise GitSubpathError(repo=self.repo, subpath=subpath, reason="absolute")
+        if "\\" in subpath or windows_subpath.drive:
+            raise GitSubpathError(repo=self.repo, subpath=subpath, reason="windows_path")
+        if ".." in posix_subpath.parts:
+            raise GitSubpathError(repo=self.repo, subpath=subpath, reason="parent_traversal")
+
+        return f"{tmp_dir}/{posix_subpath.as_posix()}"
 
     async def _clone_named_ref(
         self,
