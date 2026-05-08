@@ -16,13 +16,13 @@ from .util._types import MaybeAwaitable
 class ModelRetryBackoffSettings:
     """Backoff configuration for runner-managed model retries."""
 
-    initial_delay: float | None = None
+    initial_delay: float | None = Field(default=None, ge=0)
     """Delay in seconds before the first retry attempt."""
 
-    max_delay: float | None = None
+    max_delay: float | None = Field(default=None, ge=0)
     """Maximum delay in seconds between retry attempts."""
 
-    multiplier: float | None = None
+    multiplier: float | None = Field(default=None, ge=0)
     """Multiplier applied after each retry attempt."""
 
     jitter: bool | None = None
