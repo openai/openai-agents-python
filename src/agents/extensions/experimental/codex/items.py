@@ -168,6 +168,17 @@ def _coerce_mcp_tool_call_error(
     return McpToolCallError(message=cast(str, raw.get("message", "")))
 
 
+def _coerce_todo_item(raw: TodoItem | Mapping[str, Any]) -> TodoItem:
+    if isinstance(raw, TodoItem):
+        return raw
+    if not isinstance(raw, Mapping):
+        raise TypeError("TodoItem must be a mapping.")
+    return TodoItem(
+        text=cast(str, raw.get("text", "")),
+        completed=bool(raw.get("completed")),
+    )
+
+
 def coerce_thread_item(raw: ThreadItem | Mapping[str, Any]) -> ThreadItem:
     if isinstance(raw, _DictLike):
         return raw
@@ -225,10 +236,7 @@ def coerce_thread_item(raw: ThreadItem | Mapping[str, Any]) -> ThreadItem:
         )
     if item_type == "todo_list":
         items_raw = raw.get("items", [])
-        items = [
-            TodoItem(text=cast(str, item.get("text", "")), completed=bool(item.get("completed")))
-            for item in cast(list[Mapping[str, Any]], items_raw)
-        ]
+        items = [_coerce_todo_item(item) for item in items_raw]
         return TodoListItem(id=cast(str, raw["id"]), items=items)
     if item_type == "error":
         return ErrorItem(
