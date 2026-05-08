@@ -23,6 +23,29 @@ def test_coerce_shell_call_reads_max_output_length() -> None:
     assert result.action.max_output_length == 512
 
 
+def test_coerce_shell_call_preserves_zero_timeout_and_canonical_field_precedence() -> None:
+    # `timeout_ms` is the canonical field; an explicit value (including 0) must be honored
+    # even when a fallback alias like `timeout` is also present in the payload.
+    tool_call = {
+        "call_id": "shell-zero",
+        "action": {
+            "commands": ["ls"],
+            "timeout_ms": 0,
+            "timeout": 5000,
+        },
+    }
+    result = run_loop.coerce_shell_call(tool_call)
+    assert result.action.timeout_ms == 0
+
+    # Falling back to the legacy `timeout` field still works when `timeout_ms` is absent.
+    fallback_call = {
+        "call_id": "shell-fallback",
+        "action": {"commands": ["ls"], "timeout": 5000},
+    }
+    fallback_result = run_loop.coerce_shell_call(fallback_call)
+    assert fallback_result.action.timeout_ms == 5000
+
+
 def test_coerce_shell_call_requires_commands() -> None:
     tool_call = {"call_id": "shell-2", "action": {"commands": []}}
     with pytest.raises(ModelBehaviorError):

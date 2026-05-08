@@ -633,11 +633,11 @@ def coerce_shell_call(tool_call: Any) -> ShellCallData:
     if not commands:
         raise ModelBehaviorError("Shell call action must include at least one command.")
 
-    timeout_value = (
-        get_mapping_or_attr(action_payload, "timeout_ms")
-        or get_mapping_or_attr(action_payload, "timeoutMs")
-        or get_mapping_or_attr(action_payload, "timeout")
-    )
+    timeout_value = get_mapping_or_attr(action_payload, "timeout_ms")
+    if timeout_value is None:
+        timeout_value = get_mapping_or_attr(action_payload, "timeoutMs")
+    if timeout_value is None:
+        timeout_value = get_mapping_or_attr(action_payload, "timeout")
     timeout_ms = int(timeout_value) if isinstance(timeout_value, int | float) else None
 
     max_length_value = get_mapping_or_attr(action_payload, "max_output_length")
