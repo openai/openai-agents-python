@@ -328,11 +328,26 @@ class DaprSession(SessionABC):
                         continue
                     raise
 
-            # Update metadata
+            # Update metadata, preserving created_at across subsequent writes.
+            now = str(int(time.time()))
+            created_at = now
+            try:
+                existing_meta_response = await self._dapr_client.get_state(
+                    store_name=self._state_store_name,
+                    key=self._metadata_key,
+                    state_metadata=self._get_read_metadata(),
+                )
+                if existing_meta_response.data:
+                    existing_meta = json.loads(existing_meta_response.data.decode("utf-8"))
+                    if isinstance(existing_meta, dict) and existing_meta.get("created_at"):
+                        created_at = str(existing_meta["created_at"])
+            except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+                # Corrupt or missing metadata — start fresh with current timestamp.
+                pass
             metadata = {
                 "session_id": self.session_id,
-                "created_at": str(int(time.time())),
-                "updated_at": str(int(time.time())),
+                "created_at": created_at,
+                "updated_at": now,
             }
             await self._dapr_client.save_state(
                 store_name=self._state_store_name,
