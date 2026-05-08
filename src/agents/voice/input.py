@@ -62,13 +62,14 @@ class AudioInput:
     def to_base64(self) -> str:
         """Returns the audio data as a base64 encoded string."""
         if self.buffer.dtype == np.float32:
-            # convert to int16
-            self.buffer = np.clip(self.buffer, -1.0, 1.0)
-            self.buffer = (self.buffer * 32767).astype(np.int16)
-        elif self.buffer.dtype != np.int16:
+            # convert to int16 without mutating the caller's buffer
+            int16_buffer = (np.clip(self.buffer, -1.0, 1.0) * 32767).astype(np.int16)
+        elif self.buffer.dtype == np.int16:
+            int16_buffer = self.buffer
+        else:
             raise UserError("Buffer must be a numpy array of int16 or float32")
 
-        return base64.b64encode(self.buffer.tobytes()).decode("utf-8")
+        return base64.b64encode(int16_buffer.tobytes()).decode("utf-8")
 
 
 class StreamedAudioInput:
