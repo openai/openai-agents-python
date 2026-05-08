@@ -45,9 +45,7 @@ def remove_all_tools(handoff_input_data: HandoffInputData) -> HandoffInputData:
     # nest_handoff_history) don't drop or re-introduce tool items.
     existing_input_items = handoff_input_data.input_items
     filtered_input_items = (
-        _remove_tools_from_items(existing_input_items)
-        if existing_input_items is not None
-        else None
+        _remove_tools_from_items(existing_input_items) if existing_input_items is not None else None
     )
 
     return handoff_input_data.clone(
