@@ -67,7 +67,7 @@ def apply_diff(input: str, diff: str, mode: ApplyDiffMode = "default") -> str:
 
 def _normalize_diff_lines(diff: str) -> list[str]:
     lines = [line.rstrip("\r") for line in re.split(r"\r?\n", diff)]
-    if lines and lines[-1] == "":
+    while lines and lines[-1] == "":
         lines.pop()
     return lines
 

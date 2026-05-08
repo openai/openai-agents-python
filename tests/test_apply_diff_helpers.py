@@ -21,6 +21,12 @@ def test_normalize_diff_lines_drops_trailing_blank() -> None:
     assert _normalize_diff_lines("a\nb\n") == ["a", "b"]
 
 
+def test_normalize_diff_lines_drops_repeated_trailing_blanks() -> None:
+    assert _normalize_diff_lines("a\nb\n\n\n") == ["a", "b"]
+    assert _normalize_diff_lines("\n\n") == []
+    assert _normalize_diff_lines("a\n\nb\n\n") == ["a", "", "b"]
+
+
 def test_is_done_true_when_index_out_of_range() -> None:
     state = ParserState(lines=["line"], index=1)
     assert _is_done(state, [])

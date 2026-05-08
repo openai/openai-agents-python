@@ -62,3 +62,13 @@ def test_apply_diff_with_crlf_input_and_crlf_diff_preserves_crlf() -> None:
 def test_apply_diff_create_mode_preserves_crlf_newlines() -> None:
     diff = "\r\n".join(["+hello", "+world", "+"])
     assert apply_diff("", diff, mode="create") == "hello\r\nworld\r\n"
+
+
+def test_apply_diff_tolerates_trailing_blank_lines_in_diff() -> None:
+    # Diffs may arrive padded with multiple trailing newlines (e.g. an editor
+    # or transport that always appends a final newline plus an extra blank).
+    # Those trailing blanks should not be parsed as empty context lines that
+    # fail to match against the input.
+    input_text = "line1\nline2\n"
+    diff = "@@ line1\n-line2\n+updated\n\n\n"
+    assert apply_diff(input_text, diff) == "line1\nupdated\n"
