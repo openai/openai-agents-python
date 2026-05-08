@@ -124,3 +124,22 @@ def test_invalid_ref_format():
     schema = {"type": "object", "properties": {"a": {"$ref": "invalid", "description": "desc"}}}
     with pytest.raises(ValueError):
         ensure_strict_json_schema(schema)
+
+
+def test_chained_ref_with_sibling_keys_is_resolved():
+    # When a $ref points to a definition that is itself just a $ref (a chained alias),
+    # and the original $ref has sibling keys (like "description"), the chain must be
+    # fully resolved instead of silently dropping the inner $ref and losing the type.
+    schema = {
+        "$defs": {
+            "Inner": {"type": "string"},
+            "Outer": {"$ref": "#/$defs/Inner"},
+        },
+        "type": "object",
+        "properties": {"a": {"$ref": "#/$defs/Outer", "description": "desc"}},
+    }
+    result = ensure_strict_json_schema(schema)
+    a_schema = result["properties"]["a"]
+    assert a_schema["type"] == "string"
+    assert a_schema["description"] == "desc"
+    assert "$ref" not in a_schema
