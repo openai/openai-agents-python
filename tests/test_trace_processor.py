@@ -201,9 +201,7 @@ def test_batch_trace_processor_survives_exporter_exception():
     time.sleep(0.3)
 
     assert processor._worker_thread is not None
-    assert processor._worker_thread.is_alive(), (
-        "Worker thread must survive an exporter exception"
-    )
+    assert processor._worker_thread.is_alive(), "Worker thread must survive an exporter exception"
 
     processor.shutdown(timeout=2.0)
 
