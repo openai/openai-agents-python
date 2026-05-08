@@ -1394,3 +1394,31 @@ async def test_concurrent_add_items_preserves_message_structure_for_file_db():
         assert len(rows) == len(expected_contents)
 
         session.close()
+
+
+async def test_output_tokens_details_persisted_when_input_details_missing():
+    """Regression: output_tokens_details must persist even if input_tokens_details is None.
+
+    Previously the output serialization branch was nested inside the input branch,
+    silently dropping output_tokens_details whenever input_tokens_details was falsy
+    (e.g., when a provider populated only output details).
+    """
+    session = AdvancedSQLiteSession(session_id="output_only_usage", create_tables=True)
+    usage = Usage(
+        requests=1,
+        input_tokens=10,
+        output_tokens=5,
+        total_tokens=15,
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=42),
+    )
+    # Mimic providers that bypass validation and leave input_tokens_details unset.
+    object.__setattr__(usage, "input_tokens_details", None)
+
+    await session.add_items([{"role": "user", "content": "hi"}])
+    await session.store_run_usage(create_mock_run_result(usage))
+
+    turn_usage = await session.get_turn_usage(1)
+    assert isinstance(turn_usage, dict)
+    assert turn_usage["output_tokens_details"] == {"reasoning_tokens": 42}
+    assert turn_usage["input_tokens_details"] is None
+    session.close()
