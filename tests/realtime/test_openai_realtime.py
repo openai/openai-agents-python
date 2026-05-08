@@ -1530,6 +1530,19 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert cfg.audio.output is not None
         assert cfg.audio.output.format is None
 
+    def test_session_config_treats_none_audio_channels_as_unset(self, model):
+        # ``audio.input``/``audio.output`` may be omitted by callers that only
+        # want to override the other channel; an explicit ``None`` should be
+        # equivalent to leaving the key off rather than crashing on the
+        # membership checks inside ``_get_session_config``.
+        cfg = model._get_session_config({"audio": {"input": None, "output": None}})
+        assert cfg.audio is not None
+        assert cfg.audio.input is not None
+        assert cfg.audio.input.format is not None
+        assert cfg.audio.input.format.type == "audio/pcm"
+        assert cfg.audio.output is not None
+        assert cfg.audio.output.voice == "ash"
+
     def test_session_config_respects_audio_block_and_output_modalities(self, model):
         settings = {
             "input_audio_format": "pcm16",

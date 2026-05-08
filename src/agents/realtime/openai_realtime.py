@@ -1358,13 +1358,16 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
         audio_config = model_settings.get("audio")
         audio_config_mapping = audio_config if isinstance(audio_config, Mapping) else None
+        # ``audio.input``/``audio.output`` may be omitted or explicitly None; coerce
+        # both to an empty mapping so callers can opt out of one channel without
+        # tripping the membership checks below.
         input_audio_config: Mapping[str, Any] = (
-            cast(Mapping[str, Any], audio_config_mapping.get("input", {}))
+            cast(Mapping[str, Any], audio_config_mapping.get("input") or {})
             if audio_config_mapping
             else {}
         )
         output_audio_config: Mapping[str, Any] = (
-            cast(Mapping[str, Any], audio_config_mapping.get("output", {}))
+            cast(Mapping[str, Any], audio_config_mapping.get("output") or {})
             if audio_config_mapping
             else {}
         )
