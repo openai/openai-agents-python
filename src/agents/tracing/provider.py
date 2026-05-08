@@ -54,8 +54,15 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
     def add_tracing_processor(self, tracing_processor: TracingProcessor):
         """
         Add a processor to the list of processors. Each processor will receive all traces/spans.
+
+        Re-registering the same processor instance is a no-op so callers (e.g. fork-safe
+        re-init, hot-reload, or composite providers) cannot accidentally cause every span
+        to be exported twice.
         """
         with self._lock:
+            for existing in self._processors:
+                if existing is tracing_processor:
+                    return
             self._processors += (tracing_processor,)
 
     def set_processors(self, processors: list[TracingProcessor]):
