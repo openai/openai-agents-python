@@ -133,6 +133,24 @@ async def test_runner_disposes_computer_after_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_computer_with_create_attribute_returns_instance() -> None:
+    """A Computer subclass with a callable `create` attribute is not a provider."""
+
+    class ComputerWithCreate(FakeComputer):
+        def create(self, *args: Any, **kwargs: Any) -> str:
+            return "user-helper"
+
+    computer = ComputerWithCreate("with-create")
+    tool = ComputerTool(computer=computer)
+    ctx = RunContextWrapper(context=None)
+
+    resolved = await resolve_computer(tool=tool, run_context=ctx)
+
+    assert resolved is computer
+    await dispose_resolved_computers(run_context=ctx)
+
+
+@pytest.mark.asyncio
 async def test_streamed_run_disposes_computer_after_completion() -> None:
     created = FakeComputer("streaming")
     create = AsyncMock(return_value=created)
