@@ -1023,7 +1023,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 for part in raw_content:
                     if not isinstance(part, dict):
                         continue
-                    if part.get("type") == "audio":
+                    if part.get("type") in ("audio", "output_audio"):
                         converted_content.append(
                             {
                                 "type": "audio",

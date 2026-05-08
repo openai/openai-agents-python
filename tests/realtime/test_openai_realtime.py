@@ -569,6 +569,40 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         assert item.content[0].type == "text"
         assert item.content[0].text == "test data"
 
+    @pytest.mark.asyncio
+    async def test_output_audio_content_type_normalized(self, model):
+        """GA-style output_audio content parts on response.output_item.* are preserved.
+
+        OpenAI's GA assistant message content uses `output_audio` (not `audio`).
+        The dict-based fast path must normalize this to the SDK's `audio` type so
+        the audio + transcript reach listeners.
+        """
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        msg_added = {
+            "type": "response.output_item.added",
+            "item": {
+                "id": "audio_item_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_audio", "audio": "base64data", "transcript": "hi"},
+                ],
+            },
+        }
+        await model._handle_ws_event(msg_added)
+
+        item_updated_calls = [
+            call for call in listener.on_event.call_args_list if call[0][0].type == "item_updated"
+        ]
+        assert len(item_updated_calls) >= 1
+        item = item_updated_calls[0][0][0].item
+        assert item.type == "message"
+        assert len(item.content) == 1
+        assert item.content[0].type == "audio"
+        assert item.content[0].transcript == "hi"
+
     # Note: response.created/done require full OpenAI response payload which is
     # out-of-scope for unit tests here; covered indirectly via other branches.
 
