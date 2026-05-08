@@ -25,11 +25,13 @@ async def test_run_output_guardrails_awaits_cancelled_tasks():
     already await on cancel; the output variant should match.
     """
 
+    slow_started = asyncio.Event()
     cancelled_observed = asyncio.Event()
 
     async def slow_then_observe_cancel(
         context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
     ) -> GuardrailFunctionOutput:
+        slow_started.set()
         try:
             await asyncio.sleep(5)
         except asyncio.CancelledError:
@@ -40,6 +42,12 @@ async def test_run_output_guardrails_awaits_cancelled_tasks():
     async def fast_tripwire(
         context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
     ) -> GuardrailFunctionOutput:
+        # Wait until the slow guardrail is actually parked on its sleep so the
+        # subsequent cancel hits the installed CancelledError handler. Without
+        # this, the slow task could be cancelled before reaching the try block
+        # and ``cancelled_observed`` would stay unset even with the production
+        # fix in place.
+        await slow_started.wait()
         return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
 
     guardrails = [
