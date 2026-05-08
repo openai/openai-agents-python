@@ -98,6 +98,12 @@ async def get_handoffs(agent: Agent[Any], context_wrapper: RunContextWrapper[Any
         attr = handoff_obj.is_enabled
         if isinstance(attr, bool):
             return attr
+        if not callable(attr):
+            raise UserError(
+                f"Handoff is_enabled must be a bool or a callable that takes "
+                f"(context, agent) and returns a bool, got {type(attr).__name__} "
+                f"for handoff to {handoff_obj.agent_name!r}."
+            )
         res = attr(context_wrapper, agent)
         if inspect.isawaitable(res):
             return bool(await res)

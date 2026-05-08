@@ -382,3 +382,23 @@ async def test_handoff_is_enabled_filtering_integration():
     agent_names = {h.agent_name for h in filtered_handoffs}
     assert agent_names == {"agent_1", "agent_3"}
     assert "agent_2" not in agent_names
+
+
+@pytest.mark.asyncio
+async def test_handoff_is_enabled_invalid_type_raises_user_error():
+    """A clear UserError is raised when is_enabled is neither bool nor callable.
+
+    Without this guard the runner crashed with a confusing
+    'X object is not callable' TypeError, which surfaces deep in asyncio.gather
+    and gives no hint that the cause is a misconfigured handoff.
+    """
+    target = Agent(name="target")
+    bad_handoff = handoff(target)
+    # Bypass the dataclass type hint to mimic a misconfiguration at runtime.
+    object.__setattr__(bad_handoff, "is_enabled", "yes")  # type: ignore[arg-type]
+
+    main_agent = Agent(name="main_agent", handoffs=[bad_handoff])
+    context_wrapper = RunContextWrapper(main_agent)
+
+    with pytest.raises(UserError, match="is_enabled"):
+        await get_handoffs(main_agent, context_wrapper)
