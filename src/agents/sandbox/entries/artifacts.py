@@ -23,6 +23,7 @@ from ..errors import (
 )
 from ..materialization import MaterializedFile, gather_in_order
 from ..types import ExecResult, User
+from ..workspace_paths import SandboxPathGrant
 from .base import BaseEntry
 
 if TYPE_CHECKING:
@@ -31,6 +32,10 @@ if TYPE_CHECKING:
 _COMMIT_REF_RE = re.compile(r"[0-9a-fA-F]{7,40}")
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _HAS_O_DIRECTORY = hasattr(os, "O_DIRECTORY")
+
+
+def _absolute_without_symlink_resolution(path: Path) -> Path:
+    return Path(os.path.abspath(path))
 
 
 def _sha256_handle(handle: io.BufferedReader) -> str:
@@ -108,17 +113,21 @@ class LocalFile(BaseEntry):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
-        src = base_dir / self.src
-        src = src if src.is_absolute() else src.absolute()
+        src = _absolute_without_symlink_resolution(base_dir / self.src)
         local_dir = LocalDir(src=self.src.parent)
         rel_child = Path(self.src.name)
         fd: int | None = None
         try:
-            src_root = local_dir._resolve_local_dir_src_root(base_dir)
+            source_grants = session.state.manifest.extra_path_grants
+            src_root = local_dir._resolve_local_dir_src_root(
+                base_dir,
+                source_grants=source_grants,
+            )
             fd = local_dir._open_local_dir_file_for_copy(
                 base_dir=base_dir,
                 src_root=src_root,
                 rel_child=rel_child,
+                source_grants=source_grants,
             )
             with os.fdopen(fd, "rb") as f:
                 fd = None
@@ -161,12 +170,20 @@ class LocalDir(BaseEntry):
     ) -> list[MaterializedFile]:
         files: list[MaterializedFile] = []
         if self.src:
-            src_root = self._resolve_local_dir_src_root(base_dir)
+            source_grants = session.state.manifest.extra_path_grants
+            src_root = self._resolve_local_dir_src_root(
+                base_dir,
+                source_grants=source_grants,
+            )
             # Minimal v1: copy all files recursively.
             try:
                 await session.mkdir(dest, parents=True, user=user)
                 files = []
-                local_files = self._list_local_dir_files(base_dir=base_dir, src_root=src_root)
+                local_files = self._list_local_dir_files(
+                    base_dir=base_dir,
+                    src_root=src_root,
+                    source_grants=source_grants,
+                )
 
                 def _make_copy_task(child: Path) -> Callable[[], Awaitable[MaterializedFile]]:
                     async def _copy() -> MaterializedFile:
@@ -177,6 +194,7 @@ class LocalDir(BaseEntry):
                             src=src_root / child,
                             dest_root=dest,
                             user=user,
+                            source_grants=source_grants,
                         )
 
                     return _copy
@@ -196,15 +214,20 @@ class LocalDir(BaseEntry):
                 await self._apply_metadata(session, dest)
         return files
 
-    def _resolve_local_dir_src_root(self, base_dir: Path) -> Path:
+    def _resolve_local_dir_src_root(
+        self,
+        base_dir: Path,
+        *,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
+    ) -> Path:
         assert self.src is not None
-        src_input = base_dir / self.src
+        src_input = self._resolved_src_input(base_dir, source_grants=source_grants)
         for current in self._iter_local_dir_source_paths(base_dir):
             try:
                 current_stat = current.lstat()
             except FileNotFoundError:
                 raise LocalDirReadError(
-                    src=src_input if src_input.is_absolute() else src_input.absolute(),
+                    src=src_input,
                     context={"reason": "path_not_found"},
                 ) from None
             except OSError as e:
@@ -217,7 +240,48 @@ class LocalDir(BaseEntry):
                         "child": self._local_dir_source_child_label(base_dir, current),
                     },
                 )
-        return src_input if src_input.is_absolute() else src_input.absolute()
+        return src_input
+
+    def _resolved_src_input(
+        self,
+        base_dir: Path,
+        *,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
+    ) -> Path:
+        assert self.src is not None
+        src_input = _absolute_without_symlink_resolution(base_dir / self.src)
+
+        base = _absolute_without_symlink_resolution(base_dir)
+        try:
+            src_input.relative_to(base)
+            return src_input
+        except ValueError as base_error:
+            matching_grant = self._matching_source_grant(src_input, source_grants)
+            if matching_grant is not None:
+                return src_input
+            grant_paths = [grant.path for grant in source_grants]
+            context: dict[str, object] = {"reason": "outside_base_dir", "base_dir": str(base)}
+            if grant_paths:
+                context["extra_path_grants"] = grant_paths
+            raise LocalDirReadError(
+                src=src_input,
+                context=context,
+                cause=base_error,
+            ) from base_error
+
+    @staticmethod
+    def _matching_source_grant(
+        src_input: Path,
+        source_grants: tuple[SandboxPathGrant, ...],
+    ) -> SandboxPathGrant | None:
+        for grant in source_grants:
+            grant_root = _absolute_without_symlink_resolution(Path(grant.path))
+            try:
+                src_input.relative_to(grant_root)
+                return grant
+            except ValueError:
+                continue
+        return None
 
     def _iter_local_dir_source_paths(self, base_dir: Path) -> list[Path]:
         assert self.src is not None
@@ -244,9 +308,19 @@ class LocalDir(BaseEntry):
         except ValueError:
             return current.as_posix()
 
-    def _list_local_dir_files(self, *, base_dir: Path, src_root: Path) -> list[Path]:
+    def _list_local_dir_files(
+        self,
+        *,
+        base_dir: Path,
+        src_root: Path,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
+    ) -> list[Path]:
         if _OPEN_SUPPORTS_DIR_FD and _HAS_O_DIRECTORY:
-            return self._list_local_dir_files_pinned(base_dir=base_dir, src_root=src_root)
+            return self._list_local_dir_files_pinned(
+                base_dir=base_dir,
+                src_root=src_root,
+                source_grants=source_grants,
+            )
 
         local_files: list[Path] = []
         for child in src_root.rglob("*"):
@@ -263,10 +337,20 @@ class LocalDir(BaseEntry):
                 local_files.append(child.relative_to(src_root))
         return local_files
 
-    def _list_local_dir_files_pinned(self, *, base_dir: Path, src_root: Path) -> list[Path]:
+    def _list_local_dir_files_pinned(
+        self,
+        *,
+        base_dir: Path,
+        src_root: Path,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
+    ) -> list[Path]:
         root_fd: int | None = None
         try:
-            root_fd = self._open_local_dir_src_root_fd(base_dir=base_dir, src_root=src_root)
+            root_fd = self._open_local_dir_src_root_fd(
+                base_dir=base_dir,
+                src_root=src_root,
+                source_grants=source_grants,
+            )
             return self._list_local_dir_files_from_dir_fd(src_root=src_root, dir_fd=root_fd)
         finally:
             if root_fd is not None:
@@ -355,6 +439,7 @@ class LocalDir(BaseEntry):
         src: Path,
         dest_root: Path,
         user: str | User | None = None,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
     ) -> MaterializedFile:
         rel_child = src.relative_to(src_root)
         child_dest = dest_root / rel_child
@@ -364,6 +449,7 @@ class LocalDir(BaseEntry):
                 base_dir=base_dir,
                 src_root=src_root,
                 rel_child=rel_child,
+                source_grants=source_grants,
             )
             with os.fdopen(fd, "rb") as f:
                 fd = None
@@ -379,13 +465,19 @@ class LocalDir(BaseEntry):
         return MaterializedFile(path=child_dest, sha256=checksum)
 
     def _open_local_dir_file_for_copy(
-        self, *, base_dir: Path, src_root: Path, rel_child: Path
+        self,
+        *,
+        base_dir: Path,
+        src_root: Path,
+        rel_child: Path,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
     ) -> int:
         if not _OPEN_SUPPORTS_DIR_FD or not _HAS_O_DIRECTORY:
             return self._open_local_dir_file_for_copy_fallback(
                 base_dir=base_dir,
                 src_root=src_root,
                 rel_child=rel_child,
+                source_grants=source_grants,
             )
 
         dir_flags = (
@@ -398,7 +490,11 @@ class LocalDir(BaseEntry):
         dir_fds: list[int] = []
         current_rel = Path()
         try:
-            current_fd = self._open_local_dir_src_root_fd(base_dir=base_dir, src_root=src_root)
+            current_fd = self._open_local_dir_src_root_fd(
+                base_dir=base_dir,
+                src_root=src_root,
+                source_grants=source_grants,
+            )
             dir_fds.append(current_fd)
             for part in rel_child.parts[:-1]:
                 current_rel = current_rel / part if current_rel.parts else Path(part)
@@ -460,8 +556,15 @@ class LocalDir(BaseEntry):
             for dir_fd in reversed(dir_fds):
                 os.close(dir_fd)
 
-    def _open_local_dir_src_root_fd(self, *, base_dir: Path, src_root: Path) -> int:
+    def _open_local_dir_src_root_fd(
+        self,
+        *,
+        base_dir: Path,
+        src_root: Path,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
+    ) -> int:
         assert self.src is not None
+        self._resolved_src_input(base_dir, source_grants=source_grants)
 
         dir_flags = (
             os.O_RDONLY
@@ -559,7 +662,12 @@ class LocalDir(BaseEntry):
         return LocalDirReadError(src=src_root, cause=error)
 
     def _open_local_dir_file_for_copy_fallback(
-        self, *, base_dir: Path, src_root: Path, rel_child: Path
+        self,
+        *,
+        base_dir: Path,
+        src_root: Path,
+        rel_child: Path,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
     ) -> int:
         assert self.src is not None
         src = src_root / rel_child
@@ -588,7 +696,10 @@ class LocalDir(BaseEntry):
         try:
             leaf_fd = os.open(src, file_flags)
             try:
-                validation_dir._resolve_local_dir_src_root(base_dir)
+                validation_dir._resolve_local_dir_src_root(
+                    base_dir,
+                    source_grants=source_grants,
+                )
                 leaf_stat = os.fstat(leaf_fd)
                 if not stat.S_ISREG(leaf_stat.st_mode) or not os.path.samestat(src_stat, leaf_stat):
                     raise LocalDirReadError(
@@ -603,14 +714,17 @@ class LocalDir(BaseEntry):
                 os.close(leaf_fd)
                 raise
         except FileNotFoundError:
-            validation_dir._resolve_local_dir_src_root(base_dir)
+            validation_dir._resolve_local_dir_src_root(base_dir, source_grants=source_grants)
             raise LocalDirReadError(
                 src=src_root,
                 context={"reason": "path_changed_during_copy", "child": rel_child.as_posix()},
             ) from None
         except OSError as e:
             try:
-                validation_dir._resolve_local_dir_src_root(base_dir)
+                validation_dir._resolve_local_dir_src_root(
+                    base_dir,
+                    source_grants=source_grants,
+                )
             except LocalDirReadError as root_error:
                 raise root_error from e
             if e.errno == errno.ELOOP:

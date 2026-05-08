@@ -115,8 +115,8 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
         assert model.model == "gpt-4o-realtime-preview"
 
     @pytest.mark.asyncio
-    async def test_connect_defaults_to_gpt_realtime_1_5(self, model, mock_websocket):
-        """Test that connect() uses gpt-realtime-1.5 when no model is provided."""
+    async def test_connect_defaults_to_gpt_realtime_2(self, model, mock_websocket):
+        """Test that connect() uses gpt-realtime-2 when no model is provided."""
         config = {
             "api_key": "test-api-key-123",
             "initial_model_settings": {},
@@ -139,8 +139,8 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
 
                 mock_connect.assert_called_once()
                 call_args = mock_connect.call_args
-                assert call_args[0][0] == "wss://api.openai.com/v1/realtime?model=gpt-realtime-1.5"
-                assert model.model == "gpt-realtime-1.5"
+                assert call_args[0][0] == "wss://api.openai.com/v1/realtime?model=gpt-realtime-2"
+                assert model.model == "gpt-realtime-2"
 
         assert model._websocket_task is not None
 
@@ -1488,7 +1488,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
     def test_session_config_defaults_audio_formats_when_not_call(self, model):
         settings: dict[str, Any] = {}
         cfg = model._get_session_config(settings)
-        assert cfg.model == "gpt-realtime-1.5"
+        assert cfg.model == "gpt-realtime-2"
         assert cfg.audio is not None
         assert cfg.audio.input is not None
         assert cfg.audio.input.format is not None
@@ -1496,6 +1496,18 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert cfg.audio.output is not None
         assert cfg.audio.output.format is not None
         assert cfg.audio.output.format.type == "audio/pcm"
+
+    def test_session_config_includes_reasoning_capable_settings(self, model):
+        settings = {
+            "parallel_tool_calls": False,
+            "reasoning": {"effort": "low"},
+        }
+        cfg = model._get_session_config(settings)
+        payload = cfg.model_dump(exclude_unset=True)
+
+        assert payload["model"] == "gpt-realtime-2"
+        assert payload["parallel_tool_calls"] is False
+        assert payload["reasoning"] == {"effort": "low"}
 
     def test_session_config_allows_tool_search_as_named_function_tool_choice(self, model):
         cfg = model._get_session_config(

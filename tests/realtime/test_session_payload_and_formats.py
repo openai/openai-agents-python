@@ -26,10 +26,10 @@ class _DummyModel(pydantic.BaseModel):
 
 def _session_with_output(fmt: Any | None) -> RealtimeSessionCreateRequest:
     if fmt is None:
-        return RealtimeSessionCreateRequest(type="realtime", model="gpt-realtime-1.5")
+        return RealtimeSessionCreateRequest(type="realtime", model="gpt-realtime-2")
     return RealtimeSessionCreateRequest(
         type="realtime",
-        model="gpt-realtime-1.5",
+        model="gpt-realtime-2",
         # Use dict for output to avoid importing non-exported symbols in tests
         audio=RealtimeAudioConfig(output=cast(Any, {"format": fmt})),
     )
@@ -49,7 +49,7 @@ def test_normalize_session_payload_variants() -> None:
     assert Model._normalize_session_payload(transcription_mapping) is None
 
     # Valid realtime mapping should be converted to model
-    realtime_mapping: Mapping[str, object] = {"type": "realtime", "model": "gpt-realtime-1.5"}
+    realtime_mapping: Mapping[str, object] = {"type": "realtime", "model": "gpt-realtime-2"}
     as_model = Model._normalize_session_payload(realtime_mapping)
     assert isinstance(as_model, RealtimeSessionCreateRequest)
     assert as_model.type == "realtime"

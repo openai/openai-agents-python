@@ -38,7 +38,7 @@ from agents.items import (
     TResponseStreamEvent,
 )
 from agents.run import RunConfig
-from agents.sandbox import LocalFile, Manifest, SandboxAgent, SandboxRunConfig
+from agents.sandbox import LocalFile, Manifest, SandboxAgent, SandboxPathGrant, SandboxRunConfig
 from agents.sandbox.capabilities import (
     Filesystem,
     FilesystemToolSet,
@@ -131,8 +131,9 @@ class RecordingModel(Model):
         await self._model.close()
 
 
-def _build_manifest() -> Manifest:
+def _build_manifest(skills_root: Path) -> Manifest:
     return Manifest(
+        extra_path_grants=(SandboxPathGrant(path=str(skills_root)),),
         entries={
             "README.md": File(
                 content=(
@@ -145,7 +146,7 @@ def _build_manifest() -> Manifest:
             "examples/image.png": LocalFile(
                 src=Path(__file__).parent.parent.parent / "docs/assets/images/graph.png"
             ),
-        }
+        },
     )
 
 
@@ -222,7 +223,7 @@ def _build_agent(model: RecordingModel, skills_root: Path) -> SandboxAgent:
             "use an empty string for a path.\n"
             "Keep the final answer to one line: `capability smoke complete`."
         ),
-        default_manifest=_build_manifest(),
+        default_manifest=_build_manifest(skills_root),
         capabilities=capabilities,
         model_settings=ModelSettings(tool_choice="required"),
     )

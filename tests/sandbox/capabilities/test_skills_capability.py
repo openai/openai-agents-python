@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-from agents.sandbox import Manifest
+from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.capabilities import LocalDirLazySkillSource, Skill, Skills
 from agents.sandbox.entries import Dir, File, LocalDir
 from agents.sandbox.errors import SkillsConfigError
@@ -23,6 +23,10 @@ from tests.utils.factories import TestSessionState
 
 def _children_keys(entry: Dir) -> set[str]:
     return {coerce_posix_path(key).as_posix() for key in entry.children}
+
+
+def _source_granted_manifest(root: str | Path = "/workspace", *, source: Path) -> Manifest:
+    return Manifest(root=str(root), extra_path_grants=(SandboxPathGrant(path=str(source)),))
 
 
 def _user_name(user: object) -> str | None:
@@ -373,6 +377,21 @@ class TestSkillsInstructions:
         assert instructions is None
 
     @pytest.mark.asyncio
+    async def test_lazy_local_dir_metadata_requires_extra_path_grant(self, tmp_path: Path) -> None:
+        src_root = tmp_path / "skills"
+        skill_dir = src_root / "dynamic-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: hidden-skill\ndescription: outside base\n---\n# Skill\n",
+            encoding="utf-8",
+        )
+        capability = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)))
+
+        instructions = await capability.instructions(Manifest(root="/workspace"))
+
+        assert instructions is None
+
+    @pytest.mark.asyncio
     async def test_instructions_resolve_from_runtime_frontmatter(self, tmp_path: Path) -> None:
         workspace_root = tmp_path / "workspace"
         workspace_root.mkdir()
@@ -423,7 +442,9 @@ class TestSkillsInstructions:
             lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)),
         )
 
-        instructions = await capability.instructions(Manifest(root="/workspace"))
+        assert await capability.instructions(Manifest(root="/workspace")) is None
+
+        instructions = await capability.instructions(_source_granted_manifest(source=src_root))
 
         assert instructions is not None
         assert (
@@ -431,6 +452,32 @@ class TestSkillsInstructions:
         )
         assert "Call `load_skill` with a single skill name from the list" in instructions
         assert "loaded on demand instead of being present up front" in instructions
+
+    @pytest.mark.asyncio
+    async def test_lazy_local_dir_metadata_skips_symlinked_skill_directory(
+        self, tmp_path: Path
+    ) -> None:
+        src_root = tmp_path / "skills"
+        outside_root = tmp_path / "outside"
+        outside_skill = outside_root / "linked-skill"
+        src_root.mkdir()
+        outside_skill.mkdir(parents=True)
+        (outside_skill / "SKILL.md").write_text(
+            "---\nname: linked-skill\ndescription: linked metadata\n---\n# Skill\n",
+            encoding="utf-8",
+        )
+        try:
+            (src_root / "linked-skill").symlink_to(outside_skill, target_is_directory=True)
+        except OSError as e:
+            pytest.skip(f"symlink unavailable: {e}")
+
+        capability = Skills(
+            lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)),
+        )
+
+        instructions = await capability.instructions(_source_granted_manifest(source=src_root))
+
+        assert instructions is None
 
     @pytest.mark.asyncio
     async def test_lazy_local_dir_load_skill_tool_materializes_single_skill(
@@ -446,7 +493,9 @@ class TestSkillsInstructions:
         capability = Skills(
             lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)),
         )
-        manifest = capability.process_manifest(Manifest(root=str(workspace_root)))
+        manifest = capability.process_manifest(
+            _source_granted_manifest(workspace_root, source=src_root)
+        )
         assert manifest.entries == {}
 
         session = _SkillsSession(manifest)
@@ -494,7 +543,7 @@ class TestSkillsLazyLoading:
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
         capability = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)))
-        capability.bind(_SkillsSession(Manifest(root=str(workspace_root))))
+        capability.bind(_SkillsSession(_source_granted_manifest(workspace_root, source=src_root)))
 
         tools = capability.tools()
 
@@ -520,7 +569,7 @@ class TestSkillsLazyLoading:
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text("# dynamic skill\n", encoding="utf-8")
         capability = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)))
-        session = _SkillsSession(Manifest(root=str(workspace_root)))
+        session = _SkillsSession(_source_granted_manifest(workspace_root, source=src_root))
         capability.bind(session)
         await session.write(
             Path(".agents/dynamic-skill/SKILL.md"),
@@ -545,7 +594,7 @@ class TestSkillsLazyLoading:
         (skill_dir / "SKILL.md").write_text("# dynamic skill\n", encoding="utf-8")
 
         capability = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)))
-        session = _SkillsSession(Manifest(root=str(workspace_root)))
+        session = _SkillsSession(_source_granted_manifest(workspace_root, source=src_root))
         capability.bind(session)
         capability.bind_run_as(User(name="sandbox-user"))
 
@@ -568,7 +617,11 @@ class TestSkillsLazyLoading:
         capability = Skills(
             lazy_from=LocalDirLazySkillSource(source=LocalDir(src=tmp_path / "missing-skills"))
         )
-        capability.bind(_SkillsSession(Manifest(root=str(workspace_root))))
+        capability.bind(
+            _SkillsSession(
+                _source_granted_manifest(workspace_root, source=tmp_path / "missing-skills")
+            )
+        )
 
         with pytest.raises(SkillsConfigError):
             await capability.load_skill("missing-skill")
@@ -591,7 +644,7 @@ class TestSkillsLazyLoading:
             encoding="utf-8",
         )
         capability = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)))
-        capability.bind(_SkillsSession(Manifest(root=str(workspace_root))))
+        capability.bind(_SkillsSession(_source_granted_manifest(workspace_root, source=src_root)))
 
         with pytest.raises(SkillsConfigError):
             await capability.load_skill("shared-skill")
@@ -610,14 +663,20 @@ class TestSkillsLazyLoading:
         )
         capability = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)))
 
-        first_instructions = await capability.instructions(Manifest(root=str(workspace_root)))
+        first_instructions = await capability.instructions(
+            _source_granted_manifest(workspace_root, source=src_root)
+        )
         skill_md.write_text(
             "---\nname: cached-skill\ndescription: new description\n---\n# Skill\n",
             encoding="utf-8",
         )
-        second_instructions = await capability.instructions(Manifest(root=str(workspace_root)))
-        capability.bind(_SkillsSession(Manifest(root=str(workspace_root))))
-        third_instructions = await capability.instructions(Manifest(root=str(workspace_root)))
+        second_instructions = await capability.instructions(
+            _source_granted_manifest(workspace_root, source=src_root)
+        )
+        capability.bind(_SkillsSession(_source_granted_manifest(workspace_root, source=src_root)))
+        third_instructions = await capability.instructions(
+            _source_granted_manifest(workspace_root, source=src_root)
+        )
 
         assert first_instructions is not None
         assert second_instructions is not None

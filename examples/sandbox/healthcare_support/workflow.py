@@ -19,7 +19,7 @@ from agents import (
     trace,
 )
 from agents.run import RunConfig
-from agents.sandbox import Manifest, SandboxRunConfig
+from agents.sandbox import Manifest, SandboxPathGrant, SandboxRunConfig
 from agents.sandbox.entries import Dir, File, LocalDir
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 from agents.tool_context import ToolContext
@@ -127,6 +127,10 @@ def build_context(
 
 def _build_manifest(scenario: ScenarioCase) -> Manifest:
     return Manifest(
+        extra_path_grants=(
+            SandboxPathGrant(path=str(POLICIES_ROOT), read_only=True),
+            SandboxPathGrant(path=str(SKILLS_ROOT), read_only=True),
+        ),
         entries={
             "case": Dir(
                 children={
@@ -144,7 +148,7 @@ def _build_manifest(scenario: ScenarioCase) -> Manifest:
                 description="Local healthcare policy and workflow documents.",
             ),
             "output": Dir(description="Generated support artifacts for this case."),
-        }
+        },
     )
 
 
