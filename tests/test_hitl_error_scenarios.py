@@ -1322,10 +1322,18 @@ async def test_collect_runs_by_approval_skips_checker_when_status_resolved() -> 
     agent = Agent(name="agent")
     context_wrapper = make_context_wrapper()
     context_wrapper.approve_tool(
-        ToolApprovalItem(agent=agent, raw_item=approved_call, tool_name=shell_tool.name)
+        ToolApprovalItem(
+            agent=agent,
+            raw_item=cast(dict[str, Any], approved_call),
+            tool_name=shell_tool.name,
+        )
     )
     context_wrapper.reject_tool(
-        ToolApprovalItem(agent=agent, raw_item=rejected_call, tool_name=shell_tool.name)
+        ToolApprovalItem(
+            agent=agent,
+            raw_item=cast(dict[str, Any], rejected_call),
+            tool_name=shell_tool.name,
+        )
     )
 
     runs = [
