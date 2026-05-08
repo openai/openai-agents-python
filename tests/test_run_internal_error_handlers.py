@@ -118,3 +118,16 @@ async def test_resolve_run_error_handler_result_covers_async_and_validation_path
             context_wrapper=context_wrapper,
             run_data=run_data,
         )
+
+    # A dict with only `include_in_history` is almost certainly a partial config
+    # (forgot final_output) rather than an intentional raw mapping payload, so
+    # surface a clear error instead of silently treating the dict as final_output.
+    with pytest.raises(UserError, match="include_in_history"):
+        await run_error_handlers.resolve_run_error_handler_result(
+            error_handlers={
+                "max_turns": lambda _handler_input: {"include_in_history": False}
+            },
+            error=error,
+            context_wrapper=context_wrapper,
+            run_data=run_data,
+        )

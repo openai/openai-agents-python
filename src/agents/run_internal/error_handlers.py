@@ -162,5 +162,10 @@ async def resolve_run_error_handler_result(
                 return RunErrorHandlerResult(**result)
             except TypeError as exc:
                 raise UserError("Invalid run error handler result.") from exc
+        if "include_in_history" in result:
+            raise UserError(
+                "Invalid run error handler result: 'include_in_history' provided "
+                "without 'final_output'."
+            )
         return RunErrorHandlerResult(final_output=result)
     return RunErrorHandlerResult(final_output=result)
