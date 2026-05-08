@@ -1203,14 +1203,28 @@ class AnyLLMModel(Model):
             if message_dict.get("role") == "assistant" and message_dict.get("tool_calls"):
                 tool_calls = message_dict.get("tool_calls", [])
                 if isinstance(tool_calls, list):
+                    split_idx = 0
                     for tool_call in tool_calls:
                         if isinstance(tool_call, dict) and tool_call.get("id"):
+                            # Create a separate assistant message for each tool call.
+                            # Only the first split keeps the assistant text/thinking
+                            # blocks/reasoning content; the rest carry tool_calls only,
+                            # to avoid duplicating signed thinking blocks (which
+                            # Anthropic rejects) and assistant text in history.
                             single_tool_msg = message_dict.copy()
                             single_tool_msg["tool_calls"] = [tool_call]
+                            if split_idx > 0:
+                                for shared_field in (
+                                    "content",
+                                    "thinking_blocks",
+                                    "reasoning_content",
+                                ):
+                                    single_tool_msg.pop(shared_field, None)
                             tool_call_messages[str(tool_call["id"])] = (
                                 index,
                                 cast(ChatCompletionMessageParam, single_tool_msg),
                             )
+                            split_idx += 1
             elif message_dict.get("role") == "tool" and message_dict.get("tool_call_id"):
                 tool_result_messages[str(message_dict["tool_call_id"])] = (
                     index,
