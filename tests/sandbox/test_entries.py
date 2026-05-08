@@ -931,7 +931,7 @@ async def test_git_repo_rejects_invalid_subpath_before_copy(
     subpath: str,
     reason: str,
 ) -> None:
-    session = _GitFailureSession(fail_on="copy")
+    session = _GitFailureSession(fail_on="clone")
     repo = GitRepo(repo="openai/example", ref="main", subpath=subpath)
 
     with pytest.raises(GitSubpathError) as excinfo:
@@ -939,7 +939,7 @@ async def test_git_repo_rejects_invalid_subpath_before_copy(
 
     assert excinfo.value.context["reason"] == reason
     assert excinfo.value.context["subpath"] == subpath
-    assert not any(call[:1] == ("cp",) for call in session.exec_calls)
+    assert session.exec_calls == []
 
 
 @pytest.mark.asyncio
@@ -951,7 +951,7 @@ async def test_git_repo_allows_relative_subpath_copy() -> None:
 
     copy_call = next(call for call in session.exec_calls if call[:1] == ("cp",))
     assert copy_call[3].endswith("/docs/reference/.")
-    assert copy_call[4] == "/workspace/repo/"
+    assert copy_call[4].replace("\\", "/") == "/workspace/repo/"
 
 
 def _git_temp_cleanup_calls(session: _RecordingSession) -> list[tuple[str, ...]]:

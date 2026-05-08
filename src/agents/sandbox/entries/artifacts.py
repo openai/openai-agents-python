@@ -754,6 +754,8 @@ class GitRepo(BaseEntry):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
+        git_subpath = self._validate_subpath()
+
         # Ensure git exists in the container.
         git_check = await session.exec("command -v git >/dev/null 2>&1")
         if not git_check.ok():
@@ -787,7 +789,7 @@ class GitRepo(BaseEntry):
                     context={"repo": self.repo, "subpath": self.subpath},
                 )
 
-            git_src_root = self._git_src_root(tmp_dir)
+            git_src_root = self._git_src_root(tmp_dir, git_subpath)
 
             # Copy into destination in the container.
             await session.mkdir(dest, parents=True)
@@ -813,9 +815,9 @@ class GitRepo(BaseEntry):
     def _looks_like_commit_ref(ref: str) -> bool:
         return _COMMIT_REF_RE.fullmatch(ref) is not None
 
-    def _git_src_root(self, tmp_dir: str) -> str:
+    def _validate_subpath(self) -> PurePosixPath | None:
         if self.subpath is None:
-            return tmp_dir
+            return None
 
         subpath = self.subpath
         posix_subpath = PurePosixPath(subpath)
@@ -829,7 +831,12 @@ class GitRepo(BaseEntry):
         if ".." in posix_subpath.parts:
             raise GitSubpathError(repo=self.repo, subpath=subpath, reason="parent_traversal")
 
-        return f"{tmp_dir}/{posix_subpath.as_posix()}"
+        return posix_subpath
+
+    def _git_src_root(self, tmp_dir: str, subpath: PurePosixPath | None) -> str:
+        if subpath is None:
+            return tmp_dir
+        return f"{tmp_dir}/{subpath.as_posix()}"
 
     async def _clone_named_ref(
         self,
