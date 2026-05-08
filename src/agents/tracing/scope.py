@@ -32,7 +32,13 @@ class Scope:
 
     @classmethod
     def reset_current_span(cls, token: "contextvars.Token[Span[Any] | None]") -> None:
-        _current_span.reset(token)
+        try:
+            _current_span.reset(token)
+        except ValueError:
+            # Token was created in a different Context (e.g. span finished from
+            # a different asyncio task than where it was started). Resetting is
+            # a best-effort cleanup; log and continue rather than propagating.
+            logger.debug("Skipping span reset: token created in a different Context")
 
     @classmethod
     def get_current_trace(cls) -> "Trace | None":
@@ -46,4 +52,10 @@ class Scope:
     @classmethod
     def reset_current_trace(cls, token: "contextvars.Token[Trace | None]") -> None:
         logger.debug("Resetting current trace")
-        _current_trace.reset(token)
+        try:
+            _current_trace.reset(token)
+        except ValueError:
+            # Token was created in a different Context (e.g. trace finished
+            # from a different asyncio task than where it was started).
+            # Resetting is a best-effort cleanup; log and continue.
+            logger.debug("Skipping trace reset: token created in a different Context")
