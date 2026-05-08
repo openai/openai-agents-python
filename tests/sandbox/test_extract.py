@@ -265,14 +265,18 @@ async def test_extract_tar_rejects_member_count_over_limit(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(archive_extraction, "MAX_ARCHIVE_MEMBERS", 1)
+    data = _tar_bytes(members={"one.txt": b"1", "two.txt": b"2"})
+
+    def fail_getmembers(_self: tarfile.TarFile) -> list[tarfile.TarInfo]:
+        raise AssertionError("tar extraction should not materialize all members")
+
+    monkeypatch.setattr(tarfile.TarFile, "getmembers", fail_getmembers)
+
     session = _build_session(tmp_path)
     await session.start()
     try:
         with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
-            await session.extract(
-                "bundle.tar",
-                _tar_bytes(members={"one.txt": b"1", "two.txt": b"2"}),
-            )
+            await session.extract("bundle.tar", data)
 
         assert exc_info.value.context["member"] == "two.txt"
         assert exc_info.value.context["reason"] == "archive member count exceeds limit"

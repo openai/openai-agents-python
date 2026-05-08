@@ -12,7 +12,7 @@ from typing import Literal, cast
 
 from ..errors import ExecNonZeroError, WorkspaceArchiveWriteError
 from ..files import EntryKind, FileEntry
-from ..util.tar_utils import UnsafeTarMemberError, safe_tar_member_rel_path, validate_tarfile
+from ..util.tar_utils import UnsafeTarMemberError, safe_tar_member_rel_path
 
 MAX_ARCHIVE_MEMBERS = 10_000
 MAX_ARCHIVE_EXTRACTED_BYTES = 512 * 1024 * 1024
@@ -66,11 +66,12 @@ class WorkspaceArchiveExtractor:
     ) -> None:
         child_entry_cache: dict[Path, dict[str, EntryKind]] = {}
         try:
-            with tarfile.open(fileobj=data, mode="r:*") as archive:
-                members = archive.getmembers()
-                validate_tarfile(archive, allow_symlinks=False)
-                validate_tar_archive_resource_limits(members)
-                for member in members:
+            with tarfile.open(fileobj=data, mode="r|*") as archive:
+                validate_tar_archive_for_extraction(archive)
+
+            data.seek(0)
+            with tarfile.open(fileobj=data, mode="r|*") as archive:
+                for member in archive:
                     rel_path = safe_tar_member_rel_path(member)
                     if rel_path is None:
                         continue
@@ -368,10 +369,12 @@ def _check_archive_extracted_bytes(*, total: int, member: str) -> None:
         )
 
 
-def validate_tar_archive_resource_limits(members: list[tarfile.TarInfo]) -> None:
+def validate_tar_archive_for_extraction(archive: tarfile.TarFile) -> None:
+    members_by_rel_path: dict[Path, tarfile.TarInfo] = {}
     member_count = 0
     extracted_bytes = 0
-    for member in members:
+
+    for member in archive:
         rel_path = safe_tar_member_rel_path(member)
         if rel_path is None:
             continue
@@ -381,6 +384,39 @@ def validate_tar_archive_resource_limits(members: list[tarfile.TarInfo]) -> None
         if member.isreg():
             extracted_bytes += max(member.size, 0)
             _check_archive_extracted_bytes(total=extracted_bytes, member=member.name)
+
+        previous = members_by_rel_path.get(rel_path)
+        if previous is not None and not (previous.isdir() and member.isdir()):
+            raise UnsafeTarMemberError(
+                member=member.name,
+                reason=f"duplicate archive path: {rel_path.as_posix()}",
+            )
+
+        for parent in rel_path.parents:
+            if parent == Path():
+                break
+            parent_member = members_by_rel_path.get(parent)
+            if parent_member is not None and not parent_member.isdir():
+                raise UnsafeTarMemberError(
+                    member=member.name,
+                    reason=f"archive path descends through non-directory: {parent.as_posix()}",
+                )
+
+        if not member.isdir():
+            for existing_rel_path, existing_member in members_by_rel_path.items():
+                if _is_descendant(existing_rel_path, rel_path):
+                    raise UnsafeTarMemberError(
+                        member=existing_member.name,
+                        reason=(
+                            f"archive path descends through non-directory: {rel_path.as_posix()}"
+                        ),
+                    )
+
+        members_by_rel_path[rel_path] = member
+
+
+def _is_descendant(path: Path, parent: Path) -> bool:
+    return len(path.parts) > len(parent.parts) and path.parts[: len(parent.parts)] == parent.parts
 
 
 def validate_zipfile(archive: zipfile.ZipFile) -> None:
