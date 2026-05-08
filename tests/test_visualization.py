@@ -242,3 +242,37 @@ def test_draw_graph_with_real_handoff_object():
     assert '"ParentAgent" -> "ChildAgent";' in graph.source
     # Parent has handoffs, so should NOT connect directly to __end__
     assert '"ParentAgent" -> "__end__"' not in graph.source
+
+
+def test_handoff_node_not_duplicated_when_referenced_multiple_times():
+    """A Handoff target referenced from multiple parents should appear once.
+
+    Regression test: prior to the fix, ``get_all_nodes`` emitted a node
+    declaration for ``Handoff.agent_name`` on every visit, producing duplicate
+    DOT entries when the same handoff target was reachable from multiple
+    branches of the graph.
+    """
+    child = Agent(name="SharedChild", instructions="c")
+    h1 = handoff(child)
+    h2 = handoff(child)
+
+    parent_a = Agent(name="ParentA", instructions="a", handoffs=[h1])
+    parent_b = Agent(name="ParentB", instructions="b", handoffs=[h2])
+    root = Agent(name="Root", instructions="r", handoffs=[parent_a, parent_b])
+
+    nodes = get_all_nodes(root)
+
+    # The child node declaration should appear exactly once, regardless of
+    # how many parents handoff to it.
+    assert nodes.count('"SharedChild" [label="SharedChild"') == 1
+
+
+def test_handoff_node_not_duplicated_when_also_in_handoffs_as_agent():
+    """A handoff target referenced as both Handoff and Agent should appear once."""
+    child = Agent(name="DualChild", instructions="c")
+    h = handoff(child)
+    parent = Agent(name="Parent", instructions="p", handoffs=[h, child])
+
+    nodes = get_all_nodes(parent)
+
+    assert nodes.count('"DualChild" [label="DualChild"') == 1
