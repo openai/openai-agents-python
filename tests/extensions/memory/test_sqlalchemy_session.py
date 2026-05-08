@@ -184,6 +184,44 @@ async def test_get_items_with_limit(agent: Agent):
     assert len(more_than_all) == 4
 
 
+async def test_get_items_with_non_positive_limit(agent: Agent):
+    """Non-positive limits short-circuit before issuing SQL.
+
+    Without the early return, SQLite silently treats a negative LIMIT as
+    "no limit" and returns every row, while Postgres raises an error.
+    """
+    session = SQLAlchemySession.from_url(
+        "non_positive_limit_test", url=DB_URL, create_tables=True
+    )
+    await session.add_items(
+        [
+            {"role": "user", "content": "1"},
+            {"role": "assistant", "content": "2"},
+        ]
+    )
+
+    assert await session.get_items(limit=0) == []
+    assert await session.get_items(limit=-1) == []
+    assert await session.get_items(limit=-100) == []
+
+    # session_settings.limit set to a non-positive value also yields [].
+    from agents.memory.session_settings import SessionSettings
+
+    session_with_neg = SQLAlchemySession.from_url(
+        "non_positive_settings_limit_test",
+        url=DB_URL,
+        create_tables=True,
+        session_settings=SessionSettings(limit=-5),
+    )
+    await session_with_neg.add_items(
+        [
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "content": "y"},
+        ]
+    )
+    assert await session_with_neg.get_items() == []
+
+
 async def test_pop_from_empty_session():
     """Test that pop_item returns None on an empty session."""
     session = SQLAlchemySession.from_url("empty_session", url=DB_URL, create_tables=True)

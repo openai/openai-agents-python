@@ -288,6 +288,9 @@ class SQLAlchemySession(SessionABC):
 
         session_limit = resolve_session_limit(limit, self.session_settings)
 
+        if session_limit is not None and session_limit <= 0:
+            return []
+
         async with self._session_factory() as sess:
             if session_limit is None:
                 stmt = (
