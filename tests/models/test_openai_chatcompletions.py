@@ -41,6 +41,7 @@ from agents import (
     __version__,
     generation_span,
 )
+from agents.exceptions import UserError
 from agents.models._retry_runtime import provider_managed_retries_disabled
 from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE, ChatCmplHelpers
 from agents.models.fake_id import FAKE_RESPONSES_ID
@@ -144,6 +145,49 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
     assert resp.usage.input_tokens_details.cached_tokens == 3
     assert resp.usage.output_tokens_details.reasoning_tokens == 0
     assert resp.response_id is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("previous_response_id", "conversation_id", "expected_param"),
+    [
+        ("resp_123", None, "previous_response_id"),
+        (None, "conv_123", "conversation_id"),
+    ],
+)
+async def test_get_response_rejects_server_managed_conversation_state(
+    monkeypatch: pytest.MonkeyPatch,
+    previous_response_id: str | None,
+    conversation_id: str | None,
+    expected_param: str,
+) -> None:
+    called = False
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("_fetch_response should not be called")
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    with pytest.raises(UserError, match="server-managed conversation state") as exc_info:
+        await model.get_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=None,
+        )
+
+    assert expected_param in str(exc_info.value)
+    assert called is False
 
 
 @pytest.mark.allow_call_model_methods
