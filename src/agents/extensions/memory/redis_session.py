@@ -223,22 +223,23 @@ class RedisSession(SessionABC):
             The most recent item if it exists, None if the session is empty
         """
         async with self._lock:
-            # Use RPOP to atomically remove and return the rightmost (most recent) item
-            raw_msg = await self._redis.rpop(self._messages_key)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+            while True:
+                # Use RPOP to atomically remove and return the rightmost (most recent) item
+                raw_msg = await self._redis.rpop(self._messages_key)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
 
-            if raw_msg is None:
-                return None
+                if raw_msg is None:
+                    return None
 
-            try:
-                # Handle both bytes (default) and str (decode_responses=True) Redis clients
-                if isinstance(raw_msg, bytes):
-                    msg_str = raw_msg.decode("utf-8")
-                else:
-                    msg_str = raw_msg  # Already a string
-                return await self._deserialize_item(msg_str)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                # Return None for corrupted messages (already removed)
-                return None
+                try:
+                    # Handle both bytes (default) and str (decode_responses=True) Redis clients
+                    if isinstance(raw_msg, bytes):
+                        msg_str = raw_msg.decode("utf-8")
+                    else:
+                        msg_str = raw_msg  # Already a string
+                    return await self._deserialize_item(msg_str)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    # Drop corrupted messages and keep looking for a valid item.
+                    continue
 
     async def clear_session(self) -> None:
         """Clear all items for this session."""

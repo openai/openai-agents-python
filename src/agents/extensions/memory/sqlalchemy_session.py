@@ -385,33 +385,34 @@ class SQLAlchemySession(SessionABC):
         await self._ensure_tables()
         async with self._session_factory() as sess:
             async with sess.begin():
-                # Fallback for all dialects - get ID first, then delete
-                subq = (
-                    select(self._messages.c.id)
-                    .where(self._messages.c.session_id == self.session_id)
-                    .order_by(
-                        self._messages.c.created_at.desc(),
-                        self._messages.c.id.desc(),
+                while True:
+                    # Fallback for all dialects - get ID first, then delete
+                    subq = (
+                        select(self._messages.c.id)
+                        .where(self._messages.c.session_id == self.session_id)
+                        .order_by(
+                            self._messages.c.created_at.desc(),
+                            self._messages.c.id.desc(),
+                        )
+                        .limit(1)
                     )
-                    .limit(1)
-                )
-                res = await sess.execute(subq)
-                row_id = res.scalar_one_or_none()
-                if row_id is None:
-                    return None
-                # Fetch data before deleting
-                res_data = await sess.execute(
-                    select(self._messages.c.message_data).where(self._messages.c.id == row_id)
-                )
-                row = res_data.scalar_one_or_none()
-                await sess.execute(delete(self._messages).where(self._messages.c.id == row_id))
+                    res = await sess.execute(subq)
+                    row_id = res.scalar_one_or_none()
+                    if row_id is None:
+                        return None
+                    # Fetch data before deleting
+                    res_data = await sess.execute(
+                        select(self._messages.c.message_data).where(self._messages.c.id == row_id)
+                    )
+                    row = res_data.scalar_one_or_none()
+                    await sess.execute(delete(self._messages).where(self._messages.c.id == row_id))
 
-                if row is None:
-                    return None
-                try:
-                    return await self._deserialize_item(row)
-                except json.JSONDecodeError:
-                    return None
+                    if row is None:
+                        continue
+                    try:
+                        return await self._deserialize_item(row)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
 
     async def clear_session(self) -> None:
         """Clear all items for this session."""

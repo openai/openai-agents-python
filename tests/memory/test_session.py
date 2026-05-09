@@ -335,6 +335,49 @@ async def test_session_memory_pop_different_sessions():
 
 
 @pytest.mark.asyncio
+async def test_sqlite_session_pop_item_skips_corrupt_most_recent():
+    """pop_item skips corrupt newest rows and returns the next valid item."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_pop_corrupt.db"
+        session = SQLiteSession("pop_corrupt", db_path)
+
+        valid_item: TResponseInputItem = {"role": "user", "content": "valid"}
+        await session.add_items([valid_item])
+
+        with session._locked_connection() as conn:
+            conn.execute(
+                f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+                (session.session_id, "not valid json {{{"),
+            )
+            conn.commit()
+
+        assert await session.pop_item() == valid_item
+        assert await session.get_items() == []
+
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_pop_item_returns_none_after_dropping_only_corrupt_rows():
+    """pop_item removes corrupt rows and returns None when no valid items remain."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_pop_only_corrupt.db"
+        session = SQLiteSession("pop_only_corrupt", db_path)
+
+        with session._locked_connection() as conn:
+            conn.execute(
+                f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+                (session.session_id, "not valid json {{{"),
+            )
+            conn.commit()
+
+        assert await session.pop_item() is None
+        assert await session.get_items() == []
+
+        session.close()
+
+
+@pytest.mark.asyncio
 async def test_sqlite_session_get_items_with_limit():
     """Test SQLiteSession get_items with limit parameter."""
     with tempfile.TemporaryDirectory() as temp_dir:

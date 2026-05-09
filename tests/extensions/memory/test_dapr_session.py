@@ -396,6 +396,41 @@ async def test_pop_from_empty_session(fake_dapr_client: FakeDaprClient):
         await session.close()
 
 
+async def test_pop_item_skips_corrupt_most_recent(fake_dapr_client: FakeDaprClient):
+    """pop_item skips corrupt newest entries and returns the next valid item."""
+    session = await _create_test_session(fake_dapr_client, "pop_corrupt")
+
+    try:
+        valid_item: TResponseInputItem = {"role": "user", "content": "valid"}
+        fake_dapr_client._state[session._messages_key] = json.dumps(
+            [await session._serialize_item(valid_item), "not valid json {{{"],
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        assert await session.pop_item() == valid_item
+        assert await session.get_items() == []
+    finally:
+        await session.close()
+
+
+async def test_pop_item_returns_none_after_dropping_only_corrupt_entries(
+    fake_dapr_client: FakeDaprClient,
+):
+    """pop_item removes corrupt entries and returns None when no valid items remain."""
+    session = await _create_test_session(fake_dapr_client, "pop_only_corrupt")
+
+    try:
+        fake_dapr_client._state[session._messages_key] = json.dumps(
+            ["not valid json {{{"],
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        assert await session.pop_item() is None
+        assert await session.get_items() == []
+    finally:
+        await session.close()
+
+
 async def test_add_empty_items_list(fake_dapr_client: FakeDaprClient):
     """Test that adding an empty list of items is a no-op."""
     session = await _create_test_session(fake_dapr_client)
