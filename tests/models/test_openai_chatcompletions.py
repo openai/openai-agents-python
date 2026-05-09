@@ -848,3 +848,60 @@ async def test_fetch_response_chat_completions_rejects_duplicate_extra_args_keys
                 tracing=ModelTracing.DISABLED,
                 stream=False,
             )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fetch_response_chat_completions_rejects_stream_via_extra_args_in_non_streaming_call() -> (  # noqa: E501
+    None
+):
+    """``stream`` is reserved by the SDK. The non-streaming get_response path
+    pins create_kwargs["stream"] to the OpenAI omit sentinel and then expects
+    a ChatCompletion. Allowing ``extra_args={"stream": True}`` to slip
+    through the duplicate check would make the OpenAI client return an async
+    stream that the non-streaming code path cannot consume.
+    """
+
+    _completions, dummy_client = _build_chat_completions_dummy_client()
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=cast(AsyncOpenAI, dummy_client))
+    with generation_span(disabled=True) as span:
+        with pytest.raises(TypeError, match="multiple values.*stream"):
+            await model._fetch_response(
+                system_instructions=None,
+                input="hi",
+                model_settings=ModelSettings(extra_args={"stream": True}),
+                tools=[],
+                output_schema=None,
+                handoffs=[],
+                span=span,
+                tracing=ModelTracing.DISABLED,
+                stream=False,
+            )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fetch_response_chat_completions_rejects_stream_via_extra_args_in_streaming_call() -> (  # noqa: E501
+    None
+):
+    """``stream`` is also reserved on the streaming path. ``stream=True`` sets
+    create_kwargs["stream"] to ``True`` (a real value), so the original
+    intersection check would already catch this. Cover it explicitly so the
+    invariant is enforced for both directions.
+    """
+
+    _completions, dummy_client = _build_chat_completions_dummy_client()
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=cast(AsyncOpenAI, dummy_client))
+    with generation_span(disabled=True) as span:
+        with pytest.raises(TypeError, match="multiple values.*stream"):
+            await model._fetch_response(
+                system_instructions=None,
+                input="hi",
+                model_settings=ModelSettings(extra_args={"stream": False}),
+                tools=[],
+                output_schema=None,
+                handoffs=[],
+                span=span,
+                tracing=ModelTracing.DISABLED,
+                stream=True,
+            )

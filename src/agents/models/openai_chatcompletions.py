@@ -49,6 +49,16 @@ def _is_openai_omitted_value(value: Any) -> bool:
     return isinstance(value, Omit | NotGiven)
 
 
+# Keys whose first-class create_kwargs entry is reserved by the SDK and must
+# never be overridden via ModelSettings.extra_args, even when the SDK passes
+# the value as an OpenAI omit sentinel. ``stream`` is the canonical example:
+# get_response() pins it to ``omit`` and then expects a non-streaming
+# ChatCompletion, so allowing extra_args to flip it to True would cause the
+# OpenAI client to return an async stream that the non-streaming code path
+# cannot consume.
+_RESERVED_CHAT_COMPLETIONS_KEYS = frozenset({"stream"})
+
+
 class OpenAIChatCompletionsModel(Model):
     _OFFICIAL_OPENAI_SUPPORTED_INPUT_CONTENT_TYPES = frozenset(
         {"input_text", "input_image", "input_audio", "input_file"}
@@ -431,7 +441,11 @@ class OpenAIChatCompletionsModel(Model):
         duplicate_extra_arg_keys = sorted(
             k
             for k in extra_args
-            if k in create_kwargs and not _is_openai_omitted_value(create_kwargs[k])
+            if k in create_kwargs
+            and (
+                k in _RESERVED_CHAT_COMPLETIONS_KEYS
+                or not _is_openai_omitted_value(create_kwargs[k])
+            )
         )
         if duplicate_extra_arg_keys:
             if len(duplicate_extra_arg_keys) == 1:
