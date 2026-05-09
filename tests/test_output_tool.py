@@ -77,6 +77,23 @@ def test_structured_output_list():
     assert validated == ["foo", "bar"]
 
 
+def test_structured_output_generic_dict_is_not_wrapped():
+    output_schema = AgentOutputSchema(output_type=dict[str, int], strict_json_schema=False)
+    assert output_schema.output_type == dict[str, int]
+    assert not output_schema._is_wrapped, "Generic dict output should not be wrapped"
+    assert "response" not in output_schema.json_schema().get("properties", {})
+
+    validated = output_schema.validate_json(json.dumps({"foo": 1}))
+    assert validated == {"foo": 1}
+
+
+def test_structured_output_generic_dict_rejects_wrapper_shape():
+    output_schema = AgentOutputSchema(output_type=dict[str, int], strict_json_schema=False)
+
+    with pytest.raises(ModelBehaviorError):
+        output_schema.validate_json(json.dumps({"response": {"foo": 1}}))
+
+
 def test_bad_json_raises_error(mocker):
     agent = Agent(name="test", output_type=Foo)
     output_schema = get_output_schema(agent)
