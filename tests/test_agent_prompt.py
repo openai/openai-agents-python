@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 from openai import omit
 
-from agents import Agent, Prompt, RunConfig, RunContextWrapper, Runner
+from agents import Agent, Prompt, RunConfig, RunContextWrapper, Runner, UserError
 from agents.models.interface import Model, ModelProvider
 from agents.models.openai_responses import OpenAIResponsesModel
 
@@ -69,6 +71,25 @@ async def test_static_prompt_is_resolved_correctly():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prompt", "message"),
+    [
+        ({}, "non-empty string 'id'"),
+        ({"id": ""}, "non-empty string 'id'"),
+        ({"id": 123}, "non-empty string 'id'"),
+        ({"id": "pmpt_123", "version": 1}, "'version' must be a string"),
+        ({"id": "pmpt_123", "variables": []}, "'variables' must be a dict"),
+    ],
+)
+async def test_static_prompt_validation_errors(prompt: dict[str, object], message: str):
+    agent = Agent(name="test", prompt=cast(Any, prompt))
+    context_wrapper = RunContextWrapper(context=None)
+
+    with pytest.raises(UserError, match=message):
+        await agent.get_prompt(context_wrapper)
+
+
+@pytest.mark.asyncio
 async def test_dynamic_prompt_is_resolved_correctly():
     dynamic_prompt_value: Prompt = {"id": "dyn_prompt", "version": "2"}
 
@@ -81,6 +102,27 @@ async def test_dynamic_prompt_is_resolved_correctly():
     resolved = await agent.get_prompt(context_wrapper)
 
     assert resolved == {"id": "dyn_prompt", "version": "2", "variables": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prompt", "message"),
+    [
+        ({}, "non-empty string 'id'"),
+        ({"id": 123}, "non-empty string 'id'"),
+        ({"id": "pmpt_123", "version": 1}, "'version' must be a string"),
+        ({"id": "pmpt_123", "variables": []}, "'variables' must be a dict"),
+    ],
+)
+async def test_dynamic_prompt_validation_errors(prompt: dict[str, object], message: str):
+    def dynamic_prompt_fn(_data):
+        return prompt
+
+    agent = Agent(name="test", prompt=dynamic_prompt_fn)
+    context_wrapper = RunContextWrapper(context=None)
+
+    with pytest.raises(UserError, match=message):
+        await agent.get_prompt(context_wrapper)
 
 
 @pytest.mark.asyncio

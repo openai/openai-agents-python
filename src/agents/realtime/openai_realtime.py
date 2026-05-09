@@ -85,7 +85,7 @@ from typing_extensions import NotRequired, TypedDict, assert_never
 from websockets.asyncio.client import ClientConnection
 
 from agents.handoffs import Handoff
-from agents.prompts import Prompt
+from agents.prompts import Prompt, validate_prompt
 from agents.realtime._default_tracker import ModelAudioTracker
 from agents.realtime.audio_formats import to_realtime_audio_format
 from agents.tool import (
@@ -403,8 +403,9 @@ async def _build_model_settings_from_agent(
 ) -> RealtimeSessionModelSettings:
     updated_settings = base_settings.copy()
 
-    if agent.prompt is not None:
-        updated_settings["prompt"] = agent.prompt
+    prompt = vars(agent).get("prompt")
+    if prompt is not None:
+        updated_settings["prompt"] = prompt
 
     instructions, tools, handoffs = await asyncio.gather(
         agent.get_system_prompt(context_wrapper),
@@ -420,6 +421,12 @@ async def _build_model_settings_from_agent(
 
     if run_config and run_config.get("tracing_disabled", False):
         updated_settings["tracing"] = None
+
+    if "prompt" in updated_settings:
+        updated_settings["prompt"] = validate_prompt(
+            updated_settings["prompt"],
+            source="Realtime session prompt",
+        )
 
     return updated_settings
 
@@ -1466,7 +1473,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             session_create_request.instructions = model_settings.get("instructions")
 
         if "prompt" in model_settings:
-            _passed_prompt: Prompt = model_settings["prompt"]
+            _passed_prompt: Prompt = validate_prompt(
+                model_settings["prompt"],
+                source="Realtime session prompt",
+            )
             variables: dict[str, Any] | None = _passed_prompt.get("variables")
             session_create_request.prompt = ResponsePrompt(
                 id=_passed_prompt["id"],

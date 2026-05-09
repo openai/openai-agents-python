@@ -166,6 +166,22 @@ async def test_transcription_completed_adds_new_user_item():
     assert session._history[0].role == "user"
 
 
+@pytest.mark.asyncio
+async def test_get_updated_model_settings_from_agent_validates_final_prompt():
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent", prompt={"id": "agent-prompt"})
+    session = RealtimeSession(model, agent, None)
+    starting_settings: RealtimeSessionModelSettings = {
+        "prompt": {},  # type: ignore[typeddict-item]
+    }
+
+    with pytest.raises(UserError, match="Realtime session prompt must include"):
+        await session._get_updated_model_settings_from_agent(
+            starting_settings=starting_settings,
+            agent=agent,
+        )
+
+
 class _FakeAudio:
     # Looks like an audio part but is not an InputAudio/AssistantAudio instance
     type = "audio"

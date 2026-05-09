@@ -16,6 +16,7 @@ from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ToolApprovalItem
 from ..logger import logger
+from ..prompts import validate_prompt
 from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, invoke_function_tool
@@ -1101,8 +1102,9 @@ class RealtimeSession(RealtimeModelListener):
         # Start with the merged base settings from run and model configuration.
         updated_settings = self._base_model_settings.copy()
 
-        if agent.prompt is not None:
-            updated_settings["prompt"] = agent.prompt
+        prompt = vars(agent).get("prompt")
+        if prompt is not None:
+            updated_settings["prompt"] = prompt
 
         instructions, tools, handoffs = await asyncio.gather(
             agent.get_system_prompt(self._context_wrapper),
@@ -1120,6 +1122,12 @@ class RealtimeSession(RealtimeModelListener):
         disable_tracing = self._run_config.get("tracing_disabled", False)
         if disable_tracing:
             updated_settings["tracing"] = None
+
+        if "prompt" in updated_settings:
+            updated_settings["prompt"] = validate_prompt(
+                updated_settings["prompt"],
+                source="Realtime session prompt",
+            )
 
         return updated_settings
 

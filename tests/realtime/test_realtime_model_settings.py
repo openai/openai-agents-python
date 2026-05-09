@@ -8,6 +8,7 @@ from openai.types.realtime.realtime_session_create_request import (
 )
 from openai.types.realtime.session_update_event import SessionUpdateEvent
 
+from agents.exceptions import UserError
 from agents.handoffs import Handoff
 from agents.realtime.agent import RealtimeAgent
 from agents.realtime.config import RealtimeRunConfig, RealtimeSessionModelSettings
@@ -74,6 +75,37 @@ async def test_build_model_settings_from_agent_merges_agent_fields(monkeypatch: 
 
 
 @pytest.mark.asyncio
+async def test_build_model_settings_from_agent_validates_prompt() -> None:
+    agent = RealtimeAgent(name="root", prompt={})  # type: ignore[arg-type]
+
+    with pytest.raises(UserError, match="Realtime session prompt must include"):
+        await _build_model_settings_from_agent(
+            agent=agent,
+            context_wrapper=RunContextWrapper(None),
+            base_settings={"model_name": "gpt-realtime-2"},
+            starting_settings=None,
+            run_config=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_build_model_settings_from_agent_validates_final_prompt() -> None:
+    agent = RealtimeAgent(name="root", prompt={"id": "agent-prompt"})
+    starting_settings: RealtimeSessionModelSettings = {
+        "prompt": {},  # type: ignore[typeddict-item]
+    }
+
+    with pytest.raises(UserError, match="Realtime session prompt must include"):
+        await _build_model_settings_from_agent(
+            agent=agent,
+            context_wrapper=RunContextWrapper(None),
+            base_settings={"model_name": "gpt-realtime-2"},
+            starting_settings=starting_settings,
+            run_config=None,
+        )
+
+
+@pytest.mark.asyncio
 async def test_sip_model_build_initial_session_payload(monkeypatch: pytest.MonkeyPatch):
     agent = RealtimeAgent(name="parent", prompt={"id": "prompt-99"})
     child_agent = RealtimeAgent(name="child")
@@ -131,6 +163,19 @@ async def test_sip_model_build_initial_session_payload(monkeypatch: pytest.Monke
             tool_names.add(name)
     assert ping.name in tool_names
     assert f"transfer_to_{child_agent.name}" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_sip_model_build_initial_session_payload_validates_override_prompt() -> None:
+    overrides: RealtimeSessionModelSettings = {
+        "prompt": {},  # type: ignore[typeddict-item]
+    }
+
+    with pytest.raises(UserError, match="Realtime session prompt must include"):
+        await OpenAIRealtimeSIPModel.build_initial_session_payload(
+            RealtimeAgent(name="parent"),
+            overrides=overrides,
+        )
 
 
 def test_call_id_session_update_omits_null_audio_formats() -> None:
