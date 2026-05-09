@@ -391,6 +391,7 @@ def validate_tar_archive_for_extraction(
     archive_limits: SandboxArchiveLimits | None = None,
 ) -> None:
     members_by_rel_path: dict[Path, tarfile.TarInfo] = {}
+    descendant_by_parent_path: dict[Path, tarfile.TarInfo] = {}
     member_count = 0
     extracted_bytes = 0
 
@@ -431,20 +432,18 @@ def validate_tar_archive_for_extraction(
                 )
 
         if not member.isdir():
-            for existing_rel_path, existing_member in members_by_rel_path.items():
-                if _is_descendant(existing_rel_path, rel_path):
-                    raise UnsafeTarMemberError(
-                        member=existing_member.name,
-                        reason=(
-                            f"archive path descends through non-directory: {rel_path.as_posix()}"
-                        ),
-                    )
+            descendant = descendant_by_parent_path.get(rel_path)
+            if descendant is not None:
+                raise UnsafeTarMemberError(
+                    member=descendant.name,
+                    reason=f"archive path descends through non-directory: {rel_path.as_posix()}",
+                )
 
         members_by_rel_path[rel_path] = member
-
-
-def _is_descendant(path: Path, parent: Path) -> bool:
-    return len(path.parts) > len(parent.parts) and path.parts[: len(parent.parts)] == parent.parts
+        for parent in rel_path.parents:
+            if parent == Path():
+                break
+            descendant_by_parent_path.setdefault(parent, member)
 
 
 def validate_zipfile(
