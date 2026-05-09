@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -33,6 +34,25 @@ from agents.model_settings import ModelSettings
 from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_provider import OpenAIProvider
+
+
+async def _empty_chat_completion_stream() -> AsyncIterator[ChatCompletionChunk]:
+    chunks: list[ChatCompletionChunk] = []
+    for chunk in chunks:
+        yield chunk
+
+
+def _empty_response() -> Response:
+    return Response(
+        id="resp-id",
+        created_at=0,
+        model="fake-model",
+        object="response",
+        output=[],
+        tool_choice="none",
+        tools=[],
+        parallel_tool_calls=False,
+    )
 
 
 @pytest.mark.allow_call_model_methods
@@ -145,7 +165,88 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
         (None, "conv_123", "conversation_id"),
     ],
 )
-async def test_stream_response_rejects_server_managed_conversation_state(
+async def test_stream_response_warns_and_ignores_server_managed_conversation_state_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    previous_response_id: str | None,
+    conversation_id: str | None,
+    expected_param: str,
+) -> None:
+    called = False
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        nonlocal called
+        called = True
+        return _empty_response(), _empty_chat_completion_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    caplog.set_level(logging.WARNING, logger="openai.agents")
+
+    async for _event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=previous_response_id,
+        conversation_id=conversation_id,
+        prompt=None,
+    ):
+        pass
+
+    assert expected_param in caplog.text
+    assert "Ignoring unsupported server-managed conversation state" in caplog.text
+    assert called is True
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_warns_and_ignores_prompt_by_default(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    captured_prompt: Any = None
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        nonlocal captured_prompt
+        captured_prompt = kwargs.get("prompt")
+        return _empty_response(), _empty_chat_completion_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    caplog.set_level(logging.WARNING, logger="openai.agents")
+
+    async for _ in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=cast(Any, {"id": "pmpt_123"}),
+    ):
+        pass
+
+    assert "Reusable prompts are only supported by the Responses API" in caplog.text
+    assert "Ignoring `prompt`" in caplog.text
+    assert captured_prompt is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("previous_response_id", "conversation_id", "expected_param"),
+    [
+        ("resp_123", None, "previous_response_id"),
+        (None, "conv_123", "conversation_id"),
+    ],
+)
+async def test_stream_response_rejects_server_managed_conversation_state_in_strict_mode(
     monkeypatch: pytest.MonkeyPatch,
     previous_response_id: str | None,
     conversation_id: str | None,
@@ -159,7 +260,10 @@ async def test_stream_response_rejects_server_managed_conversation_state(
         raise AssertionError("_fetch_response should not be called")
 
     monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
-    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    model = OpenAIProvider(
+        use_responses=False,
+        strict_feature_validation=True,
+    ).get_model("gpt-4")
 
     with pytest.raises(UserError, match="server-managed conversation state") as exc_info:
         async for _event in model.stream_response(
@@ -182,12 +286,15 @@ async def test_stream_response_rejects_server_managed_conversation_state(
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_stream_response_rejects_prompt(monkeypatch) -> None:
+async def test_stream_response_rejects_prompt_in_strict_mode(monkeypatch) -> None:
     async def patched_fetch_response(self, *args, **kwargs):
         raise AssertionError("_fetch_response should not run when prompt is unsupported")
 
     monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
-    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    model = OpenAIProvider(
+        use_responses=False,
+        strict_feature_validation=True,
+    ).get_model("gpt-4")
 
     with pytest.raises(UserError, match="Reusable prompts"):
         async for _ in model.stream_response(

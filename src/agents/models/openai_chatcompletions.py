@@ -55,10 +55,14 @@ class OpenAIChatCompletionsModel(Model):
         model: str | ChatModel,
         openai_client: AsyncOpenAI,
         should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
+        strict_feature_validation: bool = False,
     ) -> None:
         self.model = model
         self._client = openai_client
         self.should_replay_reasoning_content = should_replay_reasoning_content
+        self._strict_feature_validation = strict_feature_validation
+        self._has_warned_unsupported_prompt = False
+        self._has_warned_unsupported_conversation_state = False
 
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
@@ -66,15 +70,24 @@ class OpenAIChatCompletionsModel(Model):
     def _supports_default_prompt_cache_key(self) -> bool:
         return ChatCmplHelpers.is_openai(self._get_client())
 
-    def _validate_prompt_is_supported(self, prompt: ResponsePromptParam | None) -> None:
+    def _handle_unsupported_prompt(self, prompt: ResponsePromptParam | None) -> None:
         if prompt is None:
             return
 
-        raise UserError(
+        message = (
             "Reusable prompts are only supported by the Responses API. "
             "OpenAIChatCompletionsModel does not support `prompt`; use a Responses model "
             "instead."
         )
+        if self._strict_feature_validation:
+            raise UserError(message)
+
+        if not self._has_warned_unsupported_prompt:
+            logger.warning(
+                "%s Ignoring `prompt`; enable strict feature validation to raise an error instead.",
+                message,
+            )
+            self._has_warned_unsupported_prompt = True
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)
@@ -126,11 +139,11 @@ class OpenAIChatCompletionsModel(Model):
         conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
-        self._validate_no_server_managed_conversation_state(
+        self._handle_unsupported_server_managed_conversation_state(
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
         )
-        self._validate_prompt_is_supported(prompt)
+        self._handle_unsupported_prompt(prompt)
 
         with generation_span(
             model=str(self.model),
@@ -147,7 +160,7 @@ class OpenAIChatCompletionsModel(Model):
                 span_generation,
                 tracing,
                 stream=False,
-                prompt=prompt,
+                prompt=None,
             )
 
             if not response.choices:
@@ -256,11 +269,11 @@ class OpenAIChatCompletionsModel(Model):
         """
         Yields a partial message as it is generated, as well as the usage information.
         """
-        self._validate_no_server_managed_conversation_state(
+        self._handle_unsupported_server_managed_conversation_state(
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
         )
-        self._validate_prompt_is_supported(prompt)
+        self._handle_unsupported_prompt(prompt)
 
         with generation_span(
             model=str(self.model),
@@ -277,7 +290,7 @@ class OpenAIChatCompletionsModel(Model):
                 span_generation,
                 tracing,
                 stream=True,
-                prompt=prompt,
+                prompt=None,
             )
 
             final_response: Response | None = None
@@ -310,7 +323,7 @@ class OpenAIChatCompletionsModel(Model):
                     ),
                 }
 
-    def _validate_no_server_managed_conversation_state(
+    def _handle_unsupported_server_managed_conversation_state(
         self,
         *,
         previous_response_id: str | None,
@@ -325,12 +338,22 @@ class OpenAIChatCompletionsModel(Model):
             return
 
         unsupported_params = ", ".join(unsupported)
-        raise UserError(
+        message = (
             "OpenAIChatCompletionsModel does not support server-managed conversation state "
             f"({unsupported_params}). Chat Completions requires callers to pass the full "
             "conversation history; use a Responses API model for previous_response_id or a "
             "conversation-capable model for conversation_id."
         )
+        if self._strict_feature_validation:
+            raise UserError(message)
+
+        if not self._has_warned_unsupported_conversation_state:
+            logger.warning(
+                "%s Ignoring unsupported server-managed conversation state; enable strict feature "
+                "validation to raise an error instead.",
+                message,
+            )
+            self._has_warned_unsupported_conversation_state = True
 
     @overload
     async def _fetch_response(
@@ -375,7 +398,7 @@ class OpenAIChatCompletionsModel(Model):
         stream: bool = False,
         prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
-        self._validate_prompt_is_supported(prompt)
+        self._handle_unsupported_prompt(prompt)
         self._validate_official_openai_input_content_types(input)
         converted_messages = Converter.items_to_messages(
             input,
