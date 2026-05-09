@@ -763,7 +763,10 @@ class Converter:
                 content_items = reasoning_item.get("content", [])
                 encrypted_content = reasoning_item.get("encrypted_content")
 
-                item_provider_data: dict[str, Any] = reasoning_item.get("provider_data", {})  # type: ignore[assignment]
+                raw_provider_data = reasoning_item.get("provider_data")
+                item_provider_data: dict[str, Any] = (
+                    raw_provider_data if isinstance(raw_provider_data, dict) else {}
+                )
                 item_model = item_provider_data.get("model", "")
                 should_replay = False
 
