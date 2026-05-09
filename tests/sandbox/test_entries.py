@@ -918,7 +918,6 @@ async def test_git_repo_uses_fetch_checkout_path_for_commit_refs() -> None:
 @pytest.mark.parametrize(
     ("subpath", "reason"),
     [
-        ("", "empty"),
         (".", "empty"),
         ("/docs", "absolute"),
         ("../outside", "parent_traversal"),
@@ -940,6 +939,20 @@ async def test_git_repo_rejects_invalid_subpath_before_copy(
     assert excinfo.value.context["reason"] == reason
     assert excinfo.value.context["subpath"] == subpath
     assert session.exec_calls == []
+
+
+@pytest.mark.asyncio
+async def test_git_repo_empty_subpath_copies_repo_root() -> None:
+    session = _RecordingSession()
+    repo = GitRepo(repo="openai/example", ref="main", subpath="")
+
+    await repo.apply(session, Path("/workspace/repo"), Path("/ignored"))
+
+    copy_call = next(call for call in session.exec_calls if call[:1] == ("cp",))
+    assert copy_call[3].startswith("/tmp/sandbox-git-")
+    assert copy_call[3].endswith("/.")
+    assert not copy_call[3].endswith("//.")
+    assert copy_call[4].replace("\\", "/") == "/workspace/repo/"
 
 
 @pytest.mark.asyncio

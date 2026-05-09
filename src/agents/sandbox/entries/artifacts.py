@@ -820,9 +820,12 @@ class GitRepo(BaseEntry):
             return None
 
         subpath = self.subpath
+        if subpath == "":
+            return None
+
         posix_subpath = PurePosixPath(subpath)
         windows_subpath = PureWindowsPath(subpath)
-        if subpath == "" or posix_subpath.as_posix() == ".":
+        if posix_subpath.as_posix() == ".":
             raise GitSubpathError(repo=self.repo, subpath=subpath, reason="empty")
         if posix_subpath.is_absolute():
             raise GitSubpathError(repo=self.repo, subpath=subpath, reason="absolute")
