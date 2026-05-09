@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import Any, TypeGuard
 
 from openai import NOT_GIVEN
@@ -21,7 +22,7 @@ def ensure_strict_json_schema(
     that the OpenAI API expects.
     """
     if schema == {}:
-        return _EMPTY_SCHEMA
+        return copy.deepcopy(_EMPTY_SCHEMA)
     return _ensure_strict_json_schema(schema, path=(), root=schema)
 
 

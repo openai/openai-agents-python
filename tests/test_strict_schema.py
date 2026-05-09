@@ -9,6 +9,25 @@ def test_empty_schema_has_additional_properties_false():
     assert strict_schema["additionalProperties"] is False
 
 
+def test_empty_schema_returns_fresh_copy():
+    first = ensure_strict_json_schema({})
+    first["additionalProperties"] = True
+    first["properties"]["polluted"] = {"type": "string"}
+    first["required"].append("polluted")
+
+    second = ensure_strict_json_schema({})
+
+    assert second is not first
+    assert second == {
+        "additionalProperties": False,
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+    assert second["properties"] is not first["properties"]
+    assert second["required"] is not first["required"]
+
+
 def test_non_dict_schema_errors():
     with pytest.raises(TypeError):
         ensure_strict_json_schema([])  # type: ignore
