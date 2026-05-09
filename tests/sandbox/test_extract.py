@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from agents.sandbox import SandboxArchiveLimits
 from agents.sandbox.entries import GCSMount, InContainerMountStrategy, MountpointMountPattern
 from agents.sandbox.errors import InvalidManifestPathError, WorkspaceArchiveWriteError
 from agents.sandbox.files import EntryKind, FileEntry
@@ -16,7 +17,6 @@ from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxSession,
     UnixLocalSandboxSessionState,
 )
-from agents.sandbox.session import archive_extraction, archive_ops
 from agents.sandbox.session.archive_extraction import zipfile_compatible_stream
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
@@ -192,16 +192,65 @@ async def test_extract_zip_writes_archive_and_unpacks_contents(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_extract_rejects_archive_input_over_limit(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_extract_default_archive_limits_none_preserves_no_resource_limit_behavior(
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(archive_ops, "MAX_ARCHIVE_INPUT_BYTES", 4)
+    session = _build_session(tmp_path)
+    await session.start()
+    try:
+        await session.extract(
+            "bundle.tar",
+            _tar_bytes(members={"one.txt": b"1", "two.txt": b"2"}),
+        )
+    finally:
+        await session.shutdown()
+
+    workspace = Path(session.state.manifest.root)
+    assert (workspace / "one.txt").read_text(encoding="utf-8") == "1"
+    assert (workspace / "two.txt").read_text(encoding="utf-8") == "2"
+
+
+def test_sandbox_archive_limits_defaults_enable_sdk_thresholds() -> None:
+    limits = SandboxArchiveLimits()
+
+    assert limits.max_input_bytes == 1024 * 1024 * 1024
+    assert limits.max_extracted_bytes == 4 * 1024 * 1024 * 1024
+    assert limits.max_members == 100_000
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"max_input_bytes": 0}, "archive_limits.max_input_bytes must be at least 1"),
+        ({"max_extracted_bytes": 0}, "archive_limits.max_extracted_bytes must be at least 1"),
+        ({"max_members": 0}, "archive_limits.max_members must be at least 1"),
+    ],
+)
+def test_sandbox_archive_limits_rejects_non_positive_values(
+    kwargs: dict[str, int],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        SandboxArchiveLimits(**kwargs)
+
+    assert str(exc_info.value) == message
+
+
+@pytest.mark.asyncio
+async def test_extract_rejects_archive_input_over_limit(tmp_path: Path) -> None:
     session = _build_session(tmp_path)
     await session.start()
     try:
         with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
-            await session.extract("bundle.zip", _ChunkedBinaryStream([b"123", b"45"]))
+            await session.extract(
+                "bundle.zip",
+                _ChunkedBinaryStream([b"123", b"45"]),
+                archive_limits=SandboxArchiveLimits(
+                    max_input_bytes=4,
+                    max_extracted_bytes=None,
+                    max_members=None,
+                ),
+            )
 
         assert exc_info.value.context["reason"] == "archive input size exceeds limit"
         assert exc_info.value.context["limit"] == 4
@@ -215,15 +264,21 @@ async def test_extract_rejects_archive_input_over_limit(
 
 @pytest.mark.asyncio
 async def test_extract_tar_rejects_extracted_bytes_over_limit(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(archive_extraction, "MAX_ARCHIVE_EXTRACTED_BYTES", 4)
     session = _build_session(tmp_path)
     await session.start()
     try:
         with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
-            await session.extract("bundle.tar", _tar_bytes(members={"large.txt": b"12345"}))
+            await session.extract(
+                "bundle.tar",
+                _tar_bytes(members={"large.txt": b"12345"}),
+                archive_limits=SandboxArchiveLimits(
+                    max_input_bytes=None,
+                    max_extracted_bytes=4,
+                    max_members=None,
+                ),
+            )
 
         assert exc_info.value.context["member"] == "large.txt"
         assert exc_info.value.context["reason"] == "archive extracted size exceeds limit"
@@ -238,15 +293,21 @@ async def test_extract_tar_rejects_extracted_bytes_over_limit(
 
 @pytest.mark.asyncio
 async def test_extract_zip_rejects_extracted_bytes_over_limit(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(archive_extraction, "MAX_ARCHIVE_EXTRACTED_BYTES", 4)
     session = _build_session(tmp_path)
     await session.start()
     try:
         with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
-            await session.extract("bundle.zip", _zip_bytes(members={"large.txt": b"12345"}))
+            await session.extract(
+                "bundle.zip",
+                _zip_bytes(members={"large.txt": b"12345"}),
+                archive_limits=SandboxArchiveLimits(
+                    max_input_bytes=None,
+                    max_extracted_bytes=4,
+                    max_members=None,
+                ),
+            )
 
         assert exc_info.value.context["member"] == "large.txt"
         assert exc_info.value.context["reason"] == "archive extracted size exceeds limit"
@@ -264,7 +325,6 @@ async def test_extract_tar_rejects_member_count_over_limit(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(archive_extraction, "MAX_ARCHIVE_MEMBERS", 1)
     data = _tar_bytes(members={"one.txt": b"1", "two.txt": b"2"})
 
     def fail_getmembers(_self: tarfile.TarFile) -> list[tarfile.TarInfo]:
@@ -276,7 +336,15 @@ async def test_extract_tar_rejects_member_count_over_limit(
     await session.start()
     try:
         with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
-            await session.extract("bundle.tar", data)
+            await session.extract(
+                "bundle.tar",
+                data,
+                archive_limits=SandboxArchiveLimits(
+                    max_input_bytes=None,
+                    max_extracted_bytes=None,
+                    max_members=1,
+                ),
+            )
 
         assert exc_info.value.context["member"] == "two.txt"
         assert exc_info.value.context["reason"] == "archive member count exceeds limit"
@@ -292,10 +360,8 @@ async def test_extract_tar_rejects_member_count_over_limit(
 
 @pytest.mark.asyncio
 async def test_extract_zip_rejects_member_count_over_limit(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(archive_extraction, "MAX_ARCHIVE_MEMBERS", 1)
     session = _build_session(tmp_path)
     await session.start()
     try:
@@ -303,6 +369,11 @@ async def test_extract_zip_rejects_member_count_over_limit(
             await session.extract(
                 "bundle.zip",
                 _zip_bytes(members={"one.txt": b"1", "two.txt": b"2"}),
+                archive_limits=SandboxArchiveLimits(
+                    max_input_bytes=None,
+                    max_extracted_bytes=None,
+                    max_members=1,
+                ),
             )
 
         assert exc_info.value.context["member"] == "two.txt"
@@ -315,6 +386,128 @@ async def test_extract_zip_rejects_member_count_over_limit(
     workspace = Path(session.state.manifest.root)
     assert not (workspace / "one.txt").exists()
     assert not (workspace / "two.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_extract_archive_limits_none_disables_only_selected_limits(
+    tmp_path: Path,
+) -> None:
+    session = _build_session(tmp_path)
+    await session.start()
+    try:
+        await session.extract(
+            "bundle.tar",
+            _tar_bytes(members={"large.txt": b"12345"}),
+            archive_limits=SandboxArchiveLimits(
+                max_input_bytes=None,
+                max_extracted_bytes=None,
+                max_members=1,
+            ),
+        )
+    finally:
+        await session.shutdown()
+
+    workspace = Path(session.state.manifest.root)
+    assert (workspace / "large.txt").read_text(encoding="utf-8") == "12345"
+
+
+@pytest.mark.asyncio
+async def test_extract_archive_limits_per_call_override_session_default(
+    tmp_path: Path,
+) -> None:
+    session = _build_session(tmp_path)
+    session._set_archive_limits(
+        SandboxArchiveLimits(max_input_bytes=None, max_extracted_bytes=None, max_members=1)
+    )
+    await session.start()
+    try:
+        await session.extract(
+            "bundle.tar",
+            _tar_bytes(members={"one.txt": b"1", "two.txt": b"2"}),
+            archive_limits=SandboxArchiveLimits(
+                max_input_bytes=None,
+                max_extracted_bytes=None,
+                max_members=2,
+            ),
+        )
+    finally:
+        await session.shutdown()
+
+    workspace = Path(session.state.manifest.root)
+    assert (workspace / "one.txt").read_text(encoding="utf-8") == "1"
+    assert (workspace / "two.txt").read_text(encoding="utf-8") == "2"
+
+
+@pytest.mark.asyncio
+async def test_extract_uses_session_default_archive_limits(
+    tmp_path: Path,
+) -> None:
+    session = _build_session(tmp_path)
+    session._set_archive_limits(
+        SandboxArchiveLimits(max_input_bytes=None, max_extracted_bytes=None, max_members=1)
+    )
+    await session.start()
+    try:
+        with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+            await session.extract(
+                "bundle.tar",
+                _tar_bytes(members={"one.txt": b"1", "two.txt": b"2"}),
+            )
+
+        assert exc_info.value.context["member"] == "two.txt"
+        assert exc_info.value.context["reason"] == "archive member count exceeds limit"
+        assert exc_info.value.context["limit"] == 1
+        assert exc_info.value.context["actual"] == 2
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_extract_archive_limits_object_with_all_none_overrides_session_default(
+    tmp_path: Path,
+) -> None:
+    session = _build_session(tmp_path)
+    session._set_archive_limits(
+        SandboxArchiveLimits(max_input_bytes=None, max_extracted_bytes=None, max_members=1)
+    )
+    await session.start()
+    try:
+        await session.extract(
+            "bundle.tar",
+            _tar_bytes(members={"one.txt": b"1", "two.txt": b"2"}),
+            archive_limits=SandboxArchiveLimits(
+                max_input_bytes=None,
+                max_extracted_bytes=None,
+                max_members=None,
+            ),
+        )
+    finally:
+        await session.shutdown()
+
+    workspace = Path(session.state.manifest.root)
+    assert (workspace / "one.txt").read_text(encoding="utf-8") == "1"
+    assert (workspace / "two.txt").read_text(encoding="utf-8") == "2"
+
+
+@pytest.mark.asyncio
+async def test_extract_rejects_invalid_per_call_archive_limits(
+    tmp_path: Path,
+) -> None:
+    limits = SandboxArchiveLimits(max_input_bytes=1)
+    limits.max_input_bytes = 0
+    session = _build_session(tmp_path)
+    await session.start()
+    try:
+        with pytest.raises(ValueError) as exc_info:
+            await session.extract(
+                "bundle.tar",
+                _tar_bytes(members={"one.txt": b"1"}),
+                archive_limits=limits,
+            )
+
+        assert str(exc_info.value) == "archive_limits.max_input_bytes must be at least 1"
+    finally:
+        await session.shutdown()
 
 
 class _NoSeekableZipStream(io.IOBase):

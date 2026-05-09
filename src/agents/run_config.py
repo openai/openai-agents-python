@@ -33,6 +33,9 @@ if TYPE_CHECKING:
 DEFAULT_MAX_TURNS = 10
 DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY = 4
 DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY = 4
+DEFAULT_MAX_ARCHIVE_INPUT_BYTES = 1024 * 1024 * 1024
+DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
+DEFAULT_MAX_ARCHIVE_MEMBERS = 100_000
 
 
 def _default_trace_include_sensitive_data() -> bool:
@@ -130,6 +133,40 @@ class SandboxConcurrencyLimits:
 
 
 @dataclass
+class SandboxArchiveLimits:
+    """Resource limits for sandbox archive extraction."""
+
+    max_input_bytes: int | None = DEFAULT_MAX_ARCHIVE_INPUT_BYTES
+    """Maximum archive input bytes accepted by `BaseSandboxSession.extract()`.
+
+    Set to `None` to disable this input-size limit.
+    """
+
+    max_extracted_bytes: int | None = DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES
+    """Maximum declared bytes that an archive may extract.
+
+    Set to `None` to disable this extracted-size limit.
+    """
+
+    max_members: int | None = DEFAULT_MAX_ARCHIVE_MEMBERS
+    """Maximum number of extractable archive members.
+
+    Set to `None` to disable this member-count limit.
+    """
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if self.max_input_bytes is not None and self.max_input_bytes < 1:
+            raise ValueError("archive_limits.max_input_bytes must be at least 1")
+        if self.max_extracted_bytes is not None and self.max_extracted_bytes < 1:
+            raise ValueError("archive_limits.max_extracted_bytes must be at least 1")
+        if self.max_members is not None and self.max_members < 1:
+            raise ValueError("archive_limits.max_members must be at least 1")
+
+
+@dataclass
 class SandboxRunConfig:
     """Grouped sandbox runtime configuration for `Runner`."""
 
@@ -153,6 +190,13 @@ class SandboxRunConfig:
 
     concurrency_limits: SandboxConcurrencyLimits = field(default_factory=SandboxConcurrencyLimits)
     """Concurrency limits for sandbox materialization work."""
+
+    archive_limits: SandboxArchiveLimits | None = None
+    """Resource limits for sandbox archive extraction.
+
+    Set to `None` to preserve the default behavior with no SDK archive resource limits.
+    Use `SandboxArchiveLimits()` to enable SDK defaults.
+    """
 
 
 @dataclass
@@ -316,6 +360,7 @@ __all__ = [
     "ReasoningItemIdPolicy",
     "RunConfig",
     "RunOptions",
+    "SandboxArchiveLimits",
     "SandboxConcurrencyLimits",
     "SandboxRunConfig",
     "ToolExecutionConfig",

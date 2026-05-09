@@ -481,6 +481,28 @@ These options only matter when the runner is creating a fresh sandbox session:
 
 `concurrency_limits` controls how much sandbox materialization work can run in parallel. Use `SandboxConcurrencyLimits(manifest_entries=..., local_dir_files=...)` when large manifests or local directory copies need tighter resource control. Set either value to `None` to disable that specific limit.
 
+`archive_limits` controls SDK-side resource checks for `BaseSandboxSession.extract()` archive writes. The default, `archive_limits=None`, preserves the historical behavior and does not enforce SDK archive resource limits. Use `SandboxArchiveLimits()` to enable the SDK default thresholds, or pass explicit values such as `SandboxArchiveLimits(max_input_bytes=..., max_extracted_bytes=..., max_members=...)`. Set an individual field to `None` to disable only that limit.
+
+A direct `session.extract(..., archive_limits=SandboxArchiveLimits(...))` call can override the session default for that extraction. Set all fields to `None` to disable all SDK archive limits for that call.
+
+```python
+from agents.run import RunConfig
+from agents.sandbox import SandboxArchiveLimits, SandboxRunConfig
+
+run_config = RunConfig(
+    sandbox=SandboxRunConfig(
+        client=client,
+        archive_limits=SandboxArchiveLimits(),
+    )
+)
+
+await session.extract(
+    "bundle.tar",
+    archive_stream,
+    archive_limits=SandboxArchiveLimits(max_input_bytes=None, max_members=200_000),
+)
+```
+
 A few implications are worth keeping in mind:
 
 - Fresh sessions: `manifest=` and `snapshot=` only apply when the runner is creating a fresh sandbox session.

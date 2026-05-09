@@ -10,12 +10,10 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal, cast
 
+from ...run_config import SandboxArchiveLimits
 from ..errors import ExecNonZeroError, WorkspaceArchiveWriteError
 from ..files import EntryKind, FileEntry
 from ..util.tar_utils import UnsafeTarMemberError, safe_tar_member_rel_path
-
-MAX_ARCHIVE_MEMBERS = 10_000
-MAX_ARCHIVE_EXTRACTED_BYTES = 512 * 1024 * 1024
 
 
 class UnsafeZipMemberError(ValueError):
@@ -63,11 +61,12 @@ class WorkspaceArchiveExtractor:
         archive_path: Path,
         destination_root: Path,
         data: io.IOBase,
+        archive_limits: SandboxArchiveLimits | None = None,
     ) -> None:
         child_entry_cache: dict[Path, dict[str, EntryKind]] = {}
         try:
             with tarfile.open(fileobj=data, mode="r|*") as archive:
-                validate_tar_archive_for_extraction(archive)
+                validate_tar_archive_for_extraction(archive, archive_limits=archive_limits)
 
             data.seek(0)
             with tarfile.open(fileobj=data, mode="r|*") as archive:
@@ -138,12 +137,13 @@ class WorkspaceArchiveExtractor:
         archive_path: Path,
         destination_root: Path,
         data: io.IOBase,
+        archive_limits: SandboxArchiveLimits | None = None,
     ) -> None:
         child_entry_cache: dict[Path, dict[str, EntryKind]] = {}
         try:
             with zipfile_compatible_stream(data) as zip_data:
                 with zipfile.ZipFile(zip_data) as archive:
-                    validate_zipfile(archive)
+                    validate_zipfile(archive, archive_limits=archive_limits)
                     for member in archive.infolist():
                         rel_path = safe_zip_member_rel_path(member)
                         if rel_path is None:
@@ -349,27 +349,47 @@ def _archive_resource_limit_context(error: ArchiveResourceLimitError) -> dict[st
     return context
 
 
-def _check_archive_member_count(*, count: int, member: str) -> None:
-    if count > MAX_ARCHIVE_MEMBERS:
+def _check_archive_member_count(
+    *,
+    count: int,
+    member: str,
+    archive_limits: SandboxArchiveLimits | None,
+) -> None:
+    if archive_limits is None or archive_limits.max_members is None:
+        return
+
+    if count > archive_limits.max_members:
         raise ArchiveResourceLimitError(
             reason="archive member count exceeds limit",
-            limit=MAX_ARCHIVE_MEMBERS,
+            limit=archive_limits.max_members,
             actual=count,
             member=member,
         )
 
 
-def _check_archive_extracted_bytes(*, total: int, member: str) -> None:
-    if total > MAX_ARCHIVE_EXTRACTED_BYTES:
+def _check_archive_extracted_bytes(
+    *,
+    total: int,
+    member: str,
+    archive_limits: SandboxArchiveLimits | None,
+) -> None:
+    if archive_limits is None or archive_limits.max_extracted_bytes is None:
+        return
+
+    if total > archive_limits.max_extracted_bytes:
         raise ArchiveResourceLimitError(
             reason="archive extracted size exceeds limit",
-            limit=MAX_ARCHIVE_EXTRACTED_BYTES,
+            limit=archive_limits.max_extracted_bytes,
             actual=total,
             member=member,
         )
 
 
-def validate_tar_archive_for_extraction(archive: tarfile.TarFile) -> None:
+def validate_tar_archive_for_extraction(
+    archive: tarfile.TarFile,
+    *,
+    archive_limits: SandboxArchiveLimits | None = None,
+) -> None:
     members_by_rel_path: dict[Path, tarfile.TarInfo] = {}
     member_count = 0
     extracted_bytes = 0
@@ -380,10 +400,18 @@ def validate_tar_archive_for_extraction(archive: tarfile.TarFile) -> None:
             continue
 
         member_count += 1
-        _check_archive_member_count(count=member_count, member=member.name)
+        _check_archive_member_count(
+            count=member_count,
+            member=member.name,
+            archive_limits=archive_limits,
+        )
         if member.isreg():
             extracted_bytes += max(member.size, 0)
-            _check_archive_extracted_bytes(total=extracted_bytes, member=member.name)
+            _check_archive_extracted_bytes(
+                total=extracted_bytes,
+                member=member.name,
+                archive_limits=archive_limits,
+            )
 
         previous = members_by_rel_path.get(rel_path)
         if previous is not None and not (previous.isdir() and member.isdir()):
@@ -419,7 +447,11 @@ def _is_descendant(path: Path, parent: Path) -> bool:
     return len(path.parts) > len(parent.parts) and path.parts[: len(parent.parts)] == parent.parts
 
 
-def validate_zipfile(archive: zipfile.ZipFile) -> None:
+def validate_zipfile(
+    archive: zipfile.ZipFile,
+    *,
+    archive_limits: SandboxArchiveLimits | None = None,
+) -> None:
     members_by_rel_path: dict[Path, zipfile.ZipInfo] = {}
     members: list[tuple[zipfile.ZipInfo, Path]] = []
     extracted_bytes = 0
@@ -429,9 +461,17 @@ def validate_zipfile(archive: zipfile.ZipFile) -> None:
         if rel_path is None:
             continue
 
-        _check_archive_member_count(count=len(members) + 1, member=member.filename)
+        _check_archive_member_count(
+            count=len(members) + 1,
+            member=member.filename,
+            archive_limits=archive_limits,
+        )
         extracted_bytes += max(member.file_size, 0)
-        _check_archive_extracted_bytes(total=extracted_bytes, member=member.filename)
+        _check_archive_extracted_bytes(
+            total=extracted_bytes,
+            member=member.filename,
+            archive_limits=archive_limits,
+        )
 
         previous = members_by_rel_path.get(rel_path)
         if previous is not None and not (previous.is_dir() and member.is_dir()):
