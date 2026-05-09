@@ -109,8 +109,8 @@ class MultiProvider(ModelProvider):
                 responses API.
             openai_strict_feature_validation: Whether OpenAI Chat Completions models should raise
                 a UserError when callers pass Responses-only features such as previous_response_id,
-                conversation_id, or prompt. Defaults to False, which preserves the previous
-                ignore-and-warn behavior.
+                conversation_id, prompt, or non-text-only tool outputs. Defaults to False, which
+                preserves the default compatibility behavior.
             openai_websocket_base_url: The websocket base URL to use for the OpenAI provider.
                 If not provided, the provider will use `OPENAI_WEBSOCKET_BASE_URL` when set.
             openai_prefix_mode: Controls how ``openai/...`` model strings are interpreted.

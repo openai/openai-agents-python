@@ -468,6 +468,7 @@ class Converter:
         preserve_tool_output_all_content: bool = False,
         base_url: str | None = None,
         should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
+        strict_feature_validation: bool = False,
     ) -> list[ChatCompletionMessageParam]:
         """
         Convert a sequence of 'Item' objects into a list of ChatCompletionMessageParam.
@@ -493,6 +494,8 @@ class Converter:
             should_replay_reasoning_content: Optional hook that decides whether a
                 reasoning item should be replayed into the next assistant message as
                 `reasoning_content`.
+            strict_feature_validation: Whether to raise a UserError for Responses-only
+                features that Chat Completions cannot faithfully represent.
 
         Rules:
         - EasyInputMessage or InputMessage (role=user) => ChatCompletionUserMessageParam
@@ -748,6 +751,13 @@ class Converter:
                             for c in all_output_content
                             if c.get("type") == "text"
                         ]
+                        if not tool_result_content and all_output_content:
+                            if strict_feature_validation:
+                                raise UserError(
+                                    "Chat Completions tool outputs cannot contain only non-text "
+                                    "content unless preserve_tool_output_all_content=True"
+                                )
+                            tool_result_content = "[non-text tool output omitted]"
                 msg: ChatCompletionToolMessageParam = {
                     "role": "tool",
                     "tool_call_id": func_output["call_id"],
