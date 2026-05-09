@@ -28,6 +28,10 @@ from typing import Literal, cast
 import pytest
 from openai import omit
 from openai.types.chat import ChatCompletionMessage, ChatCompletionMessageFunctionToolCall
+from openai.types.chat.chat_completion_message_custom_tool_call import (
+    ChatCompletionMessageCustomToolCall,
+    Custom,
+)
 from openai.types.chat.chat_completion_message_tool_call import Function
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -41,7 +45,7 @@ from openai.types.responses import (
 from openai.types.responses.response_input_item_param import FunctionCallOutput
 
 from agents.agent_output import AgentOutputSchema
-from agents.exceptions import UserError
+from agents.exceptions import AgentsException, UserError
 from agents.items import TResponseInputItem
 from agents.models.chatcmpl_converter import Converter
 from agents.models.fake_id import FAKE_RESPONSES_ID
@@ -106,6 +110,19 @@ def test_message_to_output_items_with_tool_call():
     assert fn_call_item.name == tool_call.function.name
     assert fn_call_item.arguments == tool_call.function.arguments
     assert fn_call_item.type == "function_call"
+
+
+def test_message_to_output_items_with_custom_tool_call_raises():
+    """Custom tool calls should fail explicitly instead of being dropped."""
+    tool_call = ChatCompletionMessageCustomToolCall(
+        id="tool1",
+        type="custom",
+        custom=Custom(name="raw_tool", input="payload"),
+    )
+    msg = ChatCompletionMessage(role="assistant", tool_calls=[tool_call])
+
+    with pytest.raises(AgentsException, match="Custom tool calls are not supported"):
+        Converter.message_to_output_items(msg)
 
 
 def test_items_to_messages_with_string_user_content():

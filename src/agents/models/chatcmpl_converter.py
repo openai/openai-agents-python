@@ -227,7 +227,9 @@ class Converter:
 
                     items.append(ResponseFunctionToolCall(**func_call_kwargs))
                 elif tool_call.type == "custom":
-                    pass
+                    raise AgentsException(
+                        "Custom tool calls are not supported by the Chat Completions converter"
+                    )
 
         return items
 
