@@ -481,6 +481,8 @@ These options only matter when the runner is creating a fresh sandbox session:
 
 `concurrency_limits` controls how much sandbox materialization work can run in parallel. Use `SandboxConcurrencyLimits(manifest_entries=..., local_dir_files=...)` when large manifests or local directory copies need tighter resource control. Set either value to `None` to disable that specific limit.
 
+`archive_limits` controls SDK-side resource checks for archive extraction. Use `SandboxArchiveLimits(max_input_bytes=..., max_extracted_bytes=..., max_members=...)` when archives need tighter resource control. Set `archive_limits=None` to keep the default behavior with no SDK archive resource limits, or set an individual value to `None` to disable that specific limit.
+
 A few implications are worth keeping in mind:
 
 - Fresh sessions: `manifest=` and `snapshot=` only apply when the runner is creating a fresh sandbox session.
