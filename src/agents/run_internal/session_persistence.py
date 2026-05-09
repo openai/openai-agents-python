@@ -333,6 +333,14 @@ async def save_result_to_session(
             serialized_to_save_counts[serialized] -= 1
             saved_run_items_count += 1
 
+    # Drop items the Conversations API cannot accept (counted above so the
+    # persisted-item counter advances correctly on the next retry/call).
+    if is_openai_conversation_session:
+        items_to_save = [
+            item for item in items_to_save
+            if not _is_unpersistable_for_openai_conversation(item)
+        ]
+
     if len(items_to_save) == 0:
         if run_state:
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
@@ -569,6 +577,19 @@ def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInp
         clean_item.pop("provider_data", None)
         return cast(TResponseInputItem, clean_item)
     return item
+
+
+def _is_unpersistable_for_openai_conversation(item: TResponseInputItem) -> bool:
+    """Return True for items the OpenAI Conversations API cannot accept.
+
+    The Conversations API rejects reasoning items with an empty summary list.
+    Callers should drop these items before calling ``session.add_items`` while
+    still counting them in the persisted-item counter so the retry logic
+    advances past them correctly.
+    """
+    if not isinstance(item, dict):
+        return False
+    return item.get("type") == "reasoning" and item.get("summary") == []
 
 
 def _sanitize_openai_conversation_history_items_for_model_input(
