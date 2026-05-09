@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 import types
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import patch
 
@@ -127,10 +128,13 @@ class FakeAsyncCollection:
                 # Apply $inc fields.
                 for field, delta in update.get("$inc", {}).items():
                     doc[field] = doc.get(field, 0) + delta
+                for field, value in update.get("$set", {}).items():
+                    doc[field] = value
                 return dict(doc) if return_document else None
         if upsert:
             new_doc: dict[str, Any] = {"_id": FakeObjectId()}
             new_doc.update(update.get("$setOnInsert", {}))
+            new_doc.update(update.get("$set", {}))
             for field, delta in update.get("$inc", {}).items():
                 new_doc[field] = new_doc.get(field, 0) + delta
             self._docs[id(new_doc["_id"])] = new_doc
@@ -343,6 +347,26 @@ async def test_multiple_add_calls_accumulate(session: MongoDBSession) -> None:
 
     items = await session.get_items()
     assert [i.get("content") for i in items] == ["a", "b", "c"]
+
+
+async def test_session_metadata_timestamps_are_written(session: MongoDBSession) -> None:
+    """Session metadata records creation time and last update time."""
+    created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    updated_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+    with patch("agents.extensions.memory.mongodb_session.datetime") as mocked_datetime:
+        mocked_datetime.now.side_effect = [created_at, updated_at]
+
+        await session.add_items([{"role": "user", "content": "first"}])
+        session_doc: dict[str, Any] = next(iter(session._sessions._docs.values()))
+        assert session_doc["session_id"] == session.session_id
+        assert session_doc["created_at"] == created_at
+        assert session_doc["updated_at"] == created_at
+
+        await session.add_items([{"role": "assistant", "content": "second"}])
+        assert session_doc["created_at"] == created_at
+        assert session_doc["updated_at"] == updated_at
+        assert session_doc["_seq"] == 2
 
 
 # ---------------------------------------------------------------------------
