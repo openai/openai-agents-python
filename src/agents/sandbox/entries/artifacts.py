@@ -819,20 +819,26 @@ class GitRepo(BaseEntry):
         if self.subpath is None:
             return None
 
-        subpath = self.subpath
-        if subpath == "":
+        original_subpath = self.subpath
+        if original_subpath == "":
             return None
+
+        subpath = original_subpath.strip()
+        if not subpath:
+            raise GitSubpathError(repo=self.repo, subpath=original_subpath, reason="empty")
 
         posix_subpath = PurePosixPath(subpath)
         windows_subpath = PureWindowsPath(subpath)
         if posix_subpath.as_posix() == ".":
-            raise GitSubpathError(repo=self.repo, subpath=subpath, reason="empty")
+            return None
         if posix_subpath.is_absolute():
-            raise GitSubpathError(repo=self.repo, subpath=subpath, reason="absolute")
-        if "\\" in subpath or windows_subpath.drive:
-            raise GitSubpathError(repo=self.repo, subpath=subpath, reason="windows_path")
+            raise GitSubpathError(repo=self.repo, subpath=original_subpath, reason="absolute")
+        if "\\" in original_subpath or windows_subpath.drive:
+            raise GitSubpathError(repo=self.repo, subpath=original_subpath, reason="windows_path")
         if ".." in posix_subpath.parts:
-            raise GitSubpathError(repo=self.repo, subpath=subpath, reason="parent_traversal")
+            raise GitSubpathError(
+                repo=self.repo, subpath=original_subpath, reason="parent_traversal"
+            )
 
         return posix_subpath
 
