@@ -22,6 +22,7 @@ from agents.sandbox.errors import (
     ExecNonZeroError,
     GitCloneError,
     GitCopyError,
+    GitSubpathError,
     InvalidManifestPathError,
     LocalDirReadError,
     LocalFileReadError,
@@ -911,6 +912,59 @@ async def test_git_repo_uses_fetch_checkout_path_for_commit_refs() -> None:
         and call[-1] == "FETCH_HEAD"
         for call in session.exec_calls
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("subpath", "reason"),
+    [
+        (".", "empty"),
+        ("/docs", "absolute"),
+        ("../outside", "parent_traversal"),
+        ("docs/../../outside", "parent_traversal"),
+        ("C:/repo", "windows_path"),
+        ("docs\\outside", "windows_path"),
+    ],
+)
+async def test_git_repo_rejects_invalid_subpath_before_copy(
+    subpath: str,
+    reason: str,
+) -> None:
+    session = _GitFailureSession(fail_on="clone")
+    repo = GitRepo(repo="openai/example", ref="main", subpath=subpath)
+
+    with pytest.raises(GitSubpathError) as excinfo:
+        await repo.apply(session, Path("/workspace/repo"), Path("/ignored"))
+
+    assert excinfo.value.context["reason"] == reason
+    assert excinfo.value.context["subpath"] == subpath
+    assert session.exec_calls == []
+
+
+@pytest.mark.asyncio
+async def test_git_repo_empty_subpath_copies_repo_root() -> None:
+    session = _RecordingSession()
+    repo = GitRepo(repo="openai/example", ref="main", subpath="")
+
+    await repo.apply(session, Path("/workspace/repo"), Path("/ignored"))
+
+    copy_call = next(call for call in session.exec_calls if call[:1] == ("cp",))
+    assert copy_call[3].startswith("/tmp/sandbox-git-")
+    assert copy_call[3].endswith("/.")
+    assert not copy_call[3].endswith("//.")
+    assert copy_call[4].replace("\\", "/") == "/workspace/repo/"
+
+
+@pytest.mark.asyncio
+async def test_git_repo_allows_relative_subpath_copy() -> None:
+    session = _RecordingSession()
+    repo = GitRepo(repo="openai/example", ref="main", subpath="docs/reference")
+
+    await repo.apply(session, Path("/workspace/repo"), Path("/ignored"))
+
+    copy_call = next(call for call in session.exec_calls if call[:1] == ("cp",))
+    assert copy_call[3].endswith("/docs/reference/.")
+    assert copy_call[4].replace("\\", "/") == "/workspace/repo/"
 
 
 def _git_temp_cleanup_calls(session: _RecordingSession) -> list[tuple[str, ...]]:

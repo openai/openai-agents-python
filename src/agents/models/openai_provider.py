@@ -52,6 +52,7 @@ class OpenAIProvider(ModelProvider):
         project: str | None = None,
         use_responses: bool | None = None,
         use_responses_websocket: bool | None = None,
+        strict_feature_validation: bool = False,
         agent_registration: OpenAIAgentRegistrationConfig | None = None,
         responses_websocket_options: OpenAIResponsesWebSocketOptions | None = None,
     ) -> None:
@@ -71,6 +72,10 @@ class OpenAIProvider(ModelProvider):
             use_responses: Whether to use the OpenAI responses API.
             use_responses_websocket: Whether to use websocket transport for the OpenAI responses
                 API.
+            strict_feature_validation: Whether Chat Completions models should raise a UserError
+                when callers pass Responses-only features such as previous_response_id,
+                conversation_id, or prompt. Defaults to False, which preserves the previous
+                ignore-and-warn behavior.
             agent_registration: Optional agent registration configuration.
             responses_websocket_options: Optional low-level websocket keepalive options for the
                 OpenAI Responses websocket transport.
@@ -102,6 +107,7 @@ class OpenAIProvider(ModelProvider):
             self._responses_transport = _openai_shared.get_default_openai_responses_transport()
         # Backward-compatibility shim for internal tests/diagnostics that inspect the legacy flag.
         self._use_responses_websocket = self._responses_transport == "websocket"
+        self._strict_feature_validation = strict_feature_validation
         self._responses_websocket_options = responses_websocket_options
 
         # Reuse websocket model wrappers so websocket transport can keep a persistent connection
@@ -220,7 +226,11 @@ class OpenAIProvider(ModelProvider):
         model: Model
 
         if not self._use_responses:
-            return OpenAIChatCompletionsModel(model=resolved_model_name, openai_client=client)
+            return OpenAIChatCompletionsModel(
+                model=resolved_model_name,
+                openai_client=client,
+                strict_feature_validation=self._strict_feature_validation,
+            )
 
         if use_websocket_transport:
             model = OpenAIResponsesWSModel(

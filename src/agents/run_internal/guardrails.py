@@ -164,6 +164,7 @@ async def run_output_guardrails(
         if result.output.tripwire_triggered:
             for t in guardrail_tasks:
                 t.cancel()
+            await asyncio.gather(*guardrail_tasks, return_exceptions=True)
             _error_tracing.attach_error_to_current_span(
                 SpanError(
                     message="Guardrail tripwire triggered",

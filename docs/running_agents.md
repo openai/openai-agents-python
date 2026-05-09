@@ -505,6 +505,10 @@ print(result.final_output)
 For tool approval pause/resume patterns, start with the dedicated [Human-in-the-loop guide](human_in_the_loop.md).
 The integrations below are for durable orchestration when runs may span long waits, retries, or process restarts.
 
+### Dapr
+
+You can use the Agents SDK [Dapr](https://dapr.io) Diagrid integration to run durable, long running agents that automatically recover from failures with human-in-the-loop support. Dapr is a vendor-neutral, [CNCF](https://cncf.io) workflow orchestrator. Get started with Dapr and OpenAI agents [here](https://docs.diagrid.io/getting-started/quickstarts/ai-agents/?agentframework=openai).
+
 ### Temporal
 
 You can use the Agents SDK [Temporal](https://temporal.io/) integration to run durable, long-running workflows, including human-in-the-loop tasks. View a demo of Temporal and the Agents SDK working in action to complete long-running tasks [in this video](https://www.youtube.com/watch?v=fFBZqzT4DD8), and [view docs here](https://github.com/temporalio/sdk-python/tree/main/temporalio/contrib/openai_agents). 

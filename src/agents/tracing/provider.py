@@ -41,6 +41,20 @@ def _safe_debug(message: str) -> None:
         return
 
 
+def _is_noop_id(value: str | None) -> bool:
+    return value == "no-op"
+
+
+def _is_noop_span(span: Span[Any] | None) -> bool:
+    return isinstance(span, NoOpSpan) or (
+        span is not None and (_is_noop_id(span.span_id) or _is_noop_id(span.trace_id))
+    )
+
+
+def _is_noop_trace(trace: Trace | None) -> bool:
+    return isinstance(trace, NoOpTrace) or (trace is not None and _is_noop_id(trace.trace_id))
+
+
 class SynchronousMultiTracingProcessor(TracingProcessor):
     """
     Forwards all calls to a list of TracingProcessors, in order of registration.
@@ -325,17 +339,20 @@ class DefaultTraceProvider(TraceProvider):
         if self._disabled or disabled:
             logger.debug(f"Tracing is disabled. Not creating span {span_data}")
             return NoOpSpan(span_data)
+        if _is_noop_id(span_id):
+            logger.debug("Span id is no-op, returning NoOpSpan")
+            return NoOpSpan(span_data)
 
         if not parent:
             current_span = Scope.get_current_span()
             current_trace = Scope.get_current_trace()
             if current_trace is None:
-                logger.error(
+                _safe_debug(
                     "No active trace. Make sure to start a trace with `trace()` first "
                     "Returning NoOpSpan."
                 )
                 return NoOpSpan(span_data)
-            elif isinstance(current_trace, NoOpTrace) or isinstance(current_span, NoOpSpan):
+            elif _is_noop_trace(current_trace) or _is_noop_span(current_span):
                 logger.debug(
                     f"Parent {current_span} or {current_trace} is no-op, returning NoOpSpan"
                 )
@@ -348,7 +365,7 @@ class DefaultTraceProvider(TraceProvider):
             trace_metadata = getattr(current_trace, "metadata", None)
 
         elif isinstance(parent, Trace):
-            if isinstance(parent, NoOpTrace):
+            if _is_noop_trace(parent):
                 logger.debug(f"Parent {parent} is no-op, returning NoOpSpan")
                 return NoOpSpan(span_data)
             trace_id = parent.trace_id
@@ -357,7 +374,7 @@ class DefaultTraceProvider(TraceProvider):
             # Trace is an interface; custom implementations may omit metadata.
             trace_metadata = getattr(parent, "metadata", None)
         elif isinstance(parent, Span):
-            if isinstance(parent, NoOpSpan):
+            if _is_noop_span(parent):
                 logger.debug(f"Parent {parent} is no-op, returning NoOpSpan")
                 return NoOpSpan(span_data)
             parent_id = parent.span_id

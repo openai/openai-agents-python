@@ -515,6 +515,51 @@ async def test_non_string_message_data_is_skipped(session: MongoDBSession) -> No
     assert items[0].get("content") == "valid"
 
 
+async def test_pop_item_skips_corrupt_most_recent(session: MongoDBSession) -> None:
+    """pop_item must skip a corrupt most-recent document and return the next valid one."""
+    await session.add_items([{"role": "user", "content": "valid"}])
+
+    # Inject a corrupt document with a higher seq so it sorts as "most recent".
+    bad_doc = {
+        "_id": FakeObjectId(),
+        "session_id": session.session_id,
+        "seq": 999,
+        "message_data": "not valid json {{{",
+    }
+    session._messages._docs[id(bad_doc["_id"])] = bad_doc
+
+    popped = await session.pop_item()
+    assert popped is not None
+    assert popped.get("content") == "valid"
+
+    # Both the corrupt doc and the valid one are now gone.
+    assert await session.get_items() == []
+
+
+async def test_pop_item_returns_none_when_only_corrupt_docs_remain(
+    session: MongoDBSession,
+) -> None:
+    """pop_item must drop every corrupt doc and return None when nothing valid remains."""
+    bad1 = {
+        "_id": FakeObjectId(),
+        "session_id": session.session_id,
+        "seq": 1,
+        "message_data": "garbage",
+    }
+    bad2 = {
+        "_id": FakeObjectId(),
+        "session_id": session.session_id,
+        "seq": 2,
+        "message_data": 42,  # non-string — TypeError
+    }
+    session._messages._docs[id(bad1["_id"])] = bad1
+    session._messages._docs[id(bad2["_id"])] = bad2
+
+    assert await session.pop_item() is None
+    # Both corrupt docs must have been removed in the process.
+    assert session._messages._docs == {}
+
+
 # ---------------------------------------------------------------------------
 # Index initialisation (idempotency)
 # ---------------------------------------------------------------------------

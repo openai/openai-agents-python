@@ -70,6 +70,13 @@ from .model_inputs import (
 REJECTION_MESSAGE = DEFAULT_APPROVAL_REJECTION_MESSAGE
 
 
+class _RealtimeSessionClosedSentinel:
+    pass
+
+
+_REALTIME_SESSION_CLOSED_SENTINEL = _RealtimeSessionClosedSentinel()
+
+
 def _serialize_tool_output(output: Any) -> str:
     """Serialize structured tool outputs to JSON when possible."""
     if isinstance(output, str):
@@ -143,7 +150,10 @@ class RealtimeSession(RealtimeModelListener):
             **(run_config_settings or {}),
             **(initial_model_settings or {}),
         }
-        self._event_queue: asyncio.Queue[RealtimeSessionEvent] = asyncio.Queue()
+        self._event_queue: asyncio.Queue[RealtimeSessionEvent | _RealtimeSessionClosedSentinel] = (
+            asyncio.Queue()
+        )
+        self._event_iterator_waiters = 0
         self._closed = False
         self._stored_exception: BaseException | None = None
         self._pending_tool_calls: dict[
@@ -206,7 +216,10 @@ class RealtimeSession(RealtimeModelListener):
 
     async def __aiter__(self) -> AsyncIterator[RealtimeSessionEvent]:
         """Iterate over events from the session."""
-        while not self._closed:
+        while True:
+            if self._closed and self._event_queue.empty():
+                return
+
             try:
                 # Check if there's a stored exception to raise
                 if self._stored_exception is not None:
@@ -214,8 +227,14 @@ class RealtimeSession(RealtimeModelListener):
                     await self._cleanup()
                     raise self._stored_exception
 
-                event = await self._event_queue.get()
-                yield event
+                self._event_iterator_waiters += 1
+                try:
+                    event = await self._event_queue.get()
+                finally:
+                    self._event_iterator_waiters -= 1
+                if event is _REALTIME_SESSION_CLOSED_SENTINEL:
+                    return
+                yield cast(RealtimeSessionEvent, event)
             except asyncio.CancelledError:
                 break
 
@@ -1047,8 +1066,16 @@ class RealtimeSession(RealtimeModelListener):
                 task.cancel()
         self._tool_call_tasks.clear()
 
+    def _wake_event_iterators(self) -> None:
+        for _ in range(self._event_iterator_waiters):
+            self._event_queue.put_nowait(_REALTIME_SESSION_CLOSED_SENTINEL)
+
     async def _cleanup(self) -> None:
         """Clean up all resources and mark session as closed."""
+        if self._closed:
+            self._wake_event_iterators()
+            return
+
         # Cancel and cleanup guardrail tasks
         self._cleanup_guardrail_tasks()
         self._cleanup_tool_call_tasks()
@@ -1064,6 +1091,7 @@ class RealtimeSession(RealtimeModelListener):
 
         # Mark as closed
         self._closed = True
+        self._wake_event_iterators()
 
     async def _get_updated_model_settings_from_agent(
         self,

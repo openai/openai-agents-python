@@ -324,21 +324,26 @@ class MongoDBSession(SessionABC):
 
         Returns:
             The most recent item if it exists, ``None`` if the session is empty.
+
+        Corrupt documents (invalid JSON, missing/non-string ``message_data``)
+        are silently discarded and the next-most-recent item is returned.  This
+        matches :meth:`get_items`, which also skips corrupt documents, so a
+        single bad row cannot make a non-empty session look empty to callers.
         """
         await self._ensure_indexes()
 
-        doc = await self._messages.find_one_and_delete(
-            {"session_id": self.session_id},
-            sort=[("seq", -1)],
-        )
-
-        if doc is None:
-            return None
-
-        try:
-            return await self._deserialize_item(doc["message_data"])
-        except (json.JSONDecodeError, KeyError, TypeError):
-            return None
+        while True:
+            doc = await self._messages.find_one_and_delete(
+                {"session_id": self.session_id},
+                sort=[("seq", -1)],
+            )
+            if doc is None:
+                return None
+            try:
+                return await self._deserialize_item(doc["message_data"])
+            except (json.JSONDecodeError, KeyError, TypeError):
+                # Corrupt — drop it and try the next-most-recent document.
+                continue
 
     async def clear_session(self) -> None:
         """Clear all items for this session."""

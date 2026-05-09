@@ -172,6 +172,44 @@ def test_batch_trace_processor_shutdown_flushes(mocked_exporter):
     assert total_exported == 2, "All items in the queue should be exported upon shutdown"
 
 
+def test_batch_trace_processor_survives_exporter_exception():
+    """A failing exporter must not kill the background worker thread.
+
+    Previously, an exception raised inside ``exporter.export`` propagated out of
+    ``_export_batches`` and killed the ``_run`` thread, causing all subsequent
+    spans to silently accumulate in the queue until it filled up.
+    """
+
+    class FlakyExporter(TracingExporter):
+        def __init__(self) -> None:
+            self.call_count = 0
+            self.exported: list[Trace | Span[Any]] = []
+
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            self.call_count += 1
+            if self.call_count == 1:
+                raise RuntimeError("simulated exporter failure")
+            self.exported.extend(items)
+
+    exporter = FlakyExporter()
+    processor = BatchTraceProcessor(exporter, schedule_delay=0.05, max_batch_size=1)
+    processor.on_span_end(get_span(processor))
+    processor.on_span_end(get_span(processor))
+    processor.on_span_end(get_span(processor))
+
+    # Give the worker time to encounter the failure and continue processing.
+    time.sleep(0.3)
+
+    assert processor._worker_thread is not None
+    assert processor._worker_thread.is_alive(), "Worker thread must survive an exporter exception"
+
+    processor.shutdown(timeout=2.0)
+
+    # First batch raised; the remaining two items must still have been exported.
+    assert len(exporter.exported) == 2
+    assert exporter.call_count >= 3
+
+
 def test_batch_trace_processor_scheduled_export(mocked_exporter):
     """
     Tests that items are automatically exported when the schedule_delay expires.

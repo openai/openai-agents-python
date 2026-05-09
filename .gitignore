@@ -143,6 +143,10 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 
+# Example runtime state
+examples/sandbox/extensions/daytona/usaspending_text2sql/.audit_log.jsonl
+examples/sandbox/extensions/daytona/usaspending_text2sql/.session_state.json
+
 # PyPI configuration file
 .pypirc
 .aider*

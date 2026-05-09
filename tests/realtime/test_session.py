@@ -128,6 +128,30 @@ async def test_aiter_cancel_breaks_loop_gracefully():
 
 
 @pytest.mark.asyncio
+async def test_aiter_exits_waiting_iterators_when_session_closes():
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+
+    iterators = [session.__aiter__(), session.__aiter__()]
+    next_events = [asyncio.ensure_future(iterator.__anext__()) for iterator in iterators]
+    await asyncio.sleep(0.01)
+
+    await session.close()
+
+    done, pending = await asyncio.wait(set(next_events), timeout=0.1)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+
+    assert done == set(next_events)
+    assert not pending
+    for task in next_events:
+        with pytest.raises(StopAsyncIteration):
+            task.result()
+
+
+@pytest.mark.asyncio
 async def test_transcription_completed_adds_new_user_item():
     model = _DummyModel()
     agent = RealtimeAgent(name="agent")
