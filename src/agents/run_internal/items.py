@@ -67,13 +67,26 @@ def run_item_to_input_item(
     run_item: RunItem,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> TResponseInputItem | None:
-    """Convert a run item to model input, optionally stripping reasoning IDs."""
+    """Convert a run item to model input, optionally stripping reasoning IDs.
+
+    Returns ``None`` for items that should be omitted from model input, including
+    tool-approval placeholders and reasoning items whose ``summary`` list is empty
+    (e.g. encrypted-reasoning turns where the model emits no visible summary text).
+    Persisting an empty reasoning item to the Conversations API causes a 400 error,
+    so we skip them rather than forwarding a ``{"type": "reasoning", "summary": []}``
+    payload that the API would reject.
+    """
     if run_item.type == "tool_approval_item":
         return None
     to_input = getattr(run_item, "to_input_item", None)
     input_item = to_input() if callable(to_input) else cast(TResponseInputItem, run_item.raw_item)
     if isinstance(input_item, dict) and input_item.get("status") is None:
         input_item = {k: v for k, v in input_item.items() if k != "status"}
+    # Skip reasoning items that carry no summary content.  The Conversations API
+    # rejects these with a 400, and they add no useful context for future turns.
+    if run_item.type == "reasoning_item" and isinstance(input_item, dict):
+        if not input_item.get("summary"):
+            return None
     if (
         _should_omit_reasoning_item_ids(reasoning_item_id_policy)
         and run_item.type == "reasoning_item"

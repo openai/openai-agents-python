@@ -8,7 +8,7 @@ from openai.types.responses import (
     ResponseToolSearchCall,
     ResponseToolSearchOutputItem,
 )
-from openai.types.responses.response_reasoning_item import ResponseReasoningItem
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 
 from agents import Agent
 from agents.exceptions import AgentsException
@@ -440,7 +440,7 @@ def test_run_item_to_input_item_preserves_reasoning_item_ids_by_default() -> Non
         raw_item=ResponseReasoningItem(
             type="reasoning",
             id="rs_123",
-            summary=[],
+            summary=[Summary(type="summary_text", text="thinking")],
         ),
     )
 
@@ -458,7 +458,7 @@ def test_run_item_to_input_item_omits_reasoning_item_ids_when_configured() -> No
         raw_item=ResponseReasoningItem(
             type="reasoning",
             id="rs_456",
-            summary=[],
+            summary=[Summary(type="summary_text", text="thinking")],
         ),
     )
 
@@ -467,6 +467,32 @@ def test_run_item_to_input_item_omits_reasoning_item_ids_when_configured() -> No
     assert isinstance(result, dict)
     assert result.get("type") == "reasoning"
     assert "id" not in result
+
+
+def test_run_item_to_input_item_skips_reasoning_item_with_empty_summary() -> None:
+    """Regression test for #3268.
+
+    When a reasoning item has an empty summary list (e.g. encrypted-reasoning turns
+    where the model emits no visible summary text), ``run_item_to_input_item`` must
+    return ``None`` so the empty item is not forwarded to session persistence.  The
+    Conversations API rejects ``{"type": "reasoning", "summary": []}`` with a 400,
+    and the payload carries no useful context for subsequent turns anyway.
+    """
+    agent = Agent(name="A")
+    reasoning = ReasoningItem(
+        agent=agent,
+        raw_item=ResponseReasoningItem(
+            type="reasoning",
+            id="rs_empty",
+            summary=[],
+        ),
+    )
+
+    result = run_items.run_item_to_input_item(reasoning)
+
+    assert result is None, (
+        f"Expected None for a reasoning item with an empty summary list, got {result!r} instead"
+    )
 
 
 def test_run_item_to_input_item_preserves_tool_search_items() -> None:
