@@ -5,6 +5,23 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 PID_FILE="$ROOT/.tmp/examples-auto-run.pid"
 LOG_DIR="$ROOT/.tmp/examples-start-logs"
 RERUN_FILE="$ROOT/.tmp/examples-rerun.txt"
+DEFAULT_UV_EXTRAS="litellm any-llm sqlalchemy redis blaxel modal runloop temporal"
+
+build_uv_prefix() {
+  UV_RUN=(uv run)
+  local extras_value
+  if [[ -n "${EXAMPLES_UV_EXTRAS+x}" ]]; then
+    extras_value="$EXAMPLES_UV_EXTRAS"
+  else
+    extras_value="$DEFAULT_UV_EXTRAS"
+  fi
+
+  local extra
+  for extra in $extras_value; do
+    UV_RUN+=(--extra "$extra")
+  done
+  export EXAMPLES_UV_EXTRAS="$extras_value"
+}
 
 ensure_dirs() {
   mkdir -p "$LOG_DIR" "$ROOT/.tmp"
@@ -28,8 +45,9 @@ cmd_start() {
   main_log="$LOG_DIR/main_${ts}.log"
   stdout_log="$LOG_DIR/stdout_${ts}.log"
 
+  build_uv_prefix
   local run_cmd=(
-    uv run examples/run_examples.py
+    "${UV_RUN[@]}" examples/run_examples.py
     --auto-mode
     --write-rerun
     --main-log "$main_log"
@@ -152,7 +170,8 @@ collect_rerun() {
     exit 1
   fi
   cd "$ROOT"
-  uv run examples/run_examples.py --collect "$log_file" --output "$RERUN_FILE"
+  build_uv_prefix
+  "${UV_RUN[@]}" examples/run_examples.py --collect "$log_file" --output "$RERUN_FILE"
 }
 
 cmd_rerun() {
@@ -171,8 +190,9 @@ cmd_rerun() {
   export APPLY_PATCH_AUTO_APPROVE="${APPLY_PATCH_AUTO_APPROVE:-1}"
   export SHELL_AUTO_APPROVE="${SHELL_AUTO_APPROVE:-1}"
   export AUTO_APPROVE_MCP="${AUTO_APPROVE_MCP:-1}"
+  build_uv_prefix
   set +e
-  uv run examples/run_examples.py --auto-mode --rerun-file "$file" --write-rerun --main-log "$main_log" --logs-dir "$LOG_DIR" 2>&1 | tee "$stdout_log"
+  "${UV_RUN[@]}" examples/run_examples.py --auto-mode --rerun-file "$file" --write-rerun --main-log "$main_log" --logs-dir "$LOG_DIR" 2>&1 | tee "$stdout_log"
   local run_status=${PIPESTATUS[0]}
   set -e
   return "$run_status"
@@ -194,6 +214,7 @@ Commands:
 Environment overrides:
   EXAMPLES_INTERACTIVE_MODE (default auto)
   EXAMPLES_INCLUDE_SERVER/INTERACTIVE/AUDIO/EXTERNAL (defaults: 0/1/0/0)
+  EXAMPLES_UV_EXTRAS (default: litellm any-llm sqlalchemy redis blaxel modal runloop; set empty to disable)
   APPLY_PATCH_AUTO_APPROVE, SHELL_AUTO_APPROVE, AUTO_APPROVE_MCP (default 1 in auto mode)
 EOF
 }

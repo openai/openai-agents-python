@@ -35,6 +35,17 @@ uv run python examples/mcp/manager_example/app.py
 
 The app listens at `http://127.0.0.1:9001`.
 
+## Run the smoke test
+
+To verify the MCP manager and app integration without calling a model:
+
+```
+uv run python -m examples.mcp.manager_example.smoke_test
+```
+
+The smoke test starts the local MCP server on a temporary port, points both app
+MCP server settings at that server, and checks `/health`, `/tools`, and `/add`.
+
 ## Toggle MCP manager usage
 
 By default, the app uses `MCPServerManager`. To disable it:

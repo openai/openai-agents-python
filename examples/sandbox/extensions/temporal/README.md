@@ -9,6 +9,30 @@ support for multiple sandbox backends (Daytona, Docker, E2B, local unix).
 cloud backends you want to use. The local and Docker sandboxes work without
 any cloud provider API keys.
 
+## Local smoke test
+
+If you only want to confirm that Temporal workflows run locally, use the minimal
+example first:
+
+```
+export OPENAI_API_KEY="sk-..."
+# Optional: export EXAMPLES_TEMPORAL_MODEL="gpt-5.4-mini"
+# Optional: export EXAMPLES_TEMPORAL_TRACE="openai"
+uv run --extra temporal python -m examples.sandbox.extensions.temporal.local_hello_workflow
+```
+
+This starts the Temporal Python SDK test server, runs one workflow and one
+model activity, connects the workflow to a local Unix sandbox, and then shuts
+down. It does not require the Temporal CLI, an already running Temporal dev
+server, or sandbox backend credentials.
+
+The local smoke test enables OpenAI Agents tracing by default. Set
+`EXAMPLES_TEMPORAL_TRACE=none` to disable tracing, or
+`EXAMPLES_TEMPORAL_TRACE=openai_with_temporal_spans` to also ask the Temporal
+plugin to add Temporal spans. The Temporal span mode depends on Temporal plugin
+behavior and may omit regular Agents spans with some plugin versions; use the
+default `openai` mode when you want standard OpenAI trace spans.
+
 1. Install [just](https://just.systems/man/en/packages.html) and the
    [Temporal CLI](https://docs.temporal.io/cli/setup-cli#install-the-cli)
    if you don't have them already.

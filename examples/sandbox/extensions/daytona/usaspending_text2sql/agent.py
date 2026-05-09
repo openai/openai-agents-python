@@ -38,6 +38,7 @@ from agents.sandbox.session import (
     Instrumentation,
     JsonlOutboxSink,
 )
+from examples.auto_mode import input_with_fallback, is_auto_mode
 from examples.sandbox.extensions.daytona.usaspending_text2sql.sql_capability import (
     SqlCapability,
 )
@@ -92,20 +93,23 @@ DEVELOPER_INSTRUCTIONS = (
 )
 
 DB_PATH = "data/usaspending.db"
+DEFAULT_AUTO_QUESTION = "What are NASA's top 5 contractors by total obligations?"
 
 WORKSPACE_ROOT = DEFAULT_DAYTONA_WORKSPACE_ROOT
 
 
 def build_agent() -> SandboxAgent:
     """Build the agent blueprint."""
+    generate_memory = not is_auto_mode()
     manifest = Manifest(
         root=WORKSPACE_ROOT,
         entries={
             "setup_db.py": LocalFile(src=SETUP_DB_PATH),
             "schema": LocalDir(src=SCHEMA_DIR),
             "data": Dir(ephemeral=True),
-            "memory/memory_summary.md": File(content=b""),
-            "memory/phase_two_selection.json": File(content=b""),
+            "memories/MEMORY.md": File(content=b""),
+            "memories/memory_summary.md": File(content=b""),
+            "memories/phase_two_selection.json": File(content=b""),
         },
     )
 
@@ -123,13 +127,17 @@ def build_agent() -> SandboxAgent:
             Compaction(),
             Memory(
                 read=MemoryReadConfig(live_update=False),
-                generate=MemoryGenerateConfig(
-                    extra_prompt=(
-                        "Pay attention to which SQL patterns work best for the USAspending data, "
-                        "column quirks (e.g. recipient_parent_name vs recipient_name for grouping), "
-                        "and data caveats the user discovers (e.g. negative obligations, masked "
-                        "recipients)."
-                    ),
+                generate=(
+                    MemoryGenerateConfig(
+                        extra_prompt=(
+                            "Pay attention to which SQL patterns work best for the USAspending "
+                            "data, column quirks (e.g. recipient_parent_name vs recipient_name "
+                            "for grouping), and data caveats the user discovers (e.g. negative "
+                            "obligations, masked recipients)."
+                        ),
+                    )
+                    if generate_memory
+                    else None
                 ),
             ),
         ],
@@ -355,12 +363,28 @@ def _save_session_state(state: DaytonaSandboxSessionState) -> None:
     SESSION_STATE_PATH.write_text(state.model_dump_json(indent=2))
 
 
+def _require_env(name: str) -> None:
+    """Exit early with a clear message when a required environment variable is missing."""
+    if os.environ.get(name):
+        return
+    raise SystemExit(f"{name} must be set before running this example.")
+
+
+def _status(message: str) -> None:
+    """Print progress immediately so automation logs show where startup is blocked."""
+    print(message, flush=True)
+
+
 # ---------------------------------------------------------------------------
 # Main entrypoint
 # ---------------------------------------------------------------------------
 
 
 async def main() -> None:
+    _status("Starting Daytona NASA spending text-to-SQL example...")
+    _require_env("OPENAI_API_KEY")
+    _require_env("DAYTONA_API_KEY")
+
     agent = build_agent()
 
     instrumentation = Instrumentation(
@@ -369,6 +393,7 @@ async def main() -> None:
     )
     RESULTS_PORT = 8080
 
+    _status("Creating Daytona sandbox client...")
     client = DaytonaSandboxClient(instrumentation=instrumentation)
     client_options = DaytonaSandboxClientOptions(
         pause_on_exit=True,
@@ -384,20 +409,23 @@ async def main() -> None:
         if saved_state is not None:
             old_sandbox_id = saved_state.sandbox_id
             try:
+                _status(f"Resuming Daytona sandbox {old_sandbox_id}...")
                 sandbox = await client.resume(saved_state)
                 assert isinstance(sandbox.state, DaytonaSandboxSessionState)
                 if sandbox.state.sandbox_id == old_sandbox_id:
-                    print("Reconnected to existing sandbox.")
+                    _status("Reconnected to existing sandbox.")
                 else:
-                    print("Previous sandbox no longer exists. Created a new one.")
+                    _status("Previous sandbox no longer exists. Created a new one.")
             except Exception as e:
-                print(f"Could not resume previous sandbox: {e}")
+                _status(f"Could not resume previous sandbox: {e}")
                 saved_state = None
                 sandbox = None
 
         if sandbox is None:
+            _status("Creating Daytona sandbox...")
             sandbox = await client.create(manifest=agent.default_manifest, options=client_options)
 
+        _status("Starting Daytona sandbox...")
         await sandbox.start()
 
         # Persist state immediately so crashes don't orphan the sandbox.
@@ -405,7 +433,7 @@ async def main() -> None:
         _save_session_state(sandbox.state)
 
         # Build database inside sandbox (idempotent — skips if DB already exists).
-        print("Setting up database (may take a few minutes on first run)...")
+        _status("Setting up database (may take a few minutes on first run)...")
         result = await sandbox.exec("python3", "setup_db.py", timeout=1800.0)
         stdout = result.stdout.decode("utf-8", errors="replace")
         if stdout.strip():
@@ -416,6 +444,7 @@ async def main() -> None:
             sys.exit(1)
 
         # Start a file server in the sandbox so query results can be downloaded.
+        _status("Starting results file server...")
         await sandbox.exec("mkdir -p results", timeout=5.0)
         await sandbox.exec(
             f"nohup python3 -m http.server {RESULTS_PORT} --directory results > /dev/null 2>&1 &",
@@ -455,10 +484,14 @@ async def main() -> None:
 """)
 
         conversation: list[Any] = []
+        auto_mode = is_auto_mode()
 
         while True:
             try:
-                question = input("> ")
+                if auto_mode:
+                    question = input_with_fallback("> ", DEFAULT_AUTO_QUESTION)
+                else:
+                    question = input("> ")
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
@@ -479,15 +512,18 @@ async def main() -> None:
                 print(f"\nError: {e}")
             print()
 
+            if auto_mode:
+                break
+
         if destroy:
             assert isinstance(sandbox.state, DaytonaSandboxSessionState)
             sandbox.state.pause_on_exit = False
             SESSION_STATE_PATH.unlink(missing_ok=True)
-            print("Deleting sandbox...")
+            _status("Deleting sandbox...")
         else:
             assert isinstance(sandbox.state, DaytonaSandboxSessionState)
             _save_session_state(sandbox.state)
-            print("Saving memory and pausing sandbox (can take a couple of minutes)...")
+            _status("Saving memory and pausing sandbox (can take a couple of minutes)...")
 
     finally:
         if sandbox is not None:
