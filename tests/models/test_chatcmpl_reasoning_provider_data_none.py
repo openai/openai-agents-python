@@ -12,7 +12,7 @@ otherwise valid items.
 from __future__ import annotations
 
 import json
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -20,24 +20,21 @@ from agents.items import TResponseInputItem
 from agents.models.chatcmpl_converter import Converter
 
 
-def _reasoning_item_with_provider_data_none() -> TResponseInputItem:
-    return cast(
-        TResponseInputItem,
-        {
-            "type": "reasoning",
-            "id": "__fake_id__",
-            "summary": [{"type": "summary_text", "text": "thinking"}],
-            "content": [{"type": "reasoning_text", "text": "step"}],
-            "encrypted_content": None,
-            "status": None,
-            "provider_data": None,
-        },
-    )
+def _reasoning_item_dict_with_provider_data_none() -> dict[str, Any]:
+    return {
+        "type": "reasoning",
+        "id": "__fake_id__",
+        "summary": [{"type": "summary_text", "text": "thinking"}],
+        "content": [{"type": "reasoning_text", "text": "step"}],
+        "encrypted_content": None,
+        "status": None,
+        "provider_data": None,
+    }
 
 
 def test_items_to_messages_handles_provider_data_none() -> None:
     """Converter must not crash when a reasoning item has provider_data=None."""
-    items = [_reasoning_item_with_provider_data_none()]
+    items = [cast(TResponseInputItem, _reasoning_item_dict_with_provider_data_none())]
 
     # The bug was a hard AttributeError raised at conversion time. The exact
     # contents of the resulting messages are not the focus here — we only need
@@ -60,14 +57,14 @@ def test_items_to_messages_handles_provider_data_none() -> None:
 
 def test_items_to_messages_handles_provider_data_none_after_json_roundtrip() -> None:
     """JSON serialization preserves a None value, exercising the same path."""
-    item = _reasoning_item_with_provider_data_none()
-    roundtripped = cast(TResponseInputItem, json.loads(json.dumps(item)))
+    item_dict = _reasoning_item_dict_with_provider_data_none()
+    roundtripped: dict[str, Any] = json.loads(json.dumps(item_dict))
 
     # Sanity check: the None survives the roundtrip.
-    assert roundtripped["provider_data"] is None  # type: ignore[index]
+    assert roundtripped["provider_data"] is None
 
     messages = Converter.items_to_messages(
-        [roundtripped],
+        [cast(TResponseInputItem, roundtripped)],
         model="claude-sonnet-4",
         preserve_thinking_blocks=True,
     )
@@ -82,11 +79,18 @@ def test_items_to_messages_handles_non_dict_provider_data(
     bogus_provider_data: object,
 ) -> None:
     """Non-dict provider_data values are treated as missing rather than crashing."""
-    item = _reasoning_item_with_provider_data_none()
-    item["provider_data"] = bogus_provider_data  # type: ignore[index]
+    item_dict: dict[str, Any] = {
+        "type": "reasoning",
+        "id": "__fake_id__",
+        "summary": [{"type": "summary_text", "text": "thinking"}],
+        "content": [{"type": "reasoning_text", "text": "step"}],
+        "encrypted_content": None,
+        "status": None,
+        "provider_data": bogus_provider_data,
+    }
 
     messages = Converter.items_to_messages(
-        [item],
+        [cast(TResponseInputItem, item_dict)],
         model="claude-sonnet-4",
         preserve_thinking_blocks=True,
     )
