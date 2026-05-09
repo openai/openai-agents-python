@@ -42,6 +42,7 @@ from openai.types.responses.response_reasoning_text_done_event import (
 )
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
+from ..exceptions import AgentsException
 from ..items import TResponseStreamEvent
 from .chatcmpl_helpers import ChatCmplHelpers
 from .fake_id import FAKE_RESPONSES_ID
@@ -555,6 +556,11 @@ class ChatCmplStreamHandler:
             # Handle tool calls with real-time streaming support
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
+                    if getattr(tc_delta, "type", None) == "custom":
+                        raise AgentsException(
+                            "Custom tool calls are not supported by the Chat Completions converter"
+                        )
+
                     if tc_delta.index not in state.function_calls:
                         state.function_calls[tc_delta.index] = ResponseFunctionToolCall(
                             id=FAKE_RESPONSES_ID,
