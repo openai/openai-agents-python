@@ -729,6 +729,24 @@ async def test_cloudflare_prepare_workspace_preserves_exec_error_context() -> No
 
 
 @pytest.mark.asyncio
+async def test_cloudflare_exec_client_error_includes_provider_context() -> None:
+    class _FailingHttp(_FakeHttp):
+        def post(self, url: str, **kwargs: Any) -> Any:
+            self._record("POST", url, **kwargs)
+            raise aiohttp.ClientError("connection reset")
+
+    with pytest.raises(ExecTransportError) as exc_info:
+        await _make_session(fake_http=_FailingHttp())._exec_internal("echo", "hello", timeout=1.0)
+
+    assert str(exc_info.value) == (
+        "Cloudflare exec transport failed: ClientError: connection reset"
+    )
+    assert exc_info.value.context["backend"] == "cloudflare"
+    assert exc_info.value.context["operation"] == "exec"
+    assert exc_info.value.context["provider_error"] == "ClientError: connection reset"
+
+
+@pytest.mark.asyncio
 async def test_cloudflare_exec_stream_without_exit_raises_transport_error() -> None:
     sess = _make_session(
         fake_http=_FakeHttp(
@@ -1296,6 +1314,12 @@ async def test_cloudflare_pty_exec_start_wraps_websocket_connect_failures() -> N
 
     assert isinstance(exc_info.value.__cause__, aiohttp.ClientError)
     assert str(exc_info.value.__cause__) == "connect failed"
+    assert str(exc_info.value) == (
+        "Cloudflare pty exec transport failed: ClientError: connect failed"
+    )
+    assert exc_info.value.context["backend"] == "cloudflare"
+    assert exc_info.value.context["operation"] == "pty exec"
+    assert exc_info.value.context["provider_error"] == "ClientError: connect failed"
 
 
 @pytest.mark.asyncio

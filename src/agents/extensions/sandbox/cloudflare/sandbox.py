@@ -156,6 +156,26 @@ def _cloudflare_exec_error_detail(error: ExecTransportError) -> str | None:
     return None
 
 
+def _cloudflare_transport_error(
+    *,
+    command: tuple[str, ...],
+    cause: BaseException,
+    operation: str,
+) -> ExecTransportError:
+    detail = str(cause)
+    provider_error = f"{type(cause).__name__}: {detail}" if detail else type(cause).__name__
+    return ExecTransportError(
+        command=command,
+        context={
+            "backend": "cloudflare",
+            "operation": operation,
+            "provider_error": provider_error,
+        },
+        cause=cause,
+        message=f"Cloudflare {operation} transport failed: {provider_error}",
+    )
+
+
 def _is_transient_workspace_error(exc: BaseException) -> bool:
     """Return True if *exc* is a workspace archive error caused by a transient HTTP status."""
     if not isinstance(exc, WorkspaceArchiveReadError | WorkspaceArchiveWriteError):
@@ -789,7 +809,11 @@ class CloudflareSandboxSession(BaseSandboxSession):
         except (ExecTimeoutError, ExecTransportError):
             raise
         except aiohttp.ClientError as e:
-            raise ExecTransportError(command=tuple(argv), cause=e) from e
+            raise _cloudflare_transport_error(
+                command=tuple(argv),
+                cause=e,
+                operation="exec",
+            ) from e
         except Exception as e:
             raise ExecTransportError(command=tuple(argv), cause=e) from e
 
@@ -1015,6 +1039,13 @@ class CloudflareSandboxSession(BaseSandboxSession):
         except ExecTransportError:
             await self._cleanup_unregistered_pty(entry, ws, registered)
             raise
+        except aiohttp.ClientError as e:
+            await self._cleanup_unregistered_pty(entry, ws, registered)
+            raise _cloudflare_transport_error(
+                command=tuple(str(part) for part in command),
+                cause=e,
+                operation="pty exec",
+            ) from e
         except Exception as e:
             await self._cleanup_unregistered_pty(entry, ws, registered)
             raise ExecTransportError(command=tuple(str(part) for part in command), cause=e) from e
