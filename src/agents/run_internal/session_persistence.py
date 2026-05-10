@@ -561,11 +561,37 @@ def _ignore_ids_for_matching(session: Session) -> bool:
     )
 
 
+# Item types whose `id` is `Required[str]` in the OpenAI Responses API param schema and
+# must therefore be preserved when persisting via the Conversations API. Stripping the id
+# from these types causes `conversations.items.create()` to reject the request with
+# `BadRequestError: Missing required parameter: 'items[0].id'` (issue #3267).
+_HOSTED_TOOL_ITEM_TYPES_REQUIRING_ID: frozenset[str] = frozenset(
+    {
+        "file_search_call",
+        "web_search_call",
+        "computer_call",
+        "code_interpreter_call",
+        "image_generation_call",
+        "local_shell_call",
+        "local_shell_call_output",
+        "mcp_call",
+        "mcp_list_tools",
+        "mcp_approval_request",
+    }
+)
+
+
 def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInputItem:
-    """Remove provider-specific fields before fingerprinting or persistence."""
+    """Remove provider-specific fields before fingerprinting or persistence.
+
+    Hosted tool call items (e.g. `file_search_call`) require their `id` for the OpenAI
+    Conversations API to accept them, so we only strip `id` from item types where the
+    schema treats it as optional.
+    """
     if isinstance(item, dict):
         clean_item = cast(dict[str, Any], strip_internal_input_item_metadata(item))
-        clean_item.pop("id", None)
+        if clean_item.get("type") not in _HOSTED_TOOL_ITEM_TYPES_REQUIRING_ID:
+            clean_item.pop("id", None)
         clean_item.pop("provider_data", None)
         return cast(TResponseInputItem, clean_item)
     return item
