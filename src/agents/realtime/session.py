@@ -10,7 +10,11 @@ from typing import Any, cast
 from pydantic import BaseModel
 from typing_extensions import assert_never
 
-from .._tool_identity import get_function_tool_lookup_key_for_tool
+from .._tool_identity import (
+    FunctionToolLookupKey,
+    get_function_tool_lookup_key_for_tool,
+    get_function_tool_namespace,
+)
 from ..agent import Agent
 from ..exceptions import UserError
 from ..handoffs import Handoff
@@ -465,16 +469,32 @@ class RealtimeSession(RealtimeModelListener):
         )
 
     def _build_tool_approval_item(
-        self, tool: FunctionTool, tool_call: RealtimeModelToolCallEvent, agent: RealtimeAgent
+        self,
+        tool: FunctionTool,
+        tool_call: RealtimeModelToolCallEvent,
+        agent: RealtimeAgent,
+        *,
+        tool_lookup_key: FunctionToolLookupKey | None = None,
     ) -> ToolApprovalItem:
         """Create a ToolApprovalItem for approval tracking."""
+        if tool_lookup_key is None:
+            tool_lookup_key = get_function_tool_lookup_key_for_tool(tool)
+        tool_namespace = get_function_tool_namespace(tool)
         raw_item = {
             "type": "function_call",
             "name": tool.name,
             "call_id": tool_call.call_id,
             "arguments": tool_call.arguments,
         }
-        return ToolApprovalItem(agent=cast(Any, agent), raw_item=raw_item, tool_name=tool.name)
+        if tool_namespace is not None:
+            raw_item["namespace"] = tool_namespace
+        return ToolApprovalItem(
+            agent=cast(Any, agent),
+            raw_item=raw_item,
+            tool_name=tool.name,
+            tool_namespace=tool_namespace,
+            tool_lookup_key=tool_lookup_key,
+        )
 
     async def _maybe_request_tool_approval(
         self,
@@ -484,14 +504,23 @@ class RealtimeSession(RealtimeModelListener):
         agent: RealtimeAgent,
     ) -> bool | None:
         """Return True/False when approved/rejected, or None when awaiting approval."""
-        approval_item = self._build_tool_approval_item(function_tool, tool_call, agent)
+        tool_lookup_key = get_function_tool_lookup_key_for_tool(function_tool)
+        approval_item = self._build_tool_approval_item(
+            function_tool,
+            tool_call,
+            agent,
+            tool_lookup_key=tool_lookup_key,
+        )
 
         needs_approval = await self._function_needs_approval(function_tool, tool_call)
         if not needs_approval:
             return True
 
-        approval_status = self._context_wrapper.is_tool_approved(
-            function_tool.name, tool_call.call_id
+        approval_status = self._context_wrapper.get_approval_status(
+            function_tool.name,
+            tool_call.call_id,
+            existing_pending=approval_item,
+            tool_lookup_key=tool_lookup_key,
         )
         if approval_status is True:
             return True
