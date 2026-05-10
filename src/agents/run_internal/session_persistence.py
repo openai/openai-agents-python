@@ -565,10 +565,22 @@ def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInp
     """Remove provider-specific fields before fingerprinting or persistence."""
     if isinstance(item, dict):
         clean_item = cast(dict[str, Any], strip_internal_input_item_metadata(item))
-        clean_item.pop("id", None)
+        if _should_strip_openai_conversation_item_id(clean_item):
+            clean_item.pop("id", None)
         clean_item.pop("provider_data", None)
         return cast(TResponseInputItem, clean_item)
     return item
+
+
+def _should_strip_openai_conversation_item_id(item: dict[str, Any]) -> bool:
+    """Return True when the Conversations API does not require the item's ``id`` field.
+
+    Hosted tool-call items (file_search_call, web_search_call, code_interpreter_call, etc.)
+    carry server-assigned IDs that the Conversations API requires when persisting those items.
+    Stripping the ``id`` from those shapes causes a 400 ``missing_required_parameter`` error.
+    Only strip for shapes where the API is known to tolerate a missing ``id``.
+    """
+    return item.get("role") == "user" or item.get("type") == "function_call_output"
 
 
 def _sanitize_openai_conversation_history_items_for_model_input(

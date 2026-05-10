@@ -2865,6 +2865,138 @@ async def test_save_result_to_session_sanitizes_original_input_items() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        cast(
+            dict[str, Any],
+            {
+                "type": "file_search_call",
+                "id": "fs_abc123",
+                "queries": ["customer profile"],
+                "status": "completed",
+            },
+        ),
+        cast(
+            dict[str, Any],
+            {
+                "type": "web_search_call",
+                "id": "ws_abc123",
+                "action": {"type": "search", "query": "latest news"},
+                "status": "completed",
+            },
+        ),
+        cast(
+            dict[str, Any],
+            {
+                "type": "code_interpreter_call",
+                "id": "ci_abc123",
+                "status": "completed",
+                "code": "print('hello')",
+            },
+        ),
+    ],
+)
+async def test_save_result_to_session_preserves_id_for_hosted_tool_calls(
+    payload: dict[str, Any],
+) -> None:
+    """Hosted tool-call items must retain their server-assigned id when persisted to an
+    OpenAIConversationsSession; stripping it causes a 400 missing_required_parameter error."""
+
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    agent = Agent(name="agent", model=FakeModel())
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [_DummyRunItem(payload)]),
+        run_state,
+    )
+
+    assert saved_count == 1
+    assert run_state._current_turn_persisted_item_count == 1
+    assert len(session.saved_items) == 1
+    saved = cast(dict[str, Any], session.saved_items[0])
+    assert saved.get("id") == payload["id"], (
+        f"id was stripped from {payload['type']} item; Conversations API requires it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_session_strips_id_from_user_message_in_openai_conversations() -> None:
+    """User-message items do not require id in the Conversations API; still stripped."""
+
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    agent = Agent(name="agent", model=FakeModel())
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+
+    user_msg = cast(
+        dict[str, Any],
+        {"type": "message", "role": "user", "id": "msg_user_001", "content": "hello"},
+    )
+
+    await save_result_to_session(
+        session,
+        [cast(TResponseInputItem, user_msg)],
+        [],
+        run_state,
+    )
+
+    assert len(session.saved_items) == 1
+    saved = cast(dict[str, Any], session.saved_items[0])
+    assert "id" not in saved
+
+
+@pytest.mark.asyncio
 async def test_prepare_input_with_session_strips_internal_tool_call_metadata() -> None:
     tool_call = cast(
         TResponseInputItem,
