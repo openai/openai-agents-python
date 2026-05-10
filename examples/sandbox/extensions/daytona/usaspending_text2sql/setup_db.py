@@ -17,8 +17,11 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import csv
+import functools
 import json
+import os
 import sqlite3
+import ssl
 import sys
 import time
 import urllib.error
@@ -27,9 +30,10 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-DB_DIR = Path("data")
+ARTIFACT_ROOT = Path(os.environ.get("EXAMPLES_ARTIFACTS_DIR", "."))
+DB_DIR = ARTIFACT_ROOT / "data"
 DB_PATH = DB_DIR / "usaspending.db"
-GLOSSARY_PATH = Path("schema") / "glossary.md"
+GLOSSARY_PATH = ARTIFACT_ROOT / "schema" / "glossary.md"
 
 USASPENDING_API = "https://api.usaspending.gov"
 BULK_DOWNLOAD_ENDPOINT = f"{USASPENDING_API}/api/v2/bulk_download/awards/"
@@ -118,14 +122,26 @@ CREATE INDEX IF NOT EXISTS idx_spending_awarding_office ON spending(awarding_off
 # ---------------------------------------------------------------------------
 
 
+@functools.cache
+def _urlopen_ssl_context() -> ssl.SSLContext | None:
+    """Use certifi's CA bundle when available, otherwise keep stdlib defaults."""
+    try:
+        import certifi
+    except ImportError:
+        return None
+
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def _urlopen_with_retry(
     req: urllib.request.Request, *, timeout: int = 60, retries: int = 3
 ) -> bytes:
     """urlopen with retries for the flaky USAspending endpoints."""
     last_exc: Exception | None = None
+    ssl_context = _urlopen_ssl_context()
     for attempt in range(1, retries + 1):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as resp:
                 return bytes(resp.read())
         except (urllib.error.URLError, ConnectionError, OSError) as e:
             last_exc = e
@@ -600,7 +616,7 @@ def main() -> None:
     elif DB_PATH.exists():
         DB_PATH.unlink()
 
-    tmp_dir = Path("data/tmp_download")
+    tmp_dir = DB_DIR / "tmp_download"
 
     print("=== NASA USAspending Database Builder ===")
     print(f"Fiscal years: {args.start_fy} - {args.end_fy}\n")
