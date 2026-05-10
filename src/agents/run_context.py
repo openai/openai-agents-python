@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic
 
@@ -12,6 +13,7 @@ from ._tool_identity import (
     is_reserved_synthetic_tool_namespace,
     tool_qualified_name,
 )
+from .exceptions import UserError
 from .usage import Usage
 
 if TYPE_CHECKING:
@@ -438,10 +440,24 @@ class RunContextWrapper(Generic[TContext]):
     def _rebuild_approvals(self, approvals: dict[str, dict[str, Any]]) -> None:
         """Restore approvals from serialized state."""
         self._approvals = {}
+        if not isinstance(approvals, Mapping):
+            raise UserError("Serialized run state approvals must be a mapping.")
         for tool_name, record_dict in approvals.items():
+            if not isinstance(record_dict, Mapping):
+                raise UserError(
+                    f"Serialized approval record for tool {tool_name!r} must be a mapping."
+                )
             record = _ApprovalRecord()
-            record.approved = record_dict.get("approved", [])
-            record.rejected = record_dict.get("rejected", [])
+            record.approved = self._restore_approval_decision_value(
+                record_dict.get("approved", []),
+                field_name="approved",
+                tool_name=str(tool_name),
+            )
+            record.rejected = self._restore_approval_decision_value(
+                record_dict.get("rejected", []),
+                field_name="rejected",
+                tool_name=str(tool_name),
+            )
             rejection_messages = record_dict.get("rejection_messages", {})
             if isinstance(rejection_messages, dict):
                 record.rejection_messages = {
@@ -452,7 +468,20 @@ class RunContextWrapper(Generic[TContext]):
             sticky_rejection_message = record_dict.get("sticky_rejection_message")
             if isinstance(sticky_rejection_message, str):
                 record.sticky_rejection_message = sticky_rejection_message
-            self._approvals[tool_name] = record
+            self._approvals[str(tool_name)] = record
+
+    @staticmethod
+    def _restore_approval_decision_value(
+        value: Any, *, field_name: str, tool_name: str
+    ) -> bool | list[str]:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, list) and all(isinstance(call_id, str) for call_id in value):
+            return list(value)
+        raise UserError(
+            f"Serialized approval record for tool {tool_name!r} has invalid "
+            f"{field_name!r}; expected a bool or list of call IDs."
+        )
 
     def _fork_with_tool_input(self, tool_input: Any) -> RunContextWrapper[TContext]:
         """Create a child context that shares approvals and usage with tool input set."""

@@ -1639,6 +1639,43 @@ class TestRunState:
         assert restored._context.get_rejection_message("tool2", "cid2") == "Denied by reviewer"
         assert restored._context.get_rejection_message("tool2", "cid3") == "Denied by reviewer"
 
+    @pytest.mark.parametrize(
+        ("field_name", "invalid_value"),
+        [
+            ("approved", "cid2"),
+            ("approved", ["cid2", 123]),
+            ("rejected", {"call_id": "cid2"}),
+            ("rejected", None),
+        ],
+    )
+    async def test_from_json_rejects_invalid_serialized_approval_decision_shapes(
+        self,
+        field_name: str,
+        invalid_value: Any,
+    ):
+        """Test that corrupted approval decision shapes fail during RunState restore."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ApprovalShapeAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        approval_item = ToolApprovalItem(
+            agent=agent,
+            raw_item=ResponseFunctionToolCall(
+                type="function_call",
+                name="tool2",
+                call_id="cid2",
+                status="completed",
+                arguments="",
+            ),
+        )
+        state.reject(approval_item, rejection_message="Denied by reviewer")
+
+        json_data = state.to_json()
+        json_data["context"]["approvals"]["tool2"][field_name] = invalid_value
+
+        with pytest.raises(UserError, match=field_name):
+            await RunState.from_json(agent, json_data)
+
 
 class TestBuildAgentMap:
     """Test agent map building for handoff resolution."""
