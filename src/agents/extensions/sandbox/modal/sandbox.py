@@ -102,6 +102,39 @@ logger = logging.getLogger(__name__)
 R = TypeVar("R")
 
 
+def _modal_provider_error_detail(error: BaseException) -> str | None:
+    if isinstance(error, ExecTransportError):
+        message = str(error)
+        return message or type(error).__name__
+    message = str(error)
+    status = getattr(error, "status_code", None) or getattr(error, "status", None)
+    if isinstance(status, int):
+        if message:
+            return f"HTTP {status}: {message}"
+        return f"HTTP {status}"
+    if message:
+        return f"{type(error).__name__}: {message}"
+    return type(error).__name__
+
+
+def _modal_exec_transport_error(
+    *,
+    command: tuple[str | Path, ...],
+    cause: BaseException,
+) -> ExecTransportError:
+    detail = _modal_provider_error_detail(cause)
+    context: dict[str, object] = {"backend": "modal"}
+    if detail:
+        context["provider_error"] = detail
+    status = getattr(cause, "status_code", None) or getattr(cause, "status", None)
+    if isinstance(status, int):
+        context["http_status"] = status
+    message = "Modal exec failed"
+    if detail:
+        message = f"{message}: {detail}"
+    return ExecTransportError(command=command, context=context, cause=cause, message=message)
+
+
 @asynccontextmanager
 async def _override_modal_image_builder_version(
     image_builder_version: str | None,
@@ -440,7 +473,16 @@ class ModalSandboxSession(BaseSandboxSession):
     def _wrap_start_error(self, error: Exception) -> Exception:
         if isinstance(error, WorkspaceStartError):
             return error
-        return WorkspaceStartError(path=self._workspace_root_path(), cause=error)
+        detail = _modal_provider_error_detail(error)
+        message = "failed to start session"
+        if detail:
+            message = f"{message}: {detail}"
+        return WorkspaceStartError(
+            path=self._workspace_root_path(),
+            context={"backend": "modal"},
+            cause=error,
+            message=message,
+        )
 
     async def _resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
         await self._ensure_sandbox()
@@ -665,7 +707,7 @@ class ModalSandboxSession(BaseSandboxSession):
         except ExecTimeoutError:
             raise
         except Exception as e:
-            raise ExecTransportError(command=command, cause=e) from e
+            raise _modal_exec_transport_error(command=command, cause=e) from e
 
     def supports_pty(self) -> bool:
         return True
@@ -725,7 +767,7 @@ class ModalSandboxSession(BaseSandboxSession):
         except Exception as e:
             if entry is not None and not registered:
                 await self._terminate_pty_entry(entry)
-            raise ExecTransportError(command=command, cause=e) from e
+            raise _modal_exec_transport_error(command=command, cause=e) from e
 
         if pruned_entry is not None:
             await self._terminate_pty_entry(pruned_entry)

@@ -576,10 +576,14 @@ class TestDaytonaSandbox:
 
         assert exc_info.value.context == {
             "path": daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT,
+            "backend": "daytona",
             "reason": "workspace_root_nonzero_exit",
             "exit_code": 2,
             "output": "mkdir failed",
         }
+        assert str(exc_info.value) == (
+            "failed to start session: Daytona workspace root setup exited with 2: mkdir failed"
+        )
         assert sandbox.process.execute_session_command_calls == []
         assert session.state.workspace_root_ready is False
 
@@ -1320,8 +1324,11 @@ class TestDaytonaSandbox:
         )
         session = daytona_module.DaytonaSandboxSession.from_state(state, sandbox=sandbox)
 
-        with pytest.raises(ExecTransportError):
+        with pytest.raises(ExecTransportError) as exc_info:
             await session.pty_exec_start("python3", shell=False, tty=True)
+        assert str(exc_info.value) == "Daytona exec failed: FileNotFoundError: missing-shell"
+        assert exc_info.value.context["backend"] == "daytona"
+        assert exc_info.value.context["provider_error"] == "FileNotFoundError: missing-shell"
 
     @pytest.mark.asyncio
     async def test_pty_start_maps_sdk_timeout_failures(

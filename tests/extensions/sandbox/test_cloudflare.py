@@ -32,6 +32,7 @@ from agents.sandbox.errors import (
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
+    WorkspaceStartError,
     WorkspaceWriteTypeError,
 )
 from agents.sandbox.manifest import Environment, Manifest
@@ -627,6 +628,104 @@ async def test_cloudflare_exec_timeout_raises_exec_timeout_error() -> None:
 
     with pytest.raises(ExecTimeoutError):
         await _make_session(fake_http=_TimeoutHttp())._exec_internal("sleep", "999", timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_exec_non_200_includes_provider_error_details() -> None:
+    sess = _make_session(
+        fake_http=_FakeHttp(
+            {
+                "POST /exec": _FakeResponse(
+                    status=502,
+                    json_body={
+                        "error": "pool error: Failed to start container",
+                        "code": "pool_error",
+                    },
+                )
+            }
+        )
+    )
+
+    with pytest.raises(ExecTransportError) as exc_info:
+        await sess._exec_internal("mkdir", "-p", "--", "/workspace", timeout=5.0)
+
+    assert exc_info.value.context == {
+        "command": ("mkdir", "-p", "--", "/workspace"),
+        "command_str": "mkdir -p -- /workspace",
+        "backend": "cloudflare",
+        "http_status": 502,
+        "provider_error": "pool_error: pool error: Failed to start container",
+    }
+    assert (
+        str(exc_info.value.__cause__)
+        == "POST /exec failed: HTTP 502: pool_error: pool error: Failed to start container"
+    )
+    assert (
+        str(exc_info.value)
+        == "POST /exec failed: HTTP 502: pool_error: pool error: Failed to start container"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_exec_non_sse_json_body_includes_provider_error_details() -> None:
+    sess = _make_session(
+        fake_http=_FakeHttp(
+            {
+                "POST /exec": _FakeSSEResponse(
+                    status=200,
+                    sse_body=(
+                        b'{"error":"pool error: Failed to start container","code":"pool_error"}'
+                    ),
+                )
+            }
+        )
+    )
+
+    with pytest.raises(ExecTransportError) as exc_info:
+        await sess._exec_internal("mkdir", "-p", "--", "/workspace", timeout=5.0)
+
+    assert exc_info.value.context["http_status"] == 200
+    assert (
+        exc_info.value.context["provider_error"]
+        == "pool_error: pool error: Failed to start container"
+    )
+    assert str(exc_info.value.__cause__) == (
+        "POST /exec returned non-SSE error body: pool_error: pool error: Failed to start container"
+    )
+    assert str(exc_info.value) == (
+        "POST /exec returned non-SSE error body: pool_error: pool error: Failed to start container"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_prepare_workspace_preserves_exec_error_context() -> None:
+    sess = _make_session(
+        fake_http=_FakeHttp(
+            {
+                "POST /exec": _FakeResponse(
+                    status=502,
+                    json_body={
+                        "error": "pool error: Failed to start container",
+                        "code": "pool_error",
+                    },
+                )
+            }
+        )
+    )
+
+    with pytest.raises(WorkspaceStartError) as exc_info:
+        await sess._prepare_backend_workspace()
+
+    assert exc_info.value.context["backend"] == "cloudflare"
+    assert exc_info.value.context["reason"] == "prepare_workspace_exec_failed"
+    exec_context = exc_info.value.context["exec_error_context"]
+    assert isinstance(exec_context, dict)
+    assert exec_context["http_status"] == 502
+    assert exec_context["provider_error"] == "pool_error: pool error: Failed to start container"
+    assert str(exc_info.value) == (
+        "failed to start session: "
+        "POST /exec failed: HTTP 502: pool_error: pool error: Failed to start container"
+    )
 
 
 @pytest.mark.asyncio
@@ -1315,3 +1414,34 @@ async def test_cloudflare_shutdown_logs_on_failure(caplog: pytest.LogCaptureFixt
         await sess._shutdown_backend()
 
     assert any("Failed to delete Cloudflare sandbox" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_shutdown_logs_delete_response_details(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify that DELETE response bodies are kept when shutdown cleanup fails."""
+    import logging
+
+    sess = _make_session(
+        fake_http=_FakeHttp(
+            {
+                "DELETE /v1/sandbox/": _FakeResponse(
+                    status=502,
+                    json_body={
+                        "error": "pool error: Failed to start container",
+                        "code": "pool_error",
+                    },
+                )
+            }
+        )
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="agents.extensions.sandbox.cloudflare.sandbox"):
+        await sess._shutdown_backend()
+
+    assert any(
+        "DELETE /sandbox failed: HTTP 502: pool_error: pool error: Failed to start container"
+        in r.message
+        for r in caplog.records
+    )
