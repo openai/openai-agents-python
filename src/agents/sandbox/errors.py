@@ -310,9 +310,10 @@ class ExecTransportError(ExecFailureError):
         command: Sequence[str | Path],
         context: Mapping[str, object] | None = None,
         cause: BaseException | None = None,
+        message: str | None = None,
     ) -> None:
         super().__init__(
-            message="exec transport error",
+            message=message or "exec transport error",
             error_code=ErrorCode.EXEC_TRANSPORT_ERROR,
             command=command,
             context=_as_context(context),
@@ -538,9 +539,10 @@ class WorkspaceStartError(SandboxRuntimeError):
         path: Path,
         context: Mapping[str, object] | None = None,
         cause: BaseException | None = None,
+        message: str | None = None,
     ) -> None:
         super().__init__(
-            message="failed to start session",
+            message=message or "failed to start session",
             error_code=ErrorCode.WORKSPACE_START_ERROR,
             op="start",
             context={"path": str(path), **_as_context(context)},

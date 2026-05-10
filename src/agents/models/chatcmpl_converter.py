@@ -115,6 +115,7 @@ class Converter:
         cls,
         message: ChatCompletionMessage,
         provider_data: dict[str, Any] | None = None,
+        strict_feature_validation: bool = False,
     ) -> list[TResponseOutputItem]:
         """
         Convert a ChatCompletionMessage to a list of response output items.
@@ -227,7 +228,10 @@ class Converter:
 
                     items.append(ResponseFunctionToolCall(**func_call_kwargs))
                 elif tool_call.type == "custom":
-                    pass
+                    if strict_feature_validation:
+                        raise UserError(
+                            "Custom tool calls are not supported by the Chat Completions converter"
+                        )
 
         return items
 

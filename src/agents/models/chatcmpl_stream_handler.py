@@ -42,7 +42,9 @@ from openai.types.responses.response_reasoning_text_done_event import (
 )
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
+from ..exceptions import UserError
 from ..items import TResponseStreamEvent
+from ..logger import logger
 from .chatcmpl_helpers import ChatCmplHelpers
 from .fake_id import FAKE_RESPONSES_ID
 
@@ -65,11 +67,13 @@ class StreamingState:
     function_calls: dict[int, ResponseFunctionToolCall] = field(default_factory=dict)
     # Fields for real-time function call streaming
     function_call_streaming: dict[int, bool] = field(default_factory=dict)
+    ignored_tool_call_indexes: set[int] = field(default_factory=set)
     # Store accumulated thinking text and signature for Anthropic compatibility
     thinking_text: str = ""
     thinking_signature: str | None = None
     # Store provider data for all output items
     provider_data: dict[str, Any] = field(default_factory=dict)
+    has_warned_unsupported_choice: bool = False
 
 
 class SequenceNumber:
@@ -263,6 +267,7 @@ class ChatCmplStreamHandler:
         response: Response,
         stream: AsyncStream[ChatCompletionChunk],
         model: str | None = None,
+        strict_feature_validation: bool = False,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """
         Handle a streaming chat completion response and yield response events.
@@ -291,7 +296,33 @@ class ChatCmplStreamHandler:
             if hasattr(chunk, "usage") and chunk.usage is not None:
                 usage = chunk.usage
 
-            if not chunk.choices or not chunk.choices[0].delta:
+            if not chunk.choices:
+                continue
+
+            unsupported_choice_indexes = [
+                choice.index for choice in chunk.choices if choice.index != 0
+            ]
+            if len(chunk.choices) > 1 or unsupported_choice_indexes:
+                message = (
+                    "Chat Completions streaming with multiple choices or nonzero choice indexes "
+                    "is not fully supported; only choice index 0 can be processed."
+                )
+                if strict_feature_validation:
+                    raise UserError(message)
+
+                if not state.has_warned_unsupported_choice:
+                    logger.warning(
+                        "%s Ignoring the other choices; enable strict feature validation to "
+                        "raise an error instead.",
+                        message,
+                    )
+                    state.has_warned_unsupported_choice = True
+
+            choice = next((choice for choice in chunk.choices if choice.index == 0), None)
+            if choice is None:
+                continue
+
+            if not choice.delta:
                 continue
 
             # Build provider_data for non-OpenAI Responses API endpoints format
@@ -303,8 +334,8 @@ class ChatCmplStreamHandler:
             if hasattr(chunk, "id") and chunk.id:
                 state.provider_data["response_id"] = chunk.id
 
-            delta = chunk.choices[0].delta
-            choice_logprobs = chunk.choices[0].logprobs
+            delta = choice.delta
+            choice_logprobs = choice.logprobs
 
             # Handle thinking blocks from Anthropic (for preserving signatures)
             if hasattr(delta, "thinking_blocks") and delta.thinking_blocks:
@@ -555,6 +586,18 @@ class ChatCmplStreamHandler:
             # Handle tool calls with real-time streaming support
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
+                    if tc_delta.index in state.ignored_tool_call_indexes:
+                        continue
+
+                    if getattr(tc_delta, "type", None) == "custom":
+                        if strict_feature_validation:
+                            raise UserError(
+                                "Custom tool calls are not supported by the Chat Completions "
+                                "converter"
+                            )
+                        state.ignored_tool_call_indexes.add(tc_delta.index)
+                        continue
+
                     if tc_delta.index not in state.function_calls:
                         state.function_calls[tc_delta.index] = ResponseFunctionToolCall(
                             id=FAKE_RESPONSES_ID,

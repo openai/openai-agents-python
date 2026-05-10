@@ -34,6 +34,11 @@ def test_default_auto_skip_keeps_computer_use_example_enabled() -> None:
     assert "examples/tools/computer_use.py" not in run_examples.DEFAULT_AUTO_SKIP
 
 
+def test_default_auto_skip_keeps_one_turn_auto_examples_enabled() -> None:
+    assert "examples/agent_patterns/routing.py" not in run_examples.DEFAULT_AUTO_SKIP
+    assert "examples/customer_service/main.py" not in run_examples.DEFAULT_AUTO_SKIP
+
+
 def test_example_command_runs_python_unbuffered(monkeypatch) -> None:
     monkeypatch.delenv("EXAMPLES_UV_EXTRAS", raising=False)
     example = run_examples.ExampleScript(
@@ -61,6 +66,15 @@ def test_example_command_includes_configured_uv_extras(monkeypatch) -> None:
         "-m",
         "examples.basic.hello_world",
     ]
+
+
+def test_artifact_dir_for_example_uses_tmp_safe_stem(tmp_path: Path) -> None:
+    artifact_dir = run_examples.artifact_dir_for_example(
+        "examples/sandbox/tutorials/vision_website_clone/main.py",
+        tmp_path,
+    )
+
+    assert artifact_dir == tmp_path / "examples__sandbox__tutorials__vision_website_clone__main"
 
 
 def test_prepare_redis_for_example_uses_existing_local_redis(monkeypatch) -> None:

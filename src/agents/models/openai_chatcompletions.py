@@ -221,7 +221,11 @@ class OpenAIChatCompletionsModel(Model):
                 provider_data["response_id"] = response.id
 
             items = (
-                Converter.message_to_output_items(message, provider_data=provider_data)
+                Converter.message_to_output_items(
+                    message,
+                    provider_data=provider_data,
+                    strict_feature_validation=self._strict_feature_validation,
+                )
                 if message is not None
                 else []
             )
@@ -295,7 +299,10 @@ class OpenAIChatCompletionsModel(Model):
 
             final_response: Response | None = None
             async for chunk in ChatCmplStreamHandler.handle_stream(
-                response, stream, model=self.model
+                response,
+                stream,
+                model=self.model,
+                strict_feature_validation=self._strict_feature_validation,
             ):
                 yield chunk
 

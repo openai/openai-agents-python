@@ -76,6 +76,36 @@ DEFAULT_DAYTONA_WORKSPACE_ROOT = "/home/daytona/workspace"
 logger = logging.getLogger(__name__)
 
 
+def _daytona_provider_error_detail(error: BaseException) -> str | None:
+    message = str(error)
+    status = getattr(error, "status_code", None) or getattr(error, "status", None)
+    if isinstance(status, int):
+        if message:
+            return f"HTTP {status}: {message}"
+        return f"HTTP {status}"
+    if message:
+        return f"{type(error).__name__}: {message}"
+    return type(error).__name__
+
+
+def _daytona_exec_transport_error(
+    *,
+    command: tuple[str | Path, ...],
+    cause: BaseException,
+) -> ExecTransportError:
+    detail = _daytona_provider_error_detail(cause)
+    context: dict[str, object] = {"backend": "daytona"}
+    if detail:
+        context["provider_error"] = detail
+    status = getattr(cause, "status_code", None) or getattr(cause, "status", None)
+    if isinstance(status, int):
+        context["http_status"] = status
+    message = "Daytona exec failed"
+    if detail:
+        message = f"{message}: {detail}"
+    return ExecTransportError(command=command, context=context, cause=cause, message=message)
+
+
 def _import_daytona_sdk() -> tuple[Any, Any, Any, Any]:
     """Lazily import Daytona SDK classes, raising a clear error if missing."""
     try:
@@ -381,17 +411,34 @@ class DaytonaSandboxSession(BaseSandboxSession):
                 timeout=self.state.timeouts.fast_op_s,
             )
         except Exception as e:
-            raise WorkspaceStartError(path=error_root, cause=e) from e
+            detail = _daytona_provider_error_detail(e)
+            message = "failed to start session"
+            if detail:
+                message = f"{message}: Daytona workspace root setup failed: {detail}"
+            raise WorkspaceStartError(
+                path=error_root,
+                context={"backend": "daytona", "reason": "workspace_root_setup_failed"},
+                cause=e,
+                message=message,
+            ) from e
 
         exit_code = int(getattr(result, "exit_code", 0) or 0)
         if exit_code != 0:
+            output = str(getattr(result, "result", "") or "")
+            message = (
+                f"failed to start session: Daytona workspace root setup exited with {exit_code}"
+            )
+            if output:
+                message = f"{message}: {output}"
             raise WorkspaceStartError(
                 path=error_root,
                 context={
+                    "backend": "daytona",
                     "reason": "workspace_root_nonzero_exit",
                     "exit_code": exit_code,
-                    "output": str(getattr(result, "result", "") or ""),
+                    "output": output,
                 },
+                message=message,
             )
 
     async def _prepare_backend_workspace(self) -> None:
@@ -490,7 +537,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
         except Exception as e:
             if timeout_exc is not None and isinstance(e, timeout_exc):
                 raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
-            raise ExecTransportError(command=command, cause=e) from e
+            raise _daytona_exec_transport_error(command=command, cause=e) from e
         finally:
             try:
                 await asyncio.wait_for(
@@ -612,7 +659,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
                     await asyncio.shield(cleanup_task)
             if timeout_exc is not None and isinstance(e, timeout_exc):
                 raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
-            raise ExecTransportError(command=command, cause=e) from e
+            raise _daytona_exec_transport_error(command=command, cause=e) from e
         except BaseException:
             if not registered:
                 cleanup_task = asyncio.ensure_future(self._terminate_pty_entry(entry))

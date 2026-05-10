@@ -72,8 +72,108 @@ from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, s
 
 _DEFAULT_EXEC_TIMEOUT_S = 30.0
 _DEFAULT_REQUEST_TIMEOUT_S = 120.0
+_MAX_ERROR_BODY_CHARS = 2000
 
 logger = logging.getLogger(__name__)
+
+
+def _format_cloudflare_response_body(body: bytes | str) -> str | None:
+    if isinstance(body, bytes):
+        text = body.decode("utf-8", errors="replace")
+    else:
+        text = body
+
+    trimmed = text.strip()
+    if not trimmed:
+        return None
+
+    try:
+        payload = json.loads(trimmed)
+    except json.JSONDecodeError:
+        return _truncate_error_body(trimmed)
+
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        code = payload.get("code")
+        if isinstance(error, str) and isinstance(code, str):
+            return _truncate_error_body(f"{code}: {error}")
+        if isinstance(error, str):
+            return _truncate_error_body(error)
+
+    return _truncate_error_body(trimmed)
+
+
+def _truncate_error_body(value: str) -> str:
+    if len(value) <= _MAX_ERROR_BODY_CHARS:
+        return value
+    return value[:_MAX_ERROR_BODY_CHARS] + "... [truncated]"
+
+
+def _looks_like_sse_stream(body: bytes) -> bool:
+    text = body.decode("utf-8", errors="replace").lstrip()
+    return text.startswith(("event:", "data:", "id:", "retry:", ":"))
+
+
+async def _read_cloudflare_response_body(resp: aiohttp.ClientResponse) -> str | None:
+    try:
+        return _format_cloudflare_response_body(await resp.read())
+    except Exception as e:
+        return f"failed to read error body: {e}"
+
+
+def _cloudflare_http_error_message(operation: str, status: int, detail: str | None) -> str:
+    message = f"{operation} failed: HTTP {status}"
+    if detail:
+        message += f": {detail}"
+    return message
+
+
+def _cloudflare_error_context(
+    *,
+    status: int | None = None,
+    detail: str | None = None,
+) -> dict[str, object]:
+    context: dict[str, object] = {"backend": "cloudflare"}
+    if status is not None:
+        context["http_status"] = status
+    if detail:
+        context["provider_error"] = detail
+    return context
+
+
+def _cloudflare_exec_error_detail(error: ExecTransportError) -> str | None:
+    detail = error.context.get("provider_error")
+    if isinstance(detail, str) and detail:
+        status = error.context.get("http_status")
+        if isinstance(status, int):
+            return f"POST /exec failed: HTTP {status}: {detail}"
+        return detail
+    cause = error.__cause__
+    if cause is not None:
+        message = str(cause)
+        if message:
+            return message
+    return None
+
+
+def _cloudflare_transport_error(
+    *,
+    command: tuple[str, ...],
+    cause: BaseException,
+    operation: str,
+) -> ExecTransportError:
+    detail = str(cause)
+    provider_error = f"{type(cause).__name__}: {detail}" if detail else type(cause).__name__
+    return ExecTransportError(
+        command=command,
+        context={
+            "backend": "cloudflare",
+            "operation": operation,
+            "provider_error": provider_error,
+        },
+        cause=cause,
+        message=f"Cloudflare {operation} transport failed: {provider_error}",
+    )
 
 
 def _is_transient_workspace_error(exc: BaseException) -> bool:
@@ -509,6 +609,21 @@ class CloudflareSandboxSession(BaseSandboxSession):
         try:
             root = self._workspace_root_path()
             await self._exec_internal("mkdir", "-p", "--", root.as_posix())
+        except ExecTransportError as e:
+            detail = _cloudflare_exec_error_detail(e)
+            message = "failed to start session"
+            if detail:
+                message = f"{message}: {detail}"
+            raise WorkspaceStartError(
+                path=self._workspace_root_path(),
+                context={
+                    "backend": "cloudflare",
+                    "reason": "prepare_workspace_exec_failed",
+                    "exec_error_context": dict(e.context),
+                },
+                cause=e,
+                message=message,
+            ) from e
         except Exception as e:
             raise WorkspaceStartError(path=self._workspace_root_path(), cause=e) from e
 
@@ -564,8 +679,14 @@ class CloudflareSandboxSession(BaseSandboxSession):
         try:
             http = self._session()
             url = self.state.worker_url.rstrip("/") + f"/v1/sandbox/{self.state.sandbox_id}"
-            async with http.delete(url):
-                pass
+            async with http.delete(url) as resp:
+                if resp.status < 400 or resp.status == 404:
+                    return
+                detail = await _read_cloudflare_response_body(resp)
+                logger.debug(
+                    "Failed to delete Cloudflare sandbox on shutdown: %s",
+                    _cloudflare_http_error_message("DELETE /sandbox", resp.status, detail),
+                )
         except Exception:
             logger.debug("Failed to delete Cloudflare sandbox on shutdown", exc_info=True)
 
@@ -603,20 +724,23 @@ class CloudflareSandboxSession(BaseSandboxSession):
             )
             async with http.post(url, json=payload, timeout=request_timeout) as resp:
                 if resp.status != 200:
-                    body: dict[str, Any] = {}
-                    try:
-                        body = await resp.json(content_type=None)
-                    except Exception:
-                        pass
-                    msg = body.get("error", f"HTTP {resp.status}")
-                    raise ExecTransportError(command=tuple(argv), cause=Exception(msg))
+                    detail = await _read_cloudflare_response_body(resp)
+                    message = _cloudflare_http_error_message("POST /exec", resp.status, detail)
+                    raise ExecTransportError(
+                        command=tuple(argv),
+                        context=_cloudflare_error_context(status=resp.status, detail=detail),
+                        cause=Exception(message),
+                        message=message,
+                    )
 
                 stdout_parts: list[bytes] = []
                 stderr_parts: list[bytes] = []
+                raw_stream = bytearray()
                 line_decoder = _SSELineDecoder()
                 sse_decoder = _SSEDecoder()
 
                 async for chunk in resp.content.iter_any():
+                    raw_stream.extend(chunk)
                     text = chunk.decode("utf-8")
                     for line in line_decoder.decode(text):
                         event = sse_decoder.decode(line)
@@ -662,9 +786,22 @@ class CloudflareSandboxSession(BaseSandboxSession):
                             cause=Exception(err_data.get("error", "unknown error")),
                         )
 
+                stream_detail = (
+                    None
+                    if not raw_stream or _looks_like_sse_stream(bytes(raw_stream))
+                    else _format_cloudflare_response_body(bytes(raw_stream))
+                )
+                message = "SSE stream ended without exit event"
+                if stream_detail:
+                    message = f"POST /exec returned non-SSE error body: {stream_detail}"
                 raise ExecTransportError(
                     command=tuple(argv),
-                    cause=Exception("SSE stream ended without exit event"),
+                    context=_cloudflare_error_context(
+                        status=resp.status,
+                        detail=stream_detail,
+                    ),
+                    cause=Exception(message),
+                    message=message,
                 )
 
         except asyncio.TimeoutError as e:
@@ -672,7 +809,11 @@ class CloudflareSandboxSession(BaseSandboxSession):
         except (ExecTimeoutError, ExecTransportError):
             raise
         except aiohttp.ClientError as e:
-            raise ExecTransportError(command=tuple(argv), cause=e) from e
+            raise _cloudflare_transport_error(
+                command=tuple(argv),
+                cause=e,
+                operation="exec",
+            ) from e
         except Exception as e:
             raise ExecTransportError(command=tuple(argv), cause=e) from e
 
@@ -898,6 +1039,13 @@ class CloudflareSandboxSession(BaseSandboxSession):
         except ExecTransportError:
             await self._cleanup_unregistered_pty(entry, ws, registered)
             raise
+        except aiohttp.ClientError as e:
+            await self._cleanup_unregistered_pty(entry, ws, registered)
+            raise _cloudflare_transport_error(
+                command=tuple(str(part) for part in command),
+                cause=e,
+                operation="pty exec",
+            ) from e
         except Exception as e:
             await self._cleanup_unregistered_pty(entry, ws, registered)
             raise ExecTransportError(command=tuple(str(part) for part in command), cause=e) from e
@@ -1347,18 +1495,14 @@ class CloudflareSandboxClient(BaseSandboxClient[CloudflareSandboxClientOptions])
                     url, timeout=aiohttp.ClientTimeout(total=request_timeout_s)
                 ) as resp:
                     if resp.status != 200:
-                        body: dict[str, Any] = {}
-                        try:
-                            body = await resp.json(content_type=None)
-                        except Exception:
-                            pass
+                        detail = await _read_cloudflare_response_body(resp)
                         raise ConfigurationError(
-                            message=(
-                                f"POST /sandbox failed: {body.get('error', f'HTTP {resp.status}')}"
+                            message=_cloudflare_http_error_message(
+                                "POST /sandbox", resp.status, detail
                             ),
                             error_code=ErrorCode.SANDBOX_CONFIG_INVALID,
                             op="start",
-                            context={"http_status": resp.status},
+                            context=_cloudflare_error_context(status=resp.status, detail=detail),
                         )
                     data = await resp.json()
                     sandbox_id = data.get("id")

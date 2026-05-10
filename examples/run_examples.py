@@ -35,6 +35,7 @@ EXAMPLES_DIR = ROOT_DIR / "examples"
 MAIN_PATTERN = re.compile(r"__name__\s*==\s*['\"]__main__['\"]")
 
 LOG_DIR_DEFAULT = ROOT_DIR / ".tmp" / "examples-start-logs"
+ARTIFACTS_DIR_DEFAULT = ROOT_DIR / ".tmp" / "examples-artifacts"
 RERUN_FILE_DEFAULT = ROOT_DIR / ".tmp" / "examples-rerun.txt"
 DEFAULT_MAIN_LOG = LOG_DIR_DEFAULT / f"main_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
 REDIS_SESSION_EXAMPLE = "examples/memory/redis_session_example.py"
@@ -58,8 +59,6 @@ DISCOVERY_EXCLUDE = {
 # Examples that are noisy, require extra credentials, or hang in auto runs.
 DEFAULT_AUTO_SKIP = {
     "examples/agent_patterns/llm_as_a_judge.py",
-    "examples/agent_patterns/routing.py",
-    "examples/customer_service/main.py",
     "examples/hosted_mcp/connectors.py",
     "examples/mcp/git_example/main.py",
     # These are helper daemons or multi-process components exercised by sibling examples.
@@ -417,6 +416,11 @@ def parse_args() -> argparse.Namespace:
         help="Path to write the main summary log.",
     )
     parser.add_argument(
+        "--artifacts-dir",
+        default=str(ARTIFACTS_DIR_DEFAULT),
+        help="Directory for example-generated artifacts.",
+    )
+    parser.add_argument(
         "--rerun-file",
         help="Only run examples listed in this file (one relative path per line).",
     )
@@ -580,6 +584,12 @@ def ensure_dirs(path: Path, is_file: bool | None = None) -> None:
     target.mkdir(parents=True, exist_ok=True)
 
 
+def artifact_dir_for_example(relpath: str, artifacts_dir: Path) -> Path:
+    """Return a deterministic scratch directory for one example run."""
+    stem = normalize_relpath(str(Path(relpath).with_suffix("")))
+    return artifacts_dir / stem.replace("/", "__")
+
+
 def parse_rerun_from_log(log_path: Path) -> list[str]:
     if not log_path.exists():
         raise FileNotFoundError(log_path)
@@ -610,6 +620,7 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
         overrides.add("external")
 
     logs_dir = Path(args.logs_dir).resolve()
+    artifacts_dir = Path(args.artifacts_dir).resolve()
     main_log_path = Path(args.main_log).resolve()
     auto_mode = args.auto_mode or os.environ.get("EXAMPLES_INTERACTIVE_MODE", "").lower() == "auto"
     auto_skip_set = load_auto_skip()
@@ -618,6 +629,7 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
         overrides.add("interactive")
 
     ensure_dirs(logs_dir, is_file=False)
+    ensure_dirs(artifacts_dir, is_file=False)
     ensure_dirs(main_log_path, is_file=True)
     rerun_entries: list[str] = []
 
@@ -659,6 +671,7 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
         env = os.environ.copy()
         env["PATH"] = command_path
         env["PYTHONPATH"] = build_python_path(env.get("PYTHONPATH"))
+        env["EXAMPLES_ARTIFACTS_DIR"] = str(artifact_dir_for_example(relpath, artifacts_dir))
         if auto_mode:
             env["EXAMPLES_INTERACTIVE_MODE"] = "auto"
             env["APPLY_PATCH_AUTO_APPROVE"] = "1"
@@ -759,6 +772,7 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
         safe_write_main(f"# include: {sorted(overrides)}")
         safe_write_main(f"# auto_mode: {auto_mode}")
         safe_write_main(f"# logs_dir: {logs_dir}")
+        safe_write_main(f"# artifacts_dir: {artifacts_dir}")
         safe_write_main(f"# jobs: {jobs}")
         safe_write_main(f"# buffer_output: {buffer_output}")
         safe_write_main(f"# path_augmented: {path_augmented}")

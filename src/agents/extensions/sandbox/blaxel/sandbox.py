@@ -72,6 +72,36 @@ DEFAULT_BLAXEL_WORKSPACE_ROOT = "/workspace"
 logger = logging.getLogger(__name__)
 
 
+def _blaxel_provider_error_detail(error: BaseException) -> str | None:
+    message = str(error)
+    status = getattr(error, "status_code", None) or getattr(error, "status", None)
+    if isinstance(status, int):
+        if message:
+            return f"HTTP {status}: {message}"
+        return f"HTTP {status}"
+    if message:
+        return f"{type(error).__name__}: {message}"
+    return type(error).__name__
+
+
+def _blaxel_exec_transport_error(
+    *,
+    command: tuple[str | Path, ...],
+    cause: BaseException,
+) -> ExecTransportError:
+    detail = _blaxel_provider_error_detail(cause)
+    context: dict[str, object] = {"backend": "blaxel"}
+    if detail:
+        context["provider_error"] = detail
+    status = getattr(cause, "status_code", None) or getattr(cause, "status", None)
+    if isinstance(status, int):
+        context["http_status"] = status
+    message = "Blaxel exec failed"
+    if detail:
+        message = f"{message}: {detail}"
+    return ExecTransportError(command=command, context=context, cause=cause, message=message)
+
+
 def _import_blaxel_sdk() -> Any:
     """Lazily import SandboxInstance from the Blaxel SDK, raising a clear error if missing."""
     try:
@@ -496,7 +526,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
                 status = getattr(e, "status_code", None)
                 if status in (408, 504):
                     raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
-            raise ExecTransportError(command=command, cause=e) from e
+            raise _blaxel_exec_transport_error(command=command, cause=e) from e
 
     # -- running check -------------------------------------------------------
 
@@ -716,7 +746,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
         except Exception as e:
             if not registered:
                 await self._terminate_pty_entry(entry)
-            raise ExecTransportError(command=command, cause=e) from e
+            raise _blaxel_exec_transport_error(command=command, cause=e) from e
 
         if pruned is not None:
             await self._terminate_pty_entry(pruned)

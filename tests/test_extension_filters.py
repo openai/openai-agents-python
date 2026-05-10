@@ -544,6 +544,93 @@ def test_nest_handoff_history_content_handling() -> None:
     assert "Hello" in summary_content2 or "text" in summary_content2
 
 
+def test_nest_handoff_history_flattens_multiline_content_without_truncation() -> None:
+    captured: list[TResponseInputItem] = []
+
+    def capture_transcript(transcript: list[TResponseInputItem]) -> list[TResponseInputItem]:
+        captured.extend(deepcopy(transcript))
+        return transcript
+
+    first_nested = nest_handoff_history(
+        handoff_data(
+            input_history=(
+                cast(
+                    TResponseInputItem,
+                    {"role": "user", "content": "first line\n2. not a new record"},
+                ),
+            ),
+        )
+    )
+
+    nest_handoff_history(
+        handoff_data(input_history=first_nested.input_history),
+        history_mapper=capture_transcript,
+    )
+
+    assert captured == [
+        cast(TResponseInputItem, {"role": "user", "content": "first line\n2. not a new record"})
+    ]
+
+
+def test_nest_handoff_history_flattens_structured_content_without_stringifying() -> None:
+    captured: list[TResponseInputItem] = []
+    content = [
+        {"type": "input_text", "text": "look at this"},
+        {"type": "input_image", "image_url": "https://example.com/image.png"},
+    ]
+
+    def capture_transcript(transcript: list[TResponseInputItem]) -> list[TResponseInputItem]:
+        captured.extend(deepcopy(transcript))
+        return transcript
+
+    first_nested = nest_handoff_history(
+        handoff_data(
+            input_history=(cast(TResponseInputItem, {"role": "user", "content": content}),),
+        )
+    )
+
+    nest_handoff_history(
+        handoff_data(input_history=first_nested.input_history),
+        history_mapper=capture_transcript,
+    )
+
+    assert captured == [cast(TResponseInputItem, {"role": "user", "content": content})]
+    captured_message = cast(dict[str, Any], captured[0])
+    assert isinstance(captured_message["content"], list)
+
+
+def test_nest_handoff_history_flattens_legacy_multiline_summary_records() -> None:
+    captured: list[TResponseInputItem] = []
+    summary_item = cast(
+        TResponseInputItem,
+        {
+            "role": "assistant",
+            "content": (
+                "For context, here is the conversation so far:\n"
+                "<CONVERSATION HISTORY>\n"
+                "1. user: first line\n"
+                "second line\n"
+                "2. assistant: reply\n"
+                "</CONVERSATION HISTORY>"
+            ),
+        },
+    )
+
+    def capture_transcript(transcript: list[TResponseInputItem]) -> list[TResponseInputItem]:
+        captured.extend(deepcopy(transcript))
+        return transcript
+
+    nest_handoff_history(
+        handoff_data(input_history=(summary_item,)),
+        history_mapper=capture_transcript,
+    )
+
+    assert captured == [
+        cast(TResponseInputItem, {"role": "user", "content": "first line\nsecond line"}),
+        cast(TResponseInputItem, {"role": "assistant", "content": "reply"}),
+    ]
+
+
 def test_nest_handoff_history_extract_nested_non_string_content() -> None:
     """Test that _extract_nested_history_transcript handles non-string content."""
     # Create a summary message with non-string content (array)
