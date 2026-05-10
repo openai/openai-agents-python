@@ -72,6 +72,7 @@ from .model_inputs import (
 )
 
 REJECTION_MESSAGE = DEFAULT_APPROVAL_REJECTION_MESSAGE
+_BACKGROUND_TASK_CLEANUP_TIMEOUT_SECONDS = 1.0
 
 
 class _RealtimeSessionClosedSentinel:
@@ -159,6 +160,7 @@ class RealtimeSession(RealtimeModelListener):
         )
         self._event_iterator_waiters = 0
         self._closed = False
+        self._closing = False
         self._stored_exception: BaseException | None = None
         self._pending_tool_calls: dict[
             str, tuple[RealtimeModelToolCallEvent, RealtimeAgent, FunctionTool, ToolApprovalItem]
@@ -1037,25 +1039,52 @@ class RealtimeSession(RealtimeModelListener):
         # Remove from tracking set
         self._guardrail_tasks.discard(task)
 
-        # Check for exceptions and propagate as events
-        if not task.cancelled():
-            exception = task.exception()
-            if exception:
-                # Create an exception event instead of raising
-                asyncio.create_task(
-                    self._put_event(
-                        RealtimeError(
-                            info=self._event_info,
-                            error={"message": f"Guardrail task failed: {str(exception)}"},
-                        )
-                    )
-                )
+        if task.cancelled():
+            return
 
-    def _cleanup_guardrail_tasks(self) -> None:
-        for task in self._guardrail_tasks:
+        exception = task.exception()
+        if exception is None or self._closing or self._closed:
+            return
+
+        # Create an exception event instead of raising
+        asyncio.create_task(
+            self._put_event(
+                RealtimeError(
+                    info=self._event_info,
+                    error={"message": f"Guardrail task failed: {str(exception)}"},
+                )
+            )
+        )
+
+    async def _cleanup_background_tasks(
+        self, tasks_set: set[asyncio.Task[Any]], task_kind: str
+    ) -> None:
+        tasks = list(tasks_set)
+        if not tasks:
+            return
+
+        for task in tasks:
             if not task.done():
                 task.cancel()
-        self._guardrail_tasks.clear()
+
+        done, pending = await asyncio.wait(
+            tasks,
+            timeout=_BACKGROUND_TASK_CLEANUP_TIMEOUT_SECONDS,
+        )
+        if done:
+            await asyncio.gather(*done, return_exceptions=True)
+        if pending:
+            logger.warning(
+                "Timed out waiting for %s Realtime %s background task(s) "
+                "to finish during cleanup; continuing shutdown.",
+                len(pending),
+                task_kind,
+            )
+
+        tasks_set.difference_update(tasks)
+
+    async def _cleanup_guardrail_tasks(self) -> None:
+        await self._cleanup_background_tasks(self._guardrail_tasks, "guardrail")
 
     def _enqueue_tool_call_task(
         self, event: RealtimeModelToolCallEvent, agent_snapshot: RealtimeAgent
@@ -1075,6 +1104,9 @@ class RealtimeSession(RealtimeModelListener):
         if exception is None:
             return
 
+        if self._closing or self._closed:
+            return
+
         logger.exception("Realtime tool call task failed", exc_info=exception)
 
         if self._stored_exception is None:
@@ -1089,11 +1121,8 @@ class RealtimeSession(RealtimeModelListener):
             )
         )
 
-    def _cleanup_tool_call_tasks(self) -> None:
-        for task in self._tool_call_tasks:
-            if not task.done():
-                task.cancel()
-        self._tool_call_tasks.clear()
+    async def _cleanup_tool_call_tasks(self) -> None:
+        await self._cleanup_background_tasks(self._tool_call_tasks, "tool-call")
 
     def _wake_event_iterators(self) -> None:
         for _ in range(self._event_iterator_waiters):
@@ -1105,9 +1134,10 @@ class RealtimeSession(RealtimeModelListener):
             self._wake_event_iterators()
             return
 
-        # Cancel and cleanup guardrail tasks
-        self._cleanup_guardrail_tasks()
-        self._cleanup_tool_call_tasks()
+        self._closing = True
+
+        # Cancel and clean up background tasks.
+        await asyncio.gather(self._cleanup_guardrail_tasks(), self._cleanup_tool_call_tasks())
 
         # Remove ourselves as a listener
         self._model.remove_listener(self)
