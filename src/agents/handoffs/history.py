@@ -162,9 +162,13 @@ def _format_transcript_item(item: TResponseInputItem) -> str:
     role = item.get("role")
     if isinstance(role, str):
         content = item.get("content")
-        if content is None or isinstance(content, str):
+        if content is None or (isinstance(content, str) and not _contains_newline(content)):
             return _format_transcript_item_legacy(item)
     return _format_transcript_item_json(item)
+
+
+def _contains_newline(value: str) -> bool:
+    return "\n" in value or "\r" in value
 
 
 def _format_transcript_item_json(item: TResponseInputItem) -> str:

@@ -554,7 +554,10 @@ def test_nest_handoff_history_flattens_multiline_content_without_truncation() ->
     first_nested = nest_handoff_history(
         handoff_data(
             input_history=(
-                cast(TResponseInputItem, {"role": "user", "content": "first line\nsecond line"}),
+                cast(
+                    TResponseInputItem,
+                    {"role": "user", "content": "first line\n2. not a new record"},
+                ),
             ),
         )
     )
@@ -565,7 +568,7 @@ def test_nest_handoff_history_flattens_multiline_content_without_truncation() ->
     )
 
     assert captured == [
-        cast(TResponseInputItem, {"role": "user", "content": "first line\nsecond line"})
+        cast(TResponseInputItem, {"role": "user", "content": "first line\n2. not a new record"})
     ]
 
 
