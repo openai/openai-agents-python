@@ -561,14 +561,42 @@ def _ignore_ids_for_matching(session: Session) -> bool:
     )
 
 
+_OPENAI_CONVERSATION_ITEM_TYPES_WITH_REQUIRED_ID: frozenset[str] = frozenset(
+    {
+        "file_search_call",
+        "web_search_call",
+        "computer_call",
+        "code_interpreter_call",
+        "image_generation_call",
+        "local_shell_call",
+        "local_shell_call_output",
+        "mcp_list_tools",
+        "mcp_approval_request",
+        "mcp_call",
+        "item_reference",
+    }
+)
+
+
 def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInputItem:
-    """Remove provider-specific fields before fingerprinting or persistence."""
+    """Remove provider-specific fields before fingerprinting or persistence.
+
+    Some Responses input item types require their server-assigned ``id`` when they are
+    persisted through the Conversations API. Other item IDs remain stripped so replayed
+    messages, reasoning items, and function calls do not carry stale provider IDs.
+    """
     if isinstance(item, dict):
         clean_item = cast(dict[str, Any], strip_internal_input_item_metadata(item))
-        clean_item.pop("id", None)
+        if not _openai_conversation_item_requires_id(clean_item):
+            clean_item.pop("id", None)
         clean_item.pop("provider_data", None)
         return cast(TResponseInputItem, clean_item)
     return item
+
+
+def _openai_conversation_item_requires_id(item: dict[str, Any]) -> bool:
+    """Return whether the Conversations create-item schema requires this item's top-level ID."""
+    return item.get("type") in _OPENAI_CONVERSATION_ITEM_TYPES_WITH_REQUIRED_ID
 
 
 def _sanitize_openai_conversation_history_items_for_model_input(
