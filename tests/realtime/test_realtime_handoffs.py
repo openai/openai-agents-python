@@ -137,6 +137,14 @@ def test_realtime_handoff_input_type_requires_on_handoff():
         realtime_handoff(rt, input_type=int)  # type: ignore[call-overload]
 
 
+def test_realtime_handoff_non_callable_on_handoff_raises_error():
+    """Providing a non-callable on_handoff with input_type should raise UserError."""
+    rt = RealtimeAgent(name="x")
+
+    with pytest.raises(UserError, match="on_handoff must be callable"):
+        realtime_handoff(rt, on_handoff="not_a_function", input_type=int)  # type: ignore[call-overload]
+
+
 @pytest.mark.asyncio
 async def test_realtime_handoff_missing_input_json_raises_model_error():
     rt = RealtimeAgent(name="x")

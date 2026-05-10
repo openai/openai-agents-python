@@ -252,12 +252,12 @@ def handoff(
             hidden from the LLM at runtime.
     """
 
-    assert (on_handoff and input_type) or not (on_handoff and input_type), (
-        "You must provide either both on_handoff and input_type, or neither"
-    )
+    if input_type is not None and on_handoff is None:
+        raise UserError("You must provide on_handoff when input_type is provided")
     type_adapter: TypeAdapter[Any] | None
     if input_type is not None:
-        assert callable(on_handoff), "on_handoff must be callable"
+        if not callable(on_handoff):
+            raise UserError("on_handoff must be callable")
         sig = inspect.signature(on_handoff)
         if len(sig.parameters) != 2:
             raise UserError("on_handoff must take two arguments: context and input")

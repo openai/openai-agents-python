@@ -92,7 +92,8 @@ def realtime_handoff(
         raise UserError("You must provide on_handoff when input_type is provided")
     type_adapter: TypeAdapter[Any] | None
     if input_type is not None:
-        assert callable(on_handoff), "on_handoff must be callable"
+        if not callable(on_handoff):
+            raise UserError("on_handoff must be callable")
         sig = inspect.signature(on_handoff)
         if len(sig.parameters) != 2:
             raise UserError("on_handoff must take two arguments: context and input")

@@ -252,6 +252,30 @@ async def test_invalid_on_handoff_raises_error():
         handoff(agent, on_handoff=_on_handoff)  # type: ignore
 
 
+def test_input_type_without_on_handoff_raises_error():
+    """Providing input_type without on_handoff should raise an error."""
+
+    class MyInput(BaseModel):
+        reason: str
+
+    agent = Agent(name="test")
+
+    with pytest.raises(UserError, match="You must provide on_handoff when input_type is provided"):
+        handoff(agent, input_type=MyInput)  # type: ignore
+
+
+def test_non_callable_on_handoff_with_input_type_raises_error():
+    """Providing a non-callable on_handoff with input_type should raise an error."""
+
+    class MyInput(BaseModel):
+        reason: str
+
+    agent = Agent(name="test")
+
+    with pytest.raises(UserError, match="on_handoff must be callable"):
+        handoff(agent, on_handoff="not_a_function", input_type=MyInput)  # type: ignore
+
+
 def test_handoff_input_data():
     agent = Agent(name="test")
 
