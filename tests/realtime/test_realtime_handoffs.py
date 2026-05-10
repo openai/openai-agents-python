@@ -129,6 +129,14 @@ def test_realtime_handoff_invalid_param_counts_raise():
         realtime_handoff(rt, on_handoff=bad1)  # type: ignore[arg-type]
 
 
+def test_realtime_handoff_input_type_requires_on_handoff():
+    """input_type without on_handoff must raise UserError, not silently produce a broken handoff."""
+    rt = RealtimeAgent(name="x")
+
+    with pytest.raises(UserError):
+        realtime_handoff(rt, input_type=int)  # type: ignore[call-overload]
+
+
 @pytest.mark.asyncio
 async def test_realtime_handoff_missing_input_json_raises_model_error():
     rt = RealtimeAgent(name="x")

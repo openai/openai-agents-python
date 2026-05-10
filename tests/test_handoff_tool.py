@@ -202,6 +202,42 @@ async def test_async_on_handoff_without_input_called():
 
 
 @pytest.mark.asyncio
+async def test_callable_class_with_async_dunder_call_is_awaited():
+    """Callable instances whose ``__call__`` is async must be awaited.
+
+    ``inspect.iscoroutinefunction`` returns ``False`` for the instance itself, so the
+    previous implementation invoked it without awaiting and silently dropped the
+    coroutine.
+    """
+
+    class WithInput:
+        def __init__(self) -> None:
+            self.calls: list[Foo] = []
+
+        async def __call__(self, ctx: RunContextWrapper[Any], input: Foo) -> None:
+            self.calls.append(input)
+
+    class NoInput:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, ctx: RunContextWrapper[Any]) -> None:
+            self.calls += 1
+
+    agent = Agent(name="test")
+
+    with_input_cb = WithInput()
+    obj_with = handoff(agent, input_type=Foo, on_handoff=with_input_cb)
+    await obj_with.on_invoke_handoff(RunContextWrapper(agent), Foo(bar="baz").model_dump_json())
+    assert with_input_cb.calls == [Foo(bar="baz")]
+
+    no_input_cb = NoInput()
+    obj_no = handoff(agent, on_handoff=no_input_cb)
+    await obj_no.on_invoke_handoff(RunContextWrapper(agent), "")
+    assert no_input_cb.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_invalid_on_handoff_raises_error():
     was_called = False
 

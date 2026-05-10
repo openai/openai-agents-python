@@ -96,7 +96,7 @@ def get_default_model() -> str:
     """
     Returns the default model name.
     """
-    return os.getenv(OPENAI_DEFAULT_MODEL_ENV_VARIABLE_NAME, "gpt-4.1").lower()
+    return os.getenv(OPENAI_DEFAULT_MODEL_ENV_VARIABLE_NAME, "gpt-5.4-mini").lower()
 
 
 def get_default_model_settings(model: str | None = None) -> ModelSettings:

@@ -15,7 +15,7 @@ from openai.types.responses.response_reasoning_item_param import (
     ResponseReasoningItemParam,
     Summary,
 )
-from sqlalchemy import select, text, update
+from sqlalchemy import insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.sql import Select
 
@@ -189,6 +189,43 @@ async def test_pop_from_empty_session():
     session = SQLAlchemySession.from_url("empty_session", url=DB_URL, create_tables=True)
     popped = await session.pop_item()
     assert popped is None
+
+
+async def test_pop_item_skips_corrupt_most_recent():
+    """pop_item skips corrupt newest rows and returns the next valid item."""
+    session = SQLAlchemySession.from_url("pop_corrupt", url=DB_URL, create_tables=True)
+
+    valid_item: TResponseInputItem = {"role": "user", "content": "valid"}
+    await session.add_items([valid_item])
+
+    await session._ensure_tables()
+    async with session._session_factory() as sess:
+        async with sess.begin():
+            await sess.execute(
+                insert(session._messages).values(
+                    {"session_id": session.session_id, "message_data": "not valid json {{{"}
+                )
+            )
+
+    assert await session.pop_item() == valid_item
+    assert await session.get_items() == []
+
+
+async def test_pop_item_returns_none_after_dropping_only_corrupt_rows():
+    """pop_item removes corrupt rows and returns None when no valid items remain."""
+    session = SQLAlchemySession.from_url("pop_only_corrupt", url=DB_URL, create_tables=True)
+
+    await session._ensure_tables()
+    async with session._session_factory() as sess:
+        async with sess.begin():
+            await sess.execute(
+                insert(session._messages).values(
+                    {"session_id": session.session_id, "message_data": "not valid json {{{"}
+                )
+            )
+
+    assert await session.pop_item() is None
+    assert await session.get_items() == []
 
 
 async def test_add_empty_items_list():

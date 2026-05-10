@@ -17,6 +17,7 @@ from agents import (
     RunResult,
     RunResultStreaming,
     SessionSettings,
+    ToolExecutionConfig,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
     ToolOutputGuardrailData,
@@ -92,6 +93,42 @@ def test_run_config_reasoning_item_id_policy_positional_binding() -> None:
 
     assert config.session_settings == session_settings
     assert config.reasoning_item_id_policy == "omit"
+    assert config.sandbox is None
+    assert config.tool_execution is None
+
+
+def test_run_config_tool_execution_append_preserves_sandbox_position() -> None:
+    session_settings = SessionSettings(limit=123)
+    tool_execution = ToolExecutionConfig(max_function_tool_concurrency=2)
+    config = RunConfig(
+        None,
+        MultiProvider(),
+        None,
+        None,
+        False,
+        None,
+        None,
+        None,
+        False,
+        None,
+        True,
+        "Agent workflow",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        session_settings,
+        "omit",
+        None,
+        tool_execution,
+    )
+
+    assert config.session_settings == session_settings
+    assert config.reasoning_item_id_policy == "omit"
+    assert config.sandbox is None
+    assert config.tool_execution is tool_execution
 
 
 def test_model_settings_context_management_append_preserves_retry_position() -> None:

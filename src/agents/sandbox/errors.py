@@ -41,6 +41,7 @@ class ErrorCode(str, Enum):
 
     GIT_MISSING_IN_IMAGE = "git_missing_in_image"
     GIT_CLONE_ERROR = "git_clone_error"
+    GIT_SUBPATH_ERROR = "git_subpath_error"
     GIT_COPY_ERROR = "git_copy_error"
 
     MOUNT_MISSING_TOOL = "mount_missing_tool"
@@ -309,9 +310,10 @@ class ExecTransportError(ExecFailureError):
         command: Sequence[str | Path],
         context: Mapping[str, object] | None = None,
         cause: BaseException | None = None,
+        message: str | None = None,
     ) -> None:
         super().__init__(
-            message="exec transport error",
+            message=message or "exec transport error",
             error_code=ErrorCode.EXEC_TRANSPORT_ERROR,
             command=command,
             context=_as_context(context),
@@ -537,9 +539,10 @@ class WorkspaceStartError(SandboxRuntimeError):
         path: Path,
         context: Mapping[str, object] | None = None,
         cause: BaseException | None = None,
+        message: str | None = None,
     ) -> None:
         super().__init__(
-            message="failed to start session",
+            message=message or "failed to start session",
             error_code=ErrorCode.WORKSPACE_START_ERROR,
             op="start",
             context={"path": str(path), **_as_context(context)},
@@ -666,6 +669,32 @@ class GitCloneError(GitArtifactError):
             error_code=ErrorCode.GIT_CLONE_ERROR,
             op="materialize",
             context={"url": url, "ref": ref, "stderr": stderr, **_as_context(context)},
+            cause=cause,
+        )
+
+
+class GitSubpathError(GitArtifactError):
+    """Git repository subpath was invalid for artifact materialization."""
+
+    def __init__(
+        self,
+        *,
+        repo: str,
+        subpath: str,
+        reason: Literal["absolute", "empty", "parent_traversal", "windows_path"],
+        context: Mapping[str, object] | None = None,
+        cause: BaseException | None = None,
+    ) -> None:
+        super().__init__(
+            message=f"git repo subpath must be a relative path inside the repository: {subpath}",
+            error_code=ErrorCode.GIT_SUBPATH_ERROR,
+            op="materialize",
+            context={
+                "repo": repo,
+                "subpath": subpath,
+                "reason": reason,
+                **_as_context(context),
+            },
             cause=cause,
         )
 

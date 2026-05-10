@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 from textwrap import dedent
@@ -66,6 +67,14 @@ AGENTS_MD = dedent(
     - Do not finish without the screenshots.
     """
 )
+
+
+def default_output_dir() -> Path:
+    """Return the local directory for copied example artifacts."""
+    artifacts_dir = os.environ.get("EXAMPLES_ARTIFACTS_DIR")
+    if artifacts_dir:
+        return Path(artifacts_dir)
+    return DEMO_DIR / "output"
 
 
 def build_manifest() -> Manifest:
@@ -236,7 +245,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=DEMO_DIR / "output",
+        default=default_output_dir(),
         help="Directory for copied website files.",
     )
     args = parser.parse_args()

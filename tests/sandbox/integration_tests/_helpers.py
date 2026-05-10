@@ -33,6 +33,7 @@ from agents.sandbox.errors import (
 from agents.sandbox.files import EntryKind
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.workspace_paths import SandboxPathGrant
 from agents.tool import Tool
 
 BUILTIN_MANIFEST_ENTRY_TYPES = {
@@ -175,6 +176,7 @@ def create_local_sources(tmp_path: Path) -> Path:
 def build_manifest_with_all_entry_types(*, workspace_root: Path, source_root: Path) -> Manifest:
     return Manifest(
         root=str(workspace_root),
+        extra_path_grants=(SandboxPathGrant(path=str(source_root)),),
         entries={
             "inline.txt": File(content=DURABLE_WORKSPACE_TEXTS["inline.txt"].encode("utf-8")),
             "delete_me.txt": File(content=DURABLE_WORKSPACE_TEXTS["delete_me.txt"].encode("utf-8")),
@@ -189,8 +191,12 @@ def build_manifest_with_all_entry_types(*, workspace_root: Path, source_root: Pa
                     ),
                 }
             ),
-            "copied_file.txt": LocalFile(src=source_root / "local-file.txt"),
-            "copied_dir": LocalDir(src=source_root / "local-dir"),
+            "copied_file.txt": LocalFile(
+                src=source_root / "local-file.txt",
+            ),
+            "copied_dir": LocalDir(
+                src=source_root / "local-dir",
+            ),
             "repo": GitRepo(repo="openai/mock-sandbox-fixture", ref="main"),
             "mounts/s3": S3Mount(
                 bucket="s3-bucket",

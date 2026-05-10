@@ -88,9 +88,8 @@ def realtime_handoff(
 
     Note: input_filter is not supported for RealtimeAgent handoffs.
     """
-    assert (on_handoff and input_type) or not (on_handoff and input_type), (
-        "You must provide either both on_handoff and input_type, or neither"
-    )
+    if input_type is not None and on_handoff is None:
+        raise UserError("You must provide on_handoff when input_type is provided")
     type_adapter: TypeAdapter[Any] | None
     if input_type is not None:
         assert callable(on_handoff), "on_handoff must be callable"

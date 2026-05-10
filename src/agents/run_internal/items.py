@@ -102,12 +102,16 @@ def drop_orphan_function_calls(
 ) -> list[TResponseInputItem]:
     """
     Remove tool call items that do not have corresponding outputs so resumptions or retries do not
-    replay stale tool calls.
+    replay stale tool calls. Reasoning items that immediately precede a tool call dropped by this
+    pass are also removed, since the Responses API rejects reasoning items that are not followed
+    by their associated model-emitted item (``Item 'rs_...' of type 'reasoning' was provided
+    without its required following item``).
     """
 
     completed_call_ids = _completed_call_ids_by_type(items)
     matched_anonymous_tool_search_calls = _matched_anonymous_tool_search_call_indexes(items)
 
+    dropped_indexes: set[int] = set()
     filtered: list[TResponseInputItem] = []
     for index, entry in enumerate(items):
         if not isinstance(entry, dict):
@@ -134,7 +138,45 @@ def drop_orphan_function_calls(
             and index in matched_anonymous_tool_search_calls
         ):
             filtered.append(entry)
-    return filtered
+            continue
+        # Tool call entry will be dropped; record so we can also drop preceding reasoning items.
+        dropped_indexes.add(index)
+
+    if not dropped_indexes:
+        return filtered
+    return _drop_reasoning_items_preceding_dropped_calls(items, dropped_indexes)
+
+
+def _drop_reasoning_items_preceding_dropped_calls(
+    items: list[TResponseInputItem],
+    dropped_indexes: set[int],
+) -> list[TResponseInputItem]:
+    """Drop reasoning items whose tied tool call was just dropped as orphan.
+
+    A reasoning item is considered tied to the next non-reasoning model-emitted item. If that
+    item was dropped, the reasoning item is now dangling and would be rejected by the Responses
+    API with ``reasoning was provided without its required following item``.
+    """
+    drop_reasoning: set[int] = set()
+    for index in range(len(items) - 1, -1, -1):
+        entry = items[index]
+        if (
+            not isinstance(entry, dict)
+            or entry.get("type") != "reasoning"
+            or index in dropped_indexes
+        ):
+            continue
+        for next_index in range(index + 1, len(items)):
+            if next_index in drop_reasoning:
+                continue
+            next_entry = items[next_index]
+            if isinstance(next_entry, dict) and next_entry.get("type") == "reasoning":
+                continue
+            if next_index in dropped_indexes:
+                drop_reasoning.add(index)
+            break
+    excluded = dropped_indexes | drop_reasoning
+    return [entry for idx, entry in enumerate(items) if idx not in excluded]
 
 
 def ensure_input_item_format(item: TResponseInputItem) -> TResponseInputItem:

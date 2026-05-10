@@ -661,13 +661,24 @@ class LitellmModel(Model):
                 # Extract tool calls from this assistant message
                 tool_calls = message.get("tool_calls", [])
                 if isinstance(tool_calls, list):
-                    for tool_call in tool_calls:
+                    for split_idx, tool_call in enumerate(tool_calls):
                         if isinstance(tool_call, dict):
                             tool_id = tool_call.get("id")
                             if tool_id:
-                                # Create a separate assistant message for each tool call
+                                # Create a separate assistant message for each tool call.
+                                # Only the first split keeps the assistant text/thinking
+                                # blocks/reasoning content; the rest carry tool_calls only,
+                                # to avoid duplicating signed thinking blocks (which
+                                # Anthropic rejects) and assistant text in history.
                                 single_tool_msg = cast(dict[str, Any], message.copy())
                                 single_tool_msg["tool_calls"] = [tool_call]
+                                if split_idx > 0:
+                                    for shared_field in (
+                                        "content",
+                                        "thinking_blocks",
+                                        "reasoning_content",
+                                    ):
+                                        single_tool_msg.pop(shared_field, None)
                                 tool_call_messages[tool_id] = (
                                     i,
                                     cast(ChatCompletionMessageParam, single_tool_msg),

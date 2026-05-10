@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 import types
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import patch
 
@@ -127,10 +128,13 @@ class FakeAsyncCollection:
                 # Apply $inc fields.
                 for field, delta in update.get("$inc", {}).items():
                     doc[field] = doc.get(field, 0) + delta
+                for field, value in update.get("$set", {}).items():
+                    doc[field] = value
                 return dict(doc) if return_document else None
         if upsert:
             new_doc: dict[str, Any] = {"_id": FakeObjectId()}
             new_doc.update(update.get("$setOnInsert", {}))
+            new_doc.update(update.get("$set", {}))
             for field, delta in update.get("$inc", {}).items():
                 new_doc[field] = new_doc.get(field, 0) + delta
             self._docs[id(new_doc["_id"])] = new_doc
@@ -345,6 +349,26 @@ async def test_multiple_add_calls_accumulate(session: MongoDBSession) -> None:
     assert [i.get("content") for i in items] == ["a", "b", "c"]
 
 
+async def test_session_metadata_timestamps_are_written(session: MongoDBSession) -> None:
+    """Session metadata records creation time and last update time."""
+    created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    updated_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+    with patch("agents.extensions.memory.mongodb_session.datetime") as mocked_datetime:
+        mocked_datetime.now.side_effect = [created_at, updated_at]
+
+        await session.add_items([{"role": "user", "content": "first"}])
+        session_doc: dict[str, Any] = next(iter(session._sessions._docs.values()))
+        assert session_doc["session_id"] == session.session_id
+        assert session_doc["created_at"] == created_at
+        assert session_doc["updated_at"] == created_at
+
+        await session.add_items([{"role": "assistant", "content": "second"}])
+        assert session_doc["created_at"] == created_at
+        assert session_doc["updated_at"] == updated_at
+        assert session_doc["_seq"] == 2
+
+
 # ---------------------------------------------------------------------------
 # Limit / SessionSettings tests
 # ---------------------------------------------------------------------------
@@ -513,6 +537,51 @@ async def test_non_string_message_data_is_skipped(session: MongoDBSession) -> No
     items = await session.get_items()
     assert len(items) == 1
     assert items[0].get("content") == "valid"
+
+
+async def test_pop_item_skips_corrupt_most_recent(session: MongoDBSession) -> None:
+    """pop_item must skip a corrupt most-recent document and return the next valid one."""
+    await session.add_items([{"role": "user", "content": "valid"}])
+
+    # Inject a corrupt document with a higher seq so it sorts as "most recent".
+    bad_doc = {
+        "_id": FakeObjectId(),
+        "session_id": session.session_id,
+        "seq": 999,
+        "message_data": "not valid json {{{",
+    }
+    session._messages._docs[id(bad_doc["_id"])] = bad_doc
+
+    popped = await session.pop_item()
+    assert popped is not None
+    assert popped.get("content") == "valid"
+
+    # Both the corrupt doc and the valid one are now gone.
+    assert await session.get_items() == []
+
+
+async def test_pop_item_returns_none_when_only_corrupt_docs_remain(
+    session: MongoDBSession,
+) -> None:
+    """pop_item must drop every corrupt doc and return None when nothing valid remains."""
+    bad1 = {
+        "_id": FakeObjectId(),
+        "session_id": session.session_id,
+        "seq": 1,
+        "message_data": "garbage",
+    }
+    bad2 = {
+        "_id": FakeObjectId(),
+        "session_id": session.session_id,
+        "seq": 2,
+        "message_data": 42,  # non-string — TypeError
+    }
+    session._messages._docs[id(bad1["_id"])] = bad1
+    session._messages._docs[id(bad2["_id"])] = bad2
+
+    assert await session.pop_item() is None
+    # Both corrupt docs must have been removed in the process.
+    assert session._messages._docs == {}
 
 
 # ---------------------------------------------------------------------------

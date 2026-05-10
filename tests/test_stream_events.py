@@ -36,6 +36,7 @@ from agents import Agent, HandoffCallItem, Runner, function_tool
 from agents.extensions.handoff_filters import remove_all_tools
 from agents.handoffs import handoff
 from agents.items import (
+    CompactionItem,
     MCPApprovalRequestItem,
     MCPApprovalResponseItem,
     MCPListToolsItem,
@@ -232,6 +233,26 @@ def test_stream_step_items_to_queue_emits_helper_events_and_skips_approvals(
         "mcp_list_tools",
     ]
     assert "Unexpected item type" in caplog.text
+
+
+def test_stream_step_items_to_queue_skips_compaction_items_silently(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CompactionItem is a session-bookkeeping RunItem with no public stream
+    event name; it must be skipped silently rather than logged as unexpected."""
+    agent = Agent(name="StreamHelper")
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+
+    compaction_item = CompactionItem(
+        agent=agent,
+        raw_item=cast(Any, {"type": "compaction", "summary": "compacted"}),
+    )
+
+    with caplog.at_level("WARNING", logger="openai.agents"):
+        stream_step_items_to_queue([compaction_item], queue)
+
+    assert queue.empty()
+    assert "Unexpected item type" not in caplog.text
 
 
 def test_stream_step_result_to_queue_uses_new_step_items() -> None:

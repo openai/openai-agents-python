@@ -115,8 +115,8 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
         assert model.model == "gpt-4o-realtime-preview"
 
     @pytest.mark.asyncio
-    async def test_connect_defaults_to_gpt_realtime_1_5(self, model, mock_websocket):
-        """Test that connect() uses gpt-realtime-1.5 when no model is provided."""
+    async def test_connect_defaults_to_gpt_realtime_2(self, model, mock_websocket):
+        """Test that connect() uses gpt-realtime-2 when no model is provided."""
         config = {
             "api_key": "test-api-key-123",
             "initial_model_settings": {},
@@ -139,8 +139,8 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
 
                 mock_connect.assert_called_once()
                 call_args = mock_connect.call_args
-                assert call_args[0][0] == "wss://api.openai.com/v1/realtime?model=gpt-realtime-1.5"
-                assert model.model == "gpt-realtime-1.5"
+                assert call_args[0][0] == "wss://api.openai.com/v1/realtime?model=gpt-realtime-2"
+                assert model.model == "gpt-realtime-2"
 
         assert model._websocket_task is not None
 
@@ -568,6 +568,40 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         assert len(item.content) >= 1
         assert item.content[0].type == "text"
         assert item.content[0].text == "test data"
+
+    @pytest.mark.asyncio
+    async def test_output_audio_content_type_normalized(self, model):
+        """GA-style output_audio content parts on response.output_item.* are preserved.
+
+        OpenAI's GA assistant message content uses `output_audio` (not `audio`).
+        The dict-based fast path must normalize this to the SDK's `audio` type so
+        the audio + transcript reach listeners.
+        """
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        msg_added = {
+            "type": "response.output_item.added",
+            "item": {
+                "id": "audio_item_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_audio", "audio": "base64data", "transcript": "hi"},
+                ],
+            },
+        }
+        await model._handle_ws_event(msg_added)
+
+        item_updated_calls = [
+            call for call in listener.on_event.call_args_list if call[0][0].type == "item_updated"
+        ]
+        assert len(item_updated_calls) >= 1
+        item = item_updated_calls[0][0][0].item
+        assert item.type == "message"
+        assert len(item.content) == 1
+        assert item.content[0].type == "audio"
+        assert item.content[0].transcript == "hi"
 
     # Note: response.created/done require full OpenAI response payload which is
     # out-of-scope for unit tests here; covered indirectly via other branches.
@@ -1488,7 +1522,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
     def test_session_config_defaults_audio_formats_when_not_call(self, model):
         settings: dict[str, Any] = {}
         cfg = model._get_session_config(settings)
-        assert cfg.model == "gpt-realtime-1.5"
+        assert cfg.model == "gpt-realtime-2"
         assert cfg.audio is not None
         assert cfg.audio.input is not None
         assert cfg.audio.input.format is not None
@@ -1496,6 +1530,31 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert cfg.audio.output is not None
         assert cfg.audio.output.format is not None
         assert cfg.audio.output.format.type == "audio/pcm"
+
+    def test_session_config_includes_reasoning_capable_settings(self, model):
+        settings = {
+            "parallel_tool_calls": False,
+            "reasoning": {"effort": "low"},
+        }
+        cfg = model._get_session_config(settings)
+        payload = cfg.model_dump(exclude_unset=True)
+
+        assert payload["model"] == "gpt-realtime-2"
+        assert payload["parallel_tool_calls"] is False
+        assert payload["reasoning"] == {"effort": "low"}
+
+    def test_session_config_passes_max_output_tokens(self, model):
+        # Integer cap is forwarded verbatim to the server payload.
+        cfg = model._get_session_config({"max_output_tokens": 256})
+        assert cfg.max_output_tokens == 256
+
+        # The "inf" sentinel is preserved (e.g., to override an earlier cap).
+        cfg_inf = model._get_session_config({"max_output_tokens": "inf"})
+        assert cfg_inf.max_output_tokens == "inf"
+
+        # Omitting the key leaves the field unset so the server default applies.
+        cfg_default = model._get_session_config({})
+        assert cfg_default.max_output_tokens is None
 
     def test_session_config_allows_tool_search_as_named_function_tool_choice(self, model):
         cfg = model._get_session_config(
@@ -1517,6 +1576,19 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert cfg.audio.input.format is None
         assert cfg.audio.output is not None
         assert cfg.audio.output.format is None
+
+    def test_session_config_treats_none_audio_channels_as_unset(self, model):
+        # ``audio.input``/``audio.output`` may be omitted by callers that only
+        # want to override the other channel; an explicit ``None`` should be
+        # equivalent to leaving the key off rather than crashing on the
+        # membership checks inside ``_get_session_config``.
+        cfg = model._get_session_config({"audio": {"input": None, "output": None}})
+        assert cfg.audio is not None
+        assert cfg.audio.input is not None
+        assert cfg.audio.input.format is not None
+        assert cfg.audio.input.format.type == "audio/pcm"
+        assert cfg.audio.output is not None
+        assert cfg.audio.output.voice == "ash"
 
     def test_session_config_respects_audio_block_and_output_modalities(self, model):
         settings = {

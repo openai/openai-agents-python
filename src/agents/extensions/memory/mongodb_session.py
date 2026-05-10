@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import threading
 import weakref
+from datetime import datetime, timezone
 from typing import Any
 
 try:
@@ -294,13 +295,16 @@ class MongoDBSession(SessionABC):
 
         await self._ensure_indexes()
 
+        now = datetime.now(timezone.utc)
+
         # Atomically reserve a block of sequence numbers for this batch.
         # $inc returns the new value, so subtract len(items) to get the first
         # number in the block.
         result = await self._sessions.find_one_and_update(
             {"session_id": self.session_id},
             {
-                "$setOnInsert": {"session_id": self.session_id},
+                "$setOnInsert": {"session_id": self.session_id, "created_at": now},
+                "$set": {"updated_at": now},
                 "$inc": {"_seq": len(items)},
             },
             upsert=True,
@@ -324,21 +328,26 @@ class MongoDBSession(SessionABC):
 
         Returns:
             The most recent item if it exists, ``None`` if the session is empty.
+
+        Corrupt documents (invalid JSON, missing/non-string ``message_data``)
+        are silently discarded and the next-most-recent item is returned.  This
+        matches :meth:`get_items`, which also skips corrupt documents, so a
+        single bad row cannot make a non-empty session look empty to callers.
         """
         await self._ensure_indexes()
 
-        doc = await self._messages.find_one_and_delete(
-            {"session_id": self.session_id},
-            sort=[("seq", -1)],
-        )
-
-        if doc is None:
-            return None
-
-        try:
-            return await self._deserialize_item(doc["message_data"])
-        except (json.JSONDecodeError, KeyError, TypeError):
-            return None
+        while True:
+            doc = await self._messages.find_one_and_delete(
+                {"session_id": self.session_id},
+                sort=[("seq", -1)],
+            )
+            if doc is None:
+                return None
+            try:
+                return await self._deserialize_item(doc["message_data"])
+            except (json.JSONDecodeError, KeyError, TypeError):
+                # Corrupt — drop it and try the next-most-recent document.
+                continue
 
     async def clear_session(self) -> None:
         """Clear all items for this session."""

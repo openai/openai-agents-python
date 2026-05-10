@@ -41,12 +41,18 @@ def remove_all_tools(handoff_input_data: HandoffInputData) -> HandoffInputData:
     )
     filtered_pre_handoff_items = _remove_tools_from_items(handoff_input_data.pre_handoff_items)
     filtered_new_items = _remove_tools_from_items(new_items)
+    # Preserve and filter input_items so chained filters (e.g. after
+    # nest_handoff_history) don't drop or re-introduce tool items.
+    existing_input_items = handoff_input_data.input_items
+    filtered_input_items = (
+        _remove_tools_from_items(existing_input_items) if existing_input_items is not None else None
+    )
 
-    return HandoffInputData(
+    return handoff_input_data.clone(
         input_history=filtered_history,
         pre_handoff_items=filtered_pre_handoff_items,
         new_items=filtered_new_items,
-        run_context=handoff_input_data.run_context,
+        input_items=filtered_input_items,
     )
 
 

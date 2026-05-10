@@ -152,7 +152,7 @@ OpenAIRealtimeAudioOutput = _rt_audio_config.RealtimeAudioConfigOutput  # type: 
 
 
 _USER_AGENT = f"Agents/Python {__version__}"
-DEFAULT_REALTIME_MODEL = "gpt-realtime-1.5"
+DEFAULT_REALTIME_MODEL = "gpt-realtime-2"
 
 DEFAULT_MODEL_SETTINGS: RealtimeSessionModelSettings = {
     "voice": "ash",
@@ -1023,7 +1023,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 for part in raw_content:
                     if not isinstance(part, dict):
                         continue
-                    if part.get("type") == "audio":
+                    if part.get("type") in ("audio", "output_audio"):
                         converted_content.append(
                             {
                                 "type": "audio",
@@ -1358,13 +1358,16 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
         audio_config = model_settings.get("audio")
         audio_config_mapping = audio_config if isinstance(audio_config, Mapping) else None
+        # ``audio.input``/``audio.output`` may be omitted or explicitly None; coerce
+        # both to an empty mapping so callers can opt out of one channel without
+        # tripping the membership checks below.
         input_audio_config: Mapping[str, Any] = (
-            cast(Mapping[str, Any], audio_config_mapping.get("input", {}))
+            cast(Mapping[str, Any], audio_config_mapping.get("input") or {})
             if audio_config_mapping
             else {}
         )
         output_audio_config: Mapping[str, Any] = (
-            cast(Mapping[str, Any], audio_config_mapping.get("output", {}))
+            cast(Mapping[str, Any], audio_config_mapping.get("output") or {})
             if audio_config_mapping
             else {}
         )
@@ -1438,23 +1441,26 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             or DEFAULT_MODEL_SETTINGS.get("modalities")
         )
 
-        # Construct full session object. `type` will be excluded at serialization time for updates.
-        session_create_request = OpenAISessionCreateRequest(
-            type="realtime",
-            model=(model_settings.get("model_name") or self.model) or DEFAULT_REALTIME_MODEL,
-            output_modalities=output_modalities,
-            audio=OpenAIRealtimeAudioConfig(
+        session_create_args: dict[str, Any] = {
+            "type": "realtime",
+            "model": (model_settings.get("model_name") or self.model) or DEFAULT_REALTIME_MODEL,
+            "output_modalities": output_modalities,
+            "audio": OpenAIRealtimeAudioConfig(
                 input=OpenAIRealtimeAudioInput(**audio_input_args),
                 output=OpenAIRealtimeAudioOutput(**audio_output_args),
             ),
-            tools=cast(
-                Any,
-                self._tools_to_session_tools(
-                    tools=model_settings.get("tools", []),
-                    handoffs=model_settings.get("handoffs", []),
-                ),
+            "tools": self._tools_to_session_tools(
+                tools=model_settings.get("tools", []),
+                handoffs=model_settings.get("handoffs", []),
             ),
-        )
+        }
+        if model_settings.get("parallel_tool_calls") is not None:
+            session_create_args["parallel_tool_calls"] = model_settings["parallel_tool_calls"]
+        if model_settings.get("reasoning") is not None:
+            session_create_args["reasoning"] = model_settings["reasoning"]
+
+        # Construct full session object. `type` will be excluded at serialization time for updates.
+        session_create_request = OpenAISessionCreateRequest(**session_create_args)
 
         if "instructions" in model_settings:
             session_create_request.instructions = model_settings.get("instructions")
@@ -1638,8 +1644,12 @@ class _ConversionHelper:
                     t = item.get("type")
                     if t == "input_text":
                         _txt = item.get("text")
-                        text_val = _txt if isinstance(_txt, str) else None
-                        content.append(Content(type="input_text", text=text_val))
+                        # Skip parts with missing/non-string text rather than
+                        # forwarding text=None, which produces an invalid item
+                        # the realtime API will reject.
+                        if not isinstance(_txt, str):
+                            continue
+                        content.append(Content(type="input_text", text=_txt))
                     elif t == "input_image":
                         iu = item.get("image_url")
                         if isinstance(iu, str) and iu:

@@ -600,8 +600,17 @@ class BatchTraceProcessor(TracingProcessor):
                 if not items_to_export:
                     break
 
-                # Export the batch
-                self._exporter.export(items_to_export)
+                # Export the batch. Catch any exception so a misbehaving exporter
+                # cannot kill the background worker thread and silently strand all
+                # subsequent spans in the queue.
+                try:
+                    self._exporter.export(items_to_export)
+                except Exception as exc:
+                    logger.error(
+                        "[non-fatal] Tracing: exporter raised %s; dropping batch of %d items",
+                        exc,
+                        len(items_to_export),
+                    )
 
 
 # Lazily initialized defaults to avoid creating network clients or threading

@@ -34,8 +34,6 @@ from .mcp import MCPUtil
 from .model_settings import ModelSettings
 from .models.default_models import (
     get_default_model_settings,
-    gpt_5_reasoning_settings_required,
-    is_gpt_5_default,
 )
 from .models.interface import Model
 from .prompts import DynamicPromptFunction, Prompt, PromptUtil
@@ -152,6 +150,25 @@ class MCPConfig(TypedDict):
     default_tool_error_function.
     """
 
+    include_server_in_tool_names: NotRequired[bool]
+    """If True, local MCP tools are exposed with server-prefixed public names to avoid name
+    collisions across multiple MCP servers. Defaults to False.
+    """
+
+
+def _initial_model_settings_for_model(model: str | Model | None) -> ModelSettings:
+    if model is None:
+        return get_default_model_settings()
+    if isinstance(model, str):
+        return get_default_model_settings(model)
+    return ModelSettings()
+
+
+def _model_settings_match_implicit_model_defaults(
+    model: str | Model | None, model_settings: ModelSettings
+) -> bool:
+    return model_settings == _initial_model_settings_for_model(model)
+
 
 @dataclass
 class AgentBase(Generic[TContext]):
@@ -182,11 +199,39 @@ class AgentBase(Generic[TContext]):
     mcp_config: MCPConfig = field(default_factory=lambda: MCPConfig())
     """Configuration for MCP servers."""
 
+    async def _get_mcp_tool_reserved_names(
+        self, run_context: RunContextWrapper[TContext]
+    ) -> set[str]:
+        reserved_tool_names = {tool.name for tool in self.tools if isinstance(tool, FunctionTool)}
+
+        async def _check_handoff_enabled(handoff_obj: Handoff[Any, Any]) -> bool:
+            attr = handoff_obj.is_enabled
+            if isinstance(attr, bool):
+                return attr
+            res = attr(run_context, self)
+            if inspect.isawaitable(res):
+                return bool(await res)
+            return bool(res)
+
+        for handoff_item in getattr(self, "handoffs", ()):
+            if isinstance(handoff_item, Handoff):
+                if await _check_handoff_enabled(handoff_item):
+                    reserved_tool_names.add(handoff_item.tool_name)
+            elif isinstance(handoff_item, AgentBase):
+                reserved_tool_names.add(Handoff.default_tool_name(handoff_item))
+        return reserved_tool_names
+
     async def get_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
         """Fetches the available tools from the MCP servers."""
         convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
         failure_error_function = self.mcp_config.get(
             "failure_error_function", default_tool_error_function
+        )
+        include_server_in_tool_names = self.mcp_config.get("include_server_in_tool_names", False)
+        reserved_tool_names = (
+            await self._get_mcp_tool_reserved_names(run_context)
+            if include_server_in_tool_names
+            else None
         )
         return await MCPUtil.get_all_function_tools(
             self.mcp_servers,
@@ -194,6 +239,8 @@ class AgentBase(Generic[TContext]):
             run_context,
             self,
             failure_error_function=failure_error_function,
+            include_server_in_tool_names=include_server_in_tool_names,
+            reserved_tool_names=reserved_tool_names,
         )
 
     async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
@@ -265,7 +312,7 @@ class Agent(AgentBase, Generic[TContext]):
     """The model implementation to use when invoking the LLM.
 
     By default, if not set, the agent will use the default model configured in
-    `agents.models.get_default_model()` (currently "gpt-4.1").
+    `agents.models.get_default_model()` (currently "gpt-5.4-mini").
     """
 
     model_settings: ModelSettings = field(default_factory=get_default_model_settings)
@@ -383,25 +430,8 @@ class Agent(AgentBase, Generic[TContext]):
                 f"got {type(self.model_settings).__name__}"
             )
 
-        if (
-            # The user sets a non-default model
-            self.model is not None
-            and (
-                # The default model is gpt-5
-                is_gpt_5_default() is True
-                # However, the specified model is not a gpt-5 model
-                and (
-                    isinstance(self.model, str) is False
-                    or gpt_5_reasoning_settings_required(self.model) is False  # type: ignore
-                )
-                # The model settings are not customized for the specified model
-                and self.model_settings == get_default_model_settings()
-            )
-        ):
-            # In this scenario, we should use a generic model settings
-            # because non-gpt-5 models are not compatible with the default gpt-5 model settings.
-            # This is a best-effort attempt to make the agent work with non-gpt-5 models.
-            self.model_settings = ModelSettings()
+        if self.model is not None and self.model_settings == get_default_model_settings():
+            self.model_settings = _initial_model_settings_for_model(self.model)
 
         if not isinstance(self.input_guardrails, list):
             raise TypeError(
@@ -467,6 +497,12 @@ class Agent(AgentBase, Generic[TContext]):
             new_agent = agent.clone(instructions="New instructions")
             ```
         """
+        if (
+            "model" in kwargs
+            and "model_settings" not in kwargs
+            and _model_settings_match_implicit_model_defaults(self.model, self.model_settings)
+        ):
+            kwargs["model_settings"] = _initial_model_settings_for_model(kwargs["model"])
         return dataclasses.replace(self, **kwargs)
 
     def as_tool(

@@ -10,7 +10,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
-from ...run_config import SandboxConcurrencyLimits
+from ...run_config import SandboxArchiveLimits, SandboxConcurrencyLimits
 from ...tracing import Span, custom_span, get_current_trace
 from ..errors import OpName, SandboxError
 from ..files import FileEntry
@@ -266,6 +266,10 @@ class SandboxSession(BaseSandboxSession):
     def _set_concurrency_limits(self, limits: SandboxConcurrencyLimits) -> None:
         super()._set_concurrency_limits(limits)
         self._inner._set_concurrency_limits(limits)
+
+    def _set_archive_limits(self, limits: SandboxArchiveLimits | None) -> None:
+        super()._set_archive_limits(limits)
+        self._inner._set_archive_limits(limits)
 
     def normalize_path(self, path: Path | str, *, for_write: bool = False) -> Path:
         return self._inner.normalize_path(path, for_write=for_write)

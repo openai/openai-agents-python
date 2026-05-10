@@ -3291,8 +3291,45 @@ async def test_modal_pty_start_wraps_startup_failures(
     )
     session = modal_module.ModalSandboxSession.from_state(state, sandbox=_FailingSandbox())
 
-    with pytest.raises(modal_module.ExecTransportError):
+    with pytest.raises(modal_module.ExecTransportError) as exc_info:
         await session.pty_exec_start("python3", shell=False, tty=True)
+    assert str(exc_info.value) == "Modal exec failed: FileNotFoundError: missing-shell"
+    assert exc_info.value.context["backend"] == "modal"
+    assert exc_info.value.context["provider_error"] == "FileNotFoundError: missing-shell"
+
+
+@pytest.mark.asyncio
+async def test_modal_start_wraps_exec_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _FailingSandbox:
+        object_id = "sb-fail"
+
+        def __init__(self) -> None:
+            self.exec = _with_aio(self._exec)
+            self.poll = _with_aio(lambda: None)
+
+        def _exec(self, *command: object, **kwargs: object) -> object:
+            _ = (command, kwargs)
+            raise FileNotFoundError("missing-shell")
+
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id="sb-fail",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=_FailingSandbox())
+
+    with pytest.raises(modal_module.WorkspaceStartError) as exc_info:
+        await session.start()
+
+    assert str(exc_info.value) == (
+        "failed to start session: Modal exec failed: FileNotFoundError: missing-shell"
+    )
+    assert exc_info.value.context["backend"] == "modal"
 
 
 @pytest.mark.asyncio

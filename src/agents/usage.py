@@ -196,8 +196,13 @@ class Usage:
         )
 
         # Automatically preserve request_usage_entries.
-        # If the other Usage represents a single request with tokens, record it.
-        if other.requests == 1 and other.total_tokens > 0:
+        # If the other Usage already has individual request breakdowns, merge them
+        # (this preserves nested token details that would otherwise be discarded
+        # when synthesizing an entry from only the top-level fields).
+        if other.request_usage_entries:
+            self.request_usage_entries.extend(other.request_usage_entries)
+        elif other.requests == 1 and other.total_tokens > 0:
+            # Otherwise, if the other Usage represents a single request with tokens, record it.
             input_details = other.input_tokens_details or InputTokensDetails(cached_tokens=0)
             output_details = other.output_tokens_details or OutputTokensDetails(reasoning_tokens=0)
             request_usage = RequestUsage(
@@ -208,9 +213,6 @@ class Usage:
                 output_tokens_details=output_details,
             )
             self.request_usage_entries.append(request_usage)
-        elif other.request_usage_entries:
-            # If the other Usage already has individual request breakdowns, merge them.
-            self.request_usage_entries.extend(other.request_usage_entries)
 
 
 def _serialize_usage_details(details: Any, default: dict[str, int]) -> dict[str, Any]:

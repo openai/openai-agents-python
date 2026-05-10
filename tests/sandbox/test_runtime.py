@@ -34,6 +34,7 @@ from agents.sandbox import (
     Manifest,
     Permissions,
     SandboxAgent,
+    SandboxArchiveLimits,
     SandboxConcurrencyLimits,
     SandboxPathGrant,
     SandboxRunConfig,
@@ -114,11 +115,16 @@ class _FakeSession(BaseSandboxSession):
         self.stop_calls = 0
         self.shutdown_calls = 0
         self.close_dependency_calls = 0
+        self.archive_limit_values: list[SandboxArchiveLimits | None] = []
         self.concurrency_limit_values: list[SandboxConcurrencyLimits] = []
 
     def _set_concurrency_limits(self, limits: SandboxConcurrencyLimits) -> None:
         super()._set_concurrency_limits(limits)
         self.concurrency_limit_values.append(limits)
+
+    def _set_archive_limits(self, limits: SandboxArchiveLimits | None) -> None:
+        super()._set_archive_limits(limits)
+        self.archive_limit_values.append(limits)
 
     async def start(self) -> None:
         self.start_calls += 1
@@ -2844,6 +2850,95 @@ async def test_session_manager_passes_concurrency_limits_from_run_config(
     assert live_session.concurrency_limit_values == [
         SandboxConcurrencyLimits(manifest_entries=2, local_dir_files=3)
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["create", "resume", "live_session"])
+async def test_session_manager_passes_archive_limits_from_run_config(
+    source: str,
+) -> None:
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    live_session = _FakeSession(Manifest())
+    client = _FakeClient(live_session)
+    archive_limits = SandboxArchiveLimits(
+        max_input_bytes=10,
+        max_extracted_bytes=20,
+        max_members=30,
+    )
+
+    if source == "live_session":
+        sandbox_config = SandboxRunConfig(
+            session=live_session,
+            archive_limits=archive_limits,
+        )
+    elif source == "resume":
+        sandbox_config = SandboxRunConfig(
+            client=client,
+            session_state=TestSessionState(
+                manifest=Manifest(),
+                snapshot=NoopSnapshot(id="resume"),
+            ),
+            options={"image": "sandbox"},
+            archive_limits=archive_limits,
+        )
+    else:
+        sandbox_config = SandboxRunConfig(
+            client=client,
+            options={"image": "sandbox"},
+            archive_limits=archive_limits,
+        )
+
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=sandbox_config,
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    await manager.ensure_session(agent=agent, capabilities=[], is_resumed_state=source == "resume")
+
+    assert live_session.archive_limit_values == [archive_limits]
+
+
+@pytest.mark.asyncio
+async def test_session_manager_default_archive_limits_preserves_no_resource_limits() -> None:
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    live_session = _FakeSession(Manifest())
+    client = _FakeClient(live_session)
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(client=client, options={"image": "sandbox"}),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    await manager.ensure_session(agent=agent, capabilities=[], is_resumed_state=False)
+
+    assert live_session.archive_limit_values == [None]
+
+
+@pytest.mark.asyncio
+async def test_session_manager_rejects_invalid_archive_limits() -> None:
+    agent = SandboxAgent(name="worker", model=FakeModel(), instructions="Worker.")
+    client = _FakeClient(_FakeSession(Manifest()))
+    limits = SandboxArchiveLimits(max_input_bytes=1)
+    limits.max_input_bytes = 0
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(
+            client=client,
+            options={"image": "sandbox"},
+            archive_limits=limits,
+        ),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    with pytest.raises(ValueError) as exc_info:
+        await manager.ensure_session(agent=agent, capabilities=[], is_resumed_state=False)
+
+    assert str(exc_info.value) == "archive_limits.max_input_bytes must be at least 1"
+    assert client.create_kwargs is None
 
 
 @pytest.mark.asyncio

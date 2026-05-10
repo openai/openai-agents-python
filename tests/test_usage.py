@@ -246,6 +246,39 @@ def test_usage_add_with_pre_existing_request_usage_entries():
     assert u1.request_usage_entries[1].input_tokens == 50
 
 
+def test_usage_add_preserves_existing_entries_when_top_level_also_set():
+    """When `other` has both top-level single-request fields AND pre-populated
+    `request_usage_entries`, the existing entries (which carry the authoritative
+    nested token details) must not be discarded in favor of a synthesized entry
+    built from only the top-level fields.
+    """
+    u1 = Usage()
+    u2 = Usage(
+        requests=1,
+        input_tokens=100,
+        output_tokens=50,
+        total_tokens=150,
+        request_usage_entries=[
+            RequestUsage(
+                input_tokens=100,
+                output_tokens=50,
+                total_tokens=150,
+                input_tokens_details=InputTokensDetails(cached_tokens=10),
+                output_tokens_details=OutputTokensDetails(reasoning_tokens=5),
+            )
+        ],
+    )
+
+    u1.add(u2)
+
+    # The pre-populated entry must be preserved — including its nested details —
+    # rather than being replaced by a synthesized entry with zeroed-out details.
+    assert len(u1.request_usage_entries) == 1
+    entry = u1.request_usage_entries[0]
+    assert entry.input_tokens_details.cached_tokens == 10
+    assert entry.output_tokens_details.reasoning_tokens == 5
+
+
 def test_usage_request_usage_entries_default_empty():
     """Test that request_usage_entries defaults to an empty list."""
     u = Usage()

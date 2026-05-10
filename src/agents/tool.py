@@ -1450,13 +1450,18 @@ def _build_handled_function_tool_error_handler(
 def _parse_function_tool_json_input(*, tool_name: str, input_json: str) -> dict[str, Any]:
     """Decode raw tool arguments with consistent diagnostics."""
     try:
-        return json.loads(input_json) if input_json else {}
+        parsed = json.loads(input_json) if input_json else {}
     except Exception as exc:
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug(f"Invalid JSON input for tool {tool_name}")
         else:
             logger.debug(f"Invalid JSON input for tool {tool_name}: {input_json}")
         raise ModelBehaviorError(f"Invalid JSON input for tool {tool_name}: {input_json}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ModelBehaviorError(f"Invalid JSON input for tool {tool_name}: expected a JSON object")
+
+    return parsed
 
 
 def _log_function_tool_invocation(*, tool_name: str, input_json: str) -> None:
@@ -1909,9 +1914,13 @@ def function_tool(
 
 
 def _is_computer_provider(candidate: object) -> bool:
-    return isinstance(candidate, ComputerProvider) or (
-        hasattr(candidate, "create") and callable(candidate.create)
-    )
+    if isinstance(candidate, ComputerProvider):
+        return True
+    if isinstance(candidate, Computer | AsyncComputer):
+        # A resolved computer instance is never a provider, even if a subclass
+        # happens to expose a callable `create` attribute.
+        return False
+    return hasattr(candidate, "create") and callable(candidate.create)
 
 
 def _validate_function_tool_timeout_config(tool: FunctionTool) -> None:

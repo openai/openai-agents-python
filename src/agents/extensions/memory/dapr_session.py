@@ -177,7 +177,7 @@ class DaprSession(SessionABC):
         """Deserialize a JSON string to an item. Can be overridden by subclasses."""
         return json.loads(item)  # type: ignore[no-any-return]
 
-    def _decode_messages(self, data: bytes | None) -> list[Any]:
+    def _decode_messages(self, data: bytes | None, *, strict: bool = False) -> list[Any]:
         if not data:
             return []
         try:
@@ -185,9 +185,22 @@ class DaprSession(SessionABC):
             messages = json.loads(messages_json)
             if isinstance(messages, list):
                 return list(messages)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            if strict:
+                raise ValueError(
+                    "The stored Dapr session messages are not valid JSON and cannot be "
+                    "safely updated."
+                ) from error
             return []
+        if strict:
+            raise ValueError(
+                "The stored Dapr session messages must be a JSON list and cannot be safely updated."
+            )
         return []
+
+    def _decode_messages_for_update(self, data: bytes | None) -> list[Any]:
+        """Decode aggregate state before an operation that rewrites it."""
+        return self._decode_messages(data, strict=True)
 
     def _calculate_retry_delay(self, attempt: int) -> float:
         base: float = _RETRY_BASE_DELAY_SECONDS * (2 ** max(0, attempt - 1))
@@ -290,7 +303,7 @@ class DaprSession(SessionABC):
                     key=self._messages_key,
                     state_metadata=self._get_read_metadata(),
                 )
-                existing_messages = self._decode_messages(response.data)
+                existing_messages = self._decode_messages_for_update(response.data)
                 updated_messages = existing_messages + serialized_items
                 messages_json = json.dumps(updated_messages, separators=(",", ":"))
                 etag = response.etag
@@ -331,42 +344,42 @@ class DaprSession(SessionABC):
             The most recent item if it exists, None if the session is empty
         """
         async with self._lock:
-            attempt = 0
             while True:
-                attempt += 1
-                response = await self._dapr_client.get_state(
-                    store_name=self._state_store_name,
-                    key=self._messages_key,
-                    state_metadata=self._get_read_metadata(),
-                )
-                messages = self._decode_messages(response.data)
-                if not messages:
-                    return None
-                last_item = messages.pop()
-                messages_json = json.dumps(messages, separators=(",", ":"))
-                etag = getattr(response, "etag", None) or None
-                etag = getattr(response, "etag", None) or None
-                try:
-                    await self._dapr_client.save_state(
+                attempt = 0
+                while True:
+                    attempt += 1
+                    response = await self._dapr_client.get_state(
                         store_name=self._state_store_name,
                         key=self._messages_key,
-                        value=messages_json,
-                        etag=etag,
-                        state_metadata=self._get_metadata(),
-                        options=self._get_state_options(concurrency=Concurrency.first_write),
+                        state_metadata=self._get_read_metadata(),
                     )
-                    break
-                except Exception as error:
-                    should_retry = await self._handle_concurrency_conflict(error, attempt)
-                    if should_retry:
-                        continue
-                    raise
-            try:
-                if isinstance(last_item, str):
-                    return await self._deserialize_item(last_item)
-                return last_item  # type: ignore[no-any-return]
-            except (json.JSONDecodeError, TypeError):
-                return None
+                    messages = self._decode_messages(response.data)
+                    if not messages:
+                        return None
+                    last_item = messages.pop()
+                    messages_json = json.dumps(messages, separators=(",", ":"))
+                    etag = getattr(response, "etag", None) or None
+                    try:
+                        await self._dapr_client.save_state(
+                            store_name=self._state_store_name,
+                            key=self._messages_key,
+                            value=messages_json,
+                            etag=etag,
+                            state_metadata=self._get_metadata(),
+                            options=self._get_state_options(concurrency=Concurrency.first_write),
+                        )
+                        break
+                    except Exception as error:
+                        should_retry = await self._handle_concurrency_conflict(error, attempt)
+                        if should_retry:
+                            continue
+                        raise
+                try:
+                    if isinstance(last_item, str):
+                        return await self._deserialize_item(last_item)
+                    return last_item  # type: ignore[no-any-return]
+                except (json.JSONDecodeError, TypeError):
+                    continue
 
     async def clear_session(self) -> None:
         """Clear all items for this session."""

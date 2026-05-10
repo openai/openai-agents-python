@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..run_config import SandboxConcurrencyLimits, SandboxRunConfig
+from ..run_config import SandboxArchiveLimits, SandboxConcurrencyLimits, SandboxRunConfig
 from .capabilities import Capability
 from .config import MemoryGenerateConfig, MemoryLayoutConfig, MemoryReadConfig
 from .entries import Dir, LocalFile
@@ -50,6 +50,7 @@ __all__ = [
     "RemoteSnapshotSpec",
     "Permissions",
     "SandboxAgent",
+    "SandboxArchiveLimits",
     "SandboxPathGrant",
     "SandboxConcurrencyLimits",
     "SandboxError",

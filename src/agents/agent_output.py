@@ -169,15 +169,15 @@ class AgentOutputSchema(AgentOutputSchemaBase):
 
 
 def _is_subclass_of_base_model_or_dict(t: Any) -> bool:
+    # If it's a generic alias, 'origin' will be the actual type, e.g. 'list'
+    origin = get_origin(t)
+    if origin is not None:
+        return isinstance(origin, type) and issubclass(origin, BaseModel | dict)
+
     if not isinstance(t, type):
         return False
 
-    # If it's a generic alias, 'origin' will be the actual type, e.g. 'list'
-    origin = get_origin(t)
-
-    allowed_types = (BaseModel, dict)
-    # If it's a generic alias e.g. list[str], then we should check the origin type i.e. list
-    return issubclass(origin or t, allowed_types)
+    return issubclass(t, BaseModel | dict)
 
 
 def _type_to_str(t: type[Any]) -> str:
