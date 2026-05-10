@@ -42,7 +42,7 @@ from openai.types.responses.response_reasoning_text_done_event import (
 )
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
-from ..exceptions import AgentsException
+from ..exceptions import UserError
 from ..items import TResponseStreamEvent
 from .chatcmpl_helpers import ChatCmplHelpers
 from .fake_id import FAKE_RESPONSES_ID
@@ -66,6 +66,7 @@ class StreamingState:
     function_calls: dict[int, ResponseFunctionToolCall] = field(default_factory=dict)
     # Fields for real-time function call streaming
     function_call_streaming: dict[int, bool] = field(default_factory=dict)
+    ignored_tool_call_indexes: set[int] = field(default_factory=set)
     # Store accumulated thinking text and signature for Anthropic compatibility
     thinking_text: str = ""
     thinking_signature: str | None = None
@@ -264,6 +265,7 @@ class ChatCmplStreamHandler:
         response: Response,
         stream: AsyncStream[ChatCompletionChunk],
         model: str | None = None,
+        strict_feature_validation: bool = False,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """
         Handle a streaming chat completion response and yield response events.
@@ -556,10 +558,17 @@ class ChatCmplStreamHandler:
             # Handle tool calls with real-time streaming support
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
+                    if tc_delta.index in state.ignored_tool_call_indexes:
+                        continue
+
                     if getattr(tc_delta, "type", None) == "custom":
-                        raise AgentsException(
-                            "Custom tool calls are not supported by the Chat Completions converter"
-                        )
+                        if strict_feature_validation:
+                            raise UserError(
+                                "Custom tool calls are not supported by the Chat Completions "
+                                "converter"
+                            )
+                        state.ignored_tool_call_indexes.add(tc_delta.index)
+                        continue
 
                     if tc_delta.index not in state.function_calls:
                         state.function_calls[tc_delta.index] = ResponseFunctionToolCall(

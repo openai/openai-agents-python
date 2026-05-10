@@ -10,6 +10,10 @@ from openai import APIConnectionError, APIStatusError, AsyncOpenAI, omit
 from openai.types.chat.chat_completion import ChatCompletion, Choice, ChoiceLogprobs
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
+from openai.types.chat.chat_completion_message_custom_tool_call import (
+    ChatCompletionMessageCustomToolCall,
+    Custom,
+)
 from openai.types.chat.chat_completion_message_tool_call import (  # type: ignore[attr-defined]
     ChatCompletionMessageFunctionToolCall,
     Function,
@@ -473,6 +477,45 @@ async def test_get_response_with_tool_call(monkeypatch) -> None:
     assert fn_call_item.call_id == "call-id"
     assert fn_call_item.name == "do_thing"
     assert fn_call_item.arguments == "{'x':1}"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_rejects_custom_tool_call_in_strict_mode(monkeypatch) -> None:
+    tool_call = ChatCompletionMessageCustomToolCall(
+        id="tool1",
+        type="custom",
+        custom=Custom(name="raw_tool", input="payload"),
+    )
+    msg = ChatCompletionMessage(role="assistant", tool_calls=[tool_call])
+    chat = ChatCompletion(
+        id="resp-id",
+        created=0,
+        model="fake",
+        object="chat.completion",
+        choices=[Choice(index=0, finish_reason="tool_calls", message=msg)],
+        usage=None,
+    )
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return chat
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False, strict_feature_validation=True).get_model("gpt-4")
+
+    with pytest.raises(UserError, match="Custom tool calls are not supported"):
+        await model.get_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
 
 
 def test_get_client_disables_provider_managed_retries_on_runner_retry() -> None:
