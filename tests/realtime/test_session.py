@@ -1376,6 +1376,48 @@ class TestToolCallExecution:
         assert any(isinstance(ev, RealtimeToolEnd) for ev in events)
 
     @pytest.mark.asyncio
+    async def test_always_approve_namespaced_tool_call_uses_qualified_key(
+        self, mock_model, mock_agent
+    ):
+        """Always approval should be scoped to the qualified tool key."""
+
+        async def invoke_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            return "account"
+
+        namespaced_tool = FunctionTool(
+            name="lookup_account",
+            description="Look up account",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_tool,
+            needs_approval=True,
+            _tool_namespace="crm",
+        )
+        mock_agent.get_all_tools.return_value = [namespaced_tool]
+
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={"async_tool_calls": False},
+        )
+
+        first_call = RealtimeModelToolCallEvent(
+            name="lookup_account", call_id="call_first", arguments="{}"
+        )
+        second_call = RealtimeModelToolCallEvent(
+            name="lookup_account", call_id="call_second", arguments="{}"
+        )
+
+        await session._handle_tool_call(first_call)
+        await session.approve_tool_call(first_call.call_id, always=True)
+        await session._handle_tool_call(second_call)
+
+        assert "crm.lookup_account" in session._context_wrapper._approvals
+        assert "lookup_account" not in session._context_wrapper._approvals
+        assert session._pending_tool_calls == {}
+        assert len(mock_model.sent_tool_outputs) == 2
+
+    @pytest.mark.asyncio
     async def test_reject_pending_tool_call_sends_rejection_output(
         self, mock_model, mock_agent, mock_function_tool
     ):
@@ -1488,6 +1530,44 @@ class TestToolCallExecution:
             isinstance(ev, RealtimeToolEnd) and ev.output == "explicit rejection message"
             for ev in events
         )
+
+    @pytest.mark.asyncio
+    async def test_reject_namespaced_tool_call_prefers_explicit_message(
+        self, mock_model, mock_agent
+    ):
+        """Rejecting a namespaced tool should resolve messages by qualified key."""
+
+        async def invoke_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            return "account"
+
+        namespaced_tool = FunctionTool(
+            name="lookup_account",
+            description="Look up account",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_tool,
+            needs_approval=True,
+            _tool_namespace="crm",
+        )
+        mock_agent.get_all_tools.return_value = [namespaced_tool]
+
+        session = RealtimeSession(mock_model, mock_agent, None)
+
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="lookup_account", call_id="call_reject_namespaced", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+        await session.reject_tool_call(
+            tool_call_event.call_id,
+            always=True,
+            rejection_message="explicit crm rejection",
+        )
+
+        _sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_output == "explicit crm rejection"
+        assert start_response is True
+        assert "crm.lookup_account" in session._context_wrapper._approvals
+        assert "lookup_account" not in session._context_wrapper._approvals
 
     @pytest.mark.asyncio
     async def test_function_tool_exception_handling(
