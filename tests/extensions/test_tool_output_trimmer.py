@@ -68,10 +68,15 @@ class TestDefaults:
         assert trimmer.trimmable_tools == frozenset({"a", "b"})
 
     def test_trimmable_tools_from_list(self) -> None:
-        trimmer = ToolOutputTrimmer(trimmable_tools=["search", "run_code"])  # type: ignore[arg-type]
+        trimmer = ToolOutputTrimmer(trimmable_tools=["search", "run_code"])
         assert isinstance(trimmer.trimmable_tools, frozenset)
         assert "search" in trimmer.trimmable_tools
         assert "run_code" in trimmer.trimmable_tools
+
+    def test_trimmable_tools_from_string(self) -> None:
+        trimmer = ToolOutputTrimmer(trimmable_tools="search")
+        assert isinstance(trimmer.trimmable_tools, frozenset)
+        assert trimmer.trimmable_tools == frozenset({"search"})
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +104,10 @@ class TestValidation:
     def test_preview_chars_zero_allowed(self) -> None:
         trimmer = ToolOutputTrimmer(preview_chars=0)
         assert trimmer.preview_chars == 0
+
+    def test_trimmable_tools_bytes_raises(self) -> None:
+        with pytest.raises(ValueError, match="trimmable_tools must be a string or iterable"):
+            ToolOutputTrimmer(trimmable_tools=b"search")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +240,26 @@ class TestTrimming:
         # search output trimmed
         assert "[Trimmed:" in _output(result, 2)
         # resolve_entity output preserved
+        assert _output(result, 4) == large
+
+    def test_string_trimmable_tools_allowlist_matches_single_tool_name(self) -> None:
+        """A string trimmable_tools value should match one tool name, not characters."""
+        large = "x" * 1000
+        items = [
+            _user("q1"),
+            _func_call("c1", "search"),
+            _func_output("c1", large),
+            _func_call("c2", "s"),
+            _func_output("c2", large),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+        trimmer = ToolOutputTrimmer(trimmable_tools="search")
+        result = trimmer(_make_data(items))
+        assert "[Trimmed:" in _output(result, 2)
         assert _output(result, 4) == large
 
     def test_respects_qualified_tool_names_allowlist(self) -> None:
