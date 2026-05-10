@@ -295,7 +295,10 @@ class OpenAIChatCompletionsModel(Model):
 
             final_response: Response | None = None
             async for chunk in ChatCmplStreamHandler.handle_stream(
-                response, stream, model=self.model
+                response,
+                stream,
+                model=self.model,
+                strict_feature_validation=self._strict_feature_validation,
             ):
                 yield chunk
 
