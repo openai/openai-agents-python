@@ -20,6 +20,7 @@ from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ToolApprovalItem
 from ..logger import logger
+from ..prompts import PromptUtil
 from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, invoke_function_tool
@@ -1131,7 +1132,7 @@ class RealtimeSession(RealtimeModelListener):
         updated_settings = self._base_model_settings.copy()
 
         if agent.prompt is not None:
-            updated_settings["prompt"] = agent.prompt
+            updated_settings["prompt"] = PromptUtil.validate_prompt_config(agent.prompt)
 
         instructions, tools, handoffs = await asyncio.gather(
             agent.get_system_prompt(self._context_wrapper),

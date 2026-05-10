@@ -8,6 +8,7 @@ from openai.types.realtime.realtime_session_create_request import (
 )
 from openai.types.realtime.session_update_event import SessionUpdateEvent
 
+from agents.exceptions import UserError
 from agents.handoffs import Handoff
 from agents.realtime.agent import RealtimeAgent
 from agents.realtime.config import RealtimeRunConfig, RealtimeSessionModelSettings
@@ -71,6 +72,20 @@ async def test_build_model_settings_from_agent_merges_agent_fields(monkeypatch: 
     assert merged["model_name"] == "gpt-realtime-2"
     assert merged["tracing"] is None
     assert base_settings == {"model_name": "gpt-realtime-2"}
+
+
+@pytest.mark.asyncio
+async def test_build_model_settings_from_agent_validates_prompt_config():
+    agent = RealtimeAgent(name="root", prompt={"id": 123})  # type: ignore[arg-type]
+
+    with pytest.raises(UserError, match="id"):
+        await _build_model_settings_from_agent(
+            agent=agent,
+            context_wrapper=RunContextWrapper(None),
+            base_settings={},
+            starting_settings=None,
+            run_config=None,
+        )
 
 
 @pytest.mark.asyncio

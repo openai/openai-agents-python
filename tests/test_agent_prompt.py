@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from openai import omit
 
-from agents import Agent, Prompt, RunConfig, RunContextWrapper, Runner
+from agents import Agent, Prompt, RunConfig, RunContextWrapper, Runner, UserError
 from agents.models.interface import Model, ModelProvider
 from agents.models.openai_responses import OpenAIResponsesModel
 
@@ -81,6 +83,44 @@ async def test_dynamic_prompt_is_resolved_correctly():
     resolved = await agent.get_prompt(context_wrapper)
 
     assert resolved == {"id": "dyn_prompt", "version": "2", "variables": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prompt", "match"),
+    [
+        ({}, "id"),
+        ({"id": ""}, "id"),
+        ({"id": 123}, "id"),
+        ({"id": "pmpt_123", "version": 1}, "version"),
+        ({"id": "pmpt_123", "variables": []}, "variables"),
+    ],
+)
+async def test_static_prompt_validation_rejects_invalid_config(prompt: dict[str, Any], match: str):
+    agent = Agent(name="test", prompt=prompt)  # type: ignore[arg-type]
+
+    with pytest.raises(UserError, match=match):
+        await agent.get_prompt(RunContextWrapper(context=None))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prompt", "match"),
+    [
+        ({}, "id"),
+        ({"id": 123}, "id"),
+        ({"id": "pmpt_123", "version": 1}, "version"),
+        ({"id": "pmpt_123", "variables": []}, "variables"),
+    ],
+)
+async def test_dynamic_prompt_validation_rejects_invalid_config(prompt: dict[str, Any], match: str):
+    def dynamic_prompt_fn(_data):
+        return prompt
+
+    agent = Agent(name="test", prompt=dynamic_prompt_fn)
+
+    with pytest.raises(UserError, match=match):
+        await agent.get_prompt(RunContextWrapper(context=None))
 
 
 @pytest.mark.asyncio

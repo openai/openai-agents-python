@@ -85,7 +85,7 @@ from typing_extensions import NotRequired, TypedDict, assert_never
 from websockets.asyncio.client import ClientConnection
 
 from agents.handoffs import Handoff
-from agents.prompts import Prompt
+from agents.prompts import Prompt, PromptUtil
 from agents.realtime._default_tracker import ModelAudioTracker
 from agents.realtime.audio_formats import to_realtime_audio_format
 from agents.tool import (
@@ -404,7 +404,7 @@ async def _build_model_settings_from_agent(
     updated_settings = base_settings.copy()
 
     if agent.prompt is not None:
-        updated_settings["prompt"] = agent.prompt
+        updated_settings["prompt"] = PromptUtil.validate_prompt_config(agent.prompt)
 
     instructions, tools, handoffs = await asyncio.gather(
         agent.get_system_prompt(context_wrapper),
