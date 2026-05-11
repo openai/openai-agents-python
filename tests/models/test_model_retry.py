@@ -2406,3 +2406,13 @@ def test_default_retry_delay_handles_large_attempt_with_default_multiplier() -> 
         initial_delay=0.25, max_delay=2.0, multiplier=2.0, jitter=False
     )
     assert _default_retry_delay(2000, backoff) == 2.0
+
+
+def test_default_retry_delay_preserves_zero_initial_delay_on_overflow() -> None:
+    # `initial_delay=0` requests immediate retries; an overflow in
+    # `multiplier ** exponent` must not promote that to max_delay.
+    backoff = ModelRetryBackoffSettings(
+        initial_delay=0.0, max_delay=5.0, multiplier=100.0, jitter=False
+    )
+    assert _default_retry_delay(200, backoff) == 0.0
+    assert _default_retry_delay(1, backoff) == 0.0

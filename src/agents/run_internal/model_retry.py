@@ -289,10 +289,15 @@ def _default_retry_delay(
     # the intermediate `multiplier ** exponent` can raise OverflowError even though the
     # result would be immediately capped at max_delay. Short-circuit to max_delay in that
     # case so a high retry count does not surface a crash from the backoff helper itself.
-    try:
-        scaled = initial_delay * (multiplier**exponent)
-    except OverflowError:
-        scaled = max_delay
+    # `initial_delay == 0` is a valid way to request immediate retries; preserve that
+    # rather than substituting `max_delay` on overflow.
+    if initial_delay == 0:
+        scaled = 0.0
+    else:
+        try:
+            scaled = initial_delay * (multiplier**exponent)
+        except OverflowError:
+            scaled = max_delay
     base = min(scaled, max_delay)
     if not use_jitter:
         return base
