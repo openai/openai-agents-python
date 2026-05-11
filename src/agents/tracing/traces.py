@@ -399,7 +399,11 @@ class NoOpTrace(Trace):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.finish(reset_current=exc_type is not GeneratorExit)
+        # Same-task generator close should still reset the context var so the
+        # NoOpTrace doesn't linger as the current trace. Cross-context closes
+        # (different task / event loop) raise ValueError from contextvars,
+        # which the finish() helper swallows below.
+        self.finish(reset_current=True)
 
     def start(self, mark_as_current: bool = False):
         if mark_as_current:
@@ -407,7 +411,14 @@ class NoOpTrace(Trace):
 
     def finish(self, reset_current: bool = False):
         if reset_current and self._prev_context_token is not None:
-            Scope.reset_current_trace(self._prev_context_token)
+            try:
+                Scope.reset_current_trace(self._prev_context_token)
+            except ValueError:
+                # The context token was created in a different Context (e.g.
+                # the trace was entered in another task and the generator is
+                # closing from the parent's context). Skipping reset here is
+                # safe: that other Context owns its own contextvar copy.
+                pass
             self._prev_context_token = None
 
     @property

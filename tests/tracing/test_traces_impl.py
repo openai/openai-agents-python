@@ -1,3 +1,4 @@
+import contextvars
 import logging
 from typing import Any, cast
 
@@ -42,25 +43,39 @@ def test_no_op_trace_double_enter_logs_error(caplog) -> None:
     trace.__exit__(None, None, None)
 
 
-def test_no_op_trace_skips_context_reset_on_generator_exit() -> None:
-    """NoOpTrace must skip context reset on GeneratorExit to match TraceImpl/ReattachedTrace.
+def test_no_op_trace_resets_context_on_same_task_generator_exit() -> None:
+    """NoOpTrace must reset the current trace on a same-task GeneratorExit.
 
-    When async generators are GC'd from a different task, resetting a contextvars
-    token created in another context raises ValueError. All other Trace/Span types
-    already check for GeneratorExit and skip the reset; NoOpTrace must too.
+    A previous version skipped reset unconditionally on GeneratorExit, which
+    handles the cross-task GC case but leaves NoOpTrace as the current trace
+    after a normal same-context generator close, suppressing later tracing.
+    Now the reset is attempted and any ValueError (from a token created in a
+    different Context) is swallowed.
     """
     Scope.set_current_trace(None)
     trace = NoOpTrace()
     trace.__enter__()
-    # The token was set in this context; pretend we're unwinding from a different
-    # async task by stashing the token and checking it isn't consumed on GeneratorExit.
+    assert trace._prev_context_token is not None
+    trace.__exit__(GeneratorExit, GeneratorExit(), None)
+    # Same-task close: reset succeeded, token consumed, current trace cleared.
+    assert trace._prev_context_token is None
+    assert Scope.get_current_trace() is None
+
+
+def test_no_op_trace_swallows_cross_context_reset_error() -> None:
+    """A token created in a different Context raises ValueError on reset; swallow it."""
+    Scope.set_current_trace(None)
+    trace = NoOpTrace()
+
+    other_context = contextvars.copy_context()
+    other_context.run(trace.__enter__)
     token = trace._prev_context_token
     assert token is not None
+
+    # Resetting from our context (not the one that set it) raises ValueError;
+    # the helper must swallow that and clear the stored token.
     trace.__exit__(GeneratorExit, GeneratorExit(), None)
-    # Token must remain (reset skipped) so the original context owner can reset it.
-    assert trace._prev_context_token is token
-    # Cleanup so subsequent tests have a clean scope.
-    Scope.reset_current_trace(token)
+    assert trace._prev_context_token is None
 
 
 def test_trace_impl_lifecycle_sets_scope() -> None:
