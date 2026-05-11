@@ -63,7 +63,7 @@ _DRIVER_INFO = DriverInfo(name="openai-agents", version=_VERSION)
 
 
 class MongoDBSession(SessionABC):
-    """MongoDB implementation of :pyclass:`agents.memory.session.Session`.
+    """MongoDB implementation of :class:`agents.memory.session.Session`.
 
     Conversation items are stored as individual documents in a ``messages``
     collection.  A lightweight ``sessions`` collection tracks metadata
