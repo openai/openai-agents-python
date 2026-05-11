@@ -322,6 +322,110 @@ async def test_get_response_rejects_prompt_in_strict_mode(monkeypatch) -> None:
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_get_response_rejects_non_text_tool_output_in_strict_mode() -> None:
+    class DummyCompletions:
+        async def create(self, **kwargs: Any) -> Any:
+            raise AssertionError("chat.completions.create should not run")
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self.chat = type("_Chat", (), {"completions": DummyCompletions()})()
+            self.base_url = httpx.URL("http://fake")
+
+    model = OpenAIChatCompletionsModel(
+        model="gpt-4",
+        openai_client=DummyClient(),  # type: ignore[arg-type]
+        strict_feature_validation=True,
+    )
+
+    with pytest.raises(UserError, match="cannot be empty or contain only non-text content"):
+        await model.get_response(
+            system_instructions=None,
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_image",
+                    "output": [
+                        {
+                            "type": "input_image",
+                            "image_url": "https://example.com/image.png",
+                        }
+                    ],
+                }
+            ],
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_warns_and_sends_placeholder_for_non_text_tool_output(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class DummyCompletions:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] = {}
+
+        async def create(self, **kwargs: Any) -> Any:
+            self.kwargs = kwargs
+            return _minimal_chat_completion()
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self.completions = DummyCompletions()
+            self.chat = type("_Chat", (), {"completions": self.completions})()
+            self.base_url = httpx.URL("http://fake")
+
+    client = DummyClient()
+    model = OpenAIChatCompletionsModel(
+        model="gpt-4",
+        openai_client=client,  # type: ignore[arg-type]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        await model.get_response(
+            system_instructions=None,
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_image",
+                    "output": [
+                        {
+                            "type": "input_image",
+                            "image_url": "https://example.com/image.png",
+                        }
+                    ],
+                }
+            ],
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+
+    assert client.completions.kwargs["messages"] == [
+        {
+            "role": "tool",
+            "tool_call_id": "call_image",
+            "content": "[tool output omitted]",
+        }
+    ]
+    assert "Replacing the tool output with a placeholder" in caplog.text
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_get_response_attaches_logprobs(monkeypatch) -> None:
     msg = ChatCompletionMessage(role="assistant", content="Hi!")
     choice = Choice(
