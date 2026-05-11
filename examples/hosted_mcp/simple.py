@@ -11,14 +11,14 @@ async def main(verbose: bool, stream: bool, repo: str):
     question = f"Which language is the repository {repo} written in?"
     agent = Agent(
         name="Assistant",
-        instructions=f"You can use the hosted MCP server to inspect {repo}.",
+        instructions=f"You can use the DeepWiki hosted MCP server to inspect {repo}.",
         model_settings=ModelSettings(tool_choice="required"),
         tools=[
             HostedMCPTool(
                 tool_config={
                     "type": "mcp",
-                    "server_label": "gitmcp",
-                    "server_url": "https://gitmcp.io/openai/codex",
+                    "server_label": "deepwiki",
+                    "server_url": "https://mcp.deepwiki.com/mcp",
                     "require_approval": "never",
                 }
             )
@@ -35,7 +35,7 @@ async def main(verbose: bool, stream: bool, repo: str):
     else:
         run_result = await Runner.run(agent, question)
         print(run_result.final_output)
-        # The repository is primarily written in multiple languages, including Rust and TypeScript...
+        # The repository is primarily written in Python...
 
     if verbose:
         for item in run_result.new_items:
@@ -49,7 +49,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--repo",
         default="https://github.com/openai/openai-agents-python",
-        help="Repository URL or slug that the Git MCP server should use.",
+        help="Repository URL or slug that the DeepWiki MCP server should use.",
     )
     args = parser.parse_args()
 

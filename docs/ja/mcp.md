@@ -83,19 +83,23 @@ from agents import Agent, HostedMCPTool, Runner
 async def main() -> None:
     agent = Agent(
         name="Assistant",
+        instructions="Use the DeepWiki hosted MCP server to inspect openai/openai-agents-python.",
         tools=[
             HostedMCPTool(
                 tool_config={
                     "type": "mcp",
-                    "server_label": "gitmcp",
-                    "server_url": "https://gitmcp.io/openai/codex",
+                    "server_label": "deepwiki",
+                    "server_url": "https://mcp.deepwiki.com/mcp",
                     "require_approval": "never",
                 }
             )
         ],
     )
 
-    result = await Runner.run(agent, "Which language is this repository written in?")
+    result = await Runner.run(
+        agent,
+        "Which language is the repository openai/openai-agents-python written in?",
+    )
     print(result.final_output)
 
 asyncio.run(main())
@@ -124,7 +128,7 @@ print(result.final_output)
 ```python
 from agents import MCPToolApprovalFunctionResult, MCPToolApprovalRequest
 
-SAFE_TOOLS = {"read_project_metadata"}
+SAFE_TOOLS = {"read_wiki_structure", "read_wiki_contents", "ask_question"}
 
 def approve_tool(request: MCPToolApprovalRequest) -> MCPToolApprovalFunctionResult:
     if request.data.name in SAFE_TOOLS:
@@ -137,8 +141,8 @@ agent = Agent(
         HostedMCPTool(
             tool_config={
                 "type": "mcp",
-                "server_label": "gitmcp",
-                "server_url": "https://gitmcp.io/openai/codex",
+                "server_label": "deepwiki",
+                "server_url": "https://mcp.deepwiki.com/mcp",
                 "require_approval": "always",
             },
             on_approval_request=approve_tool,

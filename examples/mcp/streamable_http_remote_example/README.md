@@ -1,8 +1,8 @@
 # MCP Streamable HTTP Remote Example
 
-Python port of the JS `examples/mcp/streamable-http-example.ts`. It connects to a
-remote MCP server over the Streamable HTTP transport (`https://gitmcp.io/openai/codex`)
-and lets the agent use those tools.
+Python port of the JS `examples/mcp/streamable-http-example.ts`. It connects to
+DeepWiki over the Streamable HTTP transport (`https://mcp.deepwiki.com/mcp`) and
+lets the agent use those tools.
 
 Run it with:
 
