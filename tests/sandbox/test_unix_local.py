@@ -268,9 +268,7 @@ class TestUnixLocalExecTimeoutCleanup:
         captured: list[asyncio.subprocess.Process] = []
         original_create = asyncio.create_subprocess_exec
 
-        async def _capture_create(
-            *args: Any, **kwargs: Any
-        ) -> asyncio.subprocess.Process:
+        async def _capture_create(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
             proc = await original_create(*args, **kwargs)
             captured.append(proc)
             return proc
@@ -305,9 +303,7 @@ class TestUnixLocalExecTimeoutCleanup:
 
         original_wait_for = asyncio.wait_for
 
-        async def _wait_for_with_simulated_exit(
-            awaitable: Any, timeout: float | None
-        ) -> Any:
+        async def _wait_for_with_simulated_exit(awaitable: Any, timeout: float | None) -> Any:
             # First call (proc.communicate) — race the timeout: let the
             # subprocess exit naturally and *then* surface a TimeoutError.
             # Use asyncio.TimeoutError explicitly: on Python 3.10 it is a
