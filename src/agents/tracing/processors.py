@@ -73,6 +73,7 @@ class BackendSpanExporter(TracingExporter):
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.max_delay = max_delay
+        self._shutdown_event = threading.Event()
 
         # Keep a client open for connection pooling across multiple export calls
         self._client = httpx.Client(timeout=httpx.Timeout(timeout=60, connect=5.0))
@@ -213,8 +214,12 @@ class BackendSpanExporter(TracingExporter):
 
     def _sleep_before_retry(self, sleep_time: float, deadline: float | None) -> bool:
         if deadline is None:
-            time.sleep(sleep_time)
-            return True
+            if self._shutdown_event.wait(sleep_time):
+                logger.warning(
+                    "[non-fatal] Tracing: shutdown requested during retry backoff, giving up."
+                )
+                return False
+            return not self._shutdown_event.is_set()
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -510,6 +515,9 @@ class BackendSpanExporter(TracingExporter):
         """Close the underlying HTTP client."""
         self._client.close()
 
+    def _request_shutdown(self) -> None:
+        self._shutdown_event.set()
+
 
 class BatchTraceProcessor(TracingProcessor):
     """Some implementation notes:
@@ -598,6 +606,11 @@ class BatchTraceProcessor(TracingProcessor):
         Called when the application stops. We signal our thread to stop, then join it.
         """
         self._shutdown_event.set()
+        if timeout is not None:
+            request_exporter_shutdown = getattr(self._exporter, "_request_shutdown", None)
+            if callable(request_exporter_shutdown):
+                request_exporter_shutdown()
+
         deadline = None if timeout is None else time.monotonic() + timeout
         self._shutdown_deadline = deadline
 
