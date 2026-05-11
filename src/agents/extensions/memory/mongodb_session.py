@@ -63,7 +63,7 @@ _DRIVER_INFO = DriverInfo(name="openai-agents", version=_VERSION)
 
 
 class MongoDBSession(SessionABC):
-    """MongoDB implementation of :pyclass:`agents.memory.session.Session`.
+    """MongoDB implementation of [`Session`][agents.memory.session.Session].
 
     Conversation items are stored as individual documents in a ``messages``
     collection.  A lightweight ``sessions`` collection tracks metadata
@@ -120,7 +120,7 @@ class MongoDBSession(SessionABC):
             messages_collection: Name of the collection that stores individual
                 conversation items. Defaults to ``"agent_messages"``.
             session_settings: Optional session configuration. When ``None`` a
-                default :class:`~agents.memory.session_settings.SessionSettings`
+                default [`SessionSettings`][agents.memory.session_settings.SessionSettings]
                 is used (no item limit).
         """
         self.session_id = session_id
@@ -161,14 +161,15 @@ class MongoDBSession(SessionABC):
                 ``"mongodb+srv://user:pass@cluster.example.com"``.
             database: Name of the MongoDB database to use.
             client_kwargs: Additional keyword arguments forwarded to
-                :class:`pymongo.asynchronous.mongo_client.AsyncMongoClient`.
+                `pymongo.asynchronous.mongo_client.AsyncMongoClient`.
             session_settings: Optional session configuration settings.
             **kwargs: Additional keyword arguments forwarded to the main
                 constructor (e.g. ``sessions_collection``,
                 ``messages_collection``).
 
         Returns:
-            A :class:`MongoDBSession` connected to the specified MongoDB server.
+            A [`MongoDBSession`][agents.extensions.memory.mongodb_session.MongoDBSession]
+                connected to the specified MongoDB server.
         """
         client_kwargs = client_kwargs or {}
         client_kwargs.setdefault("driver", _DRIVER_INFO)
