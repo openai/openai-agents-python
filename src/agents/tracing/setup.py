@@ -43,11 +43,14 @@ def set_trace_provider(provider: TraceProvider) -> None:
             atexit.register(_shutdown_global_trace_provider)
             _SHUTDOWN_HANDLER_REGISTERED = True
 
-    if previous is not None and previous is not provider:
-        try:
-            previous.shutdown()
-        except Exception as exc:
-            logger.error(f"Error shutting down previous trace provider: {exc}")
+        # Shut down inside the lock so a concurrent `set_trace_provider(previous)`
+        # cannot reinstall `previous` between releasing the lock and the shutdown
+        # call, which would close the processors of the now-active provider.
+        if previous is not None and previous is not provider:
+            try:
+                previous.shutdown()
+            except Exception as exc:
+                logger.error(f"Error shutting down previous trace provider: {exc}")
 
 
 def get_trace_provider() -> TraceProvider:
