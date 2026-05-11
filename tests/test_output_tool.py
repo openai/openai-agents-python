@@ -1,5 +1,5 @@
 import json
-from typing import Any
+from typing import Any, Literal, cast
 
 import pytest
 from pydantic import BaseModel
@@ -75,6 +75,18 @@ def test_structured_output_list():
     json_str = json.dumps({_WRAPPER_DICT_KEY: ["foo", "bar"]})
     validated = output_schema.validate_json(json_str)
     assert validated == ["foo", "bar"]
+
+
+def test_structured_output_literal_name_handles_literal_values():
+    output_schema = AgentOutputSchema(output_type=cast(type[Any], Literal["ok"]))
+
+    assert output_schema.name() == "Literal['ok']"
+
+
+def test_structured_output_nested_literal_name_handles_literal_values():
+    output_schema = AgentOutputSchema(output_type=list[Literal["ok", "done"]])
+
+    assert output_schema.name() == "list[Literal['ok', 'done']]"
 
 
 def test_structured_output_generic_dict_is_not_wrapped():
