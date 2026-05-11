@@ -2797,6 +2797,154 @@ async def test_save_result_to_session_omits_reasoning_ids_when_policy_is_omit() 
 
 
 @pytest.mark.asyncio
+async def test_save_result_to_openai_conversation_preserves_reasoning_id_when_policy_is_omit() -> (
+    None
+):
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    agent = Agent(name="agent", model=FakeModel())
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    run_state.set_reasoning_item_id_policy("omit")
+
+    reasoning_item = ReasoningItem(
+        agent=agent,
+        raw_item=ResponseReasoningItem(
+            type="reasoning",
+            id="rs_openai_conversation",
+            summary=[Summary(text="thinking", type="summary_text")],
+        ),
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [reasoning_item]),
+        run_state,
+    )
+
+    assert saved_count == 1
+    assert run_state._current_turn_persisted_item_count == 1
+    assert len(session.saved_items) == 1
+    saved_reasoning = cast(dict[str, Any], session.saved_items[0])
+    assert saved_reasoning.get("type") == "reasoning"
+    assert saved_reasoning.get("id") == "rs_openai_conversation"
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_openai_conversation_drops_unpersistable_reasoning_item() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    agent = Agent(name="agent", model=FakeModel())
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    malformed_reasoning = _DummyRunItem(
+        {"type": "reasoning", "summary": [], "content": []},
+        "reasoning_item",
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [malformed_reasoning]),
+        run_state,
+    )
+
+    assert saved_count == 1
+    assert run_state._current_turn_persisted_item_count == 1
+    assert session.saved_items == []
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_openai_conversation_keeps_reasoning_encrypted_content() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    encrypted_reasoning = _DummyRunItem(
+        {
+            "type": "reasoning",
+            "summary": [],
+            "content": [],
+            "encrypted_content": "encrypted",
+        },
+        "reasoning_item",
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [encrypted_reasoning]),
+        None,
+    )
+
+    assert saved_count == 1
+    assert len(session.saved_items) == 1
+    saved_reasoning = cast(dict[str, Any], session.saved_items[0])
+    assert saved_reasoning["encrypted_content"] == "encrypted"
+
+
+@pytest.mark.asyncio
 async def test_save_result_to_session_keeps_tool_call_payload_api_safe() -> None:
     session = SimpleListSession()
     agent = Agent(name="agent", model=FakeModel())

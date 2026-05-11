@@ -289,19 +289,22 @@ async def save_result_to_session(
             ]
         )
 
+    is_openai_conversation_session = isinstance(session, OpenAIConversationsSession)
     resolved_reasoning_item_id_policy = (
         reasoning_item_id_policy
         if reasoning_item_id_policy is not None
         else (run_state._reasoning_item_id_policy if run_state is not None else None)
     )
+    persistence_reasoning_item_id_policy = (
+        None if is_openai_conversation_session else resolved_reasoning_item_id_policy
+    )
     new_items_as_input: list[TResponseInputItem] = []
     for run_item in new_run_items:
-        converted = run_item_to_input_item(run_item, resolved_reasoning_item_id_policy)
+        converted = run_item_to_input_item(run_item, persistence_reasoning_item_id_policy)
         if converted is None:
             continue
         new_items_as_input.append(ensure_input_item_format(converted))
 
-    is_openai_conversation_session = isinstance(session, OpenAIConversationsSession)
     ignore_ids_for_matching = _ignore_ids_for_matching(session)
 
     new_items_for_fingerprint = (
@@ -332,6 +335,11 @@ async def save_result_to_session(
         if serialized_to_save_counts.get(serialized, 0) > 0:
             serialized_to_save_counts[serialized] -= 1
             saved_run_items_count += 1
+
+    if is_openai_conversation_session:
+        items_to_save = [
+            item for item in items_to_save if not _is_unpersistable_for_openai_conversation(item)
+        ]
 
     if len(items_to_save) == 0:
         if run_state:
@@ -582,12 +590,15 @@ def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInp
     """Remove provider-specific fields before fingerprinting or persistence.
 
     Some Responses input item types require their server-assigned ``id`` when they are
-    persisted through the Conversations API. Other item IDs remain stripped so replayed
-    messages, reasoning items, and function calls do not carry stale provider IDs.
+    persisted through the Conversations API. Reasoning items also need their server
+    identity or encrypted content to remain persistable. Other item IDs remain stripped
+    so replayed messages, function calls, and tool outputs do not carry stale provider IDs.
     """
     if isinstance(item, dict):
         clean_item = cast(dict[str, Any], strip_internal_input_item_metadata(item))
-        if not _openai_conversation_item_requires_id(clean_item):
+        if clean_item.get("type") != "reasoning" and not _openai_conversation_item_requires_id(
+            clean_item
+        ):
             clean_item.pop("id", None)
         clean_item.pop("provider_data", None)
         return cast(TResponseInputItem, clean_item)
@@ -597,6 +608,13 @@ def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInp
 def _openai_conversation_item_requires_id(item: dict[str, Any]) -> bool:
     """Return whether the Conversations create-item schema requires this item's top-level ID."""
     return item.get("type") in _OPENAI_CONVERSATION_ITEM_TYPES_WITH_REQUIRED_ID
+
+
+def _is_unpersistable_for_openai_conversation(item: TResponseInputItem) -> bool:
+    """Return whether the item should be counted but not sent to Conversations."""
+    if not isinstance(item, dict) or item.get("type") != "reasoning":
+        return False
+    return not item.get("id") and not item.get("encrypted_content")
 
 
 def _sanitize_openai_conversation_history_items_for_model_input(
