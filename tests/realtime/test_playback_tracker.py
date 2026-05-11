@@ -229,3 +229,12 @@ class TestPlaybackTracker:
         assert calculate_audio_length_ms("audio/pcma", audio_bytes) == pytest.approx(
             expected_g711, rel=0, abs=1e-6
         )
+
+        # AudioPCMU/AudioPCMA have an Optional `type` field that defaults to None.
+        # The typed-model match must classify them as G.711 even without `type` set.
+        assert calculate_audio_length_ms(AudioPCMU(), audio_bytes) == pytest.approx(
+            expected_g711, rel=0, abs=1e-6
+        )
+        assert calculate_audio_length_ms(AudioPCMA(), audio_bytes) == pytest.approx(
+            expected_g711, rel=0, abs=1e-6
+        )
