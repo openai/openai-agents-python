@@ -80,6 +80,52 @@ def create_mock_run_result(usage: Usage | None = None, agent: Agent | None = Non
     )
 
 
+class FailingOnceStructureMetadataSession(AdvancedSQLiteSession):
+    """Advanced session test double that fails the next structure metadata write."""
+
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.fail_structure_metadata_once = True
+
+    def _insert_structure_metadata(
+        self,
+        conn: Any,
+        items: list[TResponseInputItem],
+    ) -> None:
+        if self.fail_structure_metadata_once:
+            self.fail_structure_metadata_once = False
+            raise RuntimeError("structure metadata failed")
+        super()._insert_structure_metadata(conn, items)
+
+
+class PartiallyFailingStructureMetadataSession(AdvancedSQLiteSession):
+    """Advanced session test double that fails after writing one structure row."""
+
+    def _insert_structure_metadata(
+        self,
+        conn: Any,
+        items: list[TResponseInputItem],
+    ) -> None:
+        cursor = conn.execute(
+            f"SELECT id FROM {self.messages_table} WHERE session_id = ? ORDER BY id ASC LIMIT 1",
+            (self.session_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("no inserted message id found")
+
+        conn.execute(
+            """
+            INSERT INTO message_structure
+            (session_id, message_id, branch_id, message_type, sequence_number,
+             user_turn_number, branch_turn_number, tool_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (self.session_id, row[0], self._current_branch_id, "user", 1, 1, 1, None),
+        )
+        raise RuntimeError("structure metadata failed after partial write")
+
+
 async def test_advanced_session_basic_functionality(agent: Agent):
     """Test basic AdvancedSQLiteSession functionality."""
     session_id = "advanced_test"
@@ -145,6 +191,133 @@ async def test_advanced_session_respects_custom_table_names():
     assert await session.get_items(branch_id="main") == items
 
     session.close()
+
+
+async def test_add_items_rolls_back_messages_when_structure_metadata_fails():
+    """Failed structure metadata writes should not leave invisible message rows."""
+    session = FailingOnceStructureMetadataSession(
+        session_id="advanced_add_items_rollback",
+        create_tables=True,
+    )
+    items: list[TResponseInputItem] = [{"role": "user", "content": "not saved"}]
+
+    try:
+        with pytest.raises(RuntimeError, match="structure metadata failed"):
+            await session.add_items(items)
+
+        assert await session.get_items() == []
+
+        with session._locked_connection() as conn:
+            message_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+            structure_count = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+
+        assert message_count == 0
+        assert structure_count == 0
+    finally:
+        session.close()
+
+
+async def test_add_items_can_retry_after_structure_metadata_failure():
+    """Retrying after a metadata failure should persist the batch exactly once."""
+    session = FailingOnceStructureMetadataSession(
+        session_id="advanced_add_items_retry",
+        create_tables=True,
+    )
+    items: list[TResponseInputItem] = [{"role": "user", "content": "saved once"}]
+
+    try:
+        with pytest.raises(RuntimeError, match="structure metadata failed"):
+            await session.add_items(items)
+
+        await session.add_items(items)
+
+        assert await session.get_items() == items
+
+        with session._locked_connection() as conn:
+            message_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+            structure_count = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+
+        assert message_count == 1
+        assert structure_count == 1
+    finally:
+        session.close()
+
+
+async def test_add_items_failure_preserves_existing_history():
+    """A failed batch should not roll back or hide previously committed messages."""
+    session = FailingOnceStructureMetadataSession(
+        session_id="advanced_add_items_existing_history",
+        create_tables=True,
+    )
+    existing_items: list[TResponseInputItem] = [{"role": "user", "content": "already saved"}]
+    failed_items: list[TResponseInputItem] = [{"role": "assistant", "content": "not saved"}]
+
+    try:
+        session.fail_structure_metadata_once = False
+        await session.add_items(existing_items)
+
+        session.fail_structure_metadata_once = True
+        with pytest.raises(RuntimeError, match="structure metadata failed"):
+            await session.add_items(failed_items)
+
+        assert await session.get_items() == existing_items
+
+        with session._locked_connection() as conn:
+            message_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+            structure_count = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+
+        assert message_count == 1
+        assert structure_count == 1
+    finally:
+        session.close()
+
+
+async def test_add_items_rolls_back_partial_structure_metadata_write():
+    """Partial metadata writes should roll back with the message rows in the same batch."""
+    session = PartiallyFailingStructureMetadataSession(
+        session_id="advanced_add_items_partial_metadata",
+        create_tables=True,
+    )
+    items: list[TResponseInputItem] = [{"role": "user", "content": "not saved"}]
+
+    try:
+        with pytest.raises(RuntimeError, match="structure metadata failed after partial write"):
+            await session.add_items(items)
+
+        assert await session.get_items() == []
+
+        with session._locked_connection() as conn:
+            message_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+            structure_count = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+
+        assert message_count == 0
+        assert structure_count == 0
+    finally:
+        session.close()
 
 
 async def test_message_structure_tracking(agent: Agent):
