@@ -257,10 +257,14 @@ def _describe_json_schema_field(
 
 
 def _describe_nullable_anyof(any_of: Any) -> str | None:
-    """Render a 2-branch `anyOf` of a simple type and `null` as `T | null`."""
+    """Render a 2-branch `anyOf` of a simple type and `null` as `T | null`.
+
+    Also handles `Optional[Literal[...]]`, which Pydantic emits as an `enum`/`const`
+    branch (possibly with `type: "string"`) plus a `null` branch.
+    """
     if not isinstance(any_of, list) or len(any_of) != 2:
         return None
-    base_type: str | None = None
+    base_label: str | None = None
     has_null = False
     for entry in any_of:
         if not isinstance(entry, dict):
@@ -269,13 +273,23 @@ def _describe_nullable_anyof(any_of: Any) -> str | None:
         if entry_type == "null":
             has_null = True
             continue
-        if entry_type in _SIMPLE_JSON_SCHEMA_TYPES and base_type is None:
-            base_type = cast(str, entry_type)
+        if base_label is not None:
+            return None
+        # Prefer `enum`/`const` over a bare `type` so `Optional[Literal[...]]`
+        # surfaces the allowed values rather than just e.g. `string | null`.
+        if isinstance(entry.get("enum"), list):
+            base_label = _format_enum_label(entry.get("enum"))
+            continue
+        if "const" in entry:
+            base_label = _format_literal_label(entry)
+            continue
+        if entry_type in _SIMPLE_JSON_SCHEMA_TYPES:
+            base_label = cast(str, entry_type)
             continue
         return None
-    if base_type is None or not has_null:
+    if base_label is None or not has_null:
         return None
-    return f"{base_type} | null"
+    return f"{base_label} | null"
 
 
 def _read_schema_description(value: Any) -> str | None:

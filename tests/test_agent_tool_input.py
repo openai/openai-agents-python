@@ -160,3 +160,33 @@ def test_schema_summary_handles_pydantic_optional_anyof() -> None:
         )
         is None
     )
+
+
+def test_schema_summary_preserves_enum_const_in_nullable_anyof() -> None:
+    # Pydantic renders `Optional[Literal["a", "b"]]` as an anyOf branch carrying
+    # both an `enum` (with `type: "string"`) and a `null` branch. Surface the
+    # allowed values rather than collapsing to `string | null`.
+    schema = {
+        "type": "object",
+        "properties": {
+            "color": {
+                "anyOf": [
+                    {"enum": ["red", "blue"], "type": "string"},
+                    {"type": "null"},
+                ],
+                "description": "Pick a color.",
+            },
+            "tag": {
+                "anyOf": [
+                    {"const": "x", "type": "string"},
+                    {"type": "null"},
+                ],
+                "description": "A tag.",
+            },
+        },
+        "required": ["color", "tag"],
+    }
+    summary = _build_schema_summary(schema)
+    assert summary is not None
+    assert '- color (enum("red" | "blue") | null, required) - Pick a color.' in summary
+    assert '- tag (literal("x") | null, required) - A tag.' in summary
