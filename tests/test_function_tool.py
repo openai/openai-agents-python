@@ -870,6 +870,32 @@ async def test_default_error_function_treats_non_object_input_as_json_error(
 
 
 @pytest.mark.asyncio
+async def test_default_error_function_does_not_route_schema_validation_as_json_error() -> None:
+    # Schema validation errors share the `Invalid JSON input for tool` prefix
+    # but should continue to flow through the generic error path, not the
+    # "An error occurred while parsing tool arguments" path used for malformed
+    # JSON / non-object inputs.
+    def echo(value: str) -> str:
+        return value
+
+    tool = function_tool(echo, name_override="echo_tool")
+
+    result = await tool.on_invoke_tool(
+        ToolContext(
+            None,
+            tool_name="echo_tool",
+            tool_call_id="1",
+            tool_arguments='{"value": 123}',
+        ),
+        '{"wrong_field": "x"}',
+    )
+
+    assert isinstance(result, str)
+    assert "Invalid JSON input for tool" in result
+    assert not result.startswith("An error occurred while parsing tool arguments.")
+
+
+@pytest.mark.asyncio
 async def test_default_failure_error_function_survives_deepcopy() -> None:
     def boom() -> None:
         raise RuntimeError("kapow")

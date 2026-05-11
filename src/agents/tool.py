@@ -1394,9 +1394,17 @@ def _extract_tool_argument_json_error(error: Exception) -> json.JSONDecodeError 
 
 
 def _is_tool_argument_input_error(error: Exception) -> bool:
-    """Return True when an error represents an invalid-JSON-input failure for a function tool."""
-    return isinstance(error, ModelBehaviorError) and str(error).startswith(
-        "Invalid JSON input for tool"
+    """Return True when an error represents a non-object JSON input for a function tool.
+
+    Only the non-object case is matched here: schema validation failures share the
+    `Invalid JSON input for tool` prefix and should continue to flow through the
+    regular validation path rather than be reported as JSON parse errors.
+    """
+    if not isinstance(error, ModelBehaviorError):
+        return False
+    text = str(error)
+    return text.startswith("Invalid JSON input for tool") and text.endswith(
+        "expected a JSON object"
     )
 
 
