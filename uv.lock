@@ -2547,6 +2547,18 @@ dev = [
     { name = "types-pynput" },
     { name = "websockets" },
 ]
+typecheck = [
+    { name = "aiosqlite" },
+    { name = "fakeredis" },
+    { name = "fastapi" },
+    { name = "inline-snapshot" },
+    { name = "mypy" },
+    { name = "playwright" },
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "sounddevice" },
+    { name = "testcontainers" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -2620,6 +2632,18 @@ dev = [
     { name = "textual" },
     { name = "types-pynput" },
     { name = "websockets" },
+]
+typecheck = [
+    { name = "aiosqlite", specifier = ">=0.21.0" },
+    { name = "fakeredis", specifier = ">=2.31.3" },
+    { name = "fastapi", specifier = ">=0.110.0,<1" },
+    { name = "inline-snapshot", specifier = ">=0.20.7" },
+    { name = "mypy" },
+    { name = "playwright", specifier = "==1.50.0" },
+    { name = "pyright", specifier = "==1.1.408" },
+    { name = "pytest" },
+    { name = "sounddevice" },
+    { name = "testcontainers", specifier = "==4.12.0" },
 ]
 
 [[package]]

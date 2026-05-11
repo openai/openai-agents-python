@@ -55,12 +55,12 @@ jobs:
         with:
           version: "0.11.7"
           enable-cache: true
-      - name: Install dependencies
+      - name: Install typecheck dependencies
         if: steps.changes.outputs.run == 'true'
-        run: make sync
+        run: make sync-typecheck
       - name: Run typecheck
         if: steps.changes.outputs.run == 'true'
-        run: make typecheck
+        run: make typecheck-no-sync
       - name: Skip typecheck
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping typecheck for non-code changes."

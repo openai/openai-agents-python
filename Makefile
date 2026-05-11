@@ -1,6 +1,12 @@
 .PHONY: sync
+UV_RUN ?= uv run
+
 sync:
 	uv sync --all-extras --all-packages --group dev
+
+.PHONY: sync-typecheck
+sync-typecheck:
+	uv sync --all-extras --no-default-groups --group typecheck
 
 .PHONY: format
 format: 
@@ -17,11 +23,11 @@ lint:
 
 .PHONY: mypy
 mypy: 
-	uv run mypy . --exclude site
+	$(UV_RUN) mypy . --exclude site
 
 .PHONY: pyright
 pyright:
-	uv run pyright --project pyrightconfig.json
+	$(UV_RUN) pyright --project pyrightconfig.json
 
 .PHONY: typecheck
 typecheck:
@@ -35,6 +41,10 @@ typecheck:
 	wait $$mypy_pid; \
 	wait $$pyright_pid; \
 	trap - EXIT
+
+.PHONY: typecheck-no-sync
+typecheck-no-sync:
+	$(MAKE) typecheck UV_RUN='uv run --no-sync'
 
 .PHONY: tests
 tests: tests-parallel tests-serial

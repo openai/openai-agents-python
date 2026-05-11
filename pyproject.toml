@@ -60,6 +60,18 @@ temporal = [
 ]
 
 [dependency-groups]
+typecheck = [
+  "mypy",
+  "pyright==1.1.408",
+  "pytest",
+  "fastapi >= 0.110.0, <1",
+  "aiosqlite>=0.21.0",
+  "fakeredis>=2.31.3",
+  "testcontainers==4.12.0",
+  "playwright==1.50.0",
+  "inline-snapshot>=0.20.7",
+  "sounddevice",
+]
 dev = [
   "mypy",
   "ruff==0.9.2",
