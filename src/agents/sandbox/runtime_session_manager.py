@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Generic, cast
 
 from ..agent import Agent
-from ..run_config import SandboxConcurrencyLimits, SandboxRunConfig
+from ..run_config import SandboxArchiveLimits, SandboxConcurrencyLimits, SandboxRunConfig
 from ..run_context import TContext
 from ..run_state import (
     RunState,
@@ -286,10 +286,12 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
     ) -> _SandboxSessionResources:
         sandbox_config = self._require_sandbox_config()
         concurrency_limits = self._resolve_concurrency_limits()
+        archive_limits = self._resolve_archive_limits()
         if sandbox_config.session is not None:
-            self._configure_session_materialization(
+            self._configure_session(
                 sandbox_config.session,
                 concurrency_limits=concurrency_limits,
+                archive_limits=archive_limits,
             )
             running = await sandbox_config.session.running()
             manifest_update = self._process_live_session_manifest(
@@ -341,9 +343,10 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             )
             with span_cm:
                 resumed_session = await client.resume(explicit_state)
-            self._configure_session_materialization(
+            self._configure_session(
                 resumed_session,
                 concurrency_limits=concurrency_limits,
+                archive_limits=archive_limits,
             )
             return _SandboxSessionResources(
                 session=resumed_session,
@@ -383,9 +386,10 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                 manifest=effective_manifest,
                 options=options,
             )
-        self._configure_session_materialization(
+        self._configure_session(
             session,
             concurrency_limits=concurrency_limits,
+            archive_limits=archive_limits,
         )
         self._ensure_session_manifest_has_run_as_user(session=session, agent=agent)
         return _SandboxSessionResources(session=session, client=client, owns_session=True)
@@ -396,13 +400,22 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         limits.validate()
         return limits
 
-    def _configure_session_materialization(
+    def _resolve_archive_limits(self) -> SandboxArchiveLimits | None:
+        sandbox_config = self._require_sandbox_config()
+        limits = sandbox_config.archive_limits
+        if limits is not None:
+            limits.validate()
+        return limits
+
+    def _configure_session(
         self,
         session: BaseSandboxSession,
         *,
         concurrency_limits: SandboxConcurrencyLimits,
+        archive_limits: SandboxArchiveLimits | None,
     ) -> None:
         session._set_concurrency_limits(concurrency_limits)
+        session._set_archive_limits(archive_limits)
 
     def _resume_state_payload_for_agent(
         self,

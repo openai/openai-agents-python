@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .provider import TraceProvider
 
+_DEFAULT_SHUTDOWN_TIMEOUT = 5.0
 GLOBAL_TRACE_PROVIDER: TraceProvider | None = None
 _GLOBAL_TRACE_PROVIDER_LOCK = threading.Lock()
 _SHUTDOWN_HANDLER_REGISTERED = False
@@ -15,6 +16,11 @@ _SHUTDOWN_HANDLER_REGISTERED = False
 def _shutdown_global_trace_provider() -> None:
     provider = GLOBAL_TRACE_PROVIDER
     if provider is not None:
+        from .provider import DefaultTraceProvider
+
+        if isinstance(provider, DefaultTraceProvider):
+            provider.shutdown(timeout=_DEFAULT_SHUTDOWN_TIMEOUT)
+            return
         provider.shutdown()
 
 

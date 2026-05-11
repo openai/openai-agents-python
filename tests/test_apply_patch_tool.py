@@ -386,3 +386,53 @@ async def test_apply_patch_tool_on_approval_callback_auto_rejects() -> None:
     assert isinstance(result, ToolCallOutputItem)
     assert HITL_REJECTION_MSG in result.output
     assert len(editor.operations) == 0  # Should not have executed
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_failed_status_not_overwritten_by_later_completed_op() -> None:
+    """If any operation reports `failed`, the overall apply_patch status must remain `failed`,
+    even when subsequent operations succeed."""
+
+    class MixedStatusEditor(RecordingEditor):
+        def update_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
+            self.operations.append(operation)
+            return ApplyPatchResult(status="failed", output=f"Failed {operation.path}")
+
+        def create_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
+            self.operations.append(operation)
+            return ApplyPatchResult(status="completed", output=f"Created {operation.path}")
+
+    @dataclass
+    class MultiOpCall:
+        type: str
+        call_id: str
+        operations: list[dict[str, Any]]
+
+    editor = MixedStatusEditor()
+    tool = ApplyPatchTool(editor=editor)
+    multi_call = MultiOpCall(
+        type="apply_patch_call",
+        call_id="call_multi",
+        operations=[
+            {"type": "update_file", "path": "a.md", "diff": "-x\n+y\n"},
+            {"type": "create_file", "path": "b.md", "diff": "+hi\n"},
+        ],
+    )
+    agent = Agent(name="patcher", tools=[tool])
+    context_wrapper = make_context_wrapper()
+    tool_run = ToolRunApplyPatchCall(tool_call=multi_call, apply_patch_tool=tool)
+
+    result = await ApplyPatchAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=RunHooks[Any](),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    assert isinstance(result, ToolCallOutputItem)
+    raw_item = cast(dict[str, Any], result.raw_item)
+    # The first op failed; the second succeeded. Overall status must reflect the failure.
+    assert raw_item["status"] == "failed"
+    assert "Failed a.md" in result.output
+    assert "Created b.md" in result.output

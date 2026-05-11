@@ -38,7 +38,7 @@ The runner then runs a loop:
     1. If the LLM returns a `final_output`, the loop ends and we return the result.
     2. If the LLM does a handoff, we update the current agent and input, and re-run the loop.
     3. If the LLM produces tool calls, we run those tool calls, append the results, and re-run the loop.
-3. If we exceed the `max_turns` passed, we raise a [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded] exception.
+3. If we exceed the `max_turns` passed, we raise a [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded] exception. Pass `max_turns=None` to disable this turn limit.
 
 !!! note
 
@@ -152,13 +152,36 @@ Use `RunConfig` to override behavior for a single run without changing each agen
 -   [`workflow_name`][agents.run.RunConfig.workflow_name], [`trace_id`][agents.run.RunConfig.trace_id], [`group_id`][agents.run.RunConfig.group_id]: Sets the tracing workflow name, trace ID and trace group ID for the run. We recommend at least setting `workflow_name`. The group ID is an optional field that lets you link traces across multiple runs.
 -   [`trace_metadata`][agents.run.RunConfig.trace_metadata]: Metadata to include on all traces.
 
-##### Tool approval and tool error behavior
+##### Tool execution, approval, and tool error behavior
 
+-   [`tool_execution`][agents.run.RunConfig.tool_execution]: Configure SDK-side execution behavior for local tool calls, such as limiting how many function tools run at once.
 -   [`tool_error_formatter`][agents.run.RunConfig.tool_error_formatter]: Customize the model-visible message when a tool call is rejected during approval flows.
 
 Nested handoffs are available as an opt-in beta. Enable the collapsed-transcript behavior by passing `RunConfig(nest_handoff_history=True)` or set `handoff(..., nest_handoff_history=True)` to turn it on for a specific handoff. If you prefer to keep the raw transcript (the default), leave the flag unset or provide a `handoff_input_filter` (or `handoff_history_mapper`) that forwards the conversation exactly as you need. To change the wrapper text used in the generated summary without writing a custom mapper, call [`set_conversation_history_wrappers`][agents.handoffs.set_conversation_history_wrappers] (and [`reset_conversation_history_wrappers`][agents.handoffs.reset_conversation_history_wrappers] to restore the defaults).
 
 #### Run config details
+
+##### `tool_execution`
+
+Use `tool_execution` when you want the SDK to limit local function-tool concurrency for a run.
+
+```python
+from agents import Agent, RunConfig, Runner, ToolExecutionConfig
+
+agent = Agent(name="Assistant", tools=[...])
+
+result = await Runner.run(
+    agent,
+    "Run the required tool calls.",
+    run_config=RunConfig(
+        tool_execution=ToolExecutionConfig(max_function_tool_concurrency=2),
+    ),
+)
+```
+
+`max_function_tool_concurrency=None` preserves the default behavior: when a model emits multiple function tool calls in a turn, the SDK starts all emitted local function tool calls. Set an integer value to cap how many of those local function tools run at once.
+
+This is separate from provider-side [`ModelSettings.parallel_tool_calls`][agents.model_settings.ModelSettings.parallel_tool_calls]. `parallel_tool_calls` controls whether the model is allowed to emit multiple tool calls in a single response. `tool_execution.max_function_tool_concurrency` controls how the SDK executes local function tool calls after the model has emitted them.
 
 ##### `tool_error_formatter`
 
@@ -482,6 +505,10 @@ print(result.final_output)
 For tool approval pause/resume patterns, start with the dedicated [Human-in-the-loop guide](human_in_the_loop.md).
 The integrations below are for durable orchestration when runs may span long waits, retries, or process restarts.
 
+### Dapr
+
+You can use the Agents SDK [Dapr](https://dapr.io) Diagrid integration to run durable, long running agents that automatically recover from failures with human-in-the-loop support. Dapr is a vendor-neutral, [CNCF](https://cncf.io) workflow orchestrator. Get started with Dapr and OpenAI agents [here](https://docs.diagrid.io/getting-started/quickstarts/ai-agents/?agentframework=openai).
+
 ### Temporal
 
 You can use the Agents SDK [Temporal](https://temporal.io/) integration to run durable, long-running workflows, including human-in-the-loop tasks. View a demo of Temporal and the Agents SDK working in action to complete long-running tasks [in this video](https://www.youtube.com/watch?v=fFBZqzT4DD8), and [view docs here](https://github.com/temporalio/sdk-python/tree/main/temporalio/contrib/openai_agents). 
@@ -500,7 +527,7 @@ You can use the Agents SDK [DBOS](https://dbos.dev/) integration to run reliable
 The SDK raises exceptions in certain cases. The full list is in [`agents.exceptions`][]. As an overview:
 
 -   [`AgentsException`][agents.exceptions.AgentsException]: This is the base class for all exceptions raised within the SDK. It serves as a generic type from which all other specific exceptions are derived.
--   [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded]: This exception is raised when the agent's run exceeds the `max_turns` limit passed to the `Runner.run`, `Runner.run_sync`, or `Runner.run_streamed` methods. It indicates that the agent could not complete its task within the specified number of interaction turns.
+-   [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded]: This exception is raised when the agent's run exceeds the `max_turns` limit passed to the `Runner.run`, `Runner.run_sync`, or `Runner.run_streamed` methods. It indicates that the agent could not complete its task within the specified number of interaction turns. Set `max_turns=None` to disable the limit.
 -   [`ModelBehaviorError`][agents.exceptions.ModelBehaviorError]: This exception occurs when the underlying model (LLM) produces unexpected or invalid outputs. This can include:
     -   Malformed JSON: When the model provides a malformed JSON structure for tool calls or in its direct output, especially if a specific `output_type` is defined.
     -   Unexpected tool-related failures: When the model fails to use tools in an expected manner

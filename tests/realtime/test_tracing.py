@@ -103,7 +103,7 @@ class TestRealtimeTracingIntegration:
                     "session": {
                         "id": "session_456",
                         "type": "realtime",
-                        "model": "gpt-realtime-1.5",
+                        "model": "gpt-realtime-2",
                     },
                 }
 
@@ -148,7 +148,7 @@ class TestRealtimeTracingIntegration:
                     "session": {
                         "id": "session_456",
                         "type": "realtime",
-                        "model": "gpt-realtime-1.5",
+                        "model": "gpt-realtime-2",
                     },
                 }
 
@@ -174,7 +174,7 @@ class TestRealtimeTracingIntegration:
         session_created_event = {
             "type": "session.created",
             "event_id": "event_123",
-            "session": {"id": "session_456", "type": "realtime", "model": "gpt-realtime-1.5"},
+            "session": {"id": "session_456", "type": "realtime", "model": "gpt-realtime-2"},
         }
 
         with patch.object(model, "send_event") as mock_send_event:
@@ -216,7 +216,7 @@ class TestRealtimeTracingIntegration:
                     "session": {
                         "id": "session_456",
                         "type": "realtime",
-                        "model": "gpt-realtime-1.5",
+                        "model": "gpt-realtime-2",
                     },
                 }
 

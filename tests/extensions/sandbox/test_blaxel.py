@@ -354,8 +354,11 @@ class TestBlaxelSandboxSession:
             raise ConnectionError("transport error")
 
         fake_sandbox.process.exec = _raise  # type: ignore[assignment]
-        with pytest.raises(ExecTransportError):
+        with pytest.raises(ExecTransportError) as exc_info:
             await session._exec_internal("echo", "hello")
+        assert str(exc_info.value) == "Blaxel exec failed: ConnectionError: transport error"
+        assert exc_info.value.context["backend"] == "blaxel"
+        assert exc_info.value.context["provider_error"] == "ConnectionError: transport error"
 
     @pytest.mark.asyncio
     async def test_mkdir(self, fake_sandbox: _FakeSandboxInstance) -> None:
@@ -3277,8 +3280,12 @@ class TestSdkExceptionMapping:
         fake_sandbox.process.exec = _raise_500  # type: ignore[assignment]
 
         with patch.object(mod, "_import_sandbox_api_error", return_value=FakeApiError):
-            with pytest.raises(ExecTransportError):
+            with pytest.raises(ExecTransportError) as exc_info:
                 await session._exec_internal("echo", "hello")
+        assert str(exc_info.value) == "Blaxel exec failed: HTTP 500: internal error"
+        assert exc_info.value.context["backend"] == "blaxel"
+        assert exc_info.value.context["http_status"] == 500
+        assert exc_info.value.context["provider_error"] == "HTTP 500: internal error"
 
 
 # ---------------------------------------------------------------------------

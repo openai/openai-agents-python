@@ -37,6 +37,7 @@ from agents import (
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    ToolExecutionConfig,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrail,
     ToolOutputGuardrailData,
@@ -94,8 +95,8 @@ from .utils.hitl import (
 )
 
 
-def _function_span_names() -> list[str]:
-    names: list[str] = []
+def _function_spans() -> list[dict[str, Any]]:
+    function_spans: list[dict[str, Any]] = []
     for span in SPAN_PROCESSOR_TESTING.get_ordered_spans(including_empty=True):
         exported = span.export()
         if not exported:
@@ -104,6 +105,16 @@ def _function_span_names() -> list[str]:
         if not isinstance(span_data, dict):
             continue
         if span_data.get("type") != "function":
+            continue
+        function_spans.append(exported)
+    return function_spans
+
+
+def _function_span_names() -> list[str]:
+    names: list[str] = []
+    for exported in _function_spans():
+        span_data = exported.get("span_data")
+        if not isinstance(span_data, dict):
             continue
         name = span_data.get("name")
         if isinstance(name, str):
@@ -220,6 +231,122 @@ async def test_plaintext_agent_with_tool_call_is_run_again():
     assert_item_is_function_tool_call_output(items[2], "123")
 
     assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_function_tool_concurrency_default_starts_all_calls():
+    active_count = 0
+    max_seen_count = 0
+
+    async def tracked_tool(value: int) -> str:
+        nonlocal active_count, max_seen_count
+        active_count += 1
+        max_seen_count = max(max_seen_count, active_count)
+        try:
+            await asyncio.sleep(0.01)
+            return f"ok-{value}"
+        finally:
+            active_count -= 1
+
+    tool = function_tool(tracked_tool, name_override="tracked_tool")
+    agent = Agent(name="test", tools=[tool])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("tracked_tool", json.dumps({"value": 1}), call_id="call_1"),
+            get_function_tool_call("tracked_tool", json.dumps({"value": 2}), call_id="call_2"),
+            get_function_tool_call("tracked_tool", json.dumps({"value": 3}), call_id="call_3"),
+        ],
+        usage=Usage(),
+        response_id="resp",
+    )
+
+    result = await get_execute_result(agent, response)
+
+    assert active_count == 0
+    assert max_seen_count == 3
+    assert_item_is_function_tool_call_output(result.generated_items[3], "ok-1")
+    assert_item_is_function_tool_call_output(result.generated_items[4], "ok-2")
+    assert_item_is_function_tool_call_output(result.generated_items[5], "ok-3")
+
+
+@pytest.mark.asyncio
+async def test_function_tool_concurrency_cap_limits_calls_and_preserves_output_order():
+    active_count = 0
+    max_seen_count = 0
+
+    async def tracked_tool(value: int) -> str:
+        nonlocal active_count, max_seen_count
+        active_count += 1
+        max_seen_count = max(max_seen_count, active_count)
+        try:
+            await asyncio.sleep(0.03 if value == 1 else 0.001)
+            return f"ok-{value}"
+        finally:
+            active_count -= 1
+
+    tool = function_tool(tracked_tool, name_override="tracked_tool")
+    agent = Agent(name="test", tools=[tool])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("tracked_tool", json.dumps({"value": 1}), call_id="call_1"),
+            get_function_tool_call("tracked_tool", json.dumps({"value": 2}), call_id="call_2"),
+            get_function_tool_call("tracked_tool", json.dumps({"value": 3}), call_id="call_3"),
+        ],
+        usage=Usage(),
+        response_id="resp",
+    )
+
+    result = await get_execute_result(
+        agent,
+        response,
+        run_config=RunConfig(tool_execution=ToolExecutionConfig(max_function_tool_concurrency=2)),
+    )
+
+    assert active_count == 0
+    assert max_seen_count == 2
+    assert_item_is_function_tool_call_output(result.generated_items[3], "ok-1")
+    assert_item_is_function_tool_call_output(result.generated_items[4], "ok-2")
+    assert_item_is_function_tool_call_output(result.generated_items[5], "ok-3")
+
+
+@pytest.mark.asyncio
+async def test_function_tool_concurrency_cap_leaves_queued_calls_unstarted_after_failure():
+    started_tools: list[str] = []
+
+    async def failing_tool() -> str:
+        started_tools.append("failing_tool")
+        raise RuntimeError("boom")
+
+    async def queued_tool() -> str:
+        started_tools.append("queued_tool")
+        return "should-not-run"
+
+    failing = function_tool(
+        failing_tool,
+        name_override="failing_tool",
+        failure_error_function=None,
+    )
+    queued = function_tool(queued_tool, name_override="queued_tool")
+    agent = Agent(name="test", tools=[failing, queued])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("failing_tool", "{}", call_id="call_1"),
+            get_function_tool_call("queued_tool", "{}", call_id="call_2"),
+        ],
+        usage=Usage(),
+        response_id="resp",
+    )
+
+    with pytest.raises(UserError, match="Error running tool failing_tool: boom"):
+        await get_execute_result(
+            agent,
+            response,
+            run_config=RunConfig(
+                tool_execution=ToolExecutionConfig(max_function_tool_concurrency=1)
+            ),
+        )
+
+    assert started_tools == ["failing_tool"]
 
 
 @pytest.mark.asyncio
@@ -511,6 +638,78 @@ async def test_multiple_tool_calls_still_raise_when_sibling_failure_error_functi
 
 
 @pytest.mark.asyncio
+async def test_function_tool_error_trace_respects_sensitive_data_setting():
+    async def _error_tool() -> str:
+        raise ValueError("secret-token-123")
+
+    error_tool = function_tool(
+        _error_tool,
+        name_override="error_tool",
+        failure_error_function=None,
+    )
+    agent = Agent(name="test", tools=[error_tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("error_tool", "{}", call_id="1")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with trace("test"):
+        with pytest.raises(UserError, match="Error running tool error_tool: secret-token-123"):
+            await get_execute_result(
+                agent,
+                response,
+                run_config=RunConfig(trace_include_sensitive_data=False),
+            )
+
+    function_spans = _function_spans()
+
+    assert len(function_spans) == 1
+    error = function_spans[0]["error"]
+    assert error["message"] == "Error running tool"
+    assert error["data"]["tool_name"] == "error_tool"
+    assert error["data"]["error"] == "Tool execution failed. Error details are redacted."
+    assert "secret-token-123" not in str(error)
+
+
+@pytest.mark.asyncio
+async def test_default_function_tool_error_trace_respects_sensitive_data_setting():
+    async def _error_tool() -> str:
+        raise ValueError("secret-token-123")
+
+    error_tool = function_tool(_error_tool, name_override="error_tool")
+    agent = Agent(name="test", tools=[error_tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("error_tool", "{}", call_id="1")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with trace("test"):
+        result = await get_execute_result(
+            agent,
+            response,
+            run_config=RunConfig(trace_include_sensitive_data=False),
+        )
+
+    assert len(result.generated_items) == 2
+    assert isinstance(result.next_step, NextStepRunAgain)
+    assert_item_is_function_tool_call_output(
+        result.generated_items[1],
+        "An error occurred while running the tool. Please try again. Error: secret-token-123",
+    )
+
+    function_spans = _function_spans()
+
+    assert len(function_spans) == 1
+    error = function_spans[0]["error"]
+    assert error["message"] == "Error running tool (non-fatal)"
+    assert error["data"]["tool_name"] == "error_tool"
+    assert error["data"]["error"] == "Tool execution failed. Error details are redacted."
+    assert "secret-token-123" not in str(error)
+
+
+@pytest.mark.asyncio
 async def test_multiple_tool_calls_still_raise_when_sibling_cancelled():
     async def _ok_tool() -> str:
         return "ok"
@@ -769,6 +968,43 @@ async def test_single_tool_call_uses_default_failure_error_function_for_cancelle
         result.generated_items[1],
         "An error occurred while running the tool. Please try again. Error: tool-cancelled",
     )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_function_tool_error_trace_respects_sensitive_data_setting():
+    async def _cancel_tool() -> str:
+        raise asyncio.CancelledError("secret-token-123")
+
+    cancel_tool = function_tool(_cancel_tool, name_override="cancel_tool")
+    agent = Agent(name="test", tools=[cancel_tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("cancel_tool", "{}", call_id="1")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with trace("test"):
+        result = await get_execute_result(
+            agent,
+            response,
+            run_config=RunConfig(trace_include_sensitive_data=False),
+        )
+
+    assert len(result.generated_items) == 2
+    assert isinstance(result.next_step, NextStepRunAgain)
+    assert_item_is_function_tool_call_output(
+        result.generated_items[1],
+        "An error occurred while running the tool. Please try again. Error: secret-token-123",
+    )
+
+    function_spans = _function_spans()
+
+    assert len(function_spans) == 1
+    error = function_spans[0]["error"]
+    assert error["message"] == "Tool execution cancelled"
+    assert error["data"]["tool_name"] == "cancel_tool"
+    assert error["data"]["error"] == "Tool execution failed. Error details are redacted."
+    assert "secret-token-123" not in str(error)
 
 
 @pytest.mark.asyncio
@@ -3154,6 +3390,46 @@ async def test_execute_handoffs_uses_public_agent_for_ignored_extra_handoffs():
     ]
     assert len(ignored_outputs) == 1
     assert ignored_outputs[0].agent is public_agent
+
+
+@pytest.mark.asyncio
+async def test_execute_handoffs_preserves_tool_input_guardrail_results():
+    """Tool input guardrail results from concurrent function calls must survive a handoff."""
+
+    def guardrail(data) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="checked")
+
+    guardrail_obj: ToolInputGuardrail[Any] = ToolInputGuardrail(guardrail_function=guardrail)
+
+    def _echo(value: str) -> str:
+        return value
+
+    guarded_tool = function_tool(
+        _echo,
+        name_override="guarded",
+        tool_input_guardrails=[guardrail_obj],
+    )
+    target = Agent(name="target")
+    public_agent = Agent(name="triage", tools=[guarded_tool], handoffs=[target])
+    execution_agent = public_agent.clone()
+    set_public_agent(execution_agent, public_agent)
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("guarded", json.dumps({"value": "hi"}), call_id="c1"),
+            get_handoff_tool_call(target),
+        ],
+        usage=Usage(),
+        response_id="resp",
+    )
+
+    result = await get_execute_result(execution_agent, response)
+
+    assert isinstance(result.next_step, NextStepHandoff)
+    assert result.tool_input_guardrail_results, (
+        "Tool input guardrail results should not be dropped when a handoff fires alongside "
+        "a function tool call."
+    )
+    assert result.tool_input_guardrail_results[0].output.output_info == "checked"
 
 
 @pytest.mark.asyncio

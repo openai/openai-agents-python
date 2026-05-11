@@ -8,6 +8,8 @@ description: Run python examples in auto mode with logging, rerun helpers, and b
 ## What it does
 
 - Runs `uv run examples/run_examples.py` with:
+  - Optional dependency extras enabled by default:
+    `litellm`, `any-llm`, `sqlalchemy`, `redis`, `blaxel`, `modal`, `runloop`, and `temporal`.
   - `EXAMPLES_INTERACTIVE_MODE=auto` (auto-input/auto-approve).
   - Per-example logs under `.tmp/examples-start-logs/`.
   - Main summary log path passed via `--main-log` (also under `.tmp/examples-start-logs/`).
@@ -44,6 +46,16 @@ description: Run python examples in auto mode with logging, rerun helpers, and b
 .agents/skills/examples-auto-run/scripts/run.sh rerun
 ```
 
+## Codex execution environment
+
+- When Codex invokes `start` or `rerun`, run the command outside the Codex sandbox by default
+  (`sandbox_permissions=require_escalated`). Many examples start nested sandboxes, browsers, npm
+  helpers, or cloud/local service processes; running from inside the Codex sandbox can produce
+  environment-only failures such as `sandbox-exec: sandbox_apply: Operation not permitted`,
+  Playwright cache permission errors, or npm cache permission errors.
+- Use sandboxed execution only when the user explicitly asks for it or when running a narrow dry-run
+  / log inspection command that does not execute examples.
+
 ## Defaults (overridable via env)
 
 - `EXAMPLES_INTERACTIVE_MODE=auto`
@@ -51,6 +63,7 @@ description: Run python examples in auto mode with logging, rerun helpers, and b
 - `EXAMPLES_INCLUDE_SERVER=0`
 - `EXAMPLES_INCLUDE_AUDIO=0`
 - `EXAMPLES_INCLUDE_EXTERNAL=0`
+- `EXAMPLES_UV_EXTRAS="litellm any-llm sqlalchemy redis blaxel modal runloop temporal"` (set to an empty string to disable extras)
 - Auto-approvals in auto mode: `APPLY_PATCH_AUTO_APPROVE=1`, `SHELL_AUTO_APPROVE=1`, `AUTO_APPROVE_MCP=1`
 
 ## Log locations
@@ -62,7 +75,7 @@ description: Run python examples in auto mode with logging, rerun helpers, and b
 
 ## Notes
 
-- The runner delegates to `uv run examples/run_examples.py`, which already writes per-example logs and supports `--collect`, `--rerun-file`, and `--print-auto-skip`.
+- The runner delegates to `uv run --extra ... examples/run_examples.py`, which already writes per-example logs and supports `--collect`, `--rerun-file`, and `--print-auto-skip`.
 - `start` uses `--write-rerun` so failures are captured automatically.
 - If `.tmp/examples-rerun.txt` exists and is non-empty, invoking the skill with no args runs `rerun` by default.
 

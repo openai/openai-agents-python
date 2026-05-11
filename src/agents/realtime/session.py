@@ -10,7 +10,11 @@ from typing import Any, cast
 from pydantic import BaseModel
 from typing_extensions import assert_never
 
-from .._tool_identity import get_function_tool_lookup_key_for_tool
+from .._tool_identity import (
+    FunctionToolLookupKey,
+    get_function_tool_lookup_key_for_tool,
+    get_function_tool_namespace,
+)
 from ..agent import Agent
 from ..exceptions import UserError
 from ..handoffs import Handoff
@@ -68,6 +72,13 @@ from .model_inputs import (
 )
 
 REJECTION_MESSAGE = DEFAULT_APPROVAL_REJECTION_MESSAGE
+
+
+class _RealtimeSessionClosedSentinel:
+    pass
+
+
+_REALTIME_SESSION_CLOSED_SENTINEL = _RealtimeSessionClosedSentinel()
 
 
 def _serialize_tool_output(output: Any) -> str:
@@ -143,7 +154,10 @@ class RealtimeSession(RealtimeModelListener):
             **(run_config_settings or {}),
             **(initial_model_settings or {}),
         }
-        self._event_queue: asyncio.Queue[RealtimeSessionEvent] = asyncio.Queue()
+        self._event_queue: asyncio.Queue[RealtimeSessionEvent | _RealtimeSessionClosedSentinel] = (
+            asyncio.Queue()
+        )
+        self._event_iterator_waiters = 0
         self._closed = False
         self._stored_exception: BaseException | None = None
         self._pending_tool_calls: dict[
@@ -206,7 +220,10 @@ class RealtimeSession(RealtimeModelListener):
 
     async def __aiter__(self) -> AsyncIterator[RealtimeSessionEvent]:
         """Iterate over events from the session."""
-        while not self._closed:
+        while True:
+            if self._closed and self._event_queue.empty():
+                return
+
             try:
                 # Check if there's a stored exception to raise
                 if self._stored_exception is not None:
@@ -214,8 +231,14 @@ class RealtimeSession(RealtimeModelListener):
                     await self._cleanup()
                     raise self._stored_exception
 
-                event = await self._event_queue.get()
-                yield event
+                self._event_iterator_waiters += 1
+                try:
+                    event = await self._event_queue.get()
+                finally:
+                    self._event_iterator_waiters -= 1
+                if event is _REALTIME_SESSION_CLOSED_SENTINEL:
+                    return
+                yield cast(RealtimeSessionEvent, event)
             except asyncio.CancelledError:
                 break
 
@@ -362,7 +385,7 @@ class RealtimeSession(RealtimeModelListener):
 
                                 # If still missing and this is an assistant item, fall back to
                                 # accumulated transcript deltas tracked during the turn.
-                                if incoming_item.role == "assistant":
+                                if not preserved and incoming_item.role == "assistant":
                                     preserved = self._item_transcripts.get(incoming_item.item_id)
 
                                 if preserved:
@@ -446,16 +469,32 @@ class RealtimeSession(RealtimeModelListener):
         )
 
     def _build_tool_approval_item(
-        self, tool: FunctionTool, tool_call: RealtimeModelToolCallEvent, agent: RealtimeAgent
+        self,
+        tool: FunctionTool,
+        tool_call: RealtimeModelToolCallEvent,
+        agent: RealtimeAgent,
+        *,
+        tool_lookup_key: FunctionToolLookupKey | None = None,
     ) -> ToolApprovalItem:
         """Create a ToolApprovalItem for approval tracking."""
+        if tool_lookup_key is None:
+            tool_lookup_key = get_function_tool_lookup_key_for_tool(tool)
+        tool_namespace = get_function_tool_namespace(tool)
         raw_item = {
             "type": "function_call",
             "name": tool.name,
             "call_id": tool_call.call_id,
             "arguments": tool_call.arguments,
         }
-        return ToolApprovalItem(agent=cast(Any, agent), raw_item=raw_item, tool_name=tool.name)
+        if tool_namespace is not None:
+            raw_item["namespace"] = tool_namespace
+        return ToolApprovalItem(
+            agent=cast(Any, agent),
+            raw_item=raw_item,
+            tool_name=tool.name,
+            tool_namespace=tool_namespace,
+            tool_lookup_key=tool_lookup_key,
+        )
 
     async def _maybe_request_tool_approval(
         self,
@@ -465,14 +504,23 @@ class RealtimeSession(RealtimeModelListener):
         agent: RealtimeAgent,
     ) -> bool | None:
         """Return True/False when approved/rejected, or None when awaiting approval."""
-        approval_item = self._build_tool_approval_item(function_tool, tool_call, agent)
+        tool_lookup_key = get_function_tool_lookup_key_for_tool(function_tool)
+        approval_item = self._build_tool_approval_item(
+            function_tool,
+            tool_call,
+            agent,
+            tool_lookup_key=tool_lookup_key,
+        )
 
         needs_approval = await self._function_needs_approval(function_tool, tool_call)
         if not needs_approval:
             return True
 
-        approval_status = self._context_wrapper.is_tool_approved(
-            function_tool.name, tool_call.call_id
+        approval_status = self._context_wrapper.get_approval_status(
+            function_tool.name,
+            tool_call.call_id,
+            existing_pending=approval_item,
+            tool_lookup_key=tool_lookup_key,
         )
         if approval_status is True:
             return True
@@ -723,10 +771,18 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
         else:
+            error_message = f"Tool {event.name} not found"
+            await self._model.send_event(
+                RealtimeModelSendToolOutput(
+                    tool_call=event,
+                    output=error_message,
+                    start_response=True,
+                )
+            )
             await self._put_event(
                 RealtimeError(
                     info=self._event_info,
-                    error={"message": f"Tool {event.name} not found"},
+                    error={"message": error_message},
                 )
             )
 
@@ -1039,8 +1095,16 @@ class RealtimeSession(RealtimeModelListener):
                 task.cancel()
         self._tool_call_tasks.clear()
 
+    def _wake_event_iterators(self) -> None:
+        for _ in range(self._event_iterator_waiters):
+            self._event_queue.put_nowait(_REALTIME_SESSION_CLOSED_SENTINEL)
+
     async def _cleanup(self) -> None:
         """Clean up all resources and mark session as closed."""
+        if self._closed:
+            self._wake_event_iterators()
+            return
+
         # Cancel and cleanup guardrail tasks
         self._cleanup_guardrail_tasks()
         self._cleanup_tool_call_tasks()
@@ -1056,6 +1120,7 @@ class RealtimeSession(RealtimeModelListener):
 
         # Mark as closed
         self._closed = True
+        self._wake_event_iterators()
 
     async def _get_updated_model_settings_from_agent(
         self,

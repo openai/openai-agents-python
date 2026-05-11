@@ -83,6 +83,7 @@ class MultiProvider(ModelProvider):
         openai_project: str | None = None,
         openai_use_responses: bool | None = None,
         openai_use_responses_websocket: bool | None = None,
+        openai_strict_feature_validation: bool = False,
         openai_websocket_base_url: str | None = None,
         openai_prefix_mode: MultiProviderOpenAIPrefixMode = "alias",
         unknown_prefix_mode: MultiProviderUnknownPrefixMode = "error",
@@ -106,6 +107,10 @@ class MultiProvider(ModelProvider):
             openai_use_responses: Whether to use the OpenAI responses API.
             openai_use_responses_websocket: Whether to use websocket transport for the OpenAI
                 responses API.
+            openai_strict_feature_validation: Whether OpenAI Chat Completions models should raise
+                a UserError when callers pass Responses-only features such as previous_response_id,
+                conversation_id, or prompt. Defaults to False, which preserves the previous
+                ignore-and-warn behavior.
             openai_websocket_base_url: The websocket base URL to use for the OpenAI provider.
                 If not provided, the provider will use `OPENAI_WEBSOCKET_BASE_URL` when set.
             openai_prefix_mode: Controls how ``openai/...`` model strings are interpreted.
@@ -132,6 +137,7 @@ class MultiProvider(ModelProvider):
             project=openai_project,
             use_responses=openai_use_responses,
             use_responses_websocket=openai_use_responses_websocket,
+            strict_feature_validation=openai_strict_feature_validation,
             agent_registration=openai_agent_registration,
             responses_websocket_options=openai_responses_websocket_options,
         )

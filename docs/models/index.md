@@ -22,7 +22,7 @@ Start with the simplest path that fits your setup:
 
 For most OpenAI-only apps, the recommended path is to use string model names with the default OpenAI provider and stay on the Responses model path.
 
-When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-4.1`](https://developers.openai.com/api/docs/models/gpt-4.1) for compatibility and low latency. If you have access, we recommend setting your agents to [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) for higher quality while keeping explicit `model_settings`.
+When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-5.4-mini`](https://developers.openai.com/api/docs/models/gpt-5.4-mini) with `reasoning.effort="none"` and `verbosity="low"` for low-latency agent workflows. If you have access, we recommend setting your agents to [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) for higher quality while keeping explicit `model_settings`.
 
 If you want to switch to other models like [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5), there are two ways to configure your agents.
 
@@ -70,7 +70,7 @@ my_agent = Agent(
 )
 ```
 
-For lower latency, using `reasoning.effort="none"` with `gpt-5.5` is recommended. The gpt-4.1 family (including mini and nano variants) also remains a solid choice for building interactive agent apps.
+For lower latency, using `reasoning.effort="none"` with GPT-5 models is recommended.
 
 #### ComputerTool model selection
 
@@ -313,6 +313,7 @@ When you are using the OpenAI Responses API, several request fields already have
 - `parallel_tool_calls`: Allow or forbid multiple tool calls in the same turn.
 - `truncation`: Set `"auto"` to let the Responses API drop the oldest conversation items instead of failing when context would overflow.
 - `store`: Control whether the generated response is stored server-side for later retrieval. This matters for follow-up workflows that rely on response IDs, and for session compaction flows that may need to fall back to local input when `store=False`.
+- `context_management`: Configure server-side context handling such as Responses compaction with `compact_threshold`.
 - `prompt_cache_retention`: Keep cached prompt prefixes around longer, for example with `"24h"`.
 - `response_include`: Request richer response payloads such as `web_search_call.action.sources`, `file_search_call.results`, or `reasoning.encrypted_content`.
 - `top_logprobs`: Request top-token logprobs for output text. The SDK also adds `message.output_text.logprobs` automatically.
@@ -328,6 +329,7 @@ research_agent = Agent(
         parallel_tool_calls=False,
         truncation="auto",
         store=True,
+        context_management=[{"type": "compaction", "compact_threshold": 200000}],
         prompt_cache_retention="24h",
         response_include=["web_search_call.action.sources"],
         top_logprobs=5,
@@ -337,11 +339,13 @@ research_agent = Agent(
 
 When you set `store=False`, the Responses API does not keep that response available for later server-side retrieval. This is useful for stateless or zero-data-retention style flows, but it also means features that would otherwise reuse response IDs need to rely on locally managed state instead. For example, [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession] switches its default `"auto"` compaction path to input-based compaction when the last response was not stored. See the [Sessions guide](../sessions/index.md#openai-responses-compaction-sessions).
 
+Server-side compaction is different from [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession]. `context_management=[{"type": "compaction", "compact_threshold": ...}]` is sent with each Responses API request, and the API can emit compaction items as part of the response when the rendered context crosses the threshold. `OpenAIResponsesCompactionSession` calls the standalone `responses.compact` endpoint between turns and rewrites the local session history.
+
 ### Passing `extra_args`
 
 Use `extra_args` when you need provider-specific or newer request fields that the SDK does not expose directly at the top level yet.
 
-Also, when you use OpenAI's Responses API, [there are a few other optional parameters](https://platform.openai.com/docs/api-reference/responses/create) (e.g., `user`, `service_tier`, and so on). If they are not available at the top level, you can use `extra_args` to pass them as well.
+Also, when you use OpenAI's Responses API, [there are a few other optional parameters](https://platform.openai.com/docs/api-reference/responses/create) (e.g., `user`, `service_tier`, and so on). If they are not available at the top level, you can use `extra_args` to pass them as well. Do not also set the same request field through a direct `ModelSettings` field.
 
 ```python
 from agents import Agent, ModelSettings
@@ -394,7 +398,7 @@ agent = Agent(
 | Field | Type | Notes |
 | --- | --- | --- |
 | `max_retries` | `int | None` | Number of retry attempts allowed after the initial request. |
-| `backoff` | `ModelRetryBackoffSettings | dict | None` | Default delay strategy when the policy retries without returning an explicit delay. |
+| `backoff` | `ModelRetryBackoffSettings | dict | None` | Default delay strategy when the policy retries without returning an explicit delay. `backoff.max_delay` caps this computed backoff delay only. It does not cap explicit delays returned by a policy or retry-after hints. |
 | `policy` | `RetryPolicy | None` | Callback that decides whether to retry. This field is runtime-only and is not serialized. |
 
 </div>
@@ -420,7 +424,7 @@ The SDK exports ready-made helpers on `retry_policies`:
 | `retry_policies.provider_suggested()` | Follows provider retry advice when available. |
 | `retry_policies.network_error()` | Matches transient transport and timeout failures. |
 | `retry_policies.http_status([...])` | Matches selected HTTP status codes. |
-| `retry_policies.retry_after()` | Retries only when a retry-after hint is available, using that delay. |
+| `retry_policies.retry_after()` | Retries only when a retry-after hint is available, using that delay. This helper treats the retry-after value as an explicit policy delay, so `backoff.max_delay` does not cap it. |
 | `retry_policies.any(...)` | Retries when any nested policy opts in. |
 | `retry_policies.all(...)` | Retries only when every nested policy opts in. |
 

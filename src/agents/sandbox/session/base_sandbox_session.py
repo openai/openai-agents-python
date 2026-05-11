@@ -11,6 +11,7 @@ from ...editor import ApplyPatchOperation
 from ...run_config import (
     DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY,
     DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY,
+    SandboxArchiveLimits,
     SandboxConcurrencyLimits,
 )
 from ..apply_patch import PatchFormat, WorkspaceEditor
@@ -119,6 +120,7 @@ class BaseSandboxSession(abc.ABC):
     _start_workspace_root_ready: bool | None = None
     _max_manifest_entry_concurrency: int | None = DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY
     _max_local_dir_file_concurrency: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
+    _archive_limits: SandboxArchiveLimits | None = None
 
     async def start(self) -> None:
         try:
@@ -141,6 +143,11 @@ class BaseSandboxSession(abc.ABC):
         limits.validate()
         self._max_manifest_entry_concurrency = limits.manifest_entries
         self._max_local_dir_file_concurrency = limits.local_dir_files
+
+    def _set_archive_limits(self, limits: SandboxArchiveLimits | None) -> None:
+        if limits is not None:
+            limits.validate()
+        self._archive_limits = limits
 
     async def _ensure_backend_started(self) -> None:
         """Start, reconnect, or recreate the backend before workspace setup runs."""
@@ -965,6 +972,7 @@ class BaseSandboxSession(abc.ABC):
         data: io.IOBase,
         *,
         compression_scheme: Literal["tar", "zip"] | None = None,
+        archive_limits: SandboxArchiveLimits | None = None,
     ) -> None:
         """
         Write a compressed archive to a destination on the remote.
@@ -974,12 +982,21 @@ class BaseSandboxSession(abc.ABC):
         :param data: a file-like io stream.
         :param compression_scheme: either "tar" or "zip". If not provided,
             it will try to infer from the path.
+        :param archive_limits: optional per-call archive resource limits. If omitted,
+            the session default is used.
         """
+        if archive_limits is not None:
+            archive_limits.validate()
+        effective_archive_limits = (
+            archive_limits if archive_limits is not None else self._archive_limits
+        )
+
         await archive_ops.extract_archive(
             self,
             path,
             data,
             compression_scheme=compression_scheme,
+            archive_limits=effective_archive_limits,
         )
 
     async def apply_patch(
@@ -1005,12 +1022,14 @@ class BaseSandboxSession(abc.ABC):
         archive_path: Path,
         destination_root: Path,
         data: io.IOBase,
+        archive_limits: SandboxArchiveLimits | None = None,
     ) -> None:
         await archive_ops.extract_tar_archive(
             self,
             archive_path=archive_path,
             destination_root=destination_root,
             data=data,
+            archive_limits=archive_limits,
         )
 
     async def _extract_zip_archive(
@@ -1019,12 +1038,14 @@ class BaseSandboxSession(abc.ABC):
         archive_path: Path,
         destination_root: Path,
         data: io.IOBase,
+        archive_limits: SandboxArchiveLimits | None = None,
     ) -> None:
         await archive_ops.extract_zip_archive(
             self,
             archive_path=archive_path,
             destination_root=destination_root,
             data=data,
+            archive_limits=archive_limits,
         )
 
     @staticmethod

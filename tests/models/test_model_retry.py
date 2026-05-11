@@ -7,6 +7,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, BadRequestError
+from pydantic import ValidationError
 
 from agents.items import ModelResponse, TResponseStreamEvent
 from agents.models._openai_retry import get_openai_retry_advice
@@ -26,6 +27,32 @@ from agents.retry import (
 from agents.run_internal.model_retry import get_response_with_retry, stream_response_with_retry
 from agents.usage import Usage
 from tests.test_responses import get_text_message
+
+
+@pytest.mark.parametrize(
+    "make_backoff",
+    [
+        lambda: ModelRetryBackoffSettings(initial_delay=-0.1),
+        lambda: ModelRetryBackoffSettings(max_delay=-0.1),
+        lambda: ModelRetryBackoffSettings(multiplier=-0.1),
+    ],
+)
+def test_model_retry_backoff_settings_reject_negative_values(make_backoff: Any) -> None:
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        make_backoff()
+
+
+def test_model_retry_settings_rejects_negative_backoff_dict() -> None:
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        ModelRetrySettings(backoff={"initial_delay": -0.1})
+
+
+def test_model_retry_backoff_settings_allow_zero_values() -> None:
+    backoff = ModelRetryBackoffSettings(initial_delay=0, max_delay=0, multiplier=0)
+
+    assert backoff.initial_delay == 0
+    assert backoff.max_delay == 0
+    assert backoff.multiplier == 0
 
 
 def _connection_error(message: str = "connection error") -> APIConnectionError:

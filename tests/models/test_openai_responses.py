@@ -7,8 +7,9 @@ from typing import Any, cast
 
 import httpx
 import pytest
-from openai import NOT_GIVEN, APIConnectionError, RateLimitError, omit
+from openai import NOT_GIVEN, APIConnectionError, AsyncOpenAI, RateLimitError, omit
 from openai.types.responses import ResponseCompletedEvent, ResponseErrorEvent
+from openai.types.responses.response_create_params import ContextManagement
 from openai.types.shared.reasoning import Reasoning
 
 from agents import (
@@ -69,6 +70,44 @@ async def _run_responses_model_with_custom_base_url(
     await Runner.run(agent, "hi")
 
     return responses.kwargs
+
+
+async def _run_responses_model_with_official_client(
+    model_settings: ModelSettings | None = None,
+) -> list[httpx.Request]:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            content=get_response_obj([]).model_dump_json(),
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        client = AsyncOpenAI(
+            api_key="test-key",
+            base_url="https://example.test/v1",
+            http_client=http_client,
+        )
+        model = OpenAIResponsesModel(model="gpt-4", openai_client=client)
+
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=model_settings or ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+    finally:
+        await http_client.aclose()
+
+    return requests
 
 
 class DummyWSConnection:
@@ -841,6 +880,123 @@ def test_build_response_create_kwargs_includes_extra_args_prompt_cache_key():
     )
 
     assert kwargs["prompt_cache_key"] == "cache-key"
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_includes_context_management():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+    context_management: list[ContextManagement] = [
+        {"type": "compaction", "compact_threshold": 200000}
+    ]
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(context_management=context_management),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert kwargs["context_management"] == context_management
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_allows_extra_arg_when_explicit_arg_is_omitted():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+    context_management: list[ContextManagement] = [
+        {"type": "compaction", "compact_threshold": 200000}
+    ]
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(extra_args={"context_management": context_management}),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert kwargs["context_management"] == context_management
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_rejects_duplicate_context_management_extra_args():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="multiple values.*context_management"):
+        model._build_response_create_kwargs(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(
+                context_management=[{"type": "compaction", "compact_threshold": 200000}],
+                extra_args={"context_management": [{"type": "compaction"}]},
+            ),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            previous_response_id=None,
+            conversation_id=None,
+            stream=False,
+            prompt=None,
+        )
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_keeps_unset_transport_extra_kwargs_as_none():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert kwargs["extra_query"] is None
+    assert kwargs["extra_body"] is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_with_official_client_accepts_unset_transport_extra_kwargs() -> None:
+    requests = await _run_responses_model_with_official_client()
+
+    assert len(requests) == 1
+    assert requests[0].url == "https://example.test/v1/responses"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_with_official_client_applies_transport_extra_kwargs() -> None:
+    requests = await _run_responses_model_with_official_client(
+        ModelSettings(
+            extra_query={"api-version": "2026-01-01-preview"},
+            extra_body={"extra_transport_field": "enabled"},
+        )
+    )
+
+    assert len(requests) == 1
+    assert requests[0].url == ("https://example.test/v1/responses?api-version=2026-01-01-preview")
+    assert json.loads(requests[0].content)["extra_transport_field"] == "enabled"
 
 
 @pytest.mark.allow_call_model_methods

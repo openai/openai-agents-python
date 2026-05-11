@@ -842,3 +842,57 @@ def test_any_llm_reasoning_objects_prefer_content_attributes_over_iterable_pairs
     delta = pytypes.SimpleNamespace(reasoning=Reasoning(content="用户"))
 
     assert _extract_any_llm_reasoning_text(delta) == "用户"
+
+
+def test_any_llm_split_does_not_duplicate_content_or_thinking(monkeypatch) -> None:
+    """Splitting multi-tool assistant messages must not duplicate text/thinking blocks.
+
+    Anthropic's extended thinking API rejects requests that include the same signed
+    thinking block more than once, and duplicated assistant text corrupts conversation
+    history. Only the first split should retain content, thinking_blocks, and
+    reasoning_content; subsequent splits should carry the tool_call alone.
+    """
+    provider = FakeAnyLLMProvider(supports_responses=False)
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    model = AnyLLMModel(model="anthropic/claude-3-5-sonnet")
+    messages: list[Any] = [
+        {"role": "user", "content": "Search both"},
+        {
+            "role": "assistant",
+            "content": "Looking up both queries.",
+            "thinking_blocks": [{"type": "thinking", "thinking": "plan", "signature": "sig_abc"}],
+            "reasoning_content": "internal plan",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "s", "arguments": "{}"},
+                },
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "s", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "ok1"},
+        {"role": "tool", "tool_call_id": "call_2", "content": "ok2"},
+    ]
+
+    result = model._fix_tool_message_ordering(messages)
+
+    assistants = [m for m in result if m.get("role") == "assistant"]
+    assert len(assistants) == 2
+    # First split keeps the shared fields.
+    assert assistants[0].get("content") == "Looking up both queries."
+    assert "thinking_blocks" in assistants[0]
+    assert "reasoning_content" in assistants[0]
+    # Second split must NOT duplicate them.
+    assert "content" not in assistants[1]
+    assert "thinking_blocks" not in assistants[1]
+    assert "reasoning_content" not in assistants[1]
+    # Tool calls are still split one-per-message.
+    assert assistants[0]["tool_calls"][0]["id"] == "call_1"
+    assert assistants[1]["tool_calls"][0]["id"] == "call_2"

@@ -20,6 +20,7 @@ RealtimeModelName: TypeAlias = (
     Literal[
         "gpt-realtime",
         "gpt-realtime-1.5",
+        "gpt-realtime-2",
         "gpt-realtime-2025-08-28",
         "gpt-4o-realtime-preview",
         "gpt-4o-realtime-preview-2024-10-01",
@@ -43,6 +44,10 @@ RealtimeAudioFormat: TypeAlias = (
     | OpenAIRealtimeAudioFormats
 )
 """The audio format for realtime audio streams."""
+
+
+RealtimeReasoningEffort: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh"] | str
+"""The reasoning effort for realtime model responses."""
 
 
 class RealtimeClientMessage(TypedDict):
@@ -130,6 +135,13 @@ class RealtimeAudioConfig(TypedDict, total=False):
     output: RealtimeAudioOutputConfig
 
 
+class RealtimeReasoningConfig(TypedDict, total=False):
+    """Reasoning configuration for realtime sessions."""
+
+    effort: RealtimeReasoningEffort
+    """The reasoning effort to use for realtime model responses."""
+
+
 class RealtimeSessionModelSettings(TypedDict):
     """Model settings for a realtime model session."""
 
@@ -157,6 +169,13 @@ class RealtimeSessionModelSettings(TypedDict):
     speed: NotRequired[float]
     """The speed of the model's responses."""
 
+    max_output_tokens: NotRequired[int | Literal["inf"]]
+    """Maximum number of output tokens for a single assistant response, inclusive of tool calls.
+
+    Provide an integer between 1 and 4096 to limit output tokens, or ``"inf"`` for the maximum
+    available tokens for a given model. Defaults to ``"inf"`` server-side.
+    """
+
     input_audio_format: NotRequired[RealtimeAudioFormat | OpenAIRealtimeAudioFormats]
     """The format for input audio streams."""
 
@@ -174,6 +193,12 @@ class RealtimeSessionModelSettings(TypedDict):
 
     tool_choice: NotRequired[ToolChoice]
     """How the model should choose which tools to call."""
+
+    parallel_tool_calls: NotRequired[bool]
+    """Whether the model may make parallel tool calls."""
+
+    reasoning: NotRequired[RealtimeReasoningConfig]
+    """Reasoning configuration for realtime model responses."""
 
     tools: NotRequired[list[Tool]]
     """List of tools available to the model."""

@@ -827,8 +827,10 @@ class ApplyPatchAction:
                     awaited = await result if inspect.isawaitable(result) else result
                     normalized = normalize_apply_patch_result(awaited)
                     if normalized:
-                        if normalized.status in {"completed", "failed"}:
-                            status = normalized.status
+                        if normalized.status == "failed":
+                            status = "failed"
+                        elif normalized.status == "completed" and status != "failed":
+                            status = "completed"
                         if normalized.output:
                             operation_outputs.append(normalized.output)
                 output_text = "\n".join(operation_outputs)

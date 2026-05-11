@@ -211,12 +211,27 @@ class AsyncSQLiteSession(SessionABC):
             await cursor.close()
             await conn.commit()
 
-        if result:
-            message_data = result[0]
-            try:
-                return cast(TResponseInputItem, json.loads(message_data))
-            except json.JSONDecodeError:
-                return None
+            while result:
+                message_data = result[0]
+                try:
+                    return cast(TResponseInputItem, json.loads(message_data))
+                except (json.JSONDecodeError, TypeError):
+                    cursor = await conn.execute(
+                        f"""
+                        DELETE FROM {self.messages_table}
+                        WHERE id = (
+                            SELECT id FROM {self.messages_table}
+                            WHERE session_id = ?
+                            ORDER BY id DESC
+                            LIMIT 1
+                        )
+                        RETURNING message_data
+                        """,
+                        (self.session_id,),
+                    )
+                    result = await cursor.fetchone()
+                    await cursor.close()
+                    await conn.commit()
 
         return None
 

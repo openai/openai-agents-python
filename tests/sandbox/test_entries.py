@@ -9,10 +9,20 @@ from pathlib import Path, PureWindowsPath
 import pytest
 
 import agents.sandbox.entries.artifacts as artifacts_module
-from agents.sandbox import SandboxConcurrencyLimits
-from agents.sandbox.entries import Dir, File, GitRepo, LocalDir, LocalFile, resolve_workspace_path
+from agents.sandbox import SandboxConcurrencyLimits, SandboxPathGrant
+from agents.sandbox.entries import (
+    Dir,
+    File,
+    GitRepo,
+    LocalDir,
+    LocalFile,
+    resolve_workspace_path,
+)
 from agents.sandbox.errors import (
     ExecNonZeroError,
+    GitCloneError,
+    GitCopyError,
+    GitSubpathError,
     InvalidManifestPathError,
     LocalDirReadError,
     LocalFileReadError,
@@ -78,6 +88,28 @@ class _GitRefSession(_RecordingSession):
             return ExecResult(stdout=b"/usr/bin/git\n", stderr=b"", exit_code=0)
         if cmd[:2] == ("git", "clone"):
             return ExecResult(stdout=b"", stderr=b"unexpected clone path", exit_code=1)
+        return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+
+class _GitFailureSession(_RecordingSession):
+    def __init__(self, *, fail_on: str) -> None:
+        super().__init__()
+        self.fail_on = fail_on
+
+    async def _exec_internal(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        _ = timeout
+        cmd = tuple(str(part) for part in command)
+        self.exec_calls.append(cmd)
+        if cmd == ("command -v git >/dev/null 2>&1",):
+            return ExecResult(stdout=b"/usr/bin/git\n", stderr=b"", exit_code=0)
+        if self.fail_on == "clone" and cmd[:2] == ("git", "clone"):
+            return ExecResult(stdout=b"", stderr=b"clone failed", exit_code=1)
+        if self.fail_on == "copy" and cmd[:1] == ("cp",):
+            return ExecResult(stdout=b"", stderr=b"copy failed", exit_code=1)
         return ExecResult(stdout=b"", stderr=b"", exit_code=0)
 
 
@@ -182,6 +214,145 @@ async def test_base_sandbox_session_uses_current_working_directory_for_local_fil
     assert result.files[0].path == Path("/workspace/copied.txt")
     assert result.files[0].sha256 == hashlib.sha256(b"hello").hexdigest()
     assert session.writes[Path("/workspace/copied.txt")] == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_local_file_rejects_absolute_source_outside_base_dir(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=outside / "secret.txt").apply(
+            session,
+            Path("/workspace/copied.txt"),
+            base,
+        )
+
+    assert excinfo.value.context["reason"] == "outside_base_dir"
+    assert excinfo.value.context["base_dir"] == str(base)
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_file_rejects_relative_source_outside_base_dir(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=Path("../outside/secret.txt")).apply(
+            session,
+            Path("/workspace/copied.txt"),
+            base,
+        )
+
+    assert excinfo.value.context["reason"] == "outside_base_dir"
+    assert excinfo.value.context["base_dir"] == str(base)
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_file_allows_extra_path_granted_source_outside_base_dir(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession(
+        Manifest(extra_path_grants=(SandboxPathGrant(path=str(outside)),)),
+    )
+
+    result = await LocalFile(src=outside / "secret.txt").apply(
+        session,
+        Path("/workspace/copied.txt"),
+        base,
+    )
+
+    assert result[0].path == Path("/workspace/copied.txt")
+    assert session.writes[Path("/workspace/copied.txt")] == b"secret"
+
+
+@pytest.mark.asyncio
+async def test_local_file_rejects_source_outside_extra_path_grants(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    other = tmp_path / "other"
+    base.mkdir()
+    outside.mkdir()
+    other.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession(
+        Manifest(extra_path_grants=(SandboxPathGrant(path=str(other)),)),
+    )
+
+    with pytest.raises(LocalFileReadError) as excinfo:
+        await LocalFile(src=outside / "secret.txt").apply(
+            session,
+            Path("/workspace/copied.txt"),
+            base,
+        )
+
+    assert excinfo.value.context["reason"] == "outside_base_dir"
+    assert excinfo.value.context["extra_path_grants"] == [str(other)]
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_serialized_manifest_extra_path_grant_allows_local_file_source(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    manifest = Manifest.model_validate(
+        {
+            "extra_path_grants": [{"path": str(outside)}],
+            "entries": {
+                "copied.txt": {
+                    "type": "local_file",
+                    "src": str(outside / "secret.txt"),
+                }
+            },
+        }
+    )
+    session = _RecordingSession(manifest)
+
+    result = await session._apply_entry_batch(
+        [(Path("/workspace/copied.txt"), manifest.entries["copied.txt"])],
+        base_dir=base,
+    )
+
+    assert result[0].path == Path("/workspace/copied.txt")
+    assert session.writes[Path("/workspace/copied.txt")] == b"secret"
+
+
+@pytest.mark.asyncio
+async def test_local_file_allows_absolute_source_inside_base_dir(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    source_dir = base / "source"
+    source_dir.mkdir(parents=True)
+    (source_dir / "safe.txt").write_text("safe", encoding="utf-8")
+    session = _RecordingSession()
+
+    result = await LocalFile(src=source_dir / "safe.txt").apply(
+        session,
+        Path("/workspace/copied.txt"),
+        base,
+    )
+
+    assert result[0].path == Path("/workspace/copied.txt")
+    assert session.writes[Path("/workspace/copied.txt")] == b"safe"
 
 
 @pytest.mark.asyncio
@@ -570,6 +741,77 @@ async def test_local_dir_apply_uses_configured_file_copy_fanout(
 
 
 @pytest.mark.asyncio
+async def test_local_dir_rejects_absolute_source_outside_base_dir(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+
+    with pytest.raises(LocalDirReadError) as excinfo:
+        await LocalDir(src=outside).apply(session, Path("/workspace/copied"), base)
+
+    assert excinfo.value.context["reason"] == "outside_base_dir"
+    assert excinfo.value.context["base_dir"] == str(base)
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_dir_rejects_relative_source_outside_base_dir(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+
+    with pytest.raises(LocalDirReadError) as excinfo:
+        await LocalDir(src=Path("../outside")).apply(session, Path("/workspace/copied"), base)
+
+    assert excinfo.value.context["reason"] == "outside_base_dir"
+    assert excinfo.value.context["base_dir"] == str(base)
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_dir_allows_extra_path_granted_source_outside_base_dir(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession(
+        Manifest(extra_path_grants=(SandboxPathGrant(path=str(outside), read_only=True),)),
+    )
+
+    result = await LocalDir(src=outside).apply(
+        session,
+        Path("/workspace/copied"),
+        base,
+    )
+
+    assert result[0].path == Path("/workspace/copied/secret.txt")
+    assert session.writes[Path("/workspace/copied/secret.txt")] == b"secret"
+
+
+@pytest.mark.asyncio
+async def test_local_dir_allows_absolute_source_inside_base_dir(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    source = base / "source"
+    source.mkdir(parents=True)
+    (source / "safe.txt").write_text("safe", encoding="utf-8")
+    session = _RecordingSession()
+
+    result = await LocalDir(src=source).apply(session, Path("/workspace/copied"), base)
+
+    assert result[0].path == Path("/workspace/copied/safe.txt")
+    assert session.writes[Path("/workspace/copied/safe.txt")] == b"safe"
+
+
+@pytest.mark.asyncio
 async def test_local_dir_rejects_symlinked_source_ancestors(tmp_path: Path) -> None:
     target_dir = tmp_path / "secret-dir"
     target_dir.mkdir()
@@ -669,6 +911,102 @@ async def test_git_repo_uses_fetch_checkout_path_for_commit_refs() -> None:
         and call[3:5] == ("checkout", "--detach")
         and call[-1] == "FETCH_HEAD"
         for call in session.exec_calls
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("subpath", "reason"),
+    [
+        ("   ", "empty"),
+        ("/docs", "absolute"),
+        ("../outside", "parent_traversal"),
+        ("docs/../../outside", "parent_traversal"),
+        ("C:/repo", "windows_path"),
+        ("docs\\outside", "windows_path"),
+    ],
+)
+async def test_git_repo_rejects_invalid_subpath_before_copy(
+    subpath: str,
+    reason: str,
+) -> None:
+    session = _GitFailureSession(fail_on="clone")
+    repo = GitRepo(repo="openai/example", ref="main", subpath=subpath)
+
+    with pytest.raises(GitSubpathError) as excinfo:
+        await repo.apply(session, Path("/workspace/repo"), Path("/ignored"))
+
+    assert excinfo.value.context["reason"] == reason
+    assert excinfo.value.context["subpath"] == subpath
+    assert session.exec_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subpath", ["", ".", "./", "./.", " ./ "])
+async def test_git_repo_root_subpath_alias_copies_repo_root(subpath: str) -> None:
+    session = _RecordingSession()
+    repo = GitRepo(repo="openai/example", ref="main", subpath=subpath)
+
+    await repo.apply(session, Path("/workspace/repo"), Path("/ignored"))
+
+    copy_call = next(call for call in session.exec_calls if call[:1] == ("cp",))
+    assert copy_call[3].startswith("/tmp/sandbox-git-")
+    assert copy_call[3].endswith("/.")
+    assert not copy_call[3].endswith("//.")
+    assert copy_call[4].replace("\\", "/") == "/workspace/repo/"
+
+
+@pytest.mark.asyncio
+async def test_git_repo_allows_relative_subpath_copy() -> None:
+    session = _RecordingSession()
+    repo = GitRepo(repo="openai/example", ref="main", subpath="docs/reference")
+
+    await repo.apply(session, Path("/workspace/repo"), Path("/ignored"))
+
+    copy_call = next(call for call in session.exec_calls if call[:1] == ("cp",))
+    assert copy_call[3].endswith("/docs/reference/.")
+    assert copy_call[4].replace("\\", "/") == "/workspace/repo/"
+
+
+def _git_temp_cleanup_calls(session: _RecordingSession) -> list[tuple[str, ...]]:
+    return [call for call in session.exec_calls if call[:3] == ("rm", "-rf", "--")]
+
+
+def _git_temp_cleanup_call_indices(session: _RecordingSession) -> list[int]:
+    return [i for i, call in enumerate(session.exec_calls) if call[:3] == ("rm", "-rf", "--")]
+
+
+@pytest.mark.asyncio
+async def test_git_repo_cleans_temp_clone_after_copy_failure() -> None:
+    session = _GitFailureSession(fail_on="copy")
+    repo = GitRepo(repo="openai/example", ref="main")
+
+    with pytest.raises(GitCopyError):
+        await repo.apply(session, Path("/workspace/repo"), Path("/ignored"))
+
+    cleanup_calls = _git_temp_cleanup_calls(session)
+    cleanup_indices = _git_temp_cleanup_call_indices(session)
+    assert len(cleanup_calls) == 2
+    assert cleanup_calls[0] == cleanup_calls[1]
+    assert cleanup_indices[1] > next(
+        i for i, call in enumerate(session.exec_calls) if call[:1] == ("cp",)
+    )
+
+
+@pytest.mark.asyncio
+async def test_git_repo_cleans_temp_clone_after_clone_failure() -> None:
+    session = _GitFailureSession(fail_on="clone")
+    repo = GitRepo(repo="openai/example", ref="main")
+
+    with pytest.raises(GitCloneError):
+        await repo.apply(session, Path("/workspace/repo"), Path("/ignored"))
+
+    cleanup_calls = _git_temp_cleanup_calls(session)
+    cleanup_indices = _git_temp_cleanup_call_indices(session)
+    assert len(cleanup_calls) == 2
+    assert cleanup_calls[0] == cleanup_calls[1]
+    assert cleanup_indices[1] > next(
+        i for i, call in enumerate(session.exec_calls) if call[:2] == ("git", "clone")
     )
 
 

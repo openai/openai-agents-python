@@ -341,6 +341,8 @@ async def execute_handoffs(
     run_config: RunConfig,
     server_manages_conversation: bool = False,
     nest_handoff_history_fn: Callable[..., HandoffInputData] | None = None,
+    tool_input_guardrail_results: list[ToolInputGuardrailResult] | None = None,
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult] | None = None,
 ) -> SingleStepResult:
     """Execute a handoff and prepare the next turn for the new agent."""
 
@@ -511,8 +513,8 @@ async def execute_handoffs(
         pre_step_items=pre_step_items,
         new_step_items=new_step_items,
         next_step=NextStepHandoff(new_agent),
-        tool_input_guardrail_results=[],
-        tool_output_guardrail_results=[],
+        tool_input_guardrail_results=list(tool_input_guardrail_results or []),
+        tool_output_guardrail_results=list(tool_output_guardrail_results or []),
         session_step_items=session_step_items,
     )
 
@@ -659,6 +661,8 @@ async def execute_tools_and_side_effects(
             context_wrapper=context_wrapper,
             run_config=run_config,
             server_manages_conversation=server_manages_conversation,
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
         )
 
     tool_final_output = await _maybe_finalize_from_tool_results(
@@ -1434,6 +1438,8 @@ async def resolve_interrupted_turn(
             run_config=run_config,
             server_manages_conversation=server_manages_conversation,
             nest_handoff_history_fn=nest_history,
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
         )
 
     tool_final_output = await _maybe_finalize_from_tool_results(

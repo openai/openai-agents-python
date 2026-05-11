@@ -18,6 +18,11 @@ class ModelAudioTracker:
         # (item_id, item_content_index) -> ModelAudioState
         self._states: dict[tuple[str, int], ModelAudioState] = {}
         self._last_audio_item: tuple[str, int] | None = None
+        # Format is set once the session payload negotiates one. Audio deltas can
+        # arrive before that for transcription-only sessions or when the payload
+        # omits an audio format, so we default to None and let the length
+        # calculator handle the unknown-format fallback.
+        self._format: RealtimeAudioFormat | None = None
 
     def set_audio_format(self, format: RealtimeAudioFormat) -> None:
         """Called when the model wants to set the audio format."""
