@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any
+from inspect import Parameter, signature
+from typing import Any, cast
 
 from ..logger import logger
 from .config import TracingConfig
@@ -39,6 +41,24 @@ def _safe_debug(message: str) -> None:
     except Exception:
         # Avoid noisy shutdown errors when the underlying stream is already closed.
         return
+
+
+def _remaining_timeout(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _supports_shutdown_timeout(processor: TracingProcessor) -> bool:
+    try:
+        parameters = signature(processor.shutdown).parameters
+    except (TypeError, ValueError):
+        return False
+
+    for parameter in parameters.values():
+        if parameter.kind == Parameter.VAR_KEYWORD:
+            return True
+    return "timeout" in parameters
 
 
 def _is_noop_id(value: str | None) -> bool:
@@ -119,14 +139,24 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
             except Exception as e:
                 logger.error(f"Error in trace processor {processor} during on_span_end: {e}")
 
-    def shutdown(self) -> None:
+    def shutdown(self, timeout: float | None = None) -> None:
         """
         Called when the application stops.
         """
+        deadline = None if timeout is None else time.monotonic() + timeout
         for processor in self._processors:
             _safe_debug(f"Shutting down trace processor {processor}")
             try:
-                processor.shutdown()
+                processor_timeout = _remaining_timeout(deadline)
+                if processor_timeout is not None and processor_timeout <= 0:
+                    logger.warning(
+                        "[non-fatal] Tracing: shutdown timeout reached before processor cleanup."
+                    )
+                    return
+                if processor_timeout is not None and _supports_shutdown_timeout(processor):
+                    cast(Any, processor.shutdown)(timeout=processor_timeout)
+                else:
+                    processor.shutdown()
             except Exception as e:
                 logger.error(f"Error shutting down trace processor {processor}: {e}")
 
@@ -405,13 +435,13 @@ class DefaultTraceProvider(TraceProvider):
         except Exception as e:
             logger.error(f"Error flushing trace provider: {e}")
 
-    def shutdown(self) -> None:
+    def shutdown(self, timeout: float | None = None) -> None:
         self._refresh_disabled_flag()
         if self._disabled:
             return
 
         try:
             _safe_debug("Shutting down trace provider")
-            self._multi_processor.shutdown()
+            self._multi_processor.shutdown(timeout=timeout)
         except Exception as e:
             logger.error(f"Error shutting down trace provider: {e}")

@@ -1,6 +1,11 @@
+import logging
 import os
+import subprocess
+import sys
+import textwrap
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -170,6 +175,61 @@ def test_batch_trace_processor_shutdown_flushes(mocked_exporter):
         total_exported += len(batch)
 
     assert total_exported == 2, "All items in the queue should be exported upon shutdown"
+
+
+def test_batch_trace_processor_shutdown_timeout_returns_when_exporter_blocks(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    export_started = threading.Event()
+    release_export = threading.Event()
+
+    class BlockingExporter(TracingExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            export_started.set()
+            release_export.wait(timeout=5.0)
+
+    processor = BatchTraceProcessor(
+        exporter=BlockingExporter(),
+        max_queue_size=1,
+        schedule_delay=60.0,
+        export_trigger_ratio=1.0,
+    )
+    processor.on_span_end(get_span(processor))
+
+    assert export_started.wait(timeout=2.0)
+
+    start = time.monotonic()
+    with caplog.at_level(logging.WARNING):
+        processor.shutdown(timeout=0.05)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.5
+    assert "shutdown timeout reached" in caplog.text
+
+    release_export.set()
+    if processor._worker_thread:
+        processor._worker_thread.join(timeout=2.0)
+
+
+def test_batch_trace_processor_shutdown_passes_deadline_to_exporter() -> None:
+    seen_deadlines: list[float | None] = []
+
+    class DeadlineExporter(TracingExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            raise AssertionError("shutdown should use the deadline-aware exporter path")
+
+        def _export_with_deadline(
+            self, items: list[Trace | Span[Any]], deadline: float | None
+        ) -> None:
+            seen_deadlines.append(deadline)
+
+    processor = BatchTraceProcessor(exporter=DeadlineExporter())
+    processor._queue.put_nowait(get_span(processor))
+
+    processor.shutdown(timeout=1.0)
+
+    assert len(seen_deadlines) == 1
+    assert seen_deadlines[0] is not None
 
 
 def test_batch_trace_processor_survives_exporter_exception():
@@ -415,8 +475,103 @@ def test_backend_span_exporter_5xx_retry(mock_client, patched_time_sleep):
 
     # Should retry up to max_retries times
     assert mock_client.return_value.post.call_count == 3
+    assert patched_time_sleep.call_count == 2
 
     exporter.close()
+
+
+@patch("httpx.Client")
+def test_backend_span_exporter_deadline_stops_during_5xx_retry_backoff(
+    mock_client,
+    patched_time_sleep,
+):
+    mock_response = MagicMock()
+    mock_response.status_code = 504
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=1.0)
+    exporter._export_with_deadline([get_span(mock_processor())], deadline=time.monotonic() + 0.01)
+
+    assert mock_client.return_value.post.call_count == 1
+    patched_time_sleep.assert_called_once()
+    assert patched_time_sleep.call_args.args[0] <= 0.1
+
+    exporter.close()
+
+
+def test_tracing_atexit_cleanup_timeout_preserves_process_exit_code_on_504() -> None:
+    request_seen = threading.Event()
+
+    class Always504Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            request_seen.set()
+            self.send_response(504)
+            self.end_headers()
+            self.wfile.write(b"gateway timeout")
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Always504Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    script = textwrap.dedent(
+        f"""
+        import sys
+        import time
+
+        from agents.tracing import custom_span, trace
+        from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor
+        from agents.tracing.provider import DefaultTraceProvider
+        from agents.tracing import setup as tracing_setup
+
+        tracing_setup._DEFAULT_SHUTDOWN_TIMEOUT = 0.2
+
+        exporter = BackendSpanExporter(
+            api_key="test_key",
+            endpoint="http://127.0.0.1:{server.server_port}/traces/ingest",
+            max_retries=100,
+            base_delay=10.0,
+            max_delay=10.0,
+        )
+        processor = BatchTraceProcessor(
+            exporter=exporter,
+            max_queue_size=1,
+            max_batch_size=1,
+            schedule_delay=60.0,
+            export_trigger_ratio=1.0,
+        )
+        provider = DefaultTraceProvider()
+        provider.register_processor(processor)
+        tracing_setup.set_trace_provider(provider)
+
+        with trace("probe"):
+            with custom_span("probe-span"):
+                pass
+
+        time.sleep(0.3)
+        sys.exit(7)
+        """
+    )
+
+    start = time.monotonic()
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+        elapsed = time.monotonic() - start
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert request_seen.is_set()
+    assert result.returncode == 7
+    assert elapsed < 2.8
 
 
 @patch("httpx.Client")
