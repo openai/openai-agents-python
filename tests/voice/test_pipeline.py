@@ -83,6 +83,64 @@ async def test_streamed_audio_result_preserves_cross_chunk_sample_boundaries() -
 
 
 @pytest.mark.asyncio
+async def test_streamed_audio_result_synthesizes_short_custom_splitter_chunk() -> None:
+    texts: list[str] = []
+
+    class RecordingTTS(FakeTTS):
+        async def run(self, text: str, settings: TTSModelSettings):
+            texts.append(text)
+            yield np.zeros(2, dtype=np.int16).tobytes()
+
+    def split_immediately(text: str) -> tuple[str, str]:
+        return text, ""
+
+    result = StreamedAudioResult(
+        RecordingTTS(),
+        TTSModelSettings(buffer_size=1, text_splitter=split_immediately),
+        VoicePipelineConfig(),
+    )
+
+    await result._add_text("ok")
+    await result._turn_done()
+    await result._done()
+
+    events, audio_chunks = await extract_events(result)
+
+    assert texts == ["ok"]
+    assert events == ["turn_started", "audio", "turn_ended", "session_ended"]
+    assert audio_chunks == [np.zeros(2, dtype=np.int16).tobytes()]
+
+
+@pytest.mark.asyncio
+async def test_streamed_audio_result_ignores_empty_custom_splitter_chunk() -> None:
+    texts: list[str] = []
+
+    class RecordingTTS(FakeTTS):
+        async def run(self, text: str, settings: TTSModelSettings):
+            texts.append(text)
+            yield np.zeros(2, dtype=np.int16).tobytes()
+
+    def discard_text(_text: str) -> tuple[str, str]:
+        return "", ""
+
+    result = StreamedAudioResult(
+        RecordingTTS(),
+        TTSModelSettings(buffer_size=1, text_splitter=discard_text),
+        VoicePipelineConfig(),
+    )
+
+    await result._add_text("ok")
+    await result._turn_done()
+    await result._done()
+
+    events, audio_chunks = await extract_events(result)
+
+    assert texts == []
+    assert events == ["turn_started", "turn_ended", "session_ended"]
+    assert audio_chunks == []
+
+
+@pytest.mark.asyncio
 async def test_voicepipeline_run_single_turn() -> None:
     # Single turn. Should produce a single audio output, which is the TTS output for "out_1".
 

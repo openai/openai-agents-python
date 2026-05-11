@@ -201,7 +201,7 @@ class StreamedAudioResult:
 
         combined_sentences, self._text_buffer = self.tts_settings.text_splitter(self._text_buffer)
 
-        if len(combined_sentences) >= 20:
+        if combined_sentences:
             local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
             self._ordered_tasks.append(local_queue)
             self._tasks.append(
@@ -220,6 +220,10 @@ class StreamedAudioResult:
                 )
             )
             self._text_buffer = ""
+        elif self._started_processing_turn:
+            local_queue = asyncio.Queue()
+            self._ordered_tasks.append(local_queue)
+            await local_queue.put(VoiceStreamEventLifecycle(event="turn_ended"))
         self._done_processing = True
         if self._dispatcher_task is None:
             self._dispatcher_task = asyncio.create_task(self._dispatch_audio())
