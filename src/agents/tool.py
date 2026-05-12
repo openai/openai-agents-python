@@ -401,7 +401,9 @@ class FunctionTool:
         if callable(bind_to_function_tool):
             self.on_invoke_tool = bind_to_function_tool(self)
         if self.strict_json_schema:
-            self.params_json_schema = ensure_strict_json_schema(self.params_json_schema)
+            self.params_json_schema = ensure_strict_json_schema(
+                copy.deepcopy(self.params_json_schema)
+            )
         _validate_function_tool_timeout_config(self)
 
     def __copy__(self) -> FunctionTool:
