@@ -28,7 +28,7 @@ The most common properties of an agent are:
 | Property | Required | Description |
 | --- | --- | --- |
 | `name` | yes | Human-readable agent name. |
-| `instructions` | yes | System prompt or dynamic instructions callback. See [Dynamic instructions](#dynamic-instructions). |
+| `instructions` | no | System prompt or dynamic instructions callback. Strongly recommended. See [Dynamic instructions](#dynamic-instructions). |
 | `prompt` | no | OpenAI Responses API prompt configuration. Accepts a static prompt object or a function. See [Prompt templates](#prompt-templates). |
 | `handoff_description` | no | Short description exposed when this agent is offered as a handoff target. |
 | `handoffs` | no | Delegate the conversation to specialist agents. See [handoffs](handoffs.md). |
