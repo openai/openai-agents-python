@@ -14,7 +14,6 @@ from typing import Any, Final
 ALLOWED_LABELS: Final[set[str]] = {
     "documentation",
     "project",
-    "bug",
     "enhancement",
     "dependencies",
     "feature:chat-completions",
@@ -35,7 +34,6 @@ DETERMINISTIC_LABELS: Final[set[str]] = {
 }
 
 MODEL_ONLY_LABELS: Final[set[str]] = {
-    "bug",
     "enhancement",
 }
 
@@ -280,11 +278,8 @@ def fetch_existing_labels(pr_number: str) -> set[str]:
 def infer_title_intent_labels(pr_context: PRContext) -> set[str]:
     normalized_title = pr_context.title.strip().lower()
 
-    bug_prefixes = ("fix:", "fix(", "bug:", "bugfix:", "hotfix:", "regression:")
     enhancement_prefixes = ("feat:", "feat(", "feature:", "enhancement:")
 
-    if normalized_title.startswith(bug_prefixes):
-        return {"bug"}
     if normalized_title.startswith(enhancement_prefixes):
         return {"enhancement"}
     return set()
@@ -311,7 +306,7 @@ def compute_desired_labels(
     if "pyproject.toml" in changed_files:
         desired.add("project")
 
-    if any(path.startswith("docs/") for path in changed_files):
+    if any(path.startswith(("docs/", "examples/")) for path in changed_files):
         desired.add("documentation")
 
     dependencies_allowed = "uv.lock" in changed_files

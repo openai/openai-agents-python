@@ -17,7 +17,6 @@ Task:
 Allowed labels:
 - documentation
 - project
-- bug
 - enhancement
 - dependencies
 - feature:chat-completions
@@ -39,12 +38,10 @@ Important guidance:
 - A secondary `feature:*` label needs two things: a non-test implementation/docs change in that area, and evidence that the area is a user-facing outcome of the PR rather than support work for another feature.
 
 Label rules:
-- documentation: Documentation changes (docs/), or src/ changes that only modify comments/docstrings without behavior changes. If only comments/docstrings change in src/, do not add bug/enhancement.
+- documentation: Documentation changes (docs/), example code changes (examples/), or src/ changes that only modify comments/docstrings without behavior changes. If only comments/docstrings change in src/, do not add enhancement.
 - project: Any change to pyproject.toml.
 - dependencies: Dependencies are added/removed/updated (pyproject.toml dependency sections or uv.lock changes).
-- bug: The PR's primary intent is to correct existing incorrect behavior. Use only with strong evidence such as the title/body/tests clearly describing a fix, regression, crash, incorrect output, or restore/preserve behavior. Do not add `bug` for incidental hardening that accompanies a new feature.
 - enhancement: The PR's primary intent is to add or expand functionality. Prefer `enhancement` for feature work even if the diff also contains some fixes or guardrails needed to support that feature.
-- bug vs enhancement: Prefer exactly one of these. Include both only when the PR clearly contains two separate substantial changes and both are first-order outcomes.
 - feature:chat-completions: Chat Completions support or conversion is a primary deliverable of the PR. Do not add it for a small compatibility guard or parity update in `chatcmpl_converter.py`.
 - feature:core: Core agent loop, tool calls, run pipeline, or other central runtime behavior is a primary surface of the PR. For cross-cutting runtime changes, this is usually the single best feature label.
 - feature:extensions: `src/agents/extensions/` surfaces are a primary deliverable of the PR, including extension models/providers such as Any-LLM and LiteLLM. Changes under `src/agents/extensions/sandbox/` can warrant this label alongside `feature:sandboxes`.
@@ -58,7 +55,7 @@ Label rules:
 Decision process:
 1. Determine the PR's primary intent in one sentence from the PR title/body and dominant runtime diff.
 2. Start with zero labels.
-3. Add `bug` or `enhancement` conservatively.
+3. Add `enhancement` conservatively.
 4. Add only the minimum `feature:*` labels needed to describe the primary surface area.
 5. Treat extra `feature:*` labels as guilty until proven necessary. Keep them only when the PR would feel mislabeled without them.
 6. Re-check every label. Drop any label that is supported only by secondary edits, parity work, or touched files outside the PR's main focus.
@@ -66,7 +63,7 @@ Decision process:
 Examples:
 - If a new cross-cutting runtime feature touches Chat Completions, Realtime, Sessions, MCP, and tracing support code for parity, prefer `["enhancement","feature:core"]` over labeling every touched area.
 - If a PR mainly adds a Responses/core capability and touches realtime or sessions files only to keep shared serialization, replay, or adapters in sync, do not add `feature:realtime` or `feature:sessions`.
-- If a PR mainly fixes realtime transport behavior and also updates tests/docs, prefer `["bug","feature:realtime"]`.
+- If a PR mainly fixes realtime transport behavior and also updates tests/docs, prefer `["feature:realtime"]`.
 
 Output:
 - JSON only (no code fences, no extra text).

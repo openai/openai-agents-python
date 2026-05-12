@@ -102,6 +102,21 @@ def test_compute_desired_labels_falls_back_when_codex_output_is_invalid() -> Non
     assert desired == {"feature:core"}
 
 
+def test_compute_desired_labels_marks_examples_as_documentation() -> None:
+    desired = pr_labels.compute_desired_labels(
+        pr_context=pr_labels.PRContext(),
+        changed_files=["examples/basic/hello_world.py"],
+        diff_text="",
+        codex_ran=True,
+        codex_output_valid=True,
+        codex_labels=[],
+        base_sha=None,
+        head_sha=None,
+    )
+
+    assert desired == {"documentation"}
+
+
 def test_compute_desired_labels_uses_fallback_feature_labels_when_codex_valid_but_empty() -> None:
     desired = pr_labels.compute_desired_labels(
         pr_context=pr_labels.PRContext(),
@@ -117,7 +132,7 @@ def test_compute_desired_labels_uses_fallback_feature_labels_when_codex_valid_bu
     assert desired == {"feature:core"}
 
 
-def test_compute_desired_labels_infers_bug_from_fix_title() -> None:
+def test_compute_desired_labels_does_not_infer_bug_from_fix_title() -> None:
     desired = pr_labels.compute_desired_labels(
         pr_context=pr_labels.PRContext(title="fix: stop streamed tool execution"),
         changed_files=["src/agents/run_internal/approvals.py"],
@@ -129,7 +144,7 @@ def test_compute_desired_labels_infers_bug_from_fix_title() -> None:
         head_sha=None,
     )
 
-    assert desired == {"bug", "feature:core"}
+    assert desired == {"feature:core"}
 
 
 def test_compute_desired_labels_infers_extensions_for_extensions_memory_fix() -> None:
@@ -147,7 +162,7 @@ def test_compute_desired_labels_infers_extensions_for_extensions_memory_fix() ->
         head_sha=None,
     )
 
-    assert desired == {"bug", "feature:extensions"}
+    assert desired == {"feature:extensions"}
 
 
 def test_compute_desired_labels_infers_sandboxes_for_sandbox_fix() -> None:
@@ -165,7 +180,22 @@ def test_compute_desired_labels_infers_sandboxes_for_sandbox_fix() -> None:
         head_sha=None,
     )
 
-    assert desired == {"bug", "feature:extensions", "feature:sandboxes"}
+    assert desired == {"feature:extensions", "feature:sandboxes"}
+
+
+def test_compute_desired_labels_ignores_codex_bug_label() -> None:
+    desired = pr_labels.compute_desired_labels(
+        pr_context=pr_labels.PRContext(),
+        changed_files=["src/agents/run_internal/approvals.py"],
+        diff_text="",
+        codex_ran=True,
+        codex_output_valid=True,
+        codex_labels=["bug", "feature:core"],
+        base_sha=None,
+        head_sha=None,
+    )
+
+    assert desired == {"feature:core"}
 
 
 def test_compute_desired_labels_adds_extensions_for_extension_sandbox_when_codex_is_partial() -> (
@@ -198,7 +228,7 @@ def test_compute_managed_labels_preserves_model_only_labels_without_signal() -> 
     assert "feature:core" in managed
 
 
-def test_compute_managed_labels_manages_model_only_labels_with_fix_title() -> None:
+def test_compute_managed_labels_preserves_model_only_labels_with_fix_title() -> None:
     managed = pr_labels.compute_managed_labels(
         pr_context=pr_labels.PRContext(title="fix: stop streamed tool execution"),
         codex_ran=True,
@@ -206,5 +236,17 @@ def test_compute_managed_labels_manages_model_only_labels_with_fix_title() -> No
         codex_labels=[],
     )
 
-    assert "bug" in managed
-    assert "enhancement" in managed
+    assert "bug" not in managed
+    assert "enhancement" not in managed
+
+
+def test_compute_managed_labels_ignores_codex_bug_label() -> None:
+    managed = pr_labels.compute_managed_labels(
+        pr_context=pr_labels.PRContext(),
+        codex_ran=True,
+        codex_output_valid=True,
+        codex_labels=["bug"],
+    )
+
+    assert "bug" not in managed
+    assert "enhancement" not in managed

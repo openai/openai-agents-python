@@ -10,7 +10,6 @@
         "enum": [
           "documentation",
           "project",
-          "bug",
           "enhancement",
           "dependencies",
           "feature:chat-completions",
