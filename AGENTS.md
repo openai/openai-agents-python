@@ -55,6 +55,15 @@ Treat the parameter and dataclass field order of exported runtime APIs as a comp
 - If reordering is unavoidable, add an explicit compatibility layer and regression tests that exercise the old positional call pattern.
 - Prefer keyword arguments at call sites to reduce accidental breakage, but do not rely on this to justify breaking positional compatibility for public APIs.
 
+### Platform, Docs, and Security Review
+
+- Documentation is published to the live site, so coordinate SDK behavior changes and docs carefully. If docs describe behavior that is not released yet, either delay the docs change until the SDK release is available or split it into a follow-up PR.
+- Treat runnable docs snippets as API compatibility checks. Before adding OpenAI API, provider, Responses, Realtime, WebSocket, or SDK constructor examples, verify the shown arguments and call shape against the actual implementation.
+- Do not let untrusted sandbox manifests opt themselves out of host filesystem or base-directory boundaries. Escape hatches for local source materialization must be controlled by trusted application code at the call site, not by serialized manifest data.
+- When documenting sandbox or security grants, verify the actual implementation path enforces the grant or boundary. Do not claim a grant applies to `LocalDir`, `LocalFile`, archive extraction, or other materialization paths unless those paths actually consult it.
+- When redacting OpenAI tool, MCP, model, or provider payloads, consider traceback display, exception chaining, `__context__`, logs, and telemetry. Suppressing display with `raise ... from None` is not enough if the original exception object still carries sensitive input data.
+- For OpenAI platform or SDK-specific docs changes, prefer `$openai-knowledge` for authoritative platform behavior and inspect the local code path for SDK behavior. Do not rely on generic API assumptions when documenting Responses, Chat Completions, Realtime, tools, MCP, or provider adapters.
+
 ## Project Structure Guide
 
 ### Overview
