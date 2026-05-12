@@ -180,15 +180,25 @@ def _is_subclass_of_base_model_or_dict(t: Any) -> bool:
     return issubclass(t, BaseModel | dict)
 
 
-def _type_to_str(t: type[Any]) -> str:
+def _type_to_str(t: Any) -> str:
     origin = get_origin(t)
     args = get_args(t)
 
     if origin is None:
-        # It's a simple type like `str`, `int`, etc.
-        return t.__name__
+        # Plain type (str, int, MyModel, ...) or a non-type value supplied as a
+        # type argument — e.g. the "ok" inside `Literal["ok"]` is a str instance,
+        # not a class, so `t.__name__` would raise. Fall back to repr() in that
+        # case so nested forms like `list[Literal["ok"]]` still format cleanly.
+        if isinstance(t, type):
+            return t.__name__
+        return repr(t)
     elif args:
         args_str = ", ".join(_type_to_str(arg) for arg in args)
-        return f"{origin.__name__}[{args_str}]"
+        # `typing.Literal`/`typing.Union`/etc. expose `_name` rather than
+        # `__name__` on some Python versions.
+        origin_name = (
+            getattr(origin, "__name__", None) or getattr(origin, "_name", None) or str(origin)
+        )
+        return f"{origin_name}[{args_str}]"
     else:
         return str(t)

@@ -1,5 +1,5 @@
 import json
-from typing import Any
+from typing import Any, Literal, cast
 
 import pytest
 from pydantic import BaseModel
@@ -92,6 +92,33 @@ def test_structured_output_generic_dict_rejects_wrapper_shape():
 
     with pytest.raises(ModelBehaviorError):
         output_schema.validate_json(json.dumps({"response": {"foo": 1}}))
+
+
+def test_structured_output_literal_name_does_not_crash():
+    # `AgentOutputSchema.name()` used to raise `AttributeError` on `Literal["ok"]`
+    # because the Literal value "ok" is a `str` instance rather than a class, and
+    # the name formatter unconditionally read `__name__`. See issue #3357.
+    schema = AgentOutputSchema(cast(type[Any], Literal["ok"]))
+    assert schema.name() == "Literal['ok']"
+
+    # Multiple Literal members format cleanly.
+    schema_multi = AgentOutputSchema(cast(type[Any], Literal["ok", "done"]))
+    assert schema_multi.name() == "Literal['ok', 'done']"
+
+    # Literal nested inside a generic still works.
+    schema_nested = AgentOutputSchema(
+        cast(type[Any], list[Literal["ok", "done"]]),
+        strict_json_schema=False,
+    )
+    assert schema_nested.name() == "list[Literal['ok', 'done']]"
+
+    # Non-string Literal values use repr() so they keep their original literal form.
+    schema_int = AgentOutputSchema(cast(type[Any], Literal[1, 2]))
+    assert schema_int.name() == "Literal[1, 2]"
+
+    # Plain and other generic types are unchanged by the fix.
+    assert AgentOutputSchema(str).name() == "str"
+    assert AgentOutputSchema(list[int]).name() == "list[int]"
 
 
 def test_bad_json_raises_error(mocker):
