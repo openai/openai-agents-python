@@ -1422,3 +1422,60 @@ async def test_output_tokens_details_persisted_when_input_details_missing():
     assert turn_usage["output_tokens_details"] == {"reasoning_tokens": 42}
     assert turn_usage["input_tokens_details"] is None
     session.close()
+
+
+async def test_delete_branch_removes_branch_only_base_messages():
+    """Regression for #3346.
+
+    `delete_branch` used to remove only the `turn_usage` and `message_structure`
+    rows for a branch, leaving the underlying messages in the base table when
+    they were only referenced by that branch. Those rows became invisible to
+    advanced reads (which join through `message_structure`) but still padded
+    the on-disk database. After the fix, branch-only messages are dropped along
+    with their structure rows, while messages shared with another branch are
+    preserved.
+    """
+    session = AdvancedSQLiteSession(
+        session_id="delete_branch_orphan_repro",
+        create_tables=True,
+    )
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "main question"},
+                {"role": "assistant", "content": "main answer"},
+            ]
+        )
+
+        await session.create_branch_from_turn(1, "branch_only")
+        await session.add_items(
+            [
+                {"role": "user", "content": "branch-only question"},
+                {"role": "assistant", "content": "branch-only answer"},
+            ]
+        )
+
+        await session.delete_branch("branch_only", force=True)
+
+        with session._locked_connection() as conn:
+            message_rows = conn.execute(
+                f"SELECT id FROM {session.messages_table} WHERE session_id = ? ORDER BY id",
+                (session.session_id,),
+            ).fetchall()
+            structure_rows = conn.execute(
+                "SELECT branch_id FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchall()
+
+        # Main-branch messages remain (shared between branches were copied at
+        # `create_branch_from_turn`, so the two new branch-only rows were the
+        # only references for ids 3 and 4 — both should be gone now).
+        assert [row[0] for row in message_rows] == [1, 2]
+        assert all(row[0] == "main" for row in structure_rows)
+        assert await session.get_items(branch_id="main") == [
+            {"role": "user", "content": "main question"},
+            {"role": "assistant", "content": "main answer"},
+        ]
+    finally:
+        session.close()
