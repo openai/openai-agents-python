@@ -764,7 +764,7 @@ class ItemHelpers:
         text = ""
         for item in message.raw_item.content:
             if isinstance(item, ResponseOutputText):
-                text += item.text
+                text += item.text or ""
         return text
 
     @classmethod

@@ -83,6 +83,7 @@ RunErrorDetails:
 - 0 new item(s)
 - 0 raw response(s)
 - 0 input guardrail result(s)
+- 0 output guardrail result(s)
 (See `RunErrorDetails` for more details)\
 """)
 
