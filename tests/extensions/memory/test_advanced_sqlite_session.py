@@ -1422,3 +1422,53 @@ async def test_output_tokens_details_persisted_when_input_details_missing():
     assert turn_usage["output_tokens_details"] == {"reasoning_tokens": 42}
     assert turn_usage["input_tokens_details"] is None
     session.close()
+
+
+async def test_add_items_rolls_back_when_structure_metadata_fails():
+    """Regression for #3348.
+
+    The structure-metadata write and the base message rows must land together. If
+    the metadata write fails, the base rows should be rolled back instead of being
+    left as orphans that advanced reads can never see, and the original error
+    should propagate to the caller so a retry path can react.
+    """
+
+    class BrokenMetadataSession(AdvancedSQLiteSession):
+        fail_metadata = True
+
+        def _insert_structure_metadata(
+            self,
+            conn: Any,
+            items: list[TResponseInputItem],
+        ) -> None:
+            if self.fail_metadata:
+                raise RuntimeError("metadata write failed")
+            super()._insert_structure_metadata(conn, items)
+
+    session = BrokenMetadataSession(session_id="add_items_rollback", create_tables=True)
+    try:
+        with pytest.raises(RuntimeError, match="metadata write failed"):
+            await session.add_items([{"role": "user", "content": "hello"}])
+
+        # Both tables should be untouched after the rollback.
+        assert await session.get_items() == []
+        with session._locked_connection() as conn:
+            raw_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+            structure_count = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+        assert raw_count == 0
+        assert structure_count == 0
+
+        # A retry after the transient failure should land cleanly when the
+        # underlying error goes away.
+        session.fail_metadata = False
+        await session.add_items([{"role": "user", "content": "hello"}])
+        items = await session.get_items()
+        assert items == [{"role": "user", "content": "hello"}]
+    finally:
+        session.close()
