@@ -239,10 +239,13 @@ class Runner:
                 Pass ``None`` to disable the turn limit.
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
-            error_handlers: Error handlers keyed by error kind. Currently supports max_turns.
+            error_handlers: Error handlers keyed by error kind.
             previous_response_id: The ID of the previous response. If using OpenAI
                 models via the Responses API, this allows you to skip passing in input
                 from the previous turn.
+            auto_previous_response_id: If True, enable Responses API response chaining
+                automatically for the first turn even when no
+                ``previous_response_id`` is supplied yet.
             conversation_id: The conversation ID
                 (https://platform.openai.com/docs/guides/conversation-state?api-mode=responses).
                 If provided, the conversation will be used to read and write items.
@@ -325,10 +328,13 @@ class Runner:
                 Pass ``None`` to disable the turn limit.
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
-            error_handlers: Error handlers keyed by error kind. Currently supports max_turns.
+            error_handlers: Error handlers keyed by error kind.
             previous_response_id: The ID of the previous response, if using OpenAI
                 models via the Responses API, this allows you to skip passing in input
                 from the previous turn.
+            auto_previous_response_id: If True, enable Responses API response chaining
+                automatically for the first turn even when no
+                ``previous_response_id`` is supplied yet.
             conversation_id: The ID of the stored conversation, if any.
             session: A session for automatic conversation history management.
 
@@ -402,10 +408,13 @@ class Runner:
                 Pass ``None`` to disable the turn limit.
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
-            error_handlers: Error handlers keyed by error kind. Currently supports max_turns.
+            error_handlers: Error handlers keyed by error kind.
             previous_response_id: The ID of the previous response, if using OpenAI
                 models via the Responses API, this allows you to skip passing in input
                 from the previous turn.
+            auto_previous_response_id: If True, enable Responses API response chaining
+                automatically for the first turn even when no
+                ``previous_response_id`` is supplied yet.
             conversation_id: The ID of the stored conversation, if any.
             session: A session for automatic conversation history management.
 
