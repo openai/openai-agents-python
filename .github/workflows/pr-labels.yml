@@ -21,6 +21,7 @@ permissions:
 
 jobs:
   label:
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - name: Ensure main workflow
