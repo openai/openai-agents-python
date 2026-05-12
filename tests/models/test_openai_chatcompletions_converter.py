@@ -23,6 +23,7 @@ These tests exercise both conversion directions:
 
 from __future__ import annotations
 
+import logging
 from typing import Literal, cast
 
 import pytest
@@ -354,6 +355,139 @@ def test_items_to_messages_with_function_output_item():
     assert tool_msg["role"] == "tool"
     assert tool_msg["tool_call_id"] == func_output_item["call_id"]
     assert tool_msg["content"] == func_output_item["output"]
+
+
+def test_items_to_messages_with_non_text_only_function_output_uses_placeholder_by_default(
+    caplog: pytest.LogCaptureFixture,
+):
+    """Default conversion should keep running without sending an empty tool message."""
+    func_output_item: FunctionCallOutput = {
+        "type": "function_call_output",
+        "call_id": "somecall",
+        "output": [
+            {
+                "type": "input_image",
+                "image_url": "https://example.com/image.png",
+            }
+        ],
+    }
+
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        messages = Converter.items_to_messages([func_output_item])
+
+    assert len(messages) == 1
+    tool_msg = messages[0]
+    assert tool_msg["role"] == "tool"
+    assert tool_msg["tool_call_id"] == func_output_item["call_id"]
+    assert tool_msg["content"] == "[tool output omitted]"
+    assert "Replacing the tool output with a placeholder" in caplog.text
+
+
+def test_items_to_messages_with_non_text_only_function_output_raises_in_strict_mode():
+    """Strict validation should fail explicitly instead of silently losing the output."""
+    func_output_item: FunctionCallOutput = {
+        "type": "function_call_output",
+        "call_id": "somecall",
+        "output": [
+            {
+                "type": "input_image",
+                "image_url": "https://example.com/image.png",
+            }
+        ],
+    }
+
+    with pytest.raises(UserError, match="cannot be empty or contain only non-text content"):
+        Converter.items_to_messages([func_output_item], strict_feature_validation=True)
+
+
+def test_items_to_messages_with_empty_function_output_uses_placeholder_by_default(
+    caplog: pytest.LogCaptureFixture,
+):
+    """Default conversion should not send an empty tool message."""
+    func_output_item: FunctionCallOutput = {
+        "type": "function_call_output",
+        "call_id": "somecall",
+        "output": [],
+    }
+
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        messages = Converter.items_to_messages([func_output_item])
+
+    assert len(messages) == 1
+    tool_msg = messages[0]
+    assert tool_msg["role"] == "tool"
+    assert tool_msg["tool_call_id"] == func_output_item["call_id"]
+    assert tool_msg["content"] == "[tool output omitted]"
+    assert "Replacing the tool output with a placeholder" in caplog.text
+
+
+def test_items_to_messages_with_empty_function_output_raises_in_strict_mode():
+    """Strict validation should fail explicitly instead of sending empty output."""
+    func_output_item: FunctionCallOutput = {
+        "type": "function_call_output",
+        "call_id": "somecall",
+        "output": [],
+    }
+
+    with pytest.raises(UserError, match="cannot be empty or contain only non-text content"):
+        Converter.items_to_messages([func_output_item], strict_feature_validation=True)
+
+
+def test_items_to_messages_with_mixed_function_output_keeps_text_by_default(
+    caplog: pytest.LogCaptureFixture,
+):
+    """Default conversion should preserve text parts and omit unsupported non-text parts."""
+    func_output_item: FunctionCallOutput = {
+        "type": "function_call_output",
+        "call_id": "somecall",
+        "output": [
+            {"type": "input_text", "text": "visible text"},
+            {
+                "type": "input_image",
+                "image_url": "https://example.com/image.png",
+            },
+        ],
+    }
+
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        messages = Converter.items_to_messages([func_output_item])
+
+    assert len(messages) == 1
+    tool_msg = messages[0]
+    assert tool_msg["role"] == "tool"
+    assert tool_msg["tool_call_id"] == func_output_item["call_id"]
+    assert tool_msg["content"] == [{"type": "text", "text": "visible text"}]
+    assert "tool output omitted" not in caplog.text
+
+
+def test_items_to_messages_can_preserve_non_text_function_output() -> None:
+    """Compatible providers can opt in to preserving non-text tool output."""
+    func_output_item: FunctionCallOutput = {
+        "type": "function_call_output",
+        "call_id": "somecall",
+        "output": [
+            {
+                "type": "input_image",
+                "image_url": "https://example.com/image.png",
+            }
+        ],
+    }
+
+    messages = Converter.items_to_messages(
+        [func_output_item],
+        preserve_tool_output_all_content=True,
+    )
+
+    assert len(messages) == 1
+    tool_msg = messages[0]
+    assert tool_msg["role"] == "tool"
+    assert tool_msg["tool_call_id"] == func_output_item["call_id"]
+    assert tool_msg["content"] == [
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/image.png", "detail": "auto"},
+        }
+    ]
 
 
 def test_extract_all_and_text_content_for_strings_and_lists():

@@ -20,6 +20,7 @@ from agents import (
 )
 from agents.items import ToolApprovalItem, ToolCallOutputItem
 from agents.run_internal.run_loop import ShellAction, ToolRunShellCall, execute_shell_calls
+from agents.tool import ShellOnApprovalFunctionResult
 
 from .testing_processor import SPAN_PROCESSOR_TESTING
 from .utils.hitl import (
@@ -776,4 +777,37 @@ async def test_shell_tool_on_approval_callback_auto_rejects() -> None:
 
     # Should return rejection output
     assert isinstance(result, ToolCallOutputItem)
-    assert HITL_REJECTION_MSG in result.output
+    assert result.output == "Not allowed"
+    raw_item = cast(dict[str, Any], result.raw_item)
+    assert raw_item["output"][0]["stderr"] == "Not allowed"
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_on_approval_empty_reason_uses_default_rejection() -> None:
+    """Test that empty rejection reasons do not suppress the default message."""
+
+    async def on_approval(
+        _context: RunContextWrapper[Any], _approval_item: ToolApprovalItem
+    ) -> ShellOnApprovalFunctionResult:
+        return {"approve": False, "reason": ""}
+
+    shell_tool = ShellTool(
+        executor=lambda request: "output",
+        needs_approval=require_approval,
+        on_approval=on_approval,
+    )
+
+    tool_run = ToolRunShellCall(tool_call=_shell_call(), shell_tool=shell_tool)
+    agent = Agent(name="shell-agent", tools=[shell_tool])
+    context_wrapper: RunContextWrapper[Any] = make_context_wrapper()
+
+    result = await ShellAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=RunHooks[Any](),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    assert isinstance(result, ToolCallOutputItem)
+    assert result.output == HITL_REJECTION_MSG

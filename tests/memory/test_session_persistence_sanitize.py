@@ -71,7 +71,6 @@ def test_sanitize_preserves_file_search_call_payload_id() -> None:
         },
         {"type": "function_call_output", "id": "out_abc", "call_id": "call_abc", "output": "{}"},
         {"type": "computer_call_output", "id": "ccout_abc", "call_id": "call_abc", "output": {}},
-        {"type": "reasoning", "id": "rs_abc", "summary": []},
         {"type": "tool_search_call", "id": "ts_abc", "status": "completed"},
         {"type": "shell_call", "id": "sh_abc", "call_id": "call_abc", "action": {}},
     ],
@@ -81,6 +80,34 @@ def test_sanitize_strips_optional_or_policy_controlled_ids(item: dict[str, Any])
 
     assert "id" not in sanitized
     assert sanitized["type"] == item["type"]
+
+
+def test_sanitize_preserves_reasoning_id_for_openai_conversations() -> None:
+    item = {
+        "type": "reasoning",
+        "id": "rs_abc",
+        "summary": [],
+        "content": [],
+        "provider_data": {"server": "metadata"},
+    }
+
+    sanitized = _sanitize(item)
+
+    assert sanitized["id"] == "rs_abc"
+    assert "provider_data" not in sanitized
+
+
+def test_sanitize_preserves_reasoning_encrypted_content() -> None:
+    item = {
+        "type": "reasoning",
+        "summary": [],
+        "content": [],
+        "encrypted_content": "encrypted",
+    }
+
+    sanitized = _sanitize(item)
+
+    assert sanitized["encrypted_content"] == "encrypted"
 
 
 def test_sanitize_always_strips_provider_data() -> None:

@@ -55,7 +55,7 @@ _RETRY_MAX_DELAY_SECONDS: Final[float] = 1.0
 
 
 class DaprSession(SessionABC):
-    """Dapr State Store implementation of :pyclass:`agents.memory.session.Session`."""
+    """Dapr State Store implementation of [`Session`][agents.memory.session.Session]."""
 
     session_settings: SessionSettings | None = None
 

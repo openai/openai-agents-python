@@ -1091,7 +1091,12 @@ async def resolve_approval_status(
             if decision_result.get("approve") is True:
                 context_wrapper.approve_tool(approval_item)
             elif decision_result.get("approve") is False:
-                context_wrapper.reject_tool(approval_item)
+                reason = decision_result.get("reason")
+                rejection_message = reason if isinstance(reason, str) and reason else None
+                context_wrapper.reject_tool(
+                    approval_item,
+                    rejection_message=rejection_message,
+                )
         approval_status = context_wrapper.get_approval_status(
             tool_name,
             call_id,

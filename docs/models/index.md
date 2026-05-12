@@ -398,7 +398,7 @@ agent = Agent(
 | Field | Type | Notes |
 | --- | --- | --- |
 | `max_retries` | `int | None` | Number of retry attempts allowed after the initial request. |
-| `backoff` | `ModelRetryBackoffSettings | dict | None` | Default delay strategy when the policy retries without returning an explicit delay. |
+| `backoff` | `ModelRetryBackoffSettings | dict | None` | Default delay strategy when the policy retries without returning an explicit delay. `backoff.max_delay` caps this computed backoff delay only. It does not cap explicit delays returned by a policy or retry-after hints. |
 | `policy` | `RetryPolicy | None` | Callback that decides whether to retry. This field is runtime-only and is not serialized. |
 
 </div>
@@ -424,7 +424,7 @@ The SDK exports ready-made helpers on `retry_policies`:
 | `retry_policies.provider_suggested()` | Follows provider retry advice when available. |
 | `retry_policies.network_error()` | Matches transient transport and timeout failures. |
 | `retry_policies.http_status([...])` | Matches selected HTTP status codes. |
-| `retry_policies.retry_after()` | Retries only when a retry-after hint is available, using that delay. |
+| `retry_policies.retry_after()` | Retries only when a retry-after hint is available, using that delay. This helper treats the retry-after value as an explicit policy delay, so `backoff.max_delay` does not cap it. |
 | `retry_policies.any(...)` | Retries when any nested policy opts in. |
 | `retry_policies.all(...)` | Retries only when every nested policy opts in. |
 

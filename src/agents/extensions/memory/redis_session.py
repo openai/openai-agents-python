@@ -40,7 +40,7 @@ from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 
 class RedisSession(SessionABC):
-    """Redis implementation of :pyclass:`agents.memory.session.Session`."""
+    """Redis implementation of [`Session`][agents.memory.session.Session]."""
 
     session_settings: SessionSettings | None = None
 

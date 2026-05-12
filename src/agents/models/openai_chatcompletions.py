@@ -412,6 +412,7 @@ class OpenAIChatCompletionsModel(Model):
             model=self.model,
             base_url=str(self._client.base_url),
             should_replay_reasoning_content=self.should_replay_reasoning_content,
+            strict_feature_validation=self._strict_feature_validation,
         )
 
         if system_instructions:

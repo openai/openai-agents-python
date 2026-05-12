@@ -796,7 +796,7 @@ class RealtimeSession(RealtimeModelListener):
                 RealtimeModelSendToolOutput(
                     tool_call=event,
                     output=error_message,
-                    start_response=True,
+                    start_response=False,
                 )
             )
             await self._put_event(

@@ -384,7 +384,9 @@ async def test_apply_patch_tool_on_approval_callback_auto_rejects() -> None:
 
     # Should return rejection output
     assert isinstance(result, ToolCallOutputItem)
-    assert HITL_REJECTION_MSG in result.output
+    assert result.output == "Not allowed"
+    raw_item = cast(dict[str, Any], result.raw_item)
+    assert raw_item["output"] == "Not allowed"
     assert len(editor.operations) == 0  # Should not have executed
 
 
