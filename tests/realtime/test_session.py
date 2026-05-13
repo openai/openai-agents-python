@@ -1109,7 +1109,11 @@ class TestToolCallExecution:
         with pytest.raises(ToolTimeoutError, match="timed out"):
             await session._handle_tool_call(tool_call_event)
 
-        assert len(mock_model.sent_tool_outputs) == 0
+        assert len(mock_model.sent_tool_outputs) == 1
+        sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_call == tool_call_event
+        assert "timed out" in sent_output
+        assert start_response is True
         assert session._event_queue.qsize() == 1
 
         tool_start_event = await session._event_queue.get()
@@ -1196,7 +1200,11 @@ class TestToolCallExecution:
 
         assert isinstance(session._stored_exception, ToolTimeoutError)
         assert session._stored_exception.tool_name == "slow_tool"
-        assert len(mock_model.sent_tool_outputs) == 0
+        assert len(mock_model.sent_tool_outputs) == 1
+        sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_call == tool_call_event
+        assert "timed out" in sent_output
+        assert start_response is True
 
         events = []
         while True:
@@ -1285,6 +1293,34 @@ class TestToolCallExecution:
 
         # Verify agent was updated
         assert session._current_agent == second_agent
+
+    @pytest.mark.asyncio
+    async def test_handoff_tool_exception_sends_model_visible_output(self, mock_model):
+        target = RealtimeAgent(name="target_agent")
+        handoff = Handoff(
+            tool_name="switch_agent",
+            tool_description="switch",
+            input_json_schema={},
+            on_invoke_handoff=AsyncMock(side_effect=ValueError("handoff failed")),
+            input_filter=None,
+            agent_name=target.name,
+            is_enabled=True,
+        )
+        first_agent = RealtimeAgent(name="first_agent", handoffs=[handoff])
+        session = RealtimeSession(mock_model, first_agent, None)
+
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="switch_agent", call_id="call_handoff_fail", arguments="{}"
+        )
+
+        with pytest.raises(ValueError, match="handoff failed"):
+            await session._handle_tool_call(tool_call_event)
+
+        assert len(mock_model.sent_tool_outputs) == 1
+        sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_call == tool_call_event
+        assert sent_output == "handoff failed"
+        assert start_response is True
 
     @pytest.mark.asyncio
     async def test_unknown_tool_handling(self, mock_model, mock_agent, mock_function_tool):
@@ -1605,7 +1641,7 @@ class TestToolCallExecution:
     async def test_function_tool_exception_handling(
         self, mock_model, mock_agent, mock_function_tool
     ):
-        """Test that exceptions in function tools are handled (currently they propagate)"""
+        """Test that function tool exceptions reach both the model and caller."""
         # Set up tool to raise exception
         mock_function_tool.on_invoke_tool.side_effect = ValueError("Tool error")
         mock_agent.get_all_tools.return_value = [mock_function_tool]
@@ -1616,7 +1652,6 @@ class TestToolCallExecution:
             name="test_function", call_id="call_error", arguments="{}"
         )
 
-        # Currently exceptions propagate (no error handling implemented)
         with pytest.raises(ValueError, match="Tool error"):
             await session._handle_tool_call(tool_call_event)
 
@@ -1626,8 +1661,11 @@ class TestToolCallExecution:
         assert isinstance(tool_start_event, RealtimeToolStart)
         assert tool_start_event.arguments == "{}"
 
-        # But no tool output should have been sent and no end event queued
-        assert len(mock_model.sent_tool_outputs) == 0
+        assert len(mock_model.sent_tool_outputs) == 1
+        sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_call == tool_call_event
+        assert sent_output == "Tool error"
+        assert start_response is True
 
     @pytest.mark.asyncio
     async def test_tool_call_with_complex_arguments(
