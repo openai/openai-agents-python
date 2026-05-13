@@ -126,6 +126,7 @@ from .stream_events import (
     RawResponsesStreamEvent,
     RunItemStreamEvent,
     StreamEvent,
+    ToolProgressStreamEvent,
 )
 from .tool import (
     ApplyPatchTool,
@@ -442,6 +443,7 @@ __all__ = [
     "RawResponsesStreamEvent",
     "RunItemStreamEvent",
     "AgentUpdatedStreamEvent",
+    "ToolProgressStreamEvent",
     "StreamEvent",
     "FunctionTool",
     "FunctionToolResult",

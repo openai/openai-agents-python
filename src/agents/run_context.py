@@ -25,6 +25,21 @@ else:
 TContext = TypeVar("TContext", default=Any)
 
 
+@dataclass
+class _StreamContext:
+    """Holds streaming plumbing for ToolContext.send_progress().
+
+    Bundles the event queue and the event loop together because sync tools
+    run in a worker thread (via asyncio.to_thread) and cannot call
+    asyncio.get_running_loop().  The loop reference is captured at wiring
+    time on the event loop thread so that send_progress() can use
+    loop.call_soon_threadsafe() from any thread.
+    """
+
+    event_queue: Any
+    event_loop: Any
+
+
 @dataclass(eq=False)
 class _ApprovalRecord:
     """Tracks approval/rejection state for a tool.
@@ -60,6 +75,9 @@ class RunContextWrapper(Generic[TContext]):
     _approvals: dict[str, _ApprovalRecord] = field(default_factory=dict)
     tool_input: Any | None = None
     """Structured input for the current agent tool run, when available."""
+
+    # Set by Runner.run_streamed() for ToolContext.send_progress().
+    _stream_context: _StreamContext | None = None
 
     @staticmethod
     def _to_str_or_none(value: Any) -> str | None:
@@ -461,6 +479,7 @@ class RunContextWrapper(Generic[TContext]):
         fork._approvals = self._approvals
         fork.turn_input = self.turn_input
         fork.tool_input = tool_input
+        fork._stream_context = self._stream_context
         return fork
 
     def _fork_without_tool_input(self) -> RunContextWrapper[TContext]:
@@ -469,6 +488,7 @@ class RunContextWrapper(Generic[TContext]):
         fork.usage = self.usage
         fork._approvals = self._approvals
         fork.turn_input = self.turn_input
+        fork._stream_context = self._stream_context
         return fork
 
 

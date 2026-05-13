@@ -49,7 +49,9 @@ from agents.sandbox.session import BaseSandboxClient, SandboxSession
 from agents.stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
+    RunItemStreamEvent,
     StreamEvent,
+    ToolProgressStreamEvent,
 )
 from examples.auto_mode import input_with_fallback, is_auto_mode
 
@@ -289,6 +291,21 @@ def print_event(event: PrintableEvent) -> None:
         return
 
     if isinstance(event, RawResponsesStreamEvent):
+        return
+
+    if isinstance(event, ToolProgressStreamEvent):
+        console.print(
+            Panel(
+                Pretty(event.data, expand_all=True),
+                title=f"Tool progress: {event.tool_name}",
+                border_style="yellow",
+                box=box.ROUNDED,
+                expand=False,
+            )
+        )
+        return
+
+    if not isinstance(event, RunItemStreamEvent):
         return
 
     body: PanelBody

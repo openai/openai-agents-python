@@ -1840,6 +1840,14 @@ class AgentRunner:
         if sandbox_runtime.enabled:
             sandbox_runtime.apply_result_metadata(streamed_result)
 
+        # Allow tools to emit progress events via ToolContext.send_progress().
+        from .run_context import _StreamContext
+
+        context_wrapper._stream_context = _StreamContext(
+            event_queue=streamed_result._event_queue,
+            event_loop=asyncio.get_running_loop(),
+        )
+
         # Kick off the actual agent loop in the background and return the streamed result object.
         streamed_result.run_loop_task = asyncio.create_task(
             start_streaming(

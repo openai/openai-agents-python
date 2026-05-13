@@ -7,6 +7,7 @@ from openai.types.responses import ResponseFunctionToolCall
 
 from ._tool_identity import get_tool_call_namespace, tool_trace_name
 from .agent_tool_state import get_agent_tool_state_scope, set_agent_tool_state_scope
+from .logger import logger
 from .run_context import RunContextWrapper, TContext
 from .usage import Usage
 
@@ -72,6 +73,7 @@ class ToolContext(RunContextWrapper[TContext]):
         turn_input: list[TResponseInputItem] | None = None,
         _approvals: dict[str, _ApprovalRecord] | None = None,
         tool_input: Any | None = None,
+        _stream_context: Any | None = None,
     ) -> None:
         """Preserve the v0.7 positional constructor while accepting new context fields."""
         resolved_usage = Usage() if usage is _MISSING else cast(Usage, usage)
@@ -81,6 +83,7 @@ class ToolContext(RunContextWrapper[TContext]):
             turn_input=list(turn_input or []),
             _approvals={} if _approvals is None else _approvals,
             tool_input=tool_input,
+            _stream_context=_stream_context,
         )
         self.tool_name = (
             _assert_must_pass_tool_name() if tool_name is _MISSING else cast(str, tool_name)
@@ -108,6 +111,29 @@ class ToolContext(RunContextWrapper[TContext]):
     def qualified_tool_name(self) -> str:
         """Return the tool name qualified by namespace when available."""
         return tool_trace_name(self.tool_name, self.tool_namespace) or self.tool_name
+
+    def send_progress(self, data: Any) -> None:
+        """Emit a progress event to the streaming consumer.
+
+        In streaming mode (``Runner.run_streamed``), pushes a
+        ``ToolProgressStreamEvent`` into the event stream.  In non-streaming
+        mode, this is a no-op.  Works from both async and sync tool functions.
+        """
+        if self._stream_context is None:
+            return
+        try:
+            from .stream_events import ToolProgressStreamEvent
+
+            event = ToolProgressStreamEvent(
+                tool_name=self.tool_name,
+                tool_call_id=self.tool_call_id,
+                data=data,
+            )
+            self._stream_context.event_loop.call_soon_threadsafe(
+                self._stream_context.event_queue.put_nowait, event
+            )
+        except Exception:
+            logger.debug("send_progress failed", exc_info=True)
 
     @classmethod
     def from_agent_context(
