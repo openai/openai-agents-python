@@ -569,6 +569,61 @@ class MCPUtil:
             raise TypeError("MCP meta resolver must return a dict or None.")
         return result
 
+    @staticmethod
+    def _renest_flattened_arguments(
+        input_schema: Any,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Re-nest arguments that the model flattened past a nested object property.
+
+        The Realtime API does not support strict JSON schema enforcement on function
+        tools (the `RealtimeFunctionTool` type has no `strict` field), so models will
+        occasionally ignore a nested-object property in an MCP tool's input schema
+        and emit its inner fields at the top level. When the schema has exactly one
+        missing object-typed property that can unambiguously absorb the extra
+        top-level keys, restore the nesting before forwarding to the MCP server.
+        Returns the corrected arguments, or None when no safe correction applies.
+        """
+        if not isinstance(input_schema, dict):
+            return None
+        properties = input_schema.get("properties")
+        if not isinstance(properties, dict) or not properties:
+            return None
+
+        top_level_keys = set(properties.keys())
+        extras = [key for key in arguments if key not in top_level_keys]
+        if not extras:
+            return None
+
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for name, prop in properties.items():
+            if not isinstance(prop, dict):
+                continue
+            if prop.get("type") != "object":
+                continue
+            if name in arguments:
+                continue
+            candidates.append((name, prop))
+
+        if len(candidates) != 1:
+            return None
+
+        candidate_name, candidate_schema = candidates[0]
+        candidate_properties = candidate_schema.get("properties")
+        if isinstance(candidate_properties, dict) and candidate_properties:
+            # The nested object declares its own properties; only re-nest when every
+            # extra is a declared inner property to avoid corrupting structured
+            # schemas where the extras may belong elsewhere.
+            allowed = set(candidate_properties.keys())
+            if not all(extra in allowed for extra in extras):
+                return None
+        elif candidate_schema.get("additionalProperties") is False:
+            return None
+
+        renested = {key: value for key, value in arguments.items() if key not in extras}
+        renested[candidate_name] = {key: arguments[key] for key in extras}
+        return renested
+
     @classmethod
     async def invoke_mcp_tool(
         cls,
@@ -602,6 +657,10 @@ class MCPUtil:
             raise ModelBehaviorError(
                 f"Invalid JSON input for tool {tool_name_for_display}: expected a JSON object"
             )
+
+        renested = cls._renest_flattened_arguments(tool.inputSchema, json_data)
+        if renested is not None:
+            json_data = renested
 
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug(f"Invoking MCP tool {tool_name_for_display}")

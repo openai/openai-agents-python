@@ -477,6 +477,157 @@ async def test_invoke_mcp_tool():
     # Just making sure it doesn't crash
 
 
+def _set_properties_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "target": {"type": "string"},
+            "keysAndValues": {"type": "object"},
+        },
+        "required": ["target", "keysAndValues"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_invoke_mcp_tool_renests_flattened_open_object():
+    """Realtime models drop nested-object wrappers when strict mode is unavailable.
+
+    The OpenAI Realtime API has no `strict` field on `RealtimeFunctionTool`, so the
+    model receives the correct schema but may flatten arguments destined for an
+    open-ended object property. Re-nesting on the SDK side keeps the MCP call
+    intact for the unambiguous single-absorber case.
+    """
+    schema = _set_properties_schema()
+    server = FakeMCPServer()
+    server.add_tool("SetProperties", schema)
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="SetProperties", inputSchema=schema)
+
+    flattened = '{"target": "MyTarget", "visible": false, "color": "red"}'
+    await MCPUtil.invoke_mcp_tool(server, tool, ctx, flattened)
+
+    result = server.tool_results[-1]
+    prefix = f"result_{tool.name}_"
+    assert result.startswith(prefix)
+    args = json.loads(result[len(prefix) :])
+    assert args == {
+        "target": "MyTarget",
+        "keysAndValues": {"visible": False, "color": "red"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_invoke_mcp_tool_preserves_already_nested_arguments():
+    schema = _set_properties_schema()
+    server = FakeMCPServer()
+    server.add_tool("SetProperties", schema)
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="SetProperties", inputSchema=schema)
+
+    nested = '{"target": "MyTarget", "keysAndValues": {"visible": false}}'
+    await MCPUtil.invoke_mcp_tool(server, tool, ctx, nested)
+
+    result = server.tool_results[-1]
+    prefix = f"result_{tool.name}_"
+    args = json.loads(result[len(prefix) :])
+    assert args == {"target": "MyTarget", "keysAndValues": {"visible": False}}
+
+
+@pytest.mark.asyncio
+async def test_invoke_mcp_tool_skips_renesting_when_ambiguous():
+    """Two missing object-typed siblings cannot be unambiguously absorbed."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "target": {"type": "string"},
+            "keysAndValues": {"type": "object"},
+            "metadata": {"type": "object"},
+        },
+        "required": ["target"],
+    }
+    server = FakeMCPServer()
+    server.add_tool("Ambiguous", schema)
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="Ambiguous", inputSchema=schema)
+
+    flattened = '{"target": "MyTarget", "visible": false}'
+    await MCPUtil.invoke_mcp_tool(server, tool, ctx, flattened)
+
+    result = server.tool_results[-1]
+    prefix = f"result_{tool.name}_"
+    args = json.loads(result[len(prefix) :])
+    # No re-nesting attempted; args reach the server unchanged.
+    assert args == {"target": "MyTarget", "visible": False}
+
+
+@pytest.mark.asyncio
+async def test_invoke_mcp_tool_skips_renesting_for_unknown_inner_keys():
+    """Closed nested schemas should not absorb unknown extras."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "target": {"type": "string"},
+            "keysAndValues": {
+                "type": "object",
+                "properties": {"visible": {"type": "boolean"}},
+                "additionalProperties": False,
+            },
+        },
+        "required": ["target", "keysAndValues"],
+    }
+    server = FakeMCPServer()
+    server.add_tool("Strict", schema)
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="Strict", inputSchema=schema)
+
+    flattened = '{"target": "MyTarget", "visible": false, "unknown": 1}'
+    await MCPUtil.invoke_mcp_tool(server, tool, ctx, flattened)
+
+    result = server.tool_results[-1]
+    prefix = f"result_{tool.name}_"
+    args = json.loads(result[len(prefix) :])
+    assert args == {"target": "MyTarget", "visible": False, "unknown": 1}
+
+
+@pytest.mark.asyncio
+async def test_invoke_mcp_tool_renests_for_typed_inner_properties():
+    """When extras match the nested object's declared properties, absorb them."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "target": {"type": "string"},
+            "keysAndValues": {
+                "type": "object",
+                "properties": {
+                    "visible": {"type": "boolean"},
+                    "color": {"type": "string"},
+                },
+            },
+        },
+        "required": ["target", "keysAndValues"],
+    }
+    server = FakeMCPServer()
+    server.add_tool("Typed", schema)
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="Typed", inputSchema=schema)
+
+    flattened = '{"target": "MyTarget", "visible": false, "color": "red"}'
+    await MCPUtil.invoke_mcp_tool(server, tool, ctx, flattened)
+
+    result = server.tool_results[-1]
+    prefix = f"result_{tool.name}_"
+    args = json.loads(result[len(prefix) :])
+    assert args == {
+        "target": "MyTarget",
+        "keysAndValues": {"visible": False, "color": "red"},
+    }
+
+
 @pytest.mark.asyncio
 async def test_mcp_meta_resolver_merges_and_passes():
     captured: dict[str, Any] = {}
