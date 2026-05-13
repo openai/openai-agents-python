@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import importlib
 import inspect
@@ -1514,6 +1515,19 @@ def test_codex_tool_resolve_output_schema_validation_errors() -> None:
         )
     with pytest.raises(UserError, match='type "object"'):
         codex_tool_module._resolve_output_schema({"type": "string"})
+
+
+def test_codex_tool_resolve_output_schema_does_not_mutate_input() -> None:
+    nested = {"type": "object", "properties": {"y": {"type": "string"}}}
+    option = {"type": "object", "properties": {"inner": nested}}
+    option_snapshot = copy.deepcopy(option)
+
+    result = codex_tool_module._resolve_output_schema(option)
+
+    assert option == option_snapshot
+    assert nested == {"type": "object", "properties": {"y": {"type": "string"}}}
+    assert result is not None
+    assert result["properties"]["inner"] is not nested
 
 
 def test_codex_tool_resolve_output_schema_descriptor() -> None:
