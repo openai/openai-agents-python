@@ -754,19 +754,19 @@ class Converter:
                             for c in all_output_content
                             if c.get("type") == "text"
                         ]
-                        if not tool_result_content:
-                            message = (
-                                "Chat Completions tool outputs cannot be empty or contain only "
-                                "non-text content unless preserve_tool_output_all_content=True."
-                            )
-                            if strict_feature_validation:
-                                raise UserError(message)
-                            logger.warning(
-                                "%s Replacing the tool output with a placeholder; enable strict "
-                                "feature validation to raise an error instead.",
-                                message,
-                            )
-                            tool_result_content = _OMITTED_TOOL_OUTPUT_PLACEHOLDER
+                    if not tool_result_content:
+                        message = (
+                            "Chat Completions tool outputs cannot be empty or contain only "
+                            "non-text content unless preserve_tool_output_all_content=True."
+                        )
+                        if strict_feature_validation:
+                            raise UserError(message)
+                        logger.warning(
+                            "%s Replacing the tool output with a placeholder; enable strict "
+                            "feature validation to raise an error instead.",
+                            message,
+                        )
+                        tool_result_content = _OMITTED_TOOL_OUTPUT_PLACEHOLDER
                 msg: ChatCompletionToolMessageParam = {
                     "role": "tool",
                     "tool_call_id": func_output["call_id"],
