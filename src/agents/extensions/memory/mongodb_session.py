@@ -37,6 +37,8 @@ import weakref
 from datetime import datetime, timezone
 from typing import Any
 
+from ._optional_imports import raise_optional_dependency_error
+
 try:
     from importlib.metadata import version as _get_version
 
@@ -49,10 +51,12 @@ try:
     from pymongo.asynchronous.mongo_client import AsyncMongoClient
     from pymongo.driver_info import DriverInfo
 except ImportError as e:
-    raise ImportError(
-        "MongoDBSession requires the 'pymongo' package (>=4.14). "
-        "Install it with: pip install openai-agents[mongodb]"
-    ) from e
+    raise_optional_dependency_error(
+        "MongoDBSession",
+        dependency_name="mongodb",
+        extra_name="mongodb",
+        cause=e,
+    )
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC

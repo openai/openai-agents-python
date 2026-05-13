@@ -29,13 +29,18 @@ import random
 import time
 from typing import Any, Final, Literal
 
+from ._optional_imports import raise_optional_dependency_error
+
 try:
     from dapr.aio.clients import DaprClient
     from dapr.clients.grpc._state import Concurrency, Consistency, StateOptions
 except ImportError as e:
-    raise ImportError(
-        "DaprSession requires the 'dapr' package. Install it with: pip install dapr"
-    ) from e
+    raise_optional_dependency_error(
+        "DaprSession",
+        dependency_name="dapr",
+        extra_name="dapr",
+        cause=e,
+    )
 
 from ...items import TResponseInputItem
 from ...logger import logger
