@@ -8,7 +8,10 @@ used as a drop-in replacement for [`SQLiteSession`][agents.memory.sqlite_session
 
 from __future__ import annotations
 
+from importlib import import_module
 from typing import TYPE_CHECKING, Any
+
+from ._optional_imports import raise_optional_dependency_error
 
 if TYPE_CHECKING:
     from .advanced_sqlite_session import AdvancedSQLiteSession
@@ -35,99 +38,37 @@ __all__: list[str] = [
     "SQLAlchemySession",
 ]
 
+_LAZY_EXPORTS: dict[str, tuple[str, tuple[str, str] | None]] = {
+    "EncryptedSession": (".encrypt_session", ("cryptography", "encrypt")),
+    "RedisSession": (".redis_session", ("redis", "redis")),
+    "SQLAlchemySession": (".sqlalchemy_session", ("sqlalchemy", "sqlalchemy")),
+    "AdvancedSQLiteSession": (".advanced_sqlite_session", None),
+    "AsyncSQLiteSession": (".async_sqlite_session", None),
+    "DaprSession": (".dapr_session", ("dapr", "dapr")),
+    "DAPR_CONSISTENCY_EVENTUAL": (".dapr_session", ("dapr", "dapr")),
+    "DAPR_CONSISTENCY_STRONG": (".dapr_session", ("dapr", "dapr")),
+    "MongoDBSession": (".mongodb_session", ("mongodb", "mongodb")),
+}
+
 
 def __getattr__(name: str) -> Any:
-    if name == "EncryptedSession":
-        try:
-            from .encrypt_session import EncryptedSession  # noqa: F401
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(f"module {__name__} has no attribute {name}")
 
-            return EncryptedSession
-        except ModuleNotFoundError as e:
-            raise ImportError(
-                "EncryptedSession requires the 'cryptography' extra. "
-                "Install it with: pip install openai-agents[encrypt]"
-            ) from e
+    module_name, optional_dependency = _LAZY_EXPORTS[name]
+    try:
+        module = import_module(module_name, __name__)
+    except ModuleNotFoundError as e:
+        if optional_dependency is None:
+            raise ImportError(f"Failed to import {name}: {e}") from e
+        dependency_name, extra_name = optional_dependency
+        raise_optional_dependency_error(
+            name,
+            dependency_name=dependency_name,
+            extra_name=extra_name,
+            cause=e,
+        )
 
-    if name == "RedisSession":
-        try:
-            from .redis_session import RedisSession  # noqa: F401
-
-            return RedisSession
-        except ModuleNotFoundError as e:
-            raise ImportError(
-                "RedisSession requires the 'redis' extra. "
-                "Install it with: pip install openai-agents[redis]"
-            ) from e
-
-    if name == "SQLAlchemySession":
-        try:
-            from .sqlalchemy_session import SQLAlchemySession  # noqa: F401
-
-            return SQLAlchemySession
-        except ModuleNotFoundError as e:
-            raise ImportError(
-                "SQLAlchemySession requires the 'sqlalchemy' extra. "
-                "Install it with: pip install openai-agents[sqlalchemy]"
-            ) from e
-
-    if name == "AdvancedSQLiteSession":
-        try:
-            from .advanced_sqlite_session import AdvancedSQLiteSession  # noqa: F401
-
-            return AdvancedSQLiteSession
-        except ModuleNotFoundError as e:
-            raise ImportError(f"Failed to import AdvancedSQLiteSession: {e}") from e
-
-    if name == "AsyncSQLiteSession":
-        try:
-            from .async_sqlite_session import AsyncSQLiteSession  # noqa: F401
-
-            return AsyncSQLiteSession
-        except ModuleNotFoundError as e:
-            raise ImportError(f"Failed to import AsyncSQLiteSession: {e}") from e
-
-    if name == "DaprSession":
-        try:
-            from .dapr_session import DaprSession  # noqa: F401
-
-            return DaprSession
-        except ModuleNotFoundError as e:
-            raise ImportError(
-                "DaprSession requires the 'dapr' extra. "
-                "Install it with: pip install openai-agents[dapr]"
-            ) from e
-
-    if name == "DAPR_CONSISTENCY_EVENTUAL":
-        try:
-            from .dapr_session import DAPR_CONSISTENCY_EVENTUAL  # noqa: F401
-
-            return DAPR_CONSISTENCY_EVENTUAL
-        except ModuleNotFoundError as e:
-            raise ImportError(
-                "DAPR_CONSISTENCY_EVENTUAL requires the 'dapr' extra. "
-                "Install it with: pip install openai-agents[dapr]"
-            ) from e
-
-    if name == "DAPR_CONSISTENCY_STRONG":
-        try:
-            from .dapr_session import DAPR_CONSISTENCY_STRONG  # noqa: F401
-
-            return DAPR_CONSISTENCY_STRONG
-        except ModuleNotFoundError as e:
-            raise ImportError(
-                "DAPR_CONSISTENCY_STRONG requires the 'dapr' extra. "
-                "Install it with: pip install openai-agents[dapr]"
-            ) from e
-
-    if name == "MongoDBSession":
-        try:
-            from .mongodb_session import MongoDBSession  # noqa: F401
-
-            return MongoDBSession
-        except ModuleNotFoundError as e:
-            raise ImportError(
-                "MongoDBSession requires the 'mongodb' extra. "
-                "Install it with: pip install openai-agents[mongodb]"
-            ) from e
-
-    raise AttributeError(f"module {__name__} has no attribute {name}")
+    value = getattr(module, name)
+    globals()[name] = value
+    return value

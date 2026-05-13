@@ -26,13 +26,18 @@ import json
 import time
 from typing import Any
 
+from ._optional_imports import raise_optional_dependency_error
+
 try:
     import redis.asyncio as redis
     from redis.asyncio import Redis
 except ImportError as e:
-    raise ImportError(
-        "RedisSession requires the 'redis' package. Install it with: pip install redis"
-    ) from e
+    raise_optional_dependency_error(
+        "RedisSession",
+        dependency_name="redis",
+        extra_name="redis",
+        cause=e,
+    )
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
