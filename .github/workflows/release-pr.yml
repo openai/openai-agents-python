@@ -21,9 +21,9 @@ jobs:
           fetch-depth: 0
           ref: main
       - name: Setup uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # setup-uv v8.1.0; uv 0.11.7
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # setup-uv v8.1.0; uv 0.11.14
         with:
-          version: "0.11.7"
+          version: "0.11.14"
           enable-cache: true
       - name: Fetch tags
         run: git fetch origin --tags --prune
@@ -93,36 +93,11 @@ jobs:
           fi
           git commit -m "Bump version to ${RELEASE_VERSION}"
           git push --set-upstream origin "$branch"
-      - name: Prepare Codex output
-        id: codex-output
-        run: |
-          set -euo pipefail
-          output_dir=".tmp/codex/outputs"
-          output_file="${output_dir}/release-review.md"
-          mkdir -p "$output_dir"
-          echo "output_file=${output_file}" >> "$GITHUB_OUTPUT"
-      - name: Run Codex release review
-        uses: openai/codex-action@e0fdf01220eb9a88167c4898839d273e3f2609d1
-        with:
-          openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
-          prompt-file: .github/codex/prompts/release-review.md
-          output-file: ${{ steps.codex-output.outputs.output_file }}
-          # Keep the legacy Linux sandbox path until the default bubblewrap path
-          # works reliably on GitHub-hosted Ubuntu runners.
-          codex-args: '["--enable","use_legacy_landlock"]'
-          safety-strategy: drop-sudo
-          sandbox: read-only
       - name: Build PR body
         env:
-          RELEASE_REVIEW_PATH: ${{ steps.codex-output.outputs.output_file }}
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          python - <<'PY'
-          import os
-          import pathlib
-
-          report = pathlib.Path(os.environ["RELEASE_REVIEW_PATH"]).read_text()
-          pathlib.Path("pr-body.md").write_text(report)
-          PY
+          printf 'Release PR for %s.\n\nThe release readiness report will be prepared manually.\n' "$RELEASE_VERSION" > pr-body.md
       - name: Create or update PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
