@@ -351,6 +351,15 @@ class FunctionTool:
     defer_loading: bool = False
     """Whether the Responses API should hide this tool definition until tool search loads it."""
 
+    func: ToolFunction[...] | None = field(default=None, kw_only=True, repr=False)
+    """The original Python callable that this tool wraps, when constructed via the
+    `@function_tool` decorator. Provided as a public, stable handle so downstream code
+    (introspection, sandboxed re-execution, direct unit testing, framework migration) can
+    reach the user's tool body without walking `on_invoke_tool` closures.
+
+    `None` when `FunctionTool` is constructed manually with a custom `on_invoke_tool`
+    implementation rather than through `@function_tool`."""
+
     _failure_error_function: ToolErrorFunction | None = field(
         default=None,
         kw_only=True,
@@ -512,6 +521,7 @@ def _build_wrapped_function_tool(
     sync_invoker: bool = False,
     mcp_title: str | None = None,
     tool_origin: ToolOrigin | None = None,
+    func: ToolFunction[...] | None = None,
 ) -> FunctionTool:
     """Create a FunctionTool with copied-tool-aware failure handling bound in one place."""
     on_invoke_tool = _with_context_function_tool_failure_error_handler(
@@ -536,6 +546,7 @@ def _build_wrapped_function_tool(
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
             defer_loading=defer_loading,
+            func=func,
             _mcp_title=mcp_title,
             _tool_origin=tool_origin,
         ),
@@ -1894,6 +1905,7 @@ def function_tool(
             timeout_error_function=timeout_error_function,
             defer_loading=defer_loading,
             sync_invoker=is_sync_function_tool,
+            func=the_func,
         )
         return function_tool
 
