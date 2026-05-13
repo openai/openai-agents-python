@@ -625,6 +625,35 @@ async def test_any_llm_responses_stream_rejects_error_event(monkeypatch) -> None
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "incomplete"])
+async def test_any_llm_responses_path_rejects_failed_or_incomplete_status(
+    monkeypatch,
+    status: str,
+) -> None:
+    response = _response("partial", response_id="resp-terminal")
+    response.status = status  # type: ignore[assignment]
+    provider = FakeAnyLLMProvider(supports_responses=True, responses_response=response)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    model = AnyLLMModel(model="openai/gpt-5.4-mini")
+    with pytest.raises(ModelBehaviorError, match=f"response.{status}"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_any_llm_responses_path_passes_transport_kwargs_via_private_provider_api(
     monkeypatch,
 ) -> None:
