@@ -42,7 +42,7 @@ def __getattr__(name: str) -> Any:
             from .encrypt_session import EncryptedSession  # noqa: F401
 
             return EncryptedSession
-        except ModuleNotFoundError as e:
+        except ImportError as e:
             raise ImportError(
                 "EncryptedSession requires the 'cryptography' extra. "
                 "Install it with: pip install openai-agents[encrypt]"
@@ -53,7 +53,7 @@ def __getattr__(name: str) -> Any:
             from .redis_session import RedisSession  # noqa: F401
 
             return RedisSession
-        except ModuleNotFoundError as e:
+        except ImportError as e:
             raise ImportError(
                 "RedisSession requires the 'redis' extra. "
                 "Install it with: pip install openai-agents[redis]"
@@ -64,7 +64,7 @@ def __getattr__(name: str) -> Any:
             from .sqlalchemy_session import SQLAlchemySession  # noqa: F401
 
             return SQLAlchemySession
-        except ModuleNotFoundError as e:
+        except ImportError as e:
             raise ImportError(
                 "SQLAlchemySession requires the 'sqlalchemy' extra. "
                 "Install it with: pip install openai-agents[sqlalchemy]"
@@ -75,7 +75,7 @@ def __getattr__(name: str) -> Any:
             from .advanced_sqlite_session import AdvancedSQLiteSession  # noqa: F401
 
             return AdvancedSQLiteSession
-        except ModuleNotFoundError as e:
+        except ImportError as e:
             raise ImportError(f"Failed to import AdvancedSQLiteSession: {e}") from e
 
     if name == "AsyncSQLiteSession":
@@ -83,7 +83,7 @@ def __getattr__(name: str) -> Any:
             from .async_sqlite_session import AsyncSQLiteSession  # noqa: F401
 
             return AsyncSQLiteSession
-        except ModuleNotFoundError as e:
+        except ImportError as e:
             raise ImportError(f"Failed to import AsyncSQLiteSession: {e}") from e
 
     if name == "DaprSession":
@@ -91,7 +91,7 @@ def __getattr__(name: str) -> Any:
             from .dapr_session import DaprSession  # noqa: F401
 
             return DaprSession
-        except ModuleNotFoundError as e:
+        except ImportError as e:
             raise ImportError(
                 "DaprSession requires the 'dapr' extra. "
                 "Install it with: pip install openai-agents[dapr]"
@@ -102,7 +102,7 @@ def __getattr__(name: str) -> Any:
             from .dapr_session import DAPR_CONSISTENCY_EVENTUAL  # noqa: F401
 
             return DAPR_CONSISTENCY_EVENTUAL
-        except ModuleNotFoundError as e:
+        except ImportError as e:
             raise ImportError(
                 "DAPR_CONSISTENCY_EVENTUAL requires the 'dapr' extra. "
                 "Install it with: pip install openai-agents[dapr]"
@@ -113,7 +113,7 @@ def __getattr__(name: str) -> Any:
             from .dapr_session import DAPR_CONSISTENCY_STRONG  # noqa: F401
 
             return DAPR_CONSISTENCY_STRONG
-        except ModuleNotFoundError as e:
+        except ImportError as e:
             raise ImportError(
                 "DAPR_CONSISTENCY_STRONG requires the 'dapr' extra. "
                 "Install it with: pip install openai-agents[dapr]"
@@ -124,7 +124,7 @@ def __getattr__(name: str) -> Any:
             from .mongodb_session import MongoDBSession  # noqa: F401
 
             return MongoDBSession
-        except ModuleNotFoundError as e:
+        except ImportError as e:
             raise ImportError(
                 "MongoDBSession requires the 'mongodb' extra. "
                 "Install it with: pip install openai-agents[mongodb]"
