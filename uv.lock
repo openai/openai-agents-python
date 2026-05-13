@@ -9,8 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-05-04T22:31:23.151060131Z"
-exclude-newer-span = "P7D"
+exclude-newer = "2026-05-05T23:48:07Z"
 
 [[package]]
 name = "aiofiles"

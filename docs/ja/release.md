@@ -4,30 +4,30 @@ search:
 ---
 # リリースプロセス / 変更履歴
 
-このプロジェクトは、`0.Y.Z` という形式を用いた、セマンティックバージョニングを少し変更した方式に従います。先頭の `0` は、SDK がまだ急速に進化していることを示します。各コンポーネントは次のように増やします。
+このプロジェクトは、形式 `0.Y.Z` を使用するセマンティックバージョニングを少し修正したものに従います。先頭の `0` は、SDK がまだ急速に進化中であることを示します。各構成要素は次のように増加させます:
 
-## マイナー（`Y`）バージョン
+## マイナー (`Y`) バージョン
 
-beta としてマークされていない公開インターフェイスに対する **破壊的変更** がある場合、マイナーバージョン `Y` を増やします。たとえば、`0.0.x` から `0.1.x` への移行には、破壊的変更が含まれる可能性があります。
+ベータとしてマークされていない公開インターフェイスに対する **破壊的変更** の場合、マイナーバージョン `Y` を増やします。たとえば、`0.0.x` から `0.1.x` への移行には破壊的変更が含まれる可能性があります。
 
-破壊的変更を避けたい場合は、プロジェクトで `0.0.x` バージョンに固定することを推奨します。
+破壊的変更を避けたい場合は、プロジェクトで `0.0.x` バージョンに固定することをおすすめします。
 
-## パッチ（`Z`）バージョン
+## パッチ (`Z`) バージョン
 
-非破壊的な変更では `Z` を増やします。
+非破壊的変更の場合は `Z` を増やします:
 
-- バグ修正
-- 新機能
-- private インターフェイスへの変更
-- beta 機能の更新
+-   バグ修正
+-   新機能
+-   非公開インターフェイスの変更
+-   ベータ機能の更新
 
 ## 破壊的変更の変更履歴
 
 ### 0.17.0
 
-このバージョンでは、sandbox のローカルソースの materialization において、ソースパスが `Manifest.extra_path_grants` で対象に含まれていない限り、`LocalFile.src` と `LocalDir.src` は materialization の `base_dir` 内に保持されます。`base_dir` は manifest が適用されるときの SDK プロセスの現在の作業ディレクトリです。相対ローカルソースはそのディレクトリから解決され、一方で絶対ローカルソースは、すでにその中にあるか、明示的な grant の配下にある必要があります。これによりローカル artifact の境界に関する問題は解消されますが、そのベースディレクトリの外にある信頼済みのホストファイルやディレクトリを sandbox ワークスペースへ意図的にコピーするアプリケーションに影響する可能性があります。
+このバージョンでは、サンドボックスのローカルソースの実体化において、ソースパスが `Manifest.extra_path_grants` によってカバーされていない限り、`LocalFile.src` と `LocalDir.src` は実体化時の `base_dir` 内に収められます。`base_dir` は、マニフェストが適用される時点での SDK プロセスの現在の作業ディレクトリです。相対ローカルソースはそのディレクトリから解決され、絶対ローカルソースはすでにそのディレクトリ内にあるか、明示的な許可の配下にある必要があります。これによりローカルアーティファクトの境界に関する問題は解消されますが、そのベースディレクトリ外から信頼済みホストのファイルまたはディレクトリをサンドボックスワークスペースへ意図的にコピーするアプリケーションに影響する可能性があります。
 
-移行するには、manifest レベルで `SandboxPathGrant` を使って信頼済みのホスト root を許可してください。sandbox がそれらのファイルを読み取るだけでよい場合は、読み取り専用にすることが望ましいです。
+移行するには、信頼済みホストルートをマニフェストレベルで `SandboxPathGrant` により許可してください。サンドボックスがそれらのファイルを読み取るだけでよい場合は、読み取り専用にすることをおすすめします:
 
 ```python
 from pathlib import Path
@@ -54,28 +54,28 @@ manifest = Manifest(
 )
 ```
 
-`extra_path_grants` は、信頼済みのアプリケーション設定として扱ってください。アプリケーションがそれらのホストパスをすでに承認していない限り、モデル出力やその他の信頼できない manifest 入力から grant を設定しないでください。
+`extra_path_grants` は信頼済みアプリケーション設定として扱ってください。アプリケーションがそれらのホストパスをすでに承認していない限り、モデル出力やその他の信頼できないマニフェスト入力から許可を設定しないでください。
 
 ### 0.16.0
 
-このバージョンでは、SDK のデフォルトモデルが `gpt-4.1` ではなく `gpt-5.4-mini` になりました。これは、モデルを明示的に設定していないエージェントと run に影響します。新しいデフォルトは GPT-5 モデルであるため、暗黙のデフォルトモデル設定には `reasoning.effort="none"` や `verbosity="low"` などの GPT-5 のデフォルトが含まれるようになりました。
+このバージョンでは、SDK のデフォルトモデルが `gpt-4.1` ではなく `gpt-5.4-mini` になりました。これは、モデルを明示的に設定していないエージェントと実行に影響します。新しいデフォルトは GPT-5 モデルであるため、暗黙的なデフォルトモデル設定には `reasoning.effort="none"` や `verbosity="low"` などの GPT-5 デフォルトが含まれるようになりました。
 
-以前のデフォルトモデルの挙動を維持する必要がある場合は、エージェントまたは run config にモデルを明示的に設定するか、`OPENAI_DEFAULT_MODEL` 環境変数を設定してください。
+以前のデフォルトモデルの挙動を維持する必要がある場合は、エージェントまたは実行設定でモデルを明示的に設定するか、`OPENAI_DEFAULT_MODEL` 環境変数を設定してください:
 
 ```python
 agent = Agent(name="Assistant", model="gpt-4.1")
 ```
 
-ハイライト:
+主な変更点:
 
-- `Runner.run`、`Runner.run_sync`、`Runner.run_streamed` は、ターン制限を無効化するために `max_turns=None` を受け付けるようになりました。
-- sandbox ワークスペースの hydration は、ローカル、Docker、およびプロバイダーが支援する sandbox 実装全体で、絶対 symlink ターゲットを含め、アーカイブ root の外を指す symlink を含む tar アーカイブを拒否するようになりました。
+-   `Runner.run`、`Runner.run_sync`、`Runner.run_streamed` は、ターン制限を無効にするために `max_turns=None` を受け取れるようになりました。
+-   サンドボックスワークスペースのハイドレーションは、ローカル、Docker、およびプロバイダーがバックするサンドボックス実装全体で、絶対シンボリックリンクターゲットを含む、アーカイブルートの外部を指すシンボリックリンクを含む tar アーカイブを拒否するようになりました。
 
 ### 0.15.0
 
-このバージョンでは、モデルの拒否が、空のテキスト出力として扱われたり、structured outputs の場合に `MaxTurnsExceeded` になるまで run ループでリトライされるのではなく、`ModelRefusalError` として明示的に表面化されるようになりました。
+このバージョンでは、モデルの拒否応答は、空のテキスト出力として扱われたり、structured outputs の場合に実行ループが `MaxTurnsExceeded` まで再試行したりするのではなく、`ModelRefusalError` として明示的に表面化されるようになりました。
 
-これは、以前は拒否のみのモデル応答が `final_output == ""` で完了することを期待していたコードに影響します。例外を発生させずに拒否を処理するには、`model_refusal` run error handler を提供してください。
+これは、以前に拒否のみのモデル応答が `final_output == ""` で完了することを期待していたコードに影響します。例外を発生させずに拒否を処理するには、`model_refusal` 実行エラーハンドラーを提供してください:
 
 ```python
 result = Runner.run_sync(
@@ -85,81 +85,81 @@ result = Runner.run_sync(
 )
 ```
 
-structured-output エージェントでは、handler はエージェントの出力スキーマに一致する値を返すことができ、SDK は他の run error handler の最終出力と同様に検証します。
+structured-output エージェントの場合、ハンドラーはエージェントの出力スキーマに一致する値を返すことができ、SDK は他の実行エラーハンドラーの最終出力と同様に検証します。
 
 ### 0.14.0
 
-このマイナーリリースでは破壊的変更は導入 **されません** が、大きな新しい beta 機能領域である Sandbox Agents と、それらをローカル、コンテナ化、ホスト環境全体で使用するために必要なランタイム、バックエンド、ドキュメントサポートが追加されています。
+このマイナーリリースでは、破壊的変更は **導入しません** が、主要な新しいベータ機能領域である Sandbox エージェントに加え、ローカル、コンテナ化、ホスト環境全体でそれらを使用するために必要なランタイム、バックエンド、ドキュメントのサポートが追加されています。
 
-ハイライト:
+主な変更点:
 
-- `SandboxAgent`、`Manifest`、`SandboxRunConfig` を中心とする新しい beta sandbox ランタイムサーフェスを追加し、エージェントがファイル、ディレクトリ、Git リポジトリ、マウント、スナップショット、resume サポートを備えた永続的に分離されたワークスペース内で作業できるようにしました。
-- `UnixLocalSandboxClient` と `DockerSandboxClient` によるローカルおよびコンテナ化開発向けの sandbox 実行バックエンドに加え、optional extras を通じて Blaxel、Cloudflare、Daytona、E2B、Modal、Runloop、Vercel 向けのホスト型プロバイダー連携を追加しました。
-- 将来の run が過去の run から得た教訓を再利用できるようにする sandbox メモリサポートを追加しました。progressive disclosure、multi-turn grouping、設定可能な分離境界、S3 backed ワークフローを含む永続化メモリのコード例が含まれます。
-- ローカルおよび合成ワークスペースエントリ、S3/R2/GCS/Azure Blob Storage/S3 Files 向けのリモートストレージマウント、ポータブルスナップショット、`RunState`、`SandboxSessionState`、または保存済みスナップショットによる resume フローを含む、より広範なワークスペースおよび resume モデルを追加しました。
-- `examples/sandbox/` 配下に、skills、ハンドオフ、メモリ、プロバイダー固有のセットアップを用いたコーディングタスク、およびコードレビュー、dataroom QA、Web サイトクローンなどのエンドツーエンドワークフローを扱う、実質的な sandbox のコード例とチュートリアルを追加しました。
-- sandbox 対応の session 準備、capability binding、状態シリアライズ、統合トレーシング、prompt cache key のデフォルト、より安全な機密 MCP 出力の redaction により、コアランタイムとトレーシングスタックを拡張しました。
+-   `SandboxAgent`、`Manifest`、`SandboxRunConfig` を中心とした新しいベータのサンドボックスランタイムサーフェスを追加しました。これにより、エージェントはファイル、ディレクトリ、Git リポジトリ、マウント、スナップショット、再開サポートを備えた永続的な隔離ワークスペース内で動作できます。
+-   `UnixLocalSandboxClient` と `DockerSandboxClient` によるローカルおよびコンテナ化開発向けのサンドボックス実行バックエンドに加え、任意の extras を通じた Blaxel、Cloudflare、Daytona、E2B、Modal、Runloop、Vercel 向けのホスト型プロバイダー連携を追加しました。
+-   将来の実行が以前の実行から得た知見を再利用できるように、サンドボックスメモリサポートを追加しました。段階的開示、複数ターンのグループ化、設定可能な隔離境界、および S3 バックのワークフローを含む永続化メモリのコード例が含まれます。
+-   ローカルおよび合成ワークスペースエントリー、S3/R2/GCS/Azure Blob Storage/S3 Files 向けのリモートストレージマウント、移植可能なスナップショット、`RunState`、`SandboxSessionState`、または保存済みスナップショットによる再開フローを含む、より広範なワークスペースと再開モデルを追加しました。
+-   `examples/sandbox/` 配下に、充実したサンドボックスのコード例とチュートリアルを追加しました。スキル、ハンドオフ、メモリを用いたコーディングタスク、プロバイダー固有のセットアップ、コードレビュー、データルーム QA、Web サイトのクローン作成などのエンドツーエンドのワークフローを扱います。
+-   サンドボックス対応のセッション準備、ケイパビリティバインディング、状態のシリアライズ、統合トレーシング、プロンプトキャッシュキーのデフォルト、より安全な機密 MCP 出力のマスキングにより、コアランタイムとトレーシングスタックを拡張しました。
 
 ### 0.13.0
 
-このマイナーリリースでは破壊的変更は導入 **されません** が、注目すべき Realtime のデフォルト更新に加え、新しい MCP 機能とランタイム安定性の修正が含まれています。
+このマイナーリリースでは、破壊的変更は **導入しません** が、注目すべき Realtime のデフォルト更新に加え、新しい MCP 機能とランタイム安定性の修正が含まれます。
 
-ハイライト:
+主な変更点:
 
-- デフォルトの websocket Realtime モデルは `gpt-realtime-1.5` になりました。これにより、新しい Realtime エージェントのセットアップでは追加設定なしでより新しいモデルが使用されます。
-- `MCPServer` は `list_resources()`、`list_resource_templates()`、`read_resource()` を公開するようになり、`MCPServerStreamableHttp` は `session_id` を公開するようになりました。これにより、streamable HTTP セッションを再接続やステートレス worker 間で再開できます。
-- Chat Completions 連携では、`should_replay_reasoning_content` によって reasoning-content replay を opt in できるようになり、LiteLLM/DeepSeek などの adapter におけるプロバイダー固有の reasoning/tool-call の継続性が改善されます。
-- `SQLAlchemySession` における同時初回書き込み、reasoning stripping 後に孤立した assistant message ID を持つ compaction request、`remove_all_tools()` が MCP/reasoning item を残す問題、関数ツール batch executor の race など、いくつかのランタイムと session の edge case を修正しました。
+-   デフォルトの WebSocket Realtime モデルは `gpt-realtime-1.5` になりました。そのため、新しい Realtime エージェントのセットアップでは、追加設定なしで新しいモデルが使用されます。
+-   `MCPServer` は `list_resources()`、`list_resource_templates()`、`read_resource()` を公開するようになりました。また、`MCPServerStreamableHttp` は `session_id` を公開するようになったため、ストリーム可能な HTTP セッションを再接続やステートレスワーカーをまたいで再開できます。
+-   Chat Completions 連携は、`should_replay_reasoning_content` によって推論コンテンツの再生をオプトインできるようになりました。これにより、LiteLLM/DeepSeek などのアダプターで、プロバイダー固有の推論 / ツール呼び出しの連続性が向上します。
+-   `SQLAlchemySession` における初回書き込みの同時実行、推論の除去後に孤立した assistant メッセージ ID を持つ圧縮リクエスト、`remove_all_tools()` が MCP/reasoning 項目を残す問題、関数ツールバッチ実行器の競合など、複数のランタイムおよびセッションのエッジケースを修正しました。
 
 ### 0.12.0
 
-このマイナーリリースでは破壊的変更は導入 **されません**。主要な機能追加については、[リリースノート](https://github.com/openai/openai-agents-python/releases/tag/v0.12.0)を確認してください。
+このマイナーリリースでは、破壊的変更は **導入しません**。主要な機能追加については、[リリースノート](https://github.com/openai/openai-agents-python/releases/tag/v0.12.0)を確認してください。
 
 ### 0.11.0
 
-このマイナーリリースでは破壊的変更は導入 **されません**。主要な機能追加については、[リリースノート](https://github.com/openai/openai-agents-python/releases/tag/v0.11.0)を確認してください。
+このマイナーリリースでは、破壊的変更は **導入しません**。主要な機能追加については、[リリースノート](https://github.com/openai/openai-agents-python/releases/tag/v0.11.0)を確認してください。
 
 ### 0.10.0
 
-このマイナーリリースでは破壊的変更は導入 **されません** が、OpenAI Responses ユーザー向けの重要な新機能領域である、Responses API の websocket transport サポートが含まれています。
+このマイナーリリースでは、破壊的変更は **導入しません** が、OpenAI Responses ユーザー向けの重要な新機能領域である Responses API の WebSocket トランスポートサポートが含まれます。
 
-ハイライト:
+主な変更点:
 
-- OpenAI Responses モデル向けの websocket transport サポートを追加しました（opt-in。HTTP は引き続きデフォルトの transport です）。
-- 共有の websocket 対応プロバイダーと `RunConfig` を複数ターンの run で再利用するための `responses_websocket_session()` helper / `ResponsesWebSocketSession` を追加しました。
-- ストリーミング、ツール、承認、フォローアップターンを扱う新しい websocket ストリーミングコード例（`examples/basic/stream_ws.py`）を追加しました。
+-   OpenAI Responses モデル向けの WebSocket トランスポートサポートを追加しました（オプトインです。HTTP は引き続きデフォルトのトランスポートです）。
+-   複数ターンの実行全体で共有の WebSocket 対応プロバイダーと `RunConfig` を再利用するための `responses_websocket_session()` ヘルパー / `ResponsesWebSocketSession` を追加しました。
+-   ストリーミング、ツール、承認、フォローアップターンを扱う新しい WebSocket ストリーミングコード例（`examples/basic/stream_ws.py`）を追加しました。
 
 ### 0.9.0
 
-このバージョンでは、Python 3.9 はサポートされなくなりました。このメジャーバージョンは 3 か月前に EOL に達したためです。より新しいランタイムバージョンへアップグレードしてください。
+このバージョンでは、このメジャーバージョンが 3 か月前に EOL に達したため、Python 3.9 はサポートされなくなりました。より新しいランタイムバージョンへアップグレードしてください。
 
-さらに、`Agent#as_tool()` メソッドから返される値の型ヒントが、`Tool` から `FunctionTool` に狭められました。この変更は通常、破壊的な問題を引き起こすことはありませんが、コードがより広い union 型に依存している場合は、側でいくつか調整が必要になる場合があります。
+さらに、`Agent#as_tool()` メソッドから返される値の型ヒントが、`Tool` から `FunctionTool` へ狭められました。この変更は通常、破壊的な問題を引き起こすことはありませんが、コードがより広い Union 型に依存している場合は、側でいくつか調整が必要になる可能性があります。
 
 ### 0.8.0
 
-このバージョンでは、2 つのランタイム挙動の変更により、移行作業が必要になる場合があります。
+このバージョンでは、2 つのランタイム挙動の変更により、移行作業が必要になる可能性があります:
 
-- **同期** Python callable をラップする関数ツールは、イベントループスレッド上で実行されるのではなく、`asyncio.to_thread(...)` を介して worker thread 上で実行されるようになりました。ツールロジックが thread-local state や thread-affine resource に依存している場合は、async tool 実装へ移行するか、ツールコード内で thread affinity を明示してください。
-- ローカル MCP ツールの失敗処理は設定可能になり、デフォルトの挙動では run 全体を失敗させる代わりに、モデルから見えるエラー出力を返す場合があります。fail-fast semantics に依存している場合は、`mcp_config={"failure_error_function": None}` を設定してください。サーバーレベルの `failure_error_function` 値はエージェントレベルの設定を上書きするため、明示的な handler を持つ各ローカル MCP サーバーで `failure_error_function=None` を設定してください。
+-   **同期** Python 呼び出し可能オブジェクトをラップする関数ツールは、イベントループスレッドで実行されるのではなく、`asyncio.to_thread(...)` を介してワーカースレッドで実行されるようになりました。ツールのロジックがスレッドローカル状態やスレッドアフィンなリソースに依存している場合は、async ツール実装へ移行するか、ツールコード内でスレッドアフィニティを明示してください。
+-   ローカル MCP ツールの失敗処理は設定可能になり、デフォルトの挙動では実行全体を失敗させる代わりに、モデルから見えるエラー出力を返す場合があります。フェイルファストのセマンティクスに依存している場合は、`mcp_config={"failure_error_function": None}` を設定してください。サーバーレベルの `failure_error_function` 値はエージェントレベルの設定を上書きするため、明示的なハンドラーを持つ各ローカル MCP サーバーで `failure_error_function=None` を設定してください。
 
 ### 0.7.0
 
-このバージョンでは、既存のアプリケーションに影響する可能性がある挙動変更がいくつかありました。
+このバージョンでは、既存のアプリケーションに影響する可能性がある挙動の変更がいくつかありました:
 
-- ネストされたハンドオフ履歴は **opt-in**（デフォルトでは無効）になりました。v0.6.x のデフォルトのネスト挙動に依存していた場合は、`RunConfig(nest_handoff_history=True)` を明示的に設定してください。
-- `gpt-5.1` / `gpt-5.2` のデフォルトの `reasoning.effort` が `"none"` に変更されました（以前は SDK のデフォルトで設定された `"low"` がデフォルトでした）。プロンプトや品質 / コストプロファイルが `"low"` に依存していた場合は、`model_settings` で明示的に設定してください。
+-   ネストされたハンドオフ履歴は **オプトイン** になりました（デフォルトでは無効）。v0.6.x のデフォルトのネスト挙動に依存していた場合は、`RunConfig(nest_handoff_history=True)` を明示的に設定してください。
+-   `gpt-5.1` / `gpt-5.2` のデフォルトの `reasoning.effort` は、`"none"` に変更されました（SDK デフォルトで設定されていた以前のデフォルト `"low"` からの変更です）。プロンプトや品質 / コストのプロファイルが `"low"` に依存していた場合は、`model_settings` で明示的に設定してください。
 
 ### 0.6.0
 
-このバージョンでは、デフォルトのハンドオフ履歴は raw のユーザー / assistant ターンを公開するのではなく、単一の assistant メッセージにまとめられるようになり、下流のエージェントに簡潔で予測可能な要約を提供します
-- 既存の単一メッセージのハンドオフ transcript は、デフォルトで `<CONVERSATION HISTORY>` ブロックの前に "For context, here is the conversation so far between the user and the previous agent:" で始まるようになり、下流のエージェントに明確にラベル付けされた要約を提供します
+このバージョンでは、デフォルトのハンドオフ履歴は、生のユーザー / アシスタントターンを公開するのではなく、単一の assistant メッセージにまとめられるようになり、後続のエージェントに簡潔で予測可能な要約を提供します
+-   既存の単一メッセージのハンドオフトランスクリプトは、デフォルトで `<CONVERSATION HISTORY>` ブロックの前に "For context, here is the conversation so far between the user and the previous agent:" で始まるようになったため、後続のエージェントは明確なラベル付きの要約を受け取れます
 
 ### 0.5.0
 
-このバージョンでは目に見える破壊的変更は導入されませんが、新機能と内部のいくつかの重要な更新が含まれています。
+このバージョンでは、目に見える破壊的変更は導入されませんが、新機能と内部のいくつかの重要な更新が含まれます:
 
-- [SIP protocol connections](https://platform.openai.com/docs/guides/realtime-sip) を処理するための `RealtimeRunner` のサポートを追加しました
-- Python 3.14 互換性のために `Runner#run_sync` の内部ロジックを大幅に改訂しました
+-   `RealtimeRunner` が [SIP プロトコル接続](https://platform.openai.com/docs/guides/realtime-sip)を処理するためのサポートを追加しました
+-   Python 3.14 互換性のために、`Runner#run_sync` の内部ロジックを大幅に改訂しました
 
 ### 0.4.0
 
@@ -167,12 +167,12 @@ structured-output エージェントでは、handler はエージェントの出
 
 ### 0.3.0
 
-このバージョンでは、Realtime API サポートが gpt-realtime モデルとその API インターフェイス（GA バージョン）へ移行します。
+このバージョンでは、Realtime API サポートは gpt-realtime モデルとその API インターフェイス（GA バージョン）へ移行します。
 
 ### 0.2.0
 
-このバージョンでは、以前は `Agent` を arg として受け取っていたいくつかの箇所が、代わりに `AgentBase` を arg として受け取るようになりました。たとえば、MCP サーバーの `list_tools()` 呼び出しです。これは純粋に型付け上の変更であり、引き続き `Agent` オブジェクトを受け取ります。更新するには、`Agent` を `AgentBase` に置き換えて型エラーを修正するだけです。
+このバージョンでは、以前は `Agent` を引数として受け取っていたいくつかの箇所が、代わりに `AgentBase` を引数として受け取るようになりました。たとえば、MCP サーバーの `list_tools()` 呼び出しです。これは純粋に型付け上の変更であり、引き続き `Agent` オブジェクトを受け取ります。更新するには、`Agent` を `AgentBase` に置き換えて型エラーを修正するだけです。
 
 ### 0.1.0
 
-このバージョンでは、[`MCPServer.list_tools()`][agents.mcp.server.MCPServer] に 2 つの新しい params、`run_context` と `agent` が追加されました。`MCPServer` をサブクラス化するすべてのクラスに、これらの params を追加する必要があります。
+このバージョンでは、[`MCPServer.list_tools()`][agents.mcp.server.MCPServer] に `run_context` と `agent` という 2 つの新しいパラメーターが追加されました。`MCPServer` をサブクラス化しているすべてのクラスに、これらのパラメーターを追加する必要があります。

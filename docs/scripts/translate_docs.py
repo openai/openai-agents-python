@@ -340,8 +340,8 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
                 model=OPENAI_MODEL,
                 instructions=instructions,
                 input=chunk,
-                reasoning={"effort": "none"},
-                text={"verbosity": "low"},
+                reasoning={"effort": "high"},
+                text={"verbosity": "medium"},
             )
             translated_content.append(response.output_text)
         elif OPENAI_MODEL.startswith("o"):
