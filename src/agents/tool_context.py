@@ -7,7 +7,7 @@ from openai.types.responses import ResponseFunctionToolCall
 
 from ._tool_identity import get_tool_call_namespace, tool_trace_name
 from .agent_tool_state import get_agent_tool_state_scope, set_agent_tool_state_scope
-from .run_context import RunContextWrapper, TContext
+from .run_context import RunContextWrapper, TContext, ToolExecutionContext
 from .usage import Usage
 
 if TYPE_CHECKING:
@@ -70,6 +70,7 @@ class ToolContext(RunContextWrapper[TContext]):
         agent: AgentBase[Any] | None = None,
         run_config: RunConfig | None = None,
         turn_input: list[TResponseInputItem] | None = None,
+        tool_execution_context: ToolExecutionContext | None = None,
         _approvals: dict[str, _ApprovalRecord] | None = None,
         tool_input: Any | None = None,
     ) -> None:
@@ -79,6 +80,7 @@ class ToolContext(RunContextWrapper[TContext]):
             context=context,
             usage=resolved_usage,
             turn_input=list(turn_input or []),
+            tool_execution_context=tool_execution_context,
             _approvals={} if _approvals is None else _approvals,
             tool_input=tool_input,
         )

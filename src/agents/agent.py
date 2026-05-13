@@ -527,6 +527,7 @@ class Agent(AgentBase, Generic[TContext]):
         parameters: type[Any] | None = None,
         input_builder: StructuredToolInputBuilder | None = None,
         include_input_schema: bool = False,
+        include_conversation_history: bool = False,
     ) -> FunctionTool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -556,6 +557,10 @@ class Agent(AgentBase, Generic[TContext]):
             parameters: Structured input type for the tool arguments (dataclass or Pydantic model).
             input_builder: Optional function to build the nested agent input from structured data.
             include_input_schema: Whether to include the full JSON schema in structured input.
+            include_conversation_history: Whether to prepend the parent agent's conversation history
+                to the sub-agent's input. When True, the sub-agent sees a summary of the full
+                conversation context from the parent run, followed by the tool input. The summary
+                uses the same format as handoff history nesting. Defaults to False.
         """
 
         def _is_supported_parameters(value: Any) -> bool:
@@ -622,6 +627,16 @@ class Agent(AgentBase, Generic[TContext]):
             )
             if not isinstance(resolved_input, str) and not isinstance(resolved_input, list):
                 raise ModelBehaviorError("Agent tool called with invalid input")
+
+            if include_conversation_history and isinstance(context, RunContextWrapper):
+                exec_ctx = context.tool_execution_context
+                if exec_ctx:
+                    from .handoffs.history import build_agent_tool_history
+                    from .items import ItemHelpers
+
+                    summary_items, forwarded_items = build_agent_tool_history(exec_ctx)
+                    tool_input_items = ItemHelpers.input_to_new_input_list(resolved_input)
+                    resolved_input = summary_items + forwarded_items + tool_input_items
 
             resolved_max_turns = max_turns if max_turns is not None else DEFAULT_MAX_TURNS
             resolved_run_config = run_config

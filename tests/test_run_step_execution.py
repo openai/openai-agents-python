@@ -3545,3 +3545,78 @@ async def test_execute_tools_emits_hosted_mcp_rejection_reason_from_explicit_mes
     assert responses[0].raw_item["approve"] is False
     assert responses[0].raw_item["approval_request_id"] == "mcp-approval-reject-reason"
     assert responses[0].raw_item["reason"] == "Denied by policy"
+
+
+# ---------------------------------------------------------------------------
+# ToolExecutionContext propagation tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_execution_context_set_before_tool_execution():
+    """execute_tools_and_side_effects should set tool_execution_context on context_wrapper
+    before tools execute."""
+
+    captured_context: list[Any] = []
+
+    @function_tool
+    async def capture_tool(context: RunContextWrapper[None]) -> str:
+        captured_context.append(context.tool_execution_context)
+        return "ok"
+
+    agent = Agent(name="test", tools=[capture_tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("capture_tool", json.dumps({}))],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    ctx = RunContextWrapper(None)
+    original_input = [
+        cast(TResponseInputItem, {"role": "user", "content": "hello"}),
+    ]
+
+    await get_execute_result(agent, response, original_input=original_input, context_wrapper=ctx)
+
+    assert len(captured_context) == 1
+    exec_ctx = captured_context[0]
+    assert exec_ctx is not None
+    assert exec_ctx.input_history == tuple(original_input)
+    assert isinstance(exec_ctx.new_step_items, tuple)
+
+
+@pytest.mark.asyncio
+async def test_tool_execution_context_contains_pre_step_items():
+    """tool_execution_context.pre_step_items should contain items from previous turns."""
+
+    captured_context: list[Any] = []
+
+    @function_tool
+    async def capture_tool(context: RunContextWrapper[None]) -> str:
+        captured_context.append(context.tool_execution_context)
+        return "ok"
+
+    agent = Agent(name="test", tools=[capture_tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("capture_tool", json.dumps({}))],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    pre_item = MessageOutputItem(
+        agent=agent,
+        raw_item=ResponseOutputMessage(
+            id="msg_pre",
+            content=[],
+            role="assistant",
+            status="completed",
+            type="message",
+        ),
+    )
+
+    ctx = RunContextWrapper(None)
+    await get_execute_result(agent, response, generated_items=[pre_item], context_wrapper=ctx)
+
+    assert len(captured_context) == 1
+    exec_ctx = captured_context[0]
+    assert len(exec_ctx.pre_step_items) == 1

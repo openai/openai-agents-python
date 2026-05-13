@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from ..items import (
@@ -12,9 +13,11 @@ from ..items import (
 )
 
 if TYPE_CHECKING:
+    from ..run_context import ToolExecutionContext
     from . import HandoffHistoryMapper, HandoffInputData
 
 __all__ = [
+    "build_agent_tool_history",
     "default_handoff_history_mapper",
     "get_conversation_history_wrappers",
     "nest_handoff_history",
@@ -68,48 +71,110 @@ def get_conversation_history_wrappers() -> tuple[str, str]:
     return (_conversation_history_start, _conversation_history_end)
 
 
+@dataclass(frozen=True)
+class _History:
+    """Result of ``_build_history``."""
+
+    summary: list[TResponseInputItem]
+    filtered_pre_items: list[RunItem]
+    filtered_new_items: list[RunItem]
+
+
+def _build_history(
+    input_history: str | tuple[TResponseInputItem, ...],
+    pre_items: tuple[RunItem, ...],
+    new_items: tuple[RunItem, ...],
+    *,
+    history_mapper: HandoffHistoryMapper | None = None,
+) -> _History:
+    """Shared logic for ``nest_handoff_history`` and ``build_agent_tool_history``.
+
+    Normalizes/flattens input_history, filters pre_items (strict) and new_items (permissive),
+    then builds a ``<CONVERSATION HISTORY>`` text summary of the full transcript.
+    """
+    normalized = _normalize_input_history(input_history)
+    flattened = _flatten_nested_history_messages(normalized)
+
+    # Pre-items: strict filter — drops assistant messages, tool calls, reasoning.
+    pre_inputs: list[TResponseInputItem] = []
+    filtered_pre: list[RunItem] = []
+    for run_item in pre_items:
+        if isinstance(run_item, ToolApprovalItem):
+            continue
+        plain = _run_item_to_plain_input(run_item)
+        pre_inputs.append(plain)
+        if _should_forward_pre_item(plain):
+            filtered_pre.append(run_item)
+
+    # New items: permissive filter — keeps items with roles (including assistant).
+    new_inputs: list[TResponseInputItem] = []
+    filtered_new: list[RunItem] = []
+    for run_item in new_items:
+        if isinstance(run_item, ToolApprovalItem):
+            continue
+        plain = _run_item_to_plain_input(run_item)
+        new_inputs.append(plain)
+        if _should_forward_new_item(plain):
+            filtered_new.append(run_item)
+
+    transcript = flattened + pre_inputs + new_inputs
+    mapper = history_mapper or default_handoff_history_mapper
+    summary = mapper(transcript)
+
+    return _History(
+        summary=summary,
+        filtered_pre_items=filtered_pre,
+        filtered_new_items=filtered_new,
+    )
+
+
 def nest_handoff_history(
     handoff_input_data: HandoffInputData,
     *,
     history_mapper: HandoffHistoryMapper | None = None,
 ) -> HandoffInputData:
     """Summarize the previous transcript for the next agent."""
-
-    normalized_history = _normalize_input_history(handoff_input_data.input_history)
-    flattened_history = _flatten_nested_history_messages(normalized_history)
-
-    # Convert items to plain inputs for the transcript summary.
-    pre_items_as_inputs: list[TResponseInputItem] = []
-    filtered_pre_items: list[RunItem] = []
-    for run_item in handoff_input_data.pre_handoff_items:
-        if isinstance(run_item, ToolApprovalItem):
-            continue
-        plain_input = _run_item_to_plain_input(run_item)
-        pre_items_as_inputs.append(plain_input)
-        if _should_forward_pre_item(plain_input):
-            filtered_pre_items.append(run_item)
-
-    new_items_as_inputs: list[TResponseInputItem] = []
-    filtered_input_items: list[RunItem] = []
-    for run_item in handoff_input_data.new_items:
-        if isinstance(run_item, ToolApprovalItem):
-            continue
-        plain_input = _run_item_to_plain_input(run_item)
-        new_items_as_inputs.append(plain_input)
-        if _should_forward_new_item(plain_input):
-            filtered_input_items.append(run_item)
-
-    transcript = flattened_history + pre_items_as_inputs + new_items_as_inputs
-
-    mapper = history_mapper or default_handoff_history_mapper
-    history_items = mapper(transcript)
-
-    return handoff_input_data.clone(
-        input_history=tuple(deepcopy(item) for item in history_items),
-        pre_handoff_items=tuple(filtered_pre_items),
-        # new_items stays unchanged for session history.
-        input_items=tuple(filtered_input_items),
+    result = _build_history(
+        handoff_input_data.input_history,
+        handoff_input_data.pre_handoff_items,
+        handoff_input_data.new_items,
+        history_mapper=history_mapper,
     )
+    return handoff_input_data.clone(
+        input_history=tuple(deepcopy(item) for item in result.summary),
+        pre_handoff_items=tuple(result.filtered_pre_items),
+        # new_items stays unchanged for session history.
+        input_items=tuple(result.filtered_new_items),
+    )
+
+
+def build_agent_tool_history(
+    tool_execution_context: ToolExecutionContext,
+) -> tuple[list[TResponseInputItem], list[TResponseInputItem]]:
+    """Build a summary and filtered forwarded items for agent-as-tool with history.
+
+    Uses the same summarization logic as handoff history nesting to convert the parent
+    conversation into a ``<CONVERSATION HISTORY>`` text summary plus filtered raw items.
+
+    Args:
+        tool_execution_context: The conversation state captured during tool execution.
+
+    Returns:
+        A tuple of ``(summary_items, forwarded_items)``. ``summary_items`` is a single-element
+        list containing the summary assistant message. ``forwarded_items`` are the raw items
+        that should be sent alongside the summary.
+    """
+
+    result = _build_history(
+        tool_execution_context.input_history,
+        tool_execution_context.pre_step_items,
+        tool_execution_context.new_step_items,
+    )
+    forwarded = [
+        _run_item_to_plain_input(item)
+        for item in result.filtered_pre_items + result.filtered_new_items
+    ]
+    return result.summary, forwarded
 
 
 def default_handoff_history_mapper(

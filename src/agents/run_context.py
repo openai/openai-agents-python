@@ -25,6 +25,24 @@ else:
 TContext = TypeVar("TContext", default=Any)
 
 
+@dataclass(frozen=True)
+class ToolExecutionContext:
+    """Conversation state at the point of tool execution.
+
+    Mirrors ``HandoffInputData`` fields so ``build_agent_tool_history()`` can reuse
+    the same summarization logic as handoff history nesting.
+    """
+
+    input_history: str | tuple[TResponseInputItem, ...]
+    """Cross-run history — the ``original_input`` passed to ``Runner.run()``."""
+
+    pre_step_items: tuple[Any, ...]
+    """Within-run ``RunItem`` objects from prior turns in this ``Runner.run()`` call."""
+
+    new_step_items: tuple[Any, ...]
+    """Current turn ``RunItem`` objects generated before tool execution."""
+
+
 @dataclass(eq=False)
 class _ApprovalRecord:
     """Tracks approval/rejection state for a tool.
@@ -57,6 +75,10 @@ class RunContextWrapper(Generic[TContext]):
     """
 
     turn_input: list[TResponseInputItem] = field(default_factory=list)
+    tool_execution_context: ToolExecutionContext | None = None
+    """Conversation state at tool execution time. Set before tools run so agent-as-tool
+    implementations can access the parent conversation via ``include_conversation_history``."""
+
     _approvals: dict[str, _ApprovalRecord] = field(default_factory=dict)
     tool_input: Any | None = None
     """Structured input for the current agent tool run, when available."""
@@ -460,6 +482,7 @@ class RunContextWrapper(Generic[TContext]):
         fork.usage = self.usage
         fork._approvals = self._approvals
         fork.turn_input = self.turn_input
+        fork.tool_execution_context = self.tool_execution_context
         fork.tool_input = tool_input
         return fork
 
@@ -469,6 +492,7 @@ class RunContextWrapper(Generic[TContext]):
         fork.usage = self.usage
         fork._approvals = self._approvals
         fork.turn_input = self.turn_input
+        fork.tool_execution_context = self.tool_execution_context
         return fork
 
 

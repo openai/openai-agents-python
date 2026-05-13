@@ -2747,3 +2747,497 @@ def test_replaced_agent_as_tool_preserves_agent_markers_for_build_agent_map() ->
     agent_map = _build_agent_map(parent_agent)
 
     assert agent_map["nested_agent"] is nested_agent
+
+
+# ---------------------------------------------------------------------------
+# include_conversation_history tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_include_conversation_history_prepends_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When include_conversation_history=True, the sub-agent should receive a
+    CONVERSATION HISTORY summary followed by forwarded items and the tool input."""
+
+    agent = Agent(name="analyst")
+    captured_input: list[Any] = []
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        captured_input.append(input)
+        return type("DummyResult", (), {"final_output": "analysis done", "new_items": []})()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    tool = agent.as_tool(
+        tool_name="analyze",
+        tool_description="Analyze with context",
+        include_conversation_history=True,
+    )
+
+    from agents.run_context import ToolExecutionContext
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="analyze",
+        tool_call_id="call_1",
+        tool_arguments='{"input": "summarize"}',
+    )
+    tool_context.tool_execution_context = ToolExecutionContext(
+        input_history=(
+            cast(TResponseInputItem, {"role": "user", "content": "What is the baggage policy?"}),
+            cast(TResponseInputItem, {"role": "assistant", "content": "You can bring one bag."}),
+        ),
+        pre_step_items=(),
+        new_step_items=(),
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "summarize"}')
+
+    assert output == "analysis done"
+    assert len(captured_input) == 1
+    input_items = captured_input[0]
+    assert isinstance(input_items, list)
+    assert len(input_items) >= 2
+    summary = input_items[0]
+    assert isinstance(summary, dict)
+    assert summary.get("role") == "assistant"
+    assert "<CONVERSATION HISTORY>" in summary.get("content", "")
+    assert "baggage policy" in summary.get("content", "")
+    tool_input_item = input_items[-1]
+    assert tool_input_item.get("role") == "user"
+    assert tool_input_item.get("content") == "summarize"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_no_conversation_history_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When include_conversation_history is not set (default False), the sub-agent should
+    only receive the tool input, not the parent's conversation history."""
+
+    agent = Agent(name="translator")
+    captured_input: list[Any] = []
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        captured_input.append(input)
+        return type("DummyResult", (), {"final_output": "translated", "new_items": []})()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    tool = agent.as_tool(
+        tool_name="translate",
+        tool_description="Translate text",
+    )
+
+    from agents.run_context import ToolExecutionContext
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="translate",
+        tool_call_id="call_1",
+        tool_arguments='{"input": "hello"}',
+    )
+    tool_context.tool_execution_context = ToolExecutionContext(
+        input_history=(cast(TResponseInputItem, {"role": "user", "content": "previous message"}),),
+        pre_step_items=(),
+        new_step_items=(),
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "hello"}')
+
+    assert output == "translated"
+    assert len(captured_input) == 1
+    assert captured_input[0] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_include_conversation_history_empty_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When include_conversation_history=True but tool_execution_context is None,
+    the sub-agent should receive only the tool input unchanged."""
+
+    agent = Agent(name="helper")
+    captured_input: list[Any] = []
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        captured_input.append(input)
+        return type("DummyResult", (), {"final_output": "done", "new_items": []})()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    tool = agent.as_tool(
+        tool_name="help",
+        tool_description="Help with task",
+        include_conversation_history=True,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="help",
+        tool_call_id="call_1",
+        tool_arguments='{"input": "do something"}',
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "do something"}')
+
+    assert output == "done"
+    assert len(captured_input) == 1
+    assert captured_input[0] == "do something"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_include_conversation_history_forwards_new_step_assistant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Current turn's assistant message should be forwarded as a raw item alongside the summary."""
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+    agent = Agent(name="analyst")
+    captured_input: list[Any] = []
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        captured_input.append(input)
+        return type("DummyResult", (), {"final_output": "done", "new_items": []})()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    tool = agent.as_tool(
+        tool_name="analyze",
+        tool_description="Analyze",
+        include_conversation_history=True,
+    )
+
+    from agents.run_context import ToolExecutionContext
+
+    assistant_msg = ResponseOutputMessage(
+        id="msg_1",
+        content=[
+            ResponseOutputText(text="Let me analyze that.", type="output_text", annotations=[])
+        ],
+        role="assistant",
+        status="completed",
+        type="message",
+    )
+    new_step_item = MessageOutputItem(
+        agent=agent,
+        raw_item=assistant_msg,
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="analyze",
+        tool_call_id="call_1",
+        tool_arguments='{"input": "analyze this"}',
+    )
+    tool_context.tool_execution_context = ToolExecutionContext(
+        input_history="hello",
+        pre_step_items=(),
+        new_step_items=(new_step_item,),
+    )
+
+    await tool.on_invoke_tool(tool_context, '{"input": "analyze this"}')
+
+    assert len(captured_input) == 1
+    input_items = captured_input[0]
+    assert isinstance(input_items, list)
+    assert input_items[0].get("role") == "assistant"
+    assert "<CONVERSATION HISTORY>" in input_items[0].get("content", "")
+    has_forwarded_assistant = any(
+        isinstance(item, dict)
+        and item.get("role") == "assistant"
+        and "CONVERSATION HISTORY" not in str(item.get("content", ""))
+        for item in input_items[1:-1]
+    )
+    assert has_forwarded_assistant, "Current turn assistant message should be forwarded"
+    assert input_items[-1].get("content") == "analyze this"
+
+
+# ---------------------------------------------------------------------------
+# build_agent_tool_history / _build_history unit tests
+# ---------------------------------------------------------------------------
+
+
+def _get_summary_content(summary: list[TResponseInputItem]) -> str:
+    """Extract the text content from a summary message for assertions."""
+    assert len(summary) == 1
+    item = summary[0]
+    assert isinstance(item, dict)
+    content = item.get("content")
+    assert isinstance(content, str)
+    return content
+
+
+def test_build_agent_tool_history_returns_summary_and_forwarded():
+    """build_agent_tool_history should return a summary with CONVERSATION HISTORY markers
+    and forwarded items filtered appropriately."""
+    from agents.handoffs.history import build_agent_tool_history
+    from agents.run_context import ToolExecutionContext
+
+    exec_ctx = ToolExecutionContext(
+        input_history=(
+            cast(TResponseInputItem, {"role": "user", "content": "hello"}),
+            cast(TResponseInputItem, {"role": "assistant", "content": "hi there"}),
+        ),
+        pre_step_items=(),
+        new_step_items=(),
+    )
+
+    summary, forwarded = build_agent_tool_history(exec_ctx)
+
+    content = _get_summary_content(summary)
+    assert "<CONVERSATION HISTORY>" in content
+    assert "hello" in content
+    assert "hi there" in content
+    assert len(forwarded) == 0
+
+
+def test_build_agent_tool_history_filters_pre_step_assistant():
+    """Pre-step assistant messages should be in summary only, not forwarded."""
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+    from agents.handoffs.history import build_agent_tool_history
+    from agents.run_context import ToolExecutionContext
+
+    assistant_msg = ResponseOutputMessage(
+        id="msg_1",
+        content=[ResponseOutputText(text="I looked it up.", type="output_text", annotations=[])],
+        role="assistant",
+        status="completed",
+        type="message",
+    )
+    pre_item = MessageOutputItem(agent=Agent(name="test"), raw_item=assistant_msg)
+
+    exec_ctx = ToolExecutionContext(
+        input_history="hello",
+        pre_step_items=(pre_item,),
+        new_step_items=(),
+    )
+
+    summary, forwarded = build_agent_tool_history(exec_ctx)
+
+    content = _get_summary_content(summary)
+    assert "I looked it up" in content
+    assert len(forwarded) == 0
+
+
+def test_build_agent_tool_history_forwards_new_step_assistant():
+    """Current turn assistant messages should be forwarded alongside the summary."""
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+    from agents.handoffs.history import build_agent_tool_history
+    from agents.run_context import ToolExecutionContext
+
+    assistant_msg = ResponseOutputMessage(
+        id="msg_1",
+        content=[
+            ResponseOutputText(text="Let me analyze that.", type="output_text", annotations=[])
+        ],
+        role="assistant",
+        status="completed",
+        type="message",
+    )
+    new_item = MessageOutputItem(agent=Agent(name="test"), raw_item=assistant_msg)
+
+    exec_ctx = ToolExecutionContext(
+        input_history="hello",
+        pre_step_items=(),
+        new_step_items=(new_item,),
+    )
+
+    summary, forwarded = build_agent_tool_history(exec_ctx)
+
+    content = _get_summary_content(summary)
+    assert "Let me analyze that" in content
+    assert len(forwarded) == 1
+    fwd = forwarded[0]
+    assert isinstance(fwd, dict)
+    assert fwd.get("role") == "assistant"
+
+
+def test_build_agent_tool_history_flattens_nested_history():
+    """Nested <CONVERSATION HISTORY> blocks in input_history should be flattened."""
+    from agents.handoffs.history import build_agent_tool_history
+    from agents.run_context import ToolExecutionContext
+
+    nested_summary = (
+        "For context, here is the conversation so far between the user and the previous agent:\n"
+        "<CONVERSATION HISTORY>\n"
+        "1. user: original question\n"
+        "2. assistant: original answer\n"
+        "</CONVERSATION HISTORY>"
+    )
+
+    exec_ctx = ToolExecutionContext(
+        input_history=(
+            cast(TResponseInputItem, {"role": "assistant", "content": nested_summary}),
+            cast(TResponseInputItem, {"role": "user", "content": "follow up"}),
+        ),
+        pre_step_items=(),
+        new_step_items=(),
+    )
+
+    summary, forwarded = build_agent_tool_history(exec_ctx)
+
+    content = _get_summary_content(summary)
+    assert "original question" in content
+    assert "original answer" in content
+    assert "follow up" in content
+    assert content.count("<CONVERSATION HISTORY>") == 1
+
+
+def test_nest_handoff_history_uses_shared_build_history():
+    """Verify nest_handoff_history still works correctly after refactoring to use _build_history."""
+    from agents.handoffs import HandoffInputData
+    from agents.handoffs.history import nest_handoff_history
+
+    handoff_data = HandoffInputData(
+        input_history=(cast(TResponseInputItem, {"role": "user", "content": "test question"}),),
+        pre_handoff_items=(),
+        new_items=(),
+    )
+
+    result = nest_handoff_history(handoff_data)
+
+    assert isinstance(result.input_history, tuple)
+    assert len(result.input_history) == 1
+    item = result.input_history[0]
+    assert isinstance(item, dict)
+    content = item.get("content")
+    assert isinstance(content, str)
+    assert "<CONVERSATION HISTORY>" in content
+    assert "test question" in content
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_include_conversation_history_resume_uses_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When resuming from a nested interruption, resume_state takes priority over
+    the history-prepended resolved_input."""
+
+    agent = Agent(name="outer")
+    tool_call = make_function_tool_call(
+        "outer_tool",
+        call_id="outer-1",
+        arguments='{"input": "summarize"}',
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="outer_tool",
+        tool_call_id="outer-1",
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    from agents.run_context import ToolExecutionContext
+
+    tool_context.tool_execution_context = ToolExecutionContext(
+        input_history=(cast(TResponseInputItem, {"role": "user", "content": "secret is 42"}),),
+        pre_step_items=(),
+        new_step_items=(),
+    )
+
+    inner_call = make_function_tool_call("inner_tool", call_id="inner-1")
+    approval_item = ToolApprovalItem(agent=agent, raw_item=inner_call)
+
+    class DummyState:
+        def __init__(self, nested_context: ToolContext) -> None:
+            self._context = nested_context
+
+    class DummyPendingResult:
+        def __init__(self) -> None:
+            self.interruptions = [approval_item]
+            self.final_output = None
+
+        def to_state(self) -> DummyState:
+            return resume_state
+
+    class DummyResumedResult:
+        def __init__(self) -> None:
+            self.interruptions: list[ToolApprovalItem] = []
+            self.final_output = "resumed"
+
+    nested_context = ToolContext(
+        context=None,
+        tool_name=tool_call.name,
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+    resume_state = DummyState(nested_context)
+    pending_result = DummyPendingResult()
+    record_agent_tool_run_result(tool_call, cast(Any, pending_result))
+    tool_context.reject_tool(approval_item)
+
+    resumed_result = DummyResumedResult()
+    run_inputs: list[Any] = []
+
+    async def run_resume(cls, /, starting_agent, input, **kwargs) -> DummyResumedResult:
+        run_inputs.append(input)
+        # resume_state should be used, not the history-prepended resolved_input.
+        assert input is resume_state
+        return resumed_result
+
+    monkeypatch.setattr(Runner, "run", classmethod(run_resume))
+
+    tool = agent.as_tool(
+        tool_name="outer_tool",
+        tool_description="Outer agent tool",
+        include_conversation_history=True,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, tool_call.arguments)
+
+    assert output == "resumed"
+    assert run_inputs == [resume_state]

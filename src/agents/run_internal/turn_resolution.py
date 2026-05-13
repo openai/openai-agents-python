@@ -589,6 +589,16 @@ async def execute_tools_and_side_effects(
         new_items=processed_response.new_items,
     )
 
+    # Snapshot conversation state for agent-as-tool with include_conversation_history.
+    # Cleared after _execute_tool_plan since new_step_items becomes stale.
+    from ..run_context import ToolExecutionContext
+
+    context_wrapper.tool_execution_context = ToolExecutionContext(
+        input_history=tuple(original_input) if isinstance(original_input, list) else original_input,
+        pre_step_items=tuple(pre_step_items),
+        new_step_items=tuple(new_step_items),
+    )
+
     (
         function_results,
         tool_input_guardrail_results,
@@ -605,6 +615,8 @@ async def execute_tools_and_side_effects(
         context_wrapper=context_wrapper,
         run_config=run_config,
     )
+    context_wrapper.tool_execution_context = None
+
     new_step_items.extend(
         _build_tool_result_items(
             function_results=function_results,
