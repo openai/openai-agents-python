@@ -138,6 +138,12 @@ async def test_async_sqlite_session_get_items_limit():
         none = await session.get_items(limit=0)
         assert none == []
 
+        # Negative limit must also return [] to match MongoDB/Redis parity.
+        # SQLite treats LIMIT -1 as "no limit", so without an explicit guard
+        # a negative limit would incorrectly return all rows instead of [].
+        neg = await session.get_items(limit=-1)
+        assert neg == []
+
         await session.close()
 
 

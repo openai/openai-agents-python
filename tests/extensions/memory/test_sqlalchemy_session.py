@@ -183,6 +183,10 @@ async def test_get_items_with_limit(agent: Agent):
     more_than_all = await session.get_items(limit=10)
     assert len(more_than_all) == 4
 
+    # Non-positive limits must return [] for parity with MongoDB/Redis backends.
+    assert await session.get_items(limit=0) == []
+    assert await session.get_items(limit=-1) == []
+
 
 async def test_pop_from_empty_session():
     """Test that pop_item returns None on an empty session."""

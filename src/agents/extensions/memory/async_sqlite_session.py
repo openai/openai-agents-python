@@ -119,6 +119,9 @@ class AsyncSQLiteSession(SessionABC):
 
         session_limit = resolve_session_limit(limit, self.session_settings)
 
+        if session_limit is not None and session_limit <= 0:
+            return []
+
         async with self._locked_connection() as conn:
             if session_limit is None:
                 cursor = await conn.execute(
@@ -259,5 +262,7 @@ class AsyncSQLiteSession(SessionABC):
         if self._connection is None:
             return
         async with self._lock:
+            if self._connection is None:
+                return
             await self._connection.close()
             self._connection = None
