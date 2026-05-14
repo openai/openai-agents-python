@@ -795,11 +795,69 @@ async def test_vercel_resume_reconnects_existing_running_sandbox(
     ]
     assert resumed._inner.state.sandbox_id == "sandbox-existing"
     assert _FakeAsyncSandbox.create_calls == []
+    # Sandbox is already RUNNING, so wait_for_status should not be called.
+    assert existing.wait_for_status_calls == []
+    assert resumed._inner._workspace_state_preserved_on_start() is True  # noqa: SLF001
+    assert resumed._inner._system_state_preserved_on_start() is True  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transient_status", ["pending", "stopping"])
+async def test_vercel_resume_waits_when_sandbox_in_transient_state(
+    monkeypatch: pytest.MonkeyPatch,
+    transient_status: str,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    existing = _FakeAsyncSandbox(sandbox_id="sandbox-existing", status=transient_status)
+    _FakeAsyncSandbox.sandboxes[existing.sandbox_id] = existing
+
+    state = vercel_module.VercelSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000200",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=existing.sandbox_id,
+    )
+
+    client = vercel_module.VercelSandboxClient()
+    resumed = await client.resume(state)
+
+    assert resumed._inner.state.sandbox_id == "sandbox-existing"
+    assert _FakeAsyncSandbox.create_calls == []
     assert existing.wait_for_status_calls == [
         ("running", vercel_module.DEFAULT_VERCEL_WAIT_FOR_RUNNING_TIMEOUT_S)
     ]
     assert resumed._inner._workspace_state_preserved_on_start() is True  # noqa: SLF001
-    assert resumed._inner._system_state_preserved_on_start() is True  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_status", ["stopped", "failed"])
+async def test_vercel_resume_recreates_sandbox_when_in_terminal_state(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_status: str,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    existing = _FakeAsyncSandbox(sandbox_id="sandbox-terminal", status=terminal_status)
+    _FakeAsyncSandbox.sandboxes[existing.sandbox_id] = existing
+
+    state = vercel_module.VercelSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000201",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=existing.sandbox_id,
+    )
+
+    client = vercel_module.VercelSandboxClient()
+    resumed = await client.resume(state)
+
+    # Should NOT have waited for status — the sandbox is already terminal.
+    assert existing.wait_for_status_calls == []
+    # Client must be closed before abandoning the sandbox.
+    assert existing.client.closed is True
+    # A new sandbox must have been created to replace the terminal one.
+    assert len(_FakeAsyncSandbox.create_calls) == 1
+    assert resumed._inner.state.sandbox_id != "sandbox-terminal"
+    assert resumed._inner.state.workspace_root_ready is False
+    assert resumed._inner._workspace_state_preserved_on_start() is False  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -837,7 +895,8 @@ async def test_vercel_resume_recreates_sandbox_after_wait_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     vercel_module = _load_vercel_module(monkeypatch)
-    existing = _FakeAsyncSandbox(sandbox_id="sandbox-existing")
+    # Use "pending" so that the code enters the wait path (not already RUNNING).
+    existing = _FakeAsyncSandbox(sandbox_id="sandbox-existing", status="pending")
     existing.wait_for_status_error = TimeoutError()
     _FakeAsyncSandbox.sandboxes[existing.sandbox_id] = existing
 
