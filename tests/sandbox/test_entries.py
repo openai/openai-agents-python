@@ -497,6 +497,59 @@ async def test_local_dir_copy_revalidates_swapped_paths_during_open(
 
 
 @pytest.mark.asyncio
+async def test_local_dir_copy_rejects_swapped_file_if_no_follow_is_bypassed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    if not artifacts_module._OPEN_SUPPORTS_DIR_FD or not artifacts_module._HAS_O_DIRECTORY:
+        pytest.skip("safe dir_fd open pinning is unavailable on this platform")
+
+    src_root = tmp_path / "src"
+    src_root.mkdir()
+    src_file = src_root / "safe.txt"
+    src_file.write_text("safe", encoding="utf-8")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+    local_dir = LocalDir(src=Path("src"))
+    original_open = os.open
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    swapped = False
+
+    def swap_then_open(
+        path: str | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if (path == "safe.txt" or Path(path) == src_file) and not swapped:
+            src_file.unlink()
+            _symlink_or_skip(src_file, secret)
+            flags &= ~no_follow
+            swapped = True
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.open", swap_then_open)
+
+    with pytest.raises(LocalDirReadError) as excinfo:
+        await local_dir._copy_local_dir_file(
+            base_dir=tmp_path,
+            session=session,
+            src_root=src_root,
+            src=src_file,
+            dest_root=Path("/workspace/copied"),
+        )
+
+    assert excinfo.value.context["reason"] == "path_changed_during_copy"
+    assert excinfo.value.context["child"] == "safe.txt"
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
 async def test_local_dir_copy_pins_parent_directories_during_open(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -546,6 +599,57 @@ async def test_local_dir_copy_pins_parent_directories_during_open(
 
     assert result.path == Path("/workspace/copied/nested/safe.txt")
     assert session.writes[Path("/workspace/copied/nested/safe.txt")] == b"safe"
+
+
+@pytest.mark.asyncio
+async def test_local_dir_apply_rejects_nested_dir_swap_during_listing_if_no_follow_is_bypassed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    if not artifacts_module._OPEN_SUPPORTS_DIR_FD or not artifacts_module._HAS_O_DIRECTORY:
+        pytest.skip("safe dir_fd open pinning is unavailable on this platform")
+
+    src_root = tmp_path / "src"
+    src_root.mkdir()
+    nested_dir = src_root / "nested"
+    nested_dir.mkdir()
+    (nested_dir / "safe.txt").write_text("safe", encoding="utf-8")
+    secret_dir = tmp_path / "secret-dir"
+    secret_dir.mkdir()
+    (secret_dir / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+    local_dir = LocalDir(src=Path("src"))
+    original_open = os.open
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    swapped = False
+
+    def swap_nested_then_open(
+        path: str | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if path == "nested" and not swapped:
+            nested_dir.rename(src_root / "nested-original")
+            _symlink_or_skip(src_root / "nested", secret_dir, target_is_directory=True)
+            swapped = True
+        if path == "nested" and swapped:
+            flags &= ~no_follow
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.open", swap_nested_then_open)
+
+    with pytest.raises(LocalDirReadError) as excinfo:
+        await local_dir.apply(session, Path("/workspace/copied"), tmp_path)
+
+    assert excinfo.value.context["reason"] == "path_changed_during_copy"
+    assert excinfo.value.context["child"] == "nested"
+    assert Path("/workspace/copied/nested/secret.txt") not in session.writes
+    assert session.writes == {}
 
 
 @pytest.mark.asyncio
@@ -644,6 +748,102 @@ async def test_local_dir_apply_rejects_source_root_swapped_to_symlink_after_vali
 
     assert excinfo.value.context["reason"] == "symlink_not_supported"
     assert excinfo.value.context["child"] == "src"
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_dir_apply_rejects_source_root_swap_if_no_follow_is_bypassed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    if not artifacts_module._OPEN_SUPPORTS_DIR_FD or not artifacts_module._HAS_O_DIRECTORY:
+        pytest.skip("safe dir_fd open pinning is unavailable on this platform")
+
+    src_root = tmp_path / "src"
+    src_root.mkdir()
+    (src_root / "safe.txt").write_text("safe", encoding="utf-8")
+    secret_dir = tmp_path / "secret-dir"
+    secret_dir.mkdir()
+    (secret_dir / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+    local_dir = LocalDir(src=Path("src"))
+    original_open = os.open
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    swapped = False
+
+    def swap_root_then_open(
+        path: str | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if path == "src" and not swapped:
+            src_root.rename(tmp_path / "src-original")
+            _symlink_or_skip(tmp_path / "src", secret_dir, target_is_directory=True)
+            flags &= ~no_follow
+            swapped = True
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.open", swap_root_then_open)
+
+    with pytest.raises(LocalDirReadError) as excinfo:
+        await local_dir.apply(session, Path("/workspace/copied"), tmp_path)
+
+    assert excinfo.value.context["reason"] == "path_changed_during_copy"
+    assert excinfo.value.context["child"] == "src"
+    assert Path("/workspace/copied/secret.txt") not in session.writes
+    assert session.writes == {}
+
+
+@pytest.mark.asyncio
+async def test_local_dir_apply_rejects_current_dir_source_swap_if_no_follow_is_bypassed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    if not artifacts_module._OPEN_SUPPORTS_DIR_FD or not artifacts_module._HAS_O_DIRECTORY:
+        pytest.skip("safe dir_fd open pinning is unavailable on this platform")
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "safe.txt").write_text("safe", encoding="utf-8")
+    secret_dir = tmp_path / "secret-dir"
+    secret_dir.mkdir()
+    (secret_dir / "secret.txt").write_text("secret", encoding="utf-8")
+    session = _RecordingSession()
+    local_dir = LocalDir(src=Path("."))
+    original_open = os.open
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    swapped = False
+
+    def swap_base_then_open(
+        path: str | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if Path(path) == base_dir and not swapped:
+            base_dir.rename(tmp_path / "base-original")
+            _symlink_or_skip(base_dir, secret_dir, target_is_directory=True)
+            flags &= ~no_follow
+            swapped = True
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("agents.sandbox.entries.artifacts.os.open", swap_base_then_open)
+
+    with pytest.raises(LocalDirReadError) as excinfo:
+        await local_dir.apply(session, Path("/workspace/copied"), base_dir)
+
+    assert excinfo.value.context["reason"] == "path_changed_during_copy"
+    assert excinfo.value.context["child"] == "."
+    assert Path("/workspace/copied/secret.txt") not in session.writes
     assert session.writes == {}
 
 
