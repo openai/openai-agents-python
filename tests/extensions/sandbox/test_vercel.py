@@ -802,13 +802,11 @@ async def test_vercel_resume_reconnects_existing_running_sandbox(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("transient_status", ["pending", "stopping"])
-async def test_vercel_resume_waits_when_sandbox_in_transient_state(
+async def test_vercel_resume_waits_when_sandbox_pending(
     monkeypatch: pytest.MonkeyPatch,
-    transient_status: str,
 ) -> None:
     vercel_module = _load_vercel_module(monkeypatch)
-    existing = _FakeAsyncSandbox(sandbox_id="sandbox-existing", status=transient_status)
+    existing = _FakeAsyncSandbox(sandbox_id="sandbox-existing", status="pending")
     _FakeAsyncSandbox.sandboxes[existing.sandbox_id] = existing
 
     state = vercel_module.VercelSandboxSessionState(
@@ -830,11 +828,15 @@ async def test_vercel_resume_waits_when_sandbox_in_transient_state(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("terminal_status", ["stopped", "failed"])
-async def test_vercel_resume_recreates_sandbox_when_in_terminal_state(
+@pytest.mark.parametrize(
+    "terminal_status", ["stopping", "stopped", "failed", "aborted", "snapshotting"]
+)
+async def test_vercel_resume_recreates_sandbox_when_cannot_reach_running(
     monkeypatch: pytest.MonkeyPatch,
     terminal_status: str,
 ) -> None:
+    """A sandbox in any state that cannot transition to RUNNING must be recreated
+    immediately, without waiting for the wait_for_status timeout."""
     vercel_module = _load_vercel_module(monkeypatch)
     existing = _FakeAsyncSandbox(sandbox_id="sandbox-terminal", status=terminal_status)
     _FakeAsyncSandbox.sandboxes[existing.sandbox_id] = existing
@@ -849,11 +851,8 @@ async def test_vercel_resume_recreates_sandbox_when_in_terminal_state(
     client = vercel_module.VercelSandboxClient()
     resumed = await client.resume(state)
 
-    # Should NOT have waited for status — the sandbox is already terminal.
     assert existing.wait_for_status_calls == []
-    # Client must be closed before abandoning the sandbox.
     assert existing.client.closed is True
-    # A new sandbox must have been created to replace the terminal one.
     assert len(_FakeAsyncSandbox.create_calls) == 1
     assert resumed._inner.state.sandbox_id != "sandbox-terminal"
     assert resumed._inner.state.workspace_root_ready is False

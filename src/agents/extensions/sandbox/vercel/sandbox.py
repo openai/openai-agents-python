@@ -79,10 +79,11 @@ _VERCEL_TRANSIENT_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
     httpx.ProtocolError,
 )
 
-# Sandbox status values that can still transition to RUNNING (non-terminal).
-# Terminal states (e.g. "stopped", "failed") are not included because a sandbox
-# in those states can never become RUNNING, so waiting is futile.
-_VERCEL_TRANSIENT_SANDBOX_STATUSES: frozenset[str] = frozenset({"pending", "stopping"})
+# Sandbox status values from which the sandbox can still transition to RUNNING.
+# Only "pending" qualifies: a freshly created sandbox transitions PENDING -> RUNNING.
+# Other non-RUNNING states ("stopping", "stopped", "failed", "aborted",
+# "snapshotting") cannot reach RUNNING, so waiting is futile.
+_VERCEL_TRANSIENT_SANDBOX_STATUSES: frozenset[str] = frozenset({"pending"})
 
 
 def _is_transient_create_error(exc: BaseException) -> bool:
@@ -764,14 +765,15 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
                     # Already running; skip the wait entirely.
                     reconnected = True
                 elif current_status in _VERCEL_TRANSIENT_SANDBOX_STATUSES:
-                    # Still transitioning toward RUNNING; wait normally.
+                    # Still transitioning toward RUNNING (e.g. PENDING); wait normally.
                     await sandbox.wait_for_status(
                         SandboxStatus.RUNNING,
                         timeout=DEFAULT_VERCEL_WAIT_FOR_RUNNING_TIMEOUT_S,
                     )
                     reconnected = True
                 else:
-                    # Terminal state (e.g. "stopped", "failed"): cannot reach RUNNING.
+                    # Cannot reach RUNNING from here (STOPPING, STOPPED, FAILED,
+                    # ABORTED, SNAPSHOTTING). Drop the handle and recreate below.
                     await sandbox.client.aclose()
                     sandbox = None
             except TimeoutError:
