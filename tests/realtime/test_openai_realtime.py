@@ -1692,6 +1692,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert tool_call_emitted.name == "get_weather"
         assert tool_call_emitted.arguments == '{"location": "San Francisco"}'
         assert tool_call_emitted.call_id == "call_123"
+        # response_id must be propagated so RealtimeSession can coalesce parallel tool
+        # calls per model response and avoid overlapping response.create events.
+        assert tool_call_emitted.response_id == "resp_789"
 
     @pytest.mark.asyncio
     async def test_audio_timing_calculation_accuracy(self, model):

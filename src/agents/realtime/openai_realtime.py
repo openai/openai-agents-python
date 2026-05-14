@@ -926,7 +926,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             )
         )
 
-    async def _handle_output_item(self, item: ConversationItem) -> None:
+    async def _handle_output_item(
+        self, item: ConversationItem, response_id: str | None = None
+    ) -> None:
         """Handle response output item events (function calls and messages)."""
         if item.type == "function_call" and item.status == "completed":
             tool_call = RealtimeToolCallItem(
@@ -948,6 +950,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     name=item.name or "",
                     arguments=item.arguments or "",
                     id=item.id or "",
+                    response_id=response_id,
                 )
             )
         elif item.type == "message":
@@ -1149,7 +1152,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             await self._emit_event(RealtimeModelTurnStartedEvent())
         elif parsed.type == "response.done":
             await self._mark_response_done()
-            await self._emit_event(RealtimeModelTurnEndedEvent())
+            await self._emit_event(
+                RealtimeModelTurnEndedEvent(response_id=getattr(parsed.response, "id", None))
+            )
         elif parsed.type == "session.created":
             await self._send_tracing_config(self._tracing_config)
             self._update_created_session(parsed.session)
@@ -1209,7 +1214,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             parsed.type == "response.output_item.added"
             or parsed.type == "response.output_item.done"
         ):
-            await self._handle_output_item(parsed.item)
+            await self._handle_output_item(
+                parsed.item, response_id=getattr(parsed, "response_id", None)
+            )
         elif parsed.type == "input_audio_buffer.timeout_triggered":
             await self._emit_event(
                 RealtimeModelInputAudioTimeoutTriggeredEvent(

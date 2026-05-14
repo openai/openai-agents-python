@@ -56,6 +56,7 @@ from agents.realtime.model_events import (
 from agents.realtime.model_inputs import (
     RealtimeModelSendAudio,
     RealtimeModelSendInterrupt,
+    RealtimeModelSendRawMessage,
     RealtimeModelSendSessionUpdate,
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
@@ -2075,6 +2076,201 @@ class TestToolCallExecution:
         # Verify result
         sent_call, sent_output, _ = mock_model.sent_tool_outputs[0]
         assert sent_output == "result2"
+
+
+class TestParallelToolCallCoalescing:
+    """Regression tests for #1168: parallel tool calls must not race response.create."""
+
+    async def _wait_for_tool_call_tasks(self, session: RealtimeSession) -> None:
+        if not session._tool_call_tasks:
+            return
+        await asyncio.gather(*session._tool_call_tasks, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_parallel_tool_calls_emit_single_response_create(self, mock_model, mock_agent):
+        """When the model emits two tool calls in one response, only the last
+        completing tool call should request a new response. This avoids overlapping
+        response.create events that the Realtime API rejects with
+        conversation_already_has_active_response.
+        """
+
+        tool_one = _set_default_timeout_fields(Mock(spec=FunctionTool))
+        tool_one.name = "tool_one"
+        tool_one.on_invoke_tool = AsyncMock(return_value="result_one")
+        tool_one.needs_approval = False
+
+        tool_two = _set_default_timeout_fields(Mock(spec=FunctionTool))
+        tool_two.name = "tool_two"
+        tool_two.on_invoke_tool = AsyncMock(return_value="result_two")
+        tool_two.needs_approval = False
+
+        mock_agent.get_all_tools.return_value = [tool_one, tool_two]
+
+        session = RealtimeSession(mock_model, mock_agent, None)
+
+        first_call = RealtimeModelToolCallEvent(
+            name="tool_one",
+            call_id="call_one",
+            arguments="{}",
+            response_id="resp_abc",
+        )
+        second_call = RealtimeModelToolCallEvent(
+            name="tool_two",
+            call_id="call_two",
+            arguments="{}",
+            response_id="resp_abc",
+        )
+
+        await session.on_event(first_call)
+        await session.on_event(second_call)
+        await session.on_event(RealtimeModelTurnEndedEvent(response_id="resp_abc"))
+
+        await self._wait_for_tool_call_tasks(session)
+
+        assert len(mock_model.sent_tool_outputs) == 2
+        start_response_flags = [
+            start_response for _, _, start_response in mock_model.sent_tool_outputs
+        ]
+        raw_response_create_count = sum(
+            1
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendRawMessage)
+            and event.message.get("type") == "response.create"
+        )
+        # Exactly one response.create should reach the model. It can either ride along
+        # with the last tool output (start_response=True) or be sent as an explicit
+        # response.create once both tools are done and the turn has ended.
+        assert start_response_flags.count(True) + raw_response_create_count == 1
+
+        # No leftover bookkeeping after both tools complete.
+        assert session._tool_calls_by_response == {}
+        assert session._turn_ended_responses == set()
+
+    @pytest.mark.asyncio
+    async def test_turn_ended_after_tools_complete_triggers_response_create(
+        self, mock_model, mock_agent
+    ):
+        """When all parallel tool calls finish before turn_ended arrives, the session
+        must explicitly request a response so the model actually speaks.
+        """
+
+        tool_one = _set_default_timeout_fields(Mock(spec=FunctionTool))
+        tool_one.name = "tool_one"
+        tool_one.on_invoke_tool = AsyncMock(return_value="result_one")
+        tool_one.needs_approval = False
+
+        tool_two = _set_default_timeout_fields(Mock(spec=FunctionTool))
+        tool_two.name = "tool_two"
+        tool_two.on_invoke_tool = AsyncMock(return_value="result_two")
+        tool_two.needs_approval = False
+
+        mock_agent.get_all_tools.return_value = [tool_one, tool_two]
+
+        session = RealtimeSession(
+            mock_model, mock_agent, None, run_config={"async_tool_calls": False}
+        )
+
+        first_call = RealtimeModelToolCallEvent(
+            name="tool_one",
+            call_id="call_one",
+            arguments="{}",
+            response_id="resp_def",
+        )
+        second_call = RealtimeModelToolCallEvent(
+            name="tool_two",
+            call_id="call_two",
+            arguments="{}",
+            response_id="resp_def",
+        )
+
+        await session.on_event(first_call)
+        await session.on_event(second_call)
+
+        assert len(mock_model.sent_tool_outputs) == 2
+        # Neither tool output should have requested a response yet because the
+        # session has not seen turn_ended for this response_id.
+        assert all(start_response is False for _, _, start_response in mock_model.sent_tool_outputs)
+
+        raw_messages_before = [
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendRawMessage)
+        ]
+        assert raw_messages_before == []
+
+        await session.on_event(RealtimeModelTurnEndedEvent(response_id="resp_def"))
+
+        raw_messages_after = [
+            event
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendRawMessage)
+        ]
+        assert len(raw_messages_after) == 1
+        assert raw_messages_after[0].message["type"] == "response.create"
+
+        assert session._tool_calls_by_response == {}
+        assert session._turn_ended_responses == set()
+
+    @pytest.mark.asyncio
+    async def test_single_tool_call_still_requests_response(
+        self, mock_model, mock_agent, mock_function_tool
+    ):
+        """A single tool call must still request a response so the model continues.
+
+        Whether the response.create is bundled into the tool output event
+        (start_response=True) or sent as a separate raw message after turn_ended is an
+        implementation detail; the contract is that exactly one response.create reaches
+        the Realtime API per turn that contained tool calls.
+        """
+        mock_agent.get_all_tools.return_value = [mock_function_tool]
+
+        session = RealtimeSession(
+            mock_model, mock_agent, None, run_config={"async_tool_calls": False}
+        )
+
+        tool_call = RealtimeModelToolCallEvent(
+            name="test_function",
+            call_id="call_solo",
+            arguments="{}",
+            response_id="resp_solo",
+        )
+
+        await session.on_event(tool_call)
+        await session.on_event(RealtimeModelTurnEndedEvent(response_id="resp_solo"))
+
+        assert len(mock_model.sent_tool_outputs) == 1
+        _, _, start_response = mock_model.sent_tool_outputs[0]
+
+        raw_response_create_count = sum(
+            1
+            for event in mock_model.sent_events
+            if isinstance(event, RealtimeModelSendRawMessage)
+            and event.message.get("type") == "response.create"
+        )
+        response_create_requests = (1 if start_response else 0) + raw_response_create_count
+        assert response_create_requests == 1
+
+    @pytest.mark.asyncio
+    async def test_tool_call_without_response_id_falls_back_to_immediate_response(
+        self, mock_model, mock_agent, mock_function_tool
+    ):
+        """Tool call events that omit response_id must keep the legacy behavior of
+        requesting a response immediately after each tool output."""
+        mock_agent.get_all_tools.return_value = [mock_function_tool]
+
+        session = RealtimeSession(
+            mock_model, mock_agent, None, run_config={"async_tool_calls": False}
+        )
+
+        tool_call = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_legacy", arguments="{}"
+        )
+
+        await session.on_event(tool_call)
+
+        assert len(mock_model.sent_tool_outputs) == 1
+        _, _, start_response = mock_model.sent_tool_outputs[0]
+        assert start_response is True
 
 
 class TestGuardrailFunctionality:

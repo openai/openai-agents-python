@@ -28,6 +28,9 @@ class RealtimeModelToolCallEvent:
     id: str | None = None
     previous_item_id: str | None = None
 
+    response_id: str | None = None
+    """The ID of the model response that produced this tool call."""
+
     type: Literal["function_call"] = "function_call"
 
 
@@ -142,6 +145,9 @@ class RealtimeModelTurnStartedEvent:
 @dataclass
 class RealtimeModelTurnEndedEvent:
     """Triggered when the model finishes generating a response for a turn."""
+
+    response_id: str | None = None
+    """The ID of the model response that just finished, if available."""
 
     type: Literal["turn_ended"] = "turn_ended"
 
