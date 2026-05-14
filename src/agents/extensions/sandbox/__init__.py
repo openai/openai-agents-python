@@ -109,6 +109,13 @@ try:
 except Exception:  # pragma: no cover
     _HAS_VERCEL = False
 
+try:
+    from .litellm_compaction import LiteLLMCompaction as LiteLLMCompaction
+
+    _HAS_LITELLM_COMPACTION = True
+except ImportError:  # pragma: no cover
+    _HAS_LITELLM_COMPACTION = False
+
 __all__: list[str] = []
 
 if _HAS_E2B:
@@ -207,3 +214,6 @@ if _HAS_RUNLOOP:
             "RunloopUserParameters",
         ]
     )
+
+if _HAS_LITELLM_COMPACTION:
+    __all__.append("LiteLLMCompaction")
