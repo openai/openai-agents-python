@@ -28,6 +28,7 @@ from agents import (
     RunHooks,
     RunItem,
     ToolCallItem,
+    ToolCallOutputItem,
     Usage,
     handoff,
 )
@@ -132,6 +133,53 @@ async def test_missing_tool_call_raises_error():
     )
 
     with pytest.raises(ModelBehaviorError):
+        await process_response(agent=agent, response=response)
+
+
+@pytest.mark.asyncio
+async def test_unknown_function_tool_respond_appends_recovery_output():
+    """With unknown_tool_behavior='respond', an unknown function tool yields a tool output
+    describing the error and the run continues instead of raising."""
+    agent = Agent(
+        name="test",
+        tools=[get_function_tool(name="known_tool")],
+        unknown_tool_behavior="respond",
+    )
+    response = ModelResponse(
+        output=[get_function_tool_call("bogus_tool", "")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    result = await process_response(agent=agent, response=response)
+
+    # No real function run scheduled; the loop should continue and let the LLM retry.
+    assert not result.functions
+    assert not result.handoffs
+    # The unknown tool name is still recorded in tools_used (added before the lookup).
+    assert "bogus_tool" in result.tools_used
+    # The new items should contain a ToolCallItem for the unknown call followed by a
+    # ToolCallOutputItem containing the recovery message that names available tools.
+    tool_calls = [item for item in result.new_items if isinstance(item, ToolCallItem)]
+    tool_outputs = [item for item in result.new_items if isinstance(item, ToolCallOutputItem)]
+    assert len(tool_calls) == 1
+    assert len(tool_outputs) == 1
+    message = tool_outputs[0].output
+    assert "bogus_tool" in message
+    assert "known_tool" in message
+
+
+@pytest.mark.asyncio
+async def test_unknown_function_tool_default_still_raises():
+    """The default Agent behavior must continue to raise so existing users aren't broken."""
+    agent = Agent(name="test", tools=[get_function_tool(name="known_tool")])
+    response = ModelResponse(
+        output=[get_function_tool_call("bogus_tool", "")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with pytest.raises(ModelBehaviorError, match="bogus_tool"):
         await process_response(agent=agent, response=response)
 
 

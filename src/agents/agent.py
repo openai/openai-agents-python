@@ -368,6 +368,15 @@ class Agent(AgentBase, Generic[TContext]):
     """Whether to reset the tool choice to the default value after a tool has been called. Defaults
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
 
+    unknown_tool_behavior: Literal["raise", "respond"] = "raise"
+    """Controls what happens when the model invokes a tool the agent does not expose.
+
+    - ``"raise"`` (default): A `ModelBehaviorError` is raised, matching prior behavior.
+    - ``"respond"``: A synthetic tool output is appended describing the error along with the list
+      of currently available tool names, and the agent continues running so the LLM can recover
+      on the next turn instead of crashing the run.
+    """
+
     def __post_init__(self):
         from typing import get_origin
 
@@ -482,6 +491,12 @@ class Agent(AgentBase, Generic[TContext]):
             raise TypeError(
                 f"Agent reset_tool_choice must be a boolean, "
                 f"got {type(self.reset_tool_choice).__name__}"
+            )
+
+        if self.unknown_tool_behavior not in ("raise", "respond"):
+            raise TypeError(
+                f"Agent unknown_tool_behavior must be 'raise' or 'respond', "
+                f"got {self.unknown_tool_behavior!r}"
             )
 
     def clone(self, **kwargs: Any) -> Agent[TContext]:

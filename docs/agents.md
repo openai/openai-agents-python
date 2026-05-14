@@ -43,6 +43,7 @@ The most common properties of an agent are:
 | `hooks` | no | Agent-scoped lifecycle callbacks. See [Lifecycle events (hooks)](#lifecycle-events-hooks). |
 | `tool_use_behavior` | no | Control whether tool results loop back to the model or end the run. See [Tool use behavior](#tool-use-behavior). |
 | `reset_tool_choice` | no | Reset `tool_choice` after a tool call (default: `True`) to avoid tool-use loops. See [Forcing tool use](#forcing-tool-use). |
+| `unknown_tool_behavior` | no | What to do when the model calls a tool that is not registered (default: `"raise"`). Set to `"respond"` to feed an error tool output back to the LLM and let the run continue. See [Recovering from unknown tool calls](#recovering-from-unknown-tool-calls). |
 
 ```python
 from agents import Agent, ModelSettings, function_tool
@@ -423,3 +424,18 @@ agent = Agent(
 !!! note
 
     To prevent infinite loops, the framework automatically resets `tool_choice` to "auto" after a tool call. This behavior is configurable via [`agent.reset_tool_choice`][agents.agent.Agent.reset_tool_choice]. The infinite loop is because tool results are sent to the LLM, which then generates another tool call because of `tool_choice`, ad infinitum.
+
+## Recovering from unknown tool calls
+
+By default, the SDK raises [`ModelBehaviorError`][agents.exceptions.ModelBehaviorError] if the model hallucinates a tool that the agent does not expose. This is the safest behavior for development, but it can crash a long-running agent run when the model occasionally invents tool names.
+
+Set `unknown_tool_behavior="respond"` on the agent to recover instead. When the model calls an unknown tool, the SDK appends a synthetic tool output describing the error and the list of available tools, and lets the agent continue. The LLM sees the error on the next turn and can pick a real tool.
+
+```python
+agent = Agent(
+    name="Weather Agent",
+    instructions="Retrieve weather details.",
+    tools=[get_weather],
+    unknown_tool_behavior="respond",
+)
+```

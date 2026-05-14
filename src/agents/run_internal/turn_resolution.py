@@ -1468,6 +1468,81 @@ async def resolve_interrupted_turn(
     )
 
 
+def _available_tool_names_for_recovery(all_tools: list[Tool]) -> list[str]:
+    """Collect tool names suitable for inclusion in an unknown-tool recovery message."""
+    seen: set[str] = set()
+    names: list[str] = []
+    for tool in all_tools:
+        name = getattr(tool, "name", None)
+        if not isinstance(name, str) or not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _build_unknown_tool_recovery_message(
+    tool_name: str,
+    agent_name: str,
+    all_tools: list[Tool],
+) -> str:
+    """Build the synthetic tool output sent back to the model after an unknown tool call."""
+    available = _available_tool_names_for_recovery(all_tools)
+    if available:
+        return (
+            f"Tool '{tool_name}' is not available on agent '{agent_name}'. "
+            f"Available tools: {', '.join(available)}."
+        )
+    return (
+        f"Tool '{tool_name}' is not available on agent '{agent_name}'. "
+        "No tools are currently available."
+    )
+
+
+def _append_unknown_function_tool_recovery(
+    *,
+    agent: Agent[Any],
+    tool_call: ResponseFunctionToolCall,
+    items: list[RunItem],
+    all_tools: list[Tool],
+    display_name: str,
+) -> None:
+    """Emit a synthetic function-call output so the LLM can retry instead of crashing."""
+    message = _build_unknown_tool_recovery_message(display_name, agent.name, all_tools)
+    items.append(ToolCallItem(raw_item=tool_call, agent=agent))
+    items.append(
+        ToolCallOutputItem(
+            output=message,
+            raw_item=ItemHelpers.tool_call_output_item(tool_call, message),
+            agent=agent,
+        )
+    )
+
+
+def _append_unknown_custom_tool_recovery(
+    *,
+    agent: Agent[Any],
+    tool_call: ResponseCustomToolCall,
+    items: list[RunItem],
+    all_tools: list[Tool],
+) -> None:
+    """Emit a synthetic custom_tool output so the LLM can retry instead of crashing."""
+    message = _build_unknown_tool_recovery_message(tool_call.name, agent.name, all_tools)
+    items.append(ToolCallItem(raw_item=cast(Any, tool_call), agent=agent))
+    output_raw: dict[str, Any] = {
+        "type": "custom_tool_call_output",
+        "call_id": tool_call.call_id,
+        "output": message,
+    }
+    items.append(
+        ToolCallOutputItem(
+            output=message,
+            raw_item=cast(Any, output_raw),
+            agent=agent,
+        )
+    )
+
+
 def process_model_response(
     *,
     agent: Agent[Any],
@@ -1791,13 +1866,22 @@ def process_model_response(
                         "Model produced apply_patch call without an apply_patch tool."
                     )
             else:
-                items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Custom tool not found",
                         data={"tool_name": output.name},
                     )
                 )
+                if agent.unknown_tool_behavior == "respond":
+                    tools_used.append(output.name)
+                    _append_unknown_custom_tool_recovery(
+                        agent=agent,
+                        tool_call=output,
+                        items=items,
+                        all_tools=all_tools,
+                    )
+                    continue
+                items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))
                 raise ModelBehaviorError(f"Tool {output.name} not found in agent {agent.name}")
         elif (
             isinstance(output, ResponseFunctionToolCall)
@@ -1873,9 +1957,17 @@ def process_model_response(
                         data={"tool_name": qualified_output_name or output.name},
                     )
                 )
-                error = (
-                    f"Tool {qualified_output_name or output.name} not found in agent {agent.name}"
-                )
+                display_name = qualified_output_name or output.name
+                if agent.unknown_tool_behavior == "respond":
+                    _append_unknown_function_tool_recovery(
+                        agent=agent,
+                        tool_call=output,
+                        items=items,
+                        all_tools=all_tools,
+                        display_name=display_name,
+                    )
+                    continue
+                error = f"Tool {display_name} not found in agent {agent.name}"
                 raise ModelBehaviorError(error)
 
             items.append(
