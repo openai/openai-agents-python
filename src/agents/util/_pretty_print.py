@@ -45,6 +45,7 @@ def pretty_print_run_error_details(result: "RunErrorDetails") -> str:
     output += f"\n- {len(result.new_items)} new item(s)"
     output += f"\n- {len(result.raw_responses)} raw response(s)"
     output += f"\n- {len(result.input_guardrail_results)} input guardrail result(s)"
+    output += f"\n- {len(result.output_guardrail_results)} output guardrail result(s)"
     output += "\n(See `RunErrorDetails` for more details)"
 
     return output

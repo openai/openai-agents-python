@@ -36,9 +36,9 @@ jobs:
           fi
       - name: Setup uv
         if: steps.docs-only.outputs.skip != 'true'
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # setup-uv v8.1.0; uv 0.11.7
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # setup-uv v8.1.0; uv 0.11.14
         with:
-          version: "0.11.7"
+          version: "0.11.14"
           enable-cache: true
       - name: Install dependencies
         if: steps.docs-only.outputs.skip != 'true'

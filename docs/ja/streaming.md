@@ -4,17 +4,17 @@ search:
 ---
 # ストリーミング
 
-ストリーミングを使うと、エージェントの実行が進むにつれて更新を購読できます。これは、エンドユーザーに進捗更新や部分的な応答を表示するのに役立ちます。
+ストリーミングにより、エージェントの実行が進むにつれて更新を購読できます。これは、エンドユーザーに進捗状況の更新や部分的なレスポンスを表示する場合に役立ちます。
 
-ストリーミングするには、[`Runner.run_streamed()`][agents.run.Runner.run_streamed] を呼び出すことができ、[`RunResultStreaming`][agents.result.RunResultStreaming] が返されます。`result.stream_events()` を呼び出すと、以下で説明する [`StreamEvent`][agents.stream_events.StreamEvent] オブジェクトの非同期ストリームが得られます。
+ストリーミングするには、[`Runner.run_streamed()`][agents.run.Runner.run_streamed] を呼び出します。これにより [`RunResultStreaming`][agents.result.RunResultStreaming] が返されます。`result.stream_events()` を呼び出すと、以下で説明する [`StreamEvent`][agents.stream_events.StreamEvent] オブジェクトの非同期ストリームが得られます。
 
-非同期イテレーターが終了するまで、`result.stream_events()` を消費し続けてください。イテレーターが終了するまで、ストリーミング実行は完了しません。また、セッション永続化、承認の記録管理、履歴の圧縮といった後処理は、最後の可視トークンが到着した後に完了する場合があります。ループを抜けると、`result.is_complete` は最終的な実行状態を反映します。
+非同期イテレーターが終了するまで、`result.stream_events()` を消費し続けてください。ストリーミング実行は、イテレーターが終了するまで完了しません。また、セッションの永続化、承認の記録管理、履歴の圧縮などの後処理は、最後の可視トークンが到着した後に完了する場合があります。ループが終了すると、`result.is_complete` は最終的な実行状態を反映します。
 
-## Raw 応答イベント
+## raw レスポンスイベント
 
-[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] は、LLM から直接渡される raw イベントです。これらは OpenAI Responses API 形式であり、各イベントには `response.created`、`response.output_text.delta` などの type とデータがあります。これらのイベントは、応答メッセージが生成され次第ユーザーへストリーミングしたい場合に便利です。
+[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] は、LLM から直接渡される raw イベントです。これらは OpenAI Responses API 形式であり、各イベントには型（`response.created`、`response.output_text.delta` など）とデータがあります。これらのイベントは、レスポンスメッセージが生成され次第、ユーザーにストリーミングしたい場合に役立ちます。
 
-コンピュータツールの raw イベントは、保存された結果と同じプレビュー版と GA 版の区別を維持します。プレビューのフローでは、1 つの `action` を持つ `computer_call` アイテムをストリーミングします。一方、`gpt-5.5` では、バッチ化された `actions[]` を持つ `computer_call` アイテムをストリーミングできます。より高レベルの [`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] サーフェスでは、これに対してコンピュータ専用の特別なイベント名は追加されません。どちらの形も `tool_called` として表面化し、スクリーンショットの結果は `computer_call_output` アイテムをラップする `tool_output` として返されます。
+コンピュータツールの raw イベントは、保存された実行結果と同じ preview と GA の区別を維持します。Preview フローでは、1 つの `action` を持つ `computer_call` アイテムをストリーミングします。一方、`gpt-5.5` では、バッチ化された `actions[]` を持つ `computer_call` アイテムをストリーミングできます。高レベルの [`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] サーフェスは、このために特別なコンピュータ専用イベント名を追加しません。どちらの形式も引き続き `tool_called` として表面化し、スクリーンショットの実行結果は `computer_call_output` アイテムをラップする `tool_output` として返されます。
 
 たとえば、これは LLM によって生成されたテキストをトークンごとに出力します。
 
@@ -41,7 +41,7 @@ if __name__ == "__main__":
 
 ## ストリーミングと承認
 
-ストリーミングは、ツール承認のために一時停止する実行と互換性があります。ツールが承認を必要とする場合、`result.stream_events()` は終了し、保留中の承認は [`RunResultStreaming.interruptions`][agents.result.RunResultStreaming.interruptions] に公開されます。`result.to_state()` で結果を [`RunState`][agents.run_state.RunState] に変換し、割り込みを承認または拒否してから、`Runner.run_streamed(...)` で再開します。
+ストリーミングは、ツール承認のために一時停止する実行と互換性があります。ツールに承認が必要な場合、`result.stream_events()` は終了し、保留中の承認は [`RunResultStreaming.interruptions`][agents.result.RunResultStreaming.interruptions] で公開されます。`result.to_state()` を使って実行結果を [`RunState`][agents.run_state.RunState] に変換し、中断を承認または拒否してから、`Runner.run_streamed(...)` で再開します。
 
 ```python
 result = Runner.run_streamed(agent, "Delete temporary files if they are no longer needed.")
@@ -57,25 +57,25 @@ if result.interruptions:
         pass
 ```
 
-一時停止と再開の完全なウォークスルーについては、[human-in-the-loop ガイド](human_in_the_loop.md)を参照してください。
+一時停止/再開の完全なウォークスルーについては、[human-in-the-loop ガイド](human_in_the_loop.md)を参照してください。
 
 ## 現在のターン後のストリーミングのキャンセル
 
-途中でストリーミング実行を停止する必要がある場合は、[`result.cancel()`][agents.result.RunResultStreaming.cancel] を呼び出します。デフォルトでは、これにより実行は即座に停止します。停止する前に現在のターンをきれいに完了させるには、代わりに `result.cancel(mode="after_turn")` を呼び出します。
+途中でストリーミング実行を停止する必要がある場合は、[`result.cancel()`][agents.result.RunResultStreaming.cancel] を呼び出します。デフォルトでは、これにより実行はすぐに停止します。停止する前に現在のターンを正常に完了させるには、代わりに `result.cancel(mode="after_turn")` を呼び出します。
 
-`result.stream_events()` が終了するまで、ストリーミング実行は完了しません。SDK は、最後の可視トークンの後も、セッション項目の永続化、承認状態の確定、履歴の圧縮をまだ行っている可能性があります。
+ストリーミング実行は、`result.stream_events()` が終了するまで完了しません。最後の可視トークンの後も、SDK がセッションアイテムを永続化したり、承認状態を確定したり、履歴を圧縮したりしている場合があります。
 
-[`result.to_input_list(mode="normalized")`][agents.result.RunResultBase.to_input_list] から手動で続行していて、`cancel(mode="after_turn")` がツールターン後に停止した場合は、すぐに新しいユーザーターンを追加するのではなく、その正規化された入力で `result.last_agent` を再実行して、その未完了のターンを続行してください。
--   ストリーミング実行がツール承認のために停止した場合、それを新しいターンとして扱わないでください。ストリームの読み出しを最後まで行い、`result.interruptions` を確認し、代わりに `result.to_state()` から再開してください。
--   次のモデル呼び出しの前に、取得したセッション履歴と新しいユーザー入力をどのようにマージするかをカスタマイズするには、[`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_callback] を使用します。そこで新規ターンの項目を書き換えた場合、その書き換え後のバージョンがそのターンで永続化されます。
+[`result.to_input_list(mode="normalized")`][agents.result.RunResultBase.to_input_list] から手動で継続しており、`cancel(mode="after_turn")` がツールターンの後で停止した場合は、すぐに新しいユーザーターンを追加するのではなく、その正規化された入力で `result.last_agent` を再実行して、未完了のターンを継続してください。
+-   ストリーミング実行がツール承認のために停止した場合、それを新しいターンとして扱わないでください。ストリームの読み出しを最後まで完了し、`result.interruptions` を確認して、代わりに `result.to_state()` から再開してください。
+-   次のモデル呼び出しの前に、取得したセッション履歴と新しいユーザー入力をどのようにマージするかをカスタマイズするには、[`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_callback] を使用します。そこで新しいターンのアイテムを書き換えた場合、その書き換え後のバージョンがそのターンとして永続化されます。
 
-## 実行項目イベントとエージェントイベント
+## 実行アイテムイベントとエージェントイベント
 
-[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] は、より高レベルのイベントです。これらは、項目が完全に生成されたときに通知します。これにより、各トークン単位ではなく、「メッセージが生成された」「ツールが実行された」などのレベルで進捗更新を送信できます。同様に、[`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] は、現在のエージェントが変わったとき（例: ハンドオフの結果として）に更新を提供します。
+[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] は、より高レベルのイベントです。アイテムが完全に生成されたタイミングを通知します。これにより、各トークン単位ではなく、「メッセージが生成された」「ツールが実行された」などのレベルで進捗更新を送信できます。同様に、[`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] は、現在のエージェントが変更されたとき（例: ハンドオフの結果として）に更新を提供します。
 
-### 実行項目イベント名
+### 実行アイテムイベント名
 
-`RunItemStreamEvent.name` は、固定されたセマンティックなイベント名のセットを使用します。
+`RunItemStreamEvent.name` は、固定された一連のセマンティックなイベント名を使用します。
 
 -   `message_output_created`
 -   `handoff_requested`
@@ -89,9 +89,9 @@ if result.interruptions:
 -   `mcp_approval_response`
 -   `mcp_list_tools`
 
-`handoff_occured` は、後方互換性のために意図的にスペルミスされています。
+`handoff_occured` は、後方互換性のため意図的にスペルミスのままになっています。
 
-ホスト型ツール検索を使用する場合、モデルがツール検索リクエストを発行すると `tool_search_called` が発行され、Responses API が読み込まれたサブセットを返すと `tool_search_output_created` が発行されます。
+ホストされたツール検索を使用する場合、モデルがツール検索リクエストを発行すると `tool_search_called` が送出され、Responses API が読み込まれたサブセットを返すと `tool_search_output_created` が送出されます。
 
 たとえば、これは raw イベントを無視し、更新をユーザーにストリーミングします。
 

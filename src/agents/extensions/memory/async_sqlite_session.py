@@ -11,7 +11,7 @@ import aiosqlite
 
 from ...items import TResponseInputItem
 from ...memory import SessionABC
-from ...memory.session_settings import SessionSettings
+from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 
 class AsyncSQLiteSession(SessionABC):
@@ -30,6 +30,7 @@ class AsyncSQLiteSession(SessionABC):
         db_path: str | Path = ":memory:",
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
+        session_settings: SessionSettings | None = None,
     ):
         """Initialize the async SQLite session.
 
@@ -39,8 +40,11 @@ class AsyncSQLiteSession(SessionABC):
             sessions_table: Name of the table to store session metadata. Defaults to
                 'agent_sessions'
             messages_table: Name of the table to store message data. Defaults to 'agent_messages'
+            session_settings: Session configuration settings including default limit for
+                retrieving items. If None, uses default SessionSettings().
         """
         self.session_id = session_id
+        self.session_settings = session_settings or SessionSettings()
         self.db_path = db_path
         self.sessions_table = sessions_table
         self.messages_table = messages_table
@@ -106,15 +110,17 @@ class AsyncSQLiteSession(SessionABC):
         """Retrieve the conversation history for this session.
 
         Args:
-            limit: Maximum number of items to retrieve. If None, retrieves all items.
+            limit: Maximum number of items to retrieve. If None, uses session_settings.limit.
                    When specified, returns the latest N items in chronological order.
 
         Returns:
             List of input items representing the conversation history
         """
 
+        session_limit = resolve_session_limit(limit, self.session_settings)
+
         async with self._locked_connection() as conn:
-            if limit is None:
+            if session_limit is None:
                 cursor = await conn.execute(
                     f"""
                     SELECT message_data FROM {self.messages_table}
@@ -131,13 +137,13 @@ class AsyncSQLiteSession(SessionABC):
                     ORDER BY id DESC
                     LIMIT ?
                     """,
-                    (self.session_id, limit),
+                    (self.session_id, session_limit),
                 )
 
             rows = list(await cursor.fetchall())
             await cursor.close()
 
-        if limit is not None:
+        if session_limit is not None:
             rows = rows[::-1]
 
         items: list[TResponseInputItem] = []

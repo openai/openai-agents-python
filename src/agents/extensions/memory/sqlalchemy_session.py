@@ -54,7 +54,7 @@ from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 
 class SQLAlchemySession(SessionABC):
-    """SQLAlchemy implementation of :pyclass:`agents.memory.session.Session`."""
+    """SQLAlchemy implementation of [`Session`][agents.memory.session.Session]."""
 
     _table_init_locks: ClassVar[dict[tuple[str, str, str], threading.Lock]] = {}
     _table_init_locks_guard: ClassVar[threading.Lock] = threading.Lock()

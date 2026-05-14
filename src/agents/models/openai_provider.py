@@ -74,8 +74,8 @@ class OpenAIProvider(ModelProvider):
                 API.
             strict_feature_validation: Whether Chat Completions models should raise a UserError
                 when callers pass Responses-only features such as previous_response_id,
-                conversation_id, or prompt. Defaults to False, which preserves the previous
-                ignore-and-warn behavior.
+                conversation_id, prompt, or non-text-only tool outputs. Defaults to False, which
+                preserves the default compatibility behavior.
             agent_registration: Optional agent registration configuration.
             responses_websocket_options: Optional low-level websocket keepalive options for the
                 OpenAI Responses websocket transport.

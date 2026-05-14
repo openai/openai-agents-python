@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import inspect
 import json
@@ -694,7 +695,7 @@ def _resolve_output_schema(
         return _build_codex_output_schema(descriptor)
 
     if isinstance(option, Mapping):
-        schema = dict(option)
+        schema = copy.deepcopy(dict(option))
         if "type" in schema and schema.get("type") != "object":
             raise UserError('Codex output schema must be a JSON object schema with type "object".')
         return ensure_strict_json_schema(schema)
