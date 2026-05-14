@@ -255,14 +255,14 @@ There are two hook scopes:
 The callback context also changes depending on the event:
 
 -   Agent start/end hooks receive [`AgentHookContext`][agents.run_context.AgentHookContext], which wraps your original context and carries the shared run usage state.
--   LLM, tool, and handoff hooks receive [`RunContextWrapper`][agents.run_context.RunContextWrapper].
+-   Tool start/end hooks receive [`ToolContext`][agents.tool_context.ToolContext], a subclass of `RunContextWrapper` that adds tool-call metadata such as `tool_call_id`, `tool_name`, and `tool_arguments`.
+-   LLM and handoff hooks receive [`RunContextWrapper`][agents.run_context.RunContextWrapper].
 
 Typical hook timing:
 
 -   `on_agent_start` / `on_agent_end`: when a specific agent begins or finishes producing a final output.
 -   `on_llm_start` / `on_llm_end`: immediately around each model call.
--   `on_tool_start` / `on_tool_end`: around each local tool invocation.
-    For function tools, the hook `context` is typically a `ToolContext`, so you can inspect tool-call metadata such as `tool_call_id`.
+-   `on_tool_start` / `on_tool_end`: around each local tool invocation. The hook `context` is a `ToolContext`, so you can inspect `tool_call_id` to correlate the start and end of the same call when tools run in parallel.
 -   `on_handoff`: when control moves from one agent to another.
 
 Use `RunHooks` when you want a single observer for the whole workflow, and `AgentHooks` when one agent needs custom side effects.

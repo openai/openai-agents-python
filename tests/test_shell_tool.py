@@ -811,3 +811,46 @@ async def test_shell_tool_on_approval_empty_reason_uses_default_rejection() -> N
 
     assert isinstance(result, ToolCallOutputItem)
     assert result.output == HITL_REJECTION_MSG
+
+
+@pytest.mark.asyncio
+async def test_shell_action_exposes_tool_call_id_on_lifecycle_hooks() -> None:
+    """Shell lifecycle hooks must receive a ToolContext with tool_call_id set."""
+    from agents.tool_context import ToolContext
+
+    captured: dict[str, list[Any]] = {"start": [], "end": []}
+
+    class CapturingHooks(RunHooks[Any]):
+        async def on_tool_start(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
+        ) -> None:
+            captured["start"].append(context)
+
+        async def on_tool_end(
+            self,
+            context: RunContextWrapper[Any],
+            agent: Agent[Any],
+            tool: Any,
+            result: str,
+        ) -> None:
+            captured["end"].append(context)
+
+    shell_tool = ShellTool(executor=lambda request: "ok")
+    tool_run = ToolRunShellCall(tool_call=_shell_call("call_shell_ctx"), shell_tool=shell_tool)
+    agent = Agent(name="shell-ctx-agent", tools=[shell_tool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    await ShellAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=CapturingHooks(),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    assert len(captured["start"]) == 1
+    assert len(captured["end"]) == 1
+    for context in (captured["start"][0], captured["end"][0]):
+        assert isinstance(context, ToolContext)
+        assert context.tool_call_id == "call_shell_ctx"
+        assert context.tool_name == shell_tool.name

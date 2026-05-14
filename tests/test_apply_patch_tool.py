@@ -438,3 +438,49 @@ async def test_apply_patch_failed_status_not_overwritten_by_later_completed_op()
     assert raw_item["status"] == "failed"
     assert "Failed a.md" in result.output
     assert "Created b.md" in result.output
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_action_exposes_tool_call_id_on_lifecycle_hooks() -> None:
+    """Apply patch lifecycle hooks must receive a ToolContext with tool_call_id set."""
+    from agents.tool_context import ToolContext
+
+    captured: dict[str, list[Any]] = {"start": [], "end": []}
+
+    class CapturingHooks(RunHooks[Any]):
+        async def on_tool_start(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
+        ) -> None:
+            captured["start"].append(context)
+
+        async def on_tool_end(
+            self,
+            context: RunContextWrapper[Any],
+            agent: Agent[Any],
+            tool: Any,
+            result: str,
+        ) -> None:
+            captured["end"].append(context)
+
+    editor = RecordingEditor()
+    tool = ApplyPatchTool(editor=editor)
+    agent, context_wrapper, tool_run = build_apply_patch_call(
+        tool,
+        "call_apply_ctx",
+        {"type": "update_file", "path": "tasks.md", "diff": "-a\n+b\n"},
+    )
+
+    await ApplyPatchAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=CapturingHooks(),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    assert len(captured["start"]) == 1
+    assert len(captured["end"]) == 1
+    for context in (captured["start"][0], captured["end"][0]):
+        assert isinstance(context, ToolContext)
+        assert context.tool_call_id == "call_apply_ctx"
+        assert context.tool_name == tool.name

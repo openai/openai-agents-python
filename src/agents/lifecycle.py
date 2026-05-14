@@ -6,6 +6,7 @@ from .agent import Agent, AgentBase
 from .items import ModelResponse, TResponseInputItem
 from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .tool import Tool
+from .tool_context import ToolContext
 
 TAgent = TypeVar("TAgent", bound=AgentBase, default=AgentBase)
 
@@ -69,32 +70,32 @@ class RunHooksBase(Generic[TContext, TAgent]):
 
     async def on_tool_start(
         self,
-        context: RunContextWrapper[TContext],
+        context: ToolContext[TContext],
         agent: TAgent,
         tool: Tool,
     ) -> None:
         """Called immediately before a local tool is invoked.
 
-        For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
-        which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
-        and ``tool_arguments``. Other local tool families may provide a plain
-        ``RunContextWrapper`` instead.
+        ``context`` is always a ``ToolContext`` instance, which exposes tool-call-specific
+        metadata such as ``tool_call_id``, ``tool_name``, and ``tool_arguments``. The
+        ``tool_call_id`` lets hooks correlate ``on_tool_start`` with the matching
+        ``on_tool_end`` even when tools execute in parallel.
         """
         pass
 
     async def on_tool_end(
         self,
-        context: RunContextWrapper[TContext],
+        context: ToolContext[TContext],
         agent: TAgent,
         tool: Tool,
         result: str,
     ) -> None:
         """Called immediately after a local tool is invoked.
 
-        For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
-        which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
-        and ``tool_arguments``. Other local tool families may provide a plain
-        ``RunContextWrapper`` instead.
+        ``context`` is always a ``ToolContext`` instance, which exposes tool-call-specific
+        metadata such as ``tool_call_id``, ``tool_name``, and ``tool_arguments``. The
+        ``tool_call_id`` lets hooks correlate ``on_tool_start`` with the matching
+        ``on_tool_end`` even when tools execute in parallel.
         """
         pass
 
@@ -143,32 +144,32 @@ class AgentHooksBase(Generic[TContext, TAgent]):
 
     async def on_tool_start(
         self,
-        context: RunContextWrapper[TContext],
+        context: ToolContext[TContext],
         agent: TAgent,
         tool: Tool,
     ) -> None:
         """Called immediately before a local tool is invoked.
 
-        For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
-        which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
-        and ``tool_arguments``. Other local tool families may provide a plain
-        ``RunContextWrapper`` instead.
+        ``context`` is always a ``ToolContext`` instance, which exposes tool-call-specific
+        metadata such as ``tool_call_id``, ``tool_name``, and ``tool_arguments``. The
+        ``tool_call_id`` lets hooks correlate ``on_tool_start`` with the matching
+        ``on_tool_end`` even when tools execute in parallel.
         """
         pass
 
     async def on_tool_end(
         self,
-        context: RunContextWrapper[TContext],
+        context: ToolContext[TContext],
         agent: TAgent,
         tool: Tool,
         result: str,
     ) -> None:
         """Called immediately after a local tool is invoked.
 
-        For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
-        which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
-        and ``tool_arguments``. Other local tool families may provide a plain
-        ``RunContextWrapper`` instead.
+        ``context`` is always a ``ToolContext`` instance, which exposes tool-call-specific
+        metadata such as ``tool_call_id``, ``tool_name``, and ``tool_arguments``. The
+        ``tool_call_id`` lets hooks correlate ``on_tool_start`` with the matching
+        ``on_tool_end`` even when tools execute in parallel.
         """
         pass
 

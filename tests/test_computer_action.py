@@ -503,16 +503,20 @@ class LoggingRunHooks(RunHooks[Any]):
         super().__init__()
         self.started: list[tuple[Agent[Any], Any]] = []
         self.ended: list[tuple[Agent[Any], Any, str]] = []
+        self.start_contexts: list[Any] = []
+        self.end_contexts: list[Any] = []
 
     async def on_tool_start(
         self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
     ) -> None:
         self.started.append((agent, tool))
+        self.start_contexts.append(context)
 
     async def on_tool_end(
         self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any, result: str
     ) -> None:
         self.ended.append((agent, tool, result))
+        self.end_contexts.append(context)
 
 
 class LoggingAgentHooks(AgentHooks[Any]):
@@ -522,16 +526,20 @@ class LoggingAgentHooks(AgentHooks[Any]):
         super().__init__()
         self.started: list[tuple[Agent[Any], Any]] = []
         self.ended: list[tuple[Agent[Any], Any, str]] = []
+        self.start_contexts: list[Any] = []
+        self.end_contexts: list[Any] = []
 
     async def on_tool_start(
         self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
     ) -> None:
         self.started.append((agent, tool))
+        self.start_contexts.append(context)
 
     async def on_tool_end(
         self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any, result: str
     ) -> None:
         self.ended.append((agent, tool, result))
+        self.end_contexts.append(context)
 
 
 @pytest.mark.asyncio
@@ -591,6 +599,50 @@ async def test_execute_invokes_hooks_and_returns_tool_call_output() -> None:
     assert raw["output"]["type"] == "computer_screenshot"
     assert "image_url" in raw["output"]
     assert raw["output"]["image_url"].endswith("xyz")
+
+
+@pytest.mark.asyncio
+async def test_execute_exposes_tool_call_id_on_lifecycle_hooks() -> None:
+    """Computer tool lifecycle hooks must receive a ToolContext with tool_call_id set."""
+    from agents.tool_context import ToolContext
+
+    computer = LoggingComputer(screenshot_return="hookimg")
+    comptool = ComputerTool(computer=computer)
+    action = ActionClick(type="click", x=4, y=5, button="left")
+    tool_call = ResponseComputerToolCall(
+        id="computer_call_42",
+        type="computer_call",
+        action=action,
+        call_id="computer_call_42",
+        pending_safety_checks=[],
+        status="completed",
+    )
+
+    tool_run = ToolRunComputerAction(tool_call=tool_call, computer_tool=comptool)
+    agent = Agent(name="ctx_id_agent", tools=[comptool])
+    agent_hooks = LoggingAgentHooks()
+    agent.hooks = agent_hooks
+    run_hooks = LoggingRunHooks()
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    await ComputerAction.execute(
+        agent=agent,
+        action=tool_run,
+        hooks=run_hooks,
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    # Each hook should receive a ToolContext whose tool_call_id matches the tool call.
+    for context in (
+        run_hooks.start_contexts[0],
+        run_hooks.end_contexts[0],
+        agent_hooks.start_contexts[0],
+        agent_hooks.end_contexts[0],
+    ):
+        assert isinstance(context, ToolContext)
+        assert context.tool_call_id == "computer_call_42"
+        assert context.tool_name == comptool.name
 
 
 @pytest.mark.asyncio

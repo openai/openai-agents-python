@@ -21,6 +21,7 @@ from agents import (
 )
 from agents.items import ToolCallOutputItem
 from agents.run_internal.run_loop import LocalShellAction, ToolRunLocalShellCall
+from agents.tool_context import ToolContext
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
@@ -156,3 +157,60 @@ async def test_runner_executes_local_shell_calls() -> None:
 
     assert result.final_output == "shell complete"
     assert len(result.raw_responses) == 2
+
+
+@pytest.mark.asyncio
+async def test_local_shell_action_exposes_tool_call_id_on_lifecycle_hooks() -> None:
+    """Local shell lifecycle hooks must receive a ToolContext with tool_call_id set."""
+
+    captured: dict[str, list[Any]] = {"start": [], "end": []}
+
+    class CapturingHooks(RunHooks[Any]):
+        async def on_tool_start(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
+        ) -> None:
+            captured["start"].append(context)
+
+        async def on_tool_end(
+            self,
+            context: RunContextWrapper[Any],
+            agent: Agent[Any],
+            tool: Any,
+            result: str,
+        ) -> None:
+            captured["end"].append(context)
+
+    executor = RecordingLocalShellExecutor(output="ok")
+    tool = LocalShellTool(executor=executor)
+    action = LocalShellCallAction(
+        command=["bash", "-c", "true"],
+        env={},
+        type="exec",
+        timeout_ms=1000,
+        working_directory="/tmp",
+    )
+    tool_call = LocalShellCall(
+        id="lsh_id_test",
+        action=action,
+        call_id="call_local_shell_id",
+        status="completed",
+        type="local_shell_call",
+    )
+    tool_run = ToolRunLocalShellCall(tool_call=tool_call, local_shell_tool=tool)
+    agent = Agent(name="local_shell_id_agent", tools=[tool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    await LocalShellAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=CapturingHooks(),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    assert len(captured["start"]) == 1
+    assert len(captured["end"]) == 1
+    for context in (captured["start"][0], captured["end"][0]):
+        assert isinstance(context, ToolContext)
+        assert context.tool_call_id == "call_local_shell_id"
+        assert context.tool_name == tool.name

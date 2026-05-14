@@ -110,6 +110,19 @@ class ComputerAction:
         """Run a computer action, capturing a screenshot and notifying hooks."""
         trace_tool_name = get_tool_trace_name_for_tool(action.computer_tool) or cls.TRACE_TOOL_NAME
 
+        # Build a ToolContext so lifecycle hooks can attribute parallel tool calls via
+        # ``tool_call_id``. Computer tools encode their arguments in structured action
+        # fields rather than a JSON string, so serialize the actions for visibility.
+        tool_arguments = _serialize_trace_payload(cls._get_trace_input_payload(action.tool_call))
+        tool_context = ToolContext.from_agent_context(
+            context_wrapper,
+            action.tool_call.call_id,
+            tool_name=action.computer_tool.name,
+            tool_arguments=tool_arguments,
+            agent=agent,
+            run_config=config,
+        )
+
         async def _run_action(span: Any | None) -> RunItem:
             if span and config.trace_include_sensitive_data:
                 span.span_data.input = _serialize_trace_payload(
@@ -121,9 +134,9 @@ class ComputerAction:
             )
             agent_hooks = agent.hooks
             await asyncio.gather(
-                hooks.on_tool_start(context_wrapper, agent, action.computer_tool),
+                hooks.on_tool_start(tool_context, agent, action.computer_tool),
                 (
-                    agent_hooks.on_tool_start(context_wrapper, agent, action.computer_tool)
+                    agent_hooks.on_tool_start(tool_context, agent, action.computer_tool)
                     if agent_hooks
                     else _coro.noop_coroutine()
                 ),
@@ -151,9 +164,9 @@ class ComputerAction:
                 raise
 
             await asyncio.gather(
-                hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
+                hooks.on_tool_end(tool_context, agent, action.computer_tool, output),
                 (
-                    agent_hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output)
+                    agent_hooks.on_tool_end(tool_context, agent, action.computer_tool, output)
                     if agent_hooks
                     else _coro.noop_coroutine()
                 ),
@@ -374,10 +387,22 @@ class LocalShellAction:
     ) -> RunItem:
         """Run a local shell tool call and wrap the result as a ToolCallOutputItem."""
         agent_hooks = agent.hooks
+        # Build a ToolContext so lifecycle hooks can attribute parallel tool calls via
+        # ``tool_call_id``. Local shell calls carry structured action fields, so we
+        # serialize the action payload for ``tool_arguments`` visibility.
+        tool_arguments = _serialize_trace_payload(call.tool_call.action)
+        tool_context = ToolContext.from_agent_context(
+            context_wrapper,
+            call.tool_call.call_id,
+            tool_name=call.local_shell_tool.name,
+            tool_arguments=tool_arguments,
+            agent=agent,
+            run_config=config,
+        )
         await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool),
+            hooks.on_tool_start(tool_context, agent, call.local_shell_tool),
             (
-                agent_hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool)
+                agent_hooks.on_tool_start(tool_context, agent, call.local_shell_tool)
                 if agent_hooks
                 else _coro.noop_coroutine()
             ),
@@ -391,9 +416,9 @@ class LocalShellAction:
         result = await output if inspect.isawaitable(output) else output
 
         await asyncio.gather(
-            hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result),
+            hooks.on_tool_end(tool_context, agent, call.local_shell_tool, result),
             (
-                agent_hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result)
+                agent_hooks.on_tool_end(tool_context, agent, call.local_shell_tool, result)
                 if agent_hooks
                 else _coro.noop_coroutine()
             ),
@@ -428,6 +453,18 @@ class ShellAction:
         shell_call = coerce_shell_call(call.tool_call)
         shell_tool = call.shell_tool
         agent_hooks = agent.hooks
+        # Build a ToolContext so lifecycle hooks can attribute parallel tool calls via
+        # ``tool_call_id``. Shell calls carry a structured action payload, so serialize
+        # it for ``tool_arguments`` visibility.
+        tool_arguments = _serialize_trace_payload(dataclasses.asdict(shell_call.action))
+        tool_context = ToolContext.from_agent_context(
+            context_wrapper,
+            shell_call.call_id,
+            tool_name=shell_tool.name,
+            tool_arguments=tool_arguments,
+            agent=agent,
+            run_config=config,
+        )
 
         async def _run_call(span: Any | None) -> RunItem:
             if span and config.trace_include_sensitive_data:
@@ -467,9 +504,9 @@ class ShellAction:
                     return approval_item
 
             await asyncio.gather(
-                hooks.on_tool_start(context_wrapper, agent, shell_tool),
+                hooks.on_tool_start(tool_context, agent, shell_tool),
                 (
-                    agent_hooks.on_tool_start(context_wrapper, agent, shell_tool)
+                    agent_hooks.on_tool_start(tool_context, agent, shell_tool)
                     if agent_hooks
                     else _coro.noop_coroutine()
                 ),
@@ -541,9 +578,9 @@ class ShellAction:
                 logger.error("Shell executor failed: %s", exc, exc_info=True)
 
             await asyncio.gather(
-                hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text),
+                hooks.on_tool_end(tool_context, agent, call.shell_tool, output_text),
                 (
-                    agent_hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text)
+                    agent_hooks.on_tool_end(tool_context, agent, call.shell_tool, output_text)
                     if agent_hooks
                     else _coro.noop_coroutine()
                 ),
@@ -747,6 +784,27 @@ class ApplyPatchAction:
             context_wrapper=context_wrapper,
         )
         call_id = extract_apply_patch_call_id(call.tool_call)
+        # Build a ToolContext so lifecycle hooks can attribute parallel tool calls via
+        # ``tool_call_id``. Apply patch operations carry structured fields, so serialize
+        # the operation list for ``tool_arguments`` visibility.
+        tool_arguments = _serialize_trace_payload(
+            [
+                {
+                    "type": operation.type,
+                    "path": operation.path,
+                    "diff": operation.diff,
+                }
+                for operation in operations
+            ]
+        )
+        tool_context = ToolContext.from_agent_context(
+            context_wrapper,
+            call_id,
+            tool_name=apply_patch_tool.name,
+            tool_arguments=tool_arguments,
+            agent=agent,
+            run_config=config,
+        )
 
         async def _run_call(span: Any | None) -> RunItem:
             if span and config.trace_include_sensitive_data:
@@ -798,9 +856,9 @@ class ApplyPatchAction:
                     return approval_item
 
             await asyncio.gather(
-                hooks.on_tool_start(context_wrapper, agent, apply_patch_tool),
+                hooks.on_tool_start(tool_context, agent, apply_patch_tool),
                 (
-                    agent_hooks.on_tool_start(context_wrapper, agent, apply_patch_tool)
+                    agent_hooks.on_tool_start(tool_context, agent, apply_patch_tool)
                     if agent_hooks
                     else _coro.noop_coroutine()
                 ),
@@ -854,9 +912,9 @@ class ApplyPatchAction:
                 logger.error("Apply patch editor failed: %s", exc, exc_info=True)
 
             await asyncio.gather(
-                hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text),
+                hooks.on_tool_end(tool_context, agent, apply_patch_tool, output_text),
                 (
-                    agent_hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text)
+                    agent_hooks.on_tool_end(tool_context, agent, apply_patch_tool, output_text)
                     if agent_hooks
                     else _coro.noop_coroutine()
                 ),
