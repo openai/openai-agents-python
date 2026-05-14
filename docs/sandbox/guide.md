@@ -202,6 +202,8 @@ Built-in capabilities include:
 
 By default, `SandboxAgent.capabilities` uses `Capabilities.default()`, which includes `Filesystem()`, `Shell()`, and `Compaction()`. If you pass `capabilities=[...]`, that list replaces the default, so include any default capabilities you still want.
 
+`Compaction` sizes its dynamic policy from a built-in OpenAI-only context-window registry. If you route requests through litellm to a non-OpenAI model (Anthropic, Bedrock, Vertex, custom proxy aliases, ...), the lookup misses and the policy falls back to a static 240k threshold regardless of the model's real input window. For those deployments use [`LiteLLMCompaction`][agents.extensions.sandbox.litellm_compaction.LiteLLMCompaction] instead — it resolves the cap through `litellm.get_model_info()` and exposes `LiteLLMCompaction.for_model(...)` and `LiteLLMCompaction.for_context_window(...)` factories. Requires the `openai-agents[litellm]` extra.
+
 For skills, choose the source based on how you want them materialized:
 
 - `Skills(lazy_from=LocalDirLazySkillSource(...))` is a good default for larger local skill directories because the model can discover the index first and load only what it needs.

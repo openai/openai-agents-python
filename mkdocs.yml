@@ -186,6 +186,8 @@ plugins:
                         - Any-LLM provider: ref/extensions/models/any_llm_provider.md
                         - LiteLLM model: ref/extensions/models/litellm_model.md
                         - LiteLLM provider: ref/extensions/models/litellm_provider.md
+                    - Sandbox capabilities:
+                        - LiteLLM compaction: ref/extensions/sandbox/litellm_compaction.md
                     - Tool output trimmer: ref/extensions/tool_output_trimmer.md
                     - SQLAlchemySession: ref/extensions/memory/sqlalchemy_session.md
                     - Async SQLite session: ref/extensions/memory/async_sqlite_session.md
