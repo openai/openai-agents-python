@@ -1187,3 +1187,118 @@ def test_remove_all_tools_preserves_and_filters_input_items() -> None:
     # Other fields remain filtered as before.
     assert len(filtered_data.pre_handoff_items) == 1
     assert len(filtered_data.new_items) == 1
+
+
+def _get_hosted_tool_call_run_item(type_name: str) -> ToolCallItem:
+    """Build a ToolCallItem with a hosted/non-function tool type for the duplication test."""
+    return ToolCallItem(
+        agent=fake_agent(),
+        raw_item=cast(
+            Any,
+            {
+                "id": f"{type_name}_1",
+                "type": type_name,
+                "call_id": "call_1",
+                "name": "x",
+                "input": "args",
+            },
+        ),
+    )
+
+
+def _get_hosted_tool_call_output_run_item(type_name: str) -> ToolCallOutputItem:
+    """Build a ToolCallOutputItem with a hosted/non-function tool type for the test."""
+    return ToolCallOutputItem(
+        agent=fake_agent(),
+        raw_item=cast(
+            Any,
+            {
+                "id": f"{type_name}_1",
+                "type": type_name,
+                "call_id": "call_1",
+                "output": "result",
+            },
+        ),
+        output="result",
+    )
+
+
+def test_nest_handoff_history_filters_hosted_tool_pre_items() -> None:
+    """Hosted/non-function tool call items in pre_handoff_items are summarized only.
+
+    The conversation summary already includes a JSON-serialized record of every
+    transcript item, so re-forwarding the raw ToolCallItem/ToolCallOutputItem
+    duplicates it for the next agent. The summary set previously only covered
+    ``function_call``/``function_call_output``/``reasoning``; everything else
+    (computer/shell/apply_patch/custom/hosted/MCP/web/file/code-interpreter/
+    image/tool_search) survived as a verbatim pre-handoff item alongside the
+    summary, leading to silent duplication when ``nest_handoff_history`` was
+    chained with hosted tool calls.
+    """
+    hosted_call_types = [
+        "computer_call",
+        "file_search_call",
+        "tool_search_call",
+        "web_search_call",
+        "mcp_call",
+        "mcp_list_tools",
+        "mcp_approval_request",
+        "mcp_approval_response",
+        "code_interpreter_call",
+        "image_generation_call",
+        "local_shell_call",
+        "shell_call",
+        "apply_patch_call",
+        "custom_tool_call",
+        "hosted_tool_call",
+    ]
+    hosted_output_types = [
+        "computer_call_output",
+        "tool_search_output",
+        "local_shell_call_output",
+        "shell_call_output",
+        "apply_patch_call_output",
+        "custom_tool_call_output",
+    ]
+
+    pre_handoff_items: list[Any] = []
+    for t in hosted_call_types:
+        pre_handoff_items.append(_get_hosted_tool_call_run_item(t))
+    for t in hosted_output_types:
+        pre_handoff_items.append(_get_hosted_tool_call_output_run_item(t))
+
+    data = handoff_data(
+        input_history=(_get_user_input_item("Hello"),),
+        pre_handoff_items=tuple(pre_handoff_items),
+    )
+
+    nested = nest_handoff_history(data)
+
+    # All hosted tool call items must be summarized only — none should
+    # survive as raw pre_handoff_items.
+    assert len(nested.pre_handoff_items) == 0
+
+
+def test_nest_handoff_history_filters_hosted_tool_new_items() -> None:
+    """Same coverage for ``new_items``: hosted tool items appear once, in the summary only.
+
+    ``input_items`` (the forwarded model input) must drop the hosted tool items
+    so the next model turn sees the summarized history without duplicates.
+    """
+    new_items: list[Any] = [_get_message_output_run_item("user-facing reply")]
+    new_items.append(_get_hosted_tool_call_run_item("custom_tool_call"))
+    new_items.append(_get_hosted_tool_call_output_run_item("custom_tool_call_output"))
+
+    data = handoff_data(
+        input_history=(_get_user_input_item("Hello"),),
+        new_items=tuple(new_items),
+    )
+
+    nested = nest_handoff_history(data)
+
+    # new_items is preserved verbatim for session persistence; filtering happens
+    # in input_items, which the next model turn consumes.
+    assert nested.new_items == data.new_items
+    assert nested.input_items is not None
+    assert len(nested.input_items) == 1
+    assert isinstance(nested.input_items[0], MessageOutputItem)

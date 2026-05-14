@@ -29,9 +29,33 @@ _conversation_history_end = _DEFAULT_CONVERSATION_HISTORY_END
 
 # Item types that are summarized in the conversation history.
 # They should not be forwarded verbatim to the next agent to avoid duplication.
+# Mirror the tool/side-effect type list maintained by
+# ``extensions.handoff_filters._remove_tool_types_from_input`` so every tool
+# kind the SDK can emit is summarized rather than duplicated.
 _SUMMARY_ONLY_INPUT_TYPES = {
     "function_call",
     "function_call_output",
+    "computer_call",
+    "computer_call_output",
+    "file_search_call",
+    "tool_search_call",
+    "tool_search_output",
+    "web_search_call",
+    "mcp_call",
+    "mcp_list_tools",
+    "mcp_approval_request",
+    "mcp_approval_response",
+    "code_interpreter_call",
+    "image_generation_call",
+    "local_shell_call",
+    "local_shell_call_output",
+    "shell_call",
+    "shell_call_output",
+    "apply_patch_call",
+    "apply_patch_call_output",
+    "custom_tool_call",
+    "custom_tool_call_output",
+    "hosted_tool_call",
     # Reasoning items can become orphaned after other summarized items are filtered.
     "reasoning",
 }
