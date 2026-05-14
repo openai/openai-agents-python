@@ -98,6 +98,21 @@ class RunHooksBase(Generic[TContext, TAgent]):
         """
         pass
 
+    async def on_tool_progress(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        tool: Tool,
+        data: Any,
+    ) -> None:
+        """Called when a tool emits a progress update via ``send_progress()``.
+
+        Unlike ``on_tool_start``/``on_tool_end`` which fire at lifecycle boundaries,
+        this fires from inside the tool body at arbitrary points.  For function-tool
+        invocations, ``context`` is typically a ``ToolContext``.
+        """
+        pass
+
 
 class AgentHooksBase(Generic[TContext, TAgent]):
     """A class that receives callbacks on various lifecycle events for a specific agent. You can
@@ -169,6 +184,21 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
         and ``tool_arguments``. Other local tool families may provide a plain
         ``RunContextWrapper`` instead.
+        """
+        pass
+
+    async def on_tool_progress(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        tool: Tool,
+        data: Any,
+    ) -> None:
+        """Called when a tool emits a progress update via ``send_progress()``.
+
+        Unlike ``on_tool_start``/``on_tool_end`` which fire at lifecycle boundaries,
+        this fires from inside the tool body at arbitrary points.  For function-tool
+        invocations, ``context`` is typically a ``ToolContext``.
         """
         pass
 
