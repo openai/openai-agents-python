@@ -12,6 +12,7 @@ import aiosqlite
 from ...items import TResponseInputItem
 from ...memory import SessionABC
 from ...memory.session_settings import SessionSettings
+from ...memory.util import validate_sql_identifier
 
 
 class AsyncSQLiteSession(SessionABC):
@@ -42,8 +43,8 @@ class AsyncSQLiteSession(SessionABC):
         """
         self.session_id = session_id
         self.db_path = db_path
-        self.sessions_table = sessions_table
-        self.messages_table = messages_table
+        self.sessions_table = validate_sql_identifier(sessions_table, kind="table name")
+        self.messages_table = validate_sql_identifier(messages_table, kind="table name")
         self._connection: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
         self._init_lock = asyncio.Lock()

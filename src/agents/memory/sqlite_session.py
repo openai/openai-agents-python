@@ -12,6 +12,7 @@ from typing import ClassVar
 from ..items import TResponseInputItem
 from .session import SessionABC
 from .session_settings import SessionSettings, resolve_session_limit
+from .util import validate_sql_identifier
 
 
 class SQLiteSession(SessionABC):
@@ -49,8 +50,8 @@ class SQLiteSession(SessionABC):
         self.session_id = session_id
         self.session_settings = session_settings or SessionSettings()
         self.db_path = db_path
-        self.sessions_table = sessions_table
-        self.messages_table = messages_table
+        self.sessions_table = validate_sql_identifier(sessions_table, kind="table name")
+        self.messages_table = validate_sql_identifier(messages_table, kind="table name")
         self._local = threading.local()
         self._connections: set[sqlite3.Connection] = set()
         self._connections_lock = threading.Lock()
