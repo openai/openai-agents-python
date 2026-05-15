@@ -31,6 +31,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Dynamic system prompts
     -   Basic tool usage (`examples/basic/tools.py`)
     -   Tool input/output guardrails (`examples/basic/tool_guardrails.py`)
+    -   Tool input guardrails for pre-execution policy checks (`examples/basic/tool_policy_guardrail.py`)
     -   Image tool output (`examples/basic/image_tool_output.py`)
     -   Streaming outputs (text, items, function call args)
     -   Responses websocket transport with a shared session helper across turns (`examples/basic/stream_ws.py`)

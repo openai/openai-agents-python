@@ -227,3 +227,70 @@ agent = Agent(name="Classifier", tools=[classify_text])
 result = Runner.run_sync(agent, "hello world")
 print(result.final_output)
 ```
+
+## Using tool input guardrails for pre-execution policy checks
+
+Tool input guardrails run immediately before a local function tool is invoked. This makes
+them a good place to enforce deterministic checks on the exact tool payload that the model
+requested, such as:
+
+-   tool allowlists
+-   argument constraints
+-   caller or agent context
+-   destination or recipient allowlists
+-   budget or amount limits
+-   freshness, nonce, or replay checks that your application stores in context
+
+For example, a payment tool can reject a charge before execution if the amount or merchant
+is outside the current policy:
+
+```python
+import json
+from dataclasses import dataclass
+
+from agents import (
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrailData,
+    tool_input_guardrail,
+)
+
+
+@dataclass
+class PaymentPolicy:
+    max_amount_usd: float
+    allowed_merchants: set[str]
+
+
+@tool_input_guardrail
+def enforce_payment_policy(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+    policy = data.context.context
+    args = json.loads(data.context.tool_arguments or "{}")
+
+    if data.context.tool_name != "charge_card":
+        return ToolGuardrailFunctionOutput.reject_content("This tool is not allowed.")
+
+    merchant = args.get("merchant")
+    amount = float(args.get("amount_usd", 0))
+
+    if merchant not in policy.allowed_merchants:
+        return ToolGuardrailFunctionOutput.reject_content(
+            f"Payment blocked: merchant {merchant!r} is not approved."
+        )
+
+    if amount > policy.max_amount_usd:
+        return ToolGuardrailFunctionOutput.reject_content(
+            f"Payment blocked: ${amount:.2f} exceeds the ${policy.max_amount_usd:.2f} limit."
+        )
+
+    return ToolGuardrailFunctionOutput.allow(
+        {"merchant": merchant, "amount_usd": amount, "agent": data.agent.name}
+    )
+```
+
+Attach the guardrail to the function tool with `tool_input_guardrails=[...]`. If the
+guardrail returns `reject_content`, the function tool is not called and the rejection message
+is returned to the model so it can choose a different action or ask for approval.
+
+Tool input guardrails apply to local function tools executed by the SDK process. Hosted tools
+are executed server-side by OpenAI, so Python-side tool input guardrails cannot intercept them
+before execution.
