@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 
 import numpy as np
 import numpy.typing as npt
@@ -80,6 +81,39 @@ async def test_streamed_audio_result_preserves_cross_chunk_sample_boundaries() -
             break
 
     assert audio_chunks == [np.array([1], dtype=np.int16).tobytes()]
+
+
+@pytest.mark.asyncio
+async def test_streamed_audio_result_sends_short_custom_splitter_chunks() -> None:
+    class RecordingTTS(FakeTTS):
+        def __init__(self) -> None:
+            super().__init__()
+            self.texts: list[str] = []
+
+        async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+            del settings
+            self.texts.append(text)
+            yield np.zeros(2, dtype=np.int16).tobytes()
+
+    def split_immediately(text: str) -> tuple[str, str]:
+        return text, ""
+
+    fake_tts = RecordingTTS()
+    result = StreamedAudioResult(
+        fake_tts,
+        TTSModelSettings(buffer_size=1, text_splitter=split_immediately),
+        VoicePipelineConfig(),
+    )
+
+    await result._add_text("ok")
+    await result._turn_done()
+    await result._done()
+
+    events, audio_chunks = await extract_events(result)
+
+    assert fake_tts.texts == ["ok"]
+    assert events == ["turn_started", "audio", "turn_ended", "session_ended"]
+    assert len(audio_chunks) == 1
 
 
 @pytest.mark.asyncio
