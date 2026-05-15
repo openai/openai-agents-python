@@ -7,7 +7,7 @@ They intentionally keep the flow simple:
 
 1. Build a tiny manifest in memory.
 2. Create a `SandboxAgent` that inspects that workspace through one shell tool.
-3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel, or Vercel.
+3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel, Vercel, or Aliyun.
 
 All of these examples require `OPENAI_API_KEY`, because they call the model through the normal
 `Runner` path. Each cloud backend also needs its own provider credentials.
@@ -376,3 +376,50 @@ Blaxel sandboxes support cloud bucket mounts (S3, R2, GCS) through
 `BlaxelCloudBucketMountStrategy` and persistent drive mounts through
 `BlaxelDriveMountStrategy`. See the
 [Blaxel Drive docs](https://docs.blaxel.ai/Agent-drive/Overview) for details.
+
+## Aliyun
+
+### Setup
+
+Install the repo extra:
+
+```bash
+uv sync --extra aliyun
+```
+
+Create an Alibaba Cloud account, enable AgentRun, and obtain access credentials.
+The official references are:
+
+- <https://www.alibabacloud.com/help/en/agentrun>
+- <https://help.aliyun.com/document_detail/2839106.html>
+
+Export the required environment variables:
+
+```bash
+export OPENAI_API_KEY=...
+export ALIBABA_CLOUD_ACCESS_KEY_ID=...
+export ALIBABA_CLOUD_ACCESS_KEY_SECRET=...
+```
+
+`agentrun-sdk` resolves credentials through the standard Alibaba Cloud
+credential providers, so any of the supported credential sources (env vars,
+config file, RAM role) will work. You can also pass credentials explicitly via
+CLI flags below.
+
+### Run
+
+```bash
+uv run python examples/sandbox/extensions/aliyun_runner.py --stream
+```
+
+Useful flags:
+
+- `--region cn-hangzhou` -- AgentRun region. Default `cn-hangzhou`.
+- `--template-name code-interpreter` -- AgentRun template to launch.
+- `--sandbox-idle-timeout-seconds 3600` -- Idle timeout before the remote sandbox is reclaimed.
+- `--access-key-id` / `--access-key-secret` / `--account-id` / `--api-key` -- override credentials per run.
+- `--stream` -- stream model output to the terminal.
+
+The Aliyun example stays on the non-PTY path. It covers command execution,
+workspace materialization, and stop/resume persistence. AgentRun does not
+currently expose tunneled ports or hosted-specific mount strategies.

@@ -46,6 +46,7 @@ redis = ["redis>=7"]
 dapr = ["dapr>=1.16.0", "grpcio>=1.60.0"]
 mongodb = ["pymongo>=4.14"]
 docker = ["docker>=6.1"]
+aliyun = ["agentrun-sdk==0.0.35"]
 blaxel = ["blaxel>=0.2.50", "aiohttp>=3.12,<4"]
 daytona = ["daytona>=0.155.0"]
 cloudflare = ["aiohttp>=3.12,<4"]
@@ -162,6 +163,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["vercel", "vercel.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["agentrun", "agentrun.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]
