@@ -108,6 +108,22 @@ async def _write_sensitive_config_file(
     )
 
 
+def _join_mountpoint_command(
+    cmd: list[str],
+    env_vars: list[tuple[str, str]],
+    *,
+    redact: bool = False,
+) -> str:
+    joined_cmd = " ".join(shlex.quote(part) for part in cmd)
+    if not env_vars:
+        return joined_cmd
+
+    env_parts = " ".join(
+        f"{name}={shlex.quote('REDACTED' if redact else value)}" for name, value in env_vars
+    )
+    return f"{env_parts} {joined_cmd}"
+
+
 class MountPatternBase(BaseModel, abc.ABC):
     @abc.abstractmethod
     async def apply(
@@ -425,24 +441,23 @@ class MountpointMountPattern(MountPatternBase):
             cmd.extend(["--prefix", mountpoint_config.prefix])
         cmd.extend([bucket, sandbox_path_str(path)])
 
-        env_parts: list[str] = []
+        env_vars: list[tuple[str, str]] = []
         access_key_id = mountpoint_config.access_key_id
         secret_access_key = mountpoint_config.secret_access_key
         session_token = mountpoint_config.session_token
         if access_key_id and secret_access_key:
-            env_parts.append(f"AWS_ACCESS_KEY_ID={shlex.quote(access_key_id)}")
-            env_parts.append(f"AWS_SECRET_ACCESS_KEY={shlex.quote(secret_access_key)}")
+            env_vars.append(("AWS_ACCESS_KEY_ID", access_key_id))
+            env_vars.append(("AWS_SECRET_ACCESS_KEY", secret_access_key))
             if session_token:
-                env_parts.append(f"AWS_SESSION_TOKEN={shlex.quote(session_token)}")
+                env_vars.append(("AWS_SESSION_TOKEN", session_token))
 
-        joined_cmd = " ".join(shlex.quote(part) for part in cmd)
-        if env_parts:
-            joined_cmd = f"{' '.join(env_parts)} {joined_cmd}"
+        joined_cmd = _join_mountpoint_command(cmd, env_vars)
+        display_cmd = _join_mountpoint_command(cmd, env_vars, redact=True)
 
         result = await session.exec("sh", "-lc", joined_cmd, shell=False)
         if not result.ok():
             raise MountCommandError(
-                command=joined_cmd,
+                command=display_cmd,
                 stderr=result.stderr.decode("utf-8", errors="replace"),
                 context={"bucket": bucket},
             )
