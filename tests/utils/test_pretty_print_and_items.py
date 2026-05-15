@@ -38,6 +38,30 @@ def test_text_message_outputs_handles_none_text_across_items():
     assert ItemHelpers.text_message_outputs(items) == "world"
 
 
+def _make_output_message(text: str | None) -> ResponseOutputMessage:
+    return ResponseOutputMessage.model_construct(
+        id="msg_1",
+        role="assistant",
+        status="completed",
+        content=[ResponseOutputText.model_construct(type="output_text", text=text, annotations=[])],
+    )
+
+
+def test_extract_last_content_returns_empty_string_for_none_text():
+    """extract_last_content is declared `-> str` and must not return None even if
+    the underlying ResponseOutputText.text is None (observed via LiteLLM gateways
+    and ``model_construct`` paths during streaming, per items.py:714-720)."""
+    msg = _make_output_message(None)
+    result = ItemHelpers.extract_last_content(msg)
+    assert isinstance(result, str)
+    assert result == ""
+
+
+def test_extract_last_content_returns_text_normally():
+    msg = _make_output_message("hello")
+    assert ItemHelpers.extract_last_content(msg) == "hello"
+
+
 def _make_run_error_details(n_input: int = 0, n_output: int = 0) -> RunErrorDetails:
     return RunErrorDetails(
         input="hi",
