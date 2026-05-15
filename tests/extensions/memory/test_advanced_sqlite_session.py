@@ -1288,6 +1288,12 @@ async def test_get_items_explicit_limit_overrides_session_settings():
     assert retrieved[0].get("content") == "Message 8"
     assert retrieved[1].get("content") == "Message 9"
 
+    # Non-positive limits must return [] for parity with MongoDB/Redis/AsyncSQLite.
+    # SQLite treats LIMIT -1 as "no limit", so without an explicit guard a negative
+    # limit would incorrectly return all rows instead of an empty list.
+    assert await session.get_items(limit=0) == []
+    assert await session.get_items(limit=-1) == []
+
     session.close()
 
 

@@ -172,6 +172,9 @@ class AdvancedSQLiteSession(SQLiteSession):
         """
         session_limit = resolve_session_limit(limit, self.session_settings)
 
+        if session_limit is not None and session_limit <= 0:
+            return []
+
         if branch_id is None:
             branch_id = self._current_branch_id
 
