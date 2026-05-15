@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+from openai.types.responses import ResponseOutputMessage, ResponseOutputRefusal, ResponseOutputText
 
 from agents import Agent
 from agents.exceptions import RunErrorDetails
@@ -60,6 +60,32 @@ def test_extract_last_content_returns_empty_string_for_none_text():
 def test_extract_last_content_returns_text_normally():
     msg = _make_output_message("hello")
     assert ItemHelpers.extract_last_content(msg) == "hello"
+
+
+def _make_refusal_message(refusal: str | None) -> ResponseOutputMessage:
+    return ResponseOutputMessage.model_construct(
+        id="msg_refusal",
+        role="assistant",
+        status="completed",
+        content=[ResponseOutputRefusal.model_construct(type="refusal", refusal=refusal)],
+    )
+
+
+def test_extract_last_content_returns_empty_string_for_none_refusal():
+    """extract_last_content is declared ``-> str`` and must not return None even if
+    the underlying ResponseOutputRefusal.refusal is None.  The same provider
+    gateways (e.g. LiteLLM) that surface ``None`` for ResponseOutputText.text
+    can also surface ``None`` for ResponseOutputRefusal.refusal; the ``or ""``
+    guard must be applied consistently to both branches."""
+    msg = _make_refusal_message(None)
+    result = ItemHelpers.extract_last_content(msg)
+    assert isinstance(result, str)
+    assert result == ""
+
+
+def test_extract_last_content_returns_refusal_normally():
+    msg = _make_refusal_message("I cannot do that")
+    assert ItemHelpers.extract_last_content(msg) == "I cannot do that"
 
 
 def _make_run_error_details(n_input: int = 0, n_output: int = 0) -> RunErrorDetails:

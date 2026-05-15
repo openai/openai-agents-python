@@ -691,7 +691,11 @@ class ItemHelpers:
             # ``extract_text`` below.
             return last_content.text or ""
         elif isinstance(last_content, ResponseOutputRefusal):
-            return last_content.refusal
+            # ``last_content.refusal`` is typed as ``str`` per the Responses API schema,
+            # but provider gateways (e.g. LiteLLM) have been observed surfacing ``None``
+            # for typed-str fields (same rationale as the ``ResponseOutputText.text``
+            # guard above).
+            return last_content.refusal or ""
         else:
             raise ModelBehaviorError(f"Unexpected content type: {type(last_content)}")
 
