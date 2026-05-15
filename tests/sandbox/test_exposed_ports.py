@@ -28,6 +28,18 @@ def test_exposed_port_endpoint_with_query() -> None:
     assert endpoint.url_for("ws") == "wss://preview.example.com/?bl_preview_token=abc123"
 
 
+def test_exposed_port_endpoint_accepts_leading_question_mark_query() -> None:
+    endpoint = ExposedPortEndpoint(
+        host="preview.example.com",
+        port=443,
+        tls=True,
+        query="?bl_preview_token=abc123",
+    )
+
+    assert endpoint.url_for("http") == "https://preview.example.com/?bl_preview_token=abc123"
+    assert endpoint.url_for("ws") == "wss://preview.example.com/?bl_preview_token=abc123"
+
+
 def test_exposed_port_endpoint_empty_query() -> None:
     endpoint = ExposedPortEndpoint(host="127.0.0.1", port=8080, tls=False, query="")
     assert endpoint.url_for("http") == "http://127.0.0.1:8080/"
