@@ -90,6 +90,7 @@ For provider-specific setup notes and links for the checked-in extension example
 
 | Client | Install | Example |
 | --- | --- | --- |
+| `AliyunSandboxClient` | `openai-agents[aliyun]` | [Aliyun runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/aliyun_runner.py) |
 | `BlaxelSandboxClient` | `openai-agents[blaxel]` | [Blaxel runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/blaxel_runner.py) |
 | `CloudflareSandboxClient` | `openai-agents[cloudflare]` | [Cloudflare runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/cloudflare_runner.py) |
 | `DaytonaSandboxClient` | `openai-agents[daytona]` | [Daytona runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/daytona/daytona_runner.py) |
@@ -114,6 +115,7 @@ Hosted sandbox clients expose provider-specific mount strategies. Choose the bac
 | `E2BSandboxClient` | Supports rclone-backed cloud storage mounts with `E2BCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
 | `RunloopSandboxClient` | Supports rclone-backed cloud storage mounts with `RunloopCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
 | `VercelSandboxClient` | No hosted-specific mount strategy is currently exposed. Use manifest files, repos, or other workspace inputs instead. |
+| `AliyunSandboxClient` | No hosted-specific mount strategy is currently exposed. AgentRun also does not expose tunneled ports. Use manifest files or workspace inputs instead. |
 
 </div>
 
@@ -131,6 +133,7 @@ The table below summarizes which remote storage entries each backend can mount d
 | `E2BSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `RunloopSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `VercelSandboxClient` | - | - | - | - | - | - |
+| `AliyunSandboxClient` | - | - | - | - | - | - |
 
 </div>
 
