@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import hashlib
 import io
 import re
 import shlex
@@ -106,6 +107,41 @@ async def _write_sensitive_config_file(
     await session._exec_checked_nonzero(
         "chmod", "0600", sandbox_path_str(session.normalize_path(path))
     )
+
+
+def _render_shell_exports(env_vars: list[tuple[str, str]]) -> bytes:
+    lines = [f"export {name}={shlex.quote(value)}" for name, value in env_vars]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _redact_sensitive_values(text: str, sensitive_values: list[str]) -> str:
+    redacted = text
+    for value in sensitive_values:
+        if not value:
+            continue
+        redacted = redacted.replace(value, "REDACTED")
+        quoted = shlex.quote(value)
+        if quoted != value:
+            redacted = redacted.replace(quoted, "REDACTED")
+    return redacted
+
+
+async def _read_text_if_present(session: BaseSandboxSession, path: Path) -> str:
+    try:
+        handle = await session.read(path)
+    except Exception:
+        return ""
+
+    try:
+        raw = handle.read()
+    finally:
+        handle.close()
+
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="replace")
+    if isinstance(raw, str):
+        return raw
+    return str(raw)
 
 
 class MountPatternBase(BaseModel, abc.ABC):
@@ -425,25 +461,57 @@ class MountpointMountPattern(MountPatternBase):
             cmd.extend(["--prefix", mountpoint_config.prefix])
         cmd.extend([bucket, sandbox_path_str(path)])
 
-        env_parts: list[str] = []
+        env_vars: list[tuple[str, str]] = []
         access_key_id = mountpoint_config.access_key_id
         secret_access_key = mountpoint_config.secret_access_key
         session_token = mountpoint_config.session_token
         if access_key_id and secret_access_key:
-            env_parts.append(f"AWS_ACCESS_KEY_ID={shlex.quote(access_key_id)}")
-            env_parts.append(f"AWS_SECRET_ACCESS_KEY={shlex.quote(secret_access_key)}")
+            env_vars.append(("AWS_ACCESS_KEY_ID", access_key_id))
+            env_vars.append(("AWS_SECRET_ACCESS_KEY", secret_access_key))
             if session_token:
-                env_parts.append(f"AWS_SESSION_TOKEN={shlex.quote(session_token)}")
+                env_vars.append(("AWS_SESSION_TOKEN", session_token))
 
         joined_cmd = " ".join(shlex.quote(part) for part in cmd)
-        if env_parts:
-            joined_cmd = f"{' '.join(env_parts)} {joined_cmd}"
+        stderr_path: Path | None = None
+        sensitive_values = [value for _name, value in env_vars]
+        if env_vars:
+            session_id = getattr(session.state, "session_id", None)
+            if session_id is None:
+                raise MountConfigError(
+                    message="mount session is missing session_id",
+                    context={"type": mountpoint_config.mount_type},
+                )
+            command_hash = hashlib.sha256(
+                f"{bucket}\0{sandbox_path_str(path)}".encode()
+            ).hexdigest()[:16]
+            config_dir = posix_path_as_path(
+                coerce_posix_path(f".sandbox-mountpoint-env/{session_id.hex}")
+            )
+            env_path = config_dir / f"{command_hash}.env"
+            stdout_path = config_dir / f"{command_hash}.stdout"
+            stderr_path = config_dir / f"{command_hash}.stderr"
+
+            await session.mkdir(config_dir, parents=True)
+            session.register_persist_workspace_skip_path(config_dir)
+            await _write_sensitive_config_file(session, env_path, _render_shell_exports(env_vars))
+
+            command_env_path = sandbox_path_str(session.normalize_path(env_path))
+            command_stdout_path = sandbox_path_str(session.normalize_path(stdout_path))
+            command_stderr_path = sandbox_path_str(session.normalize_path(stderr_path))
+            joined_cmd = (
+                f". {shlex.quote(command_env_path)} && exec {joined_cmd} "
+                f">{shlex.quote(command_stdout_path)} 2>{shlex.quote(command_stderr_path)}"
+            )
 
         result = await session.exec("sh", "-lc", joined_cmd, shell=False)
         if not result.ok():
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            if stderr_path is not None:
+                stderr += await _read_text_if_present(session, stderr_path)
+            stderr = _redact_sensitive_values(stderr, sensitive_values)
             raise MountCommandError(
                 command=joined_cmd,
-                stderr=result.stderr.decode("utf-8", errors="replace"),
+                stderr=stderr,
                 context={"bucket": bucket},
             )
 
