@@ -274,6 +274,9 @@ class SandboxSession(BaseSandboxSession):
     def normalize_path(self, path: Path | str, *, for_write: bool = False) -> Path:
         return self._inner.normalize_path(path, for_write=for_write)
 
+    def register_persist_workspace_skip_path(self, path: Path | str) -> Path:
+        return self._inner.register_persist_workspace_skip_path(path)
+
     def supports_pty(self) -> bool:
         return self._inner.supports_pty()
 

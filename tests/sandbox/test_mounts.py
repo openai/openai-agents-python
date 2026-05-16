@@ -105,6 +105,9 @@ class _MountpointApplySession(BaseSandboxSession):
     async def running(self) -> bool:
         return True
 
+    def persist_workspace_skip_paths(self) -> set[Path]:
+        return self._persist_workspace_skip_relpaths()
+
     async def _exec_internal(
         self,
         *command: str | Path,
@@ -549,6 +552,10 @@ async def test_s3_mountpoint_failure_redacts_credentials_from_errors_and_events(
     stderr = str(context["stderr"])
     assert "REDACTED" in stderr
     assert ".sandbox-mountpoint-env" in command
+    assert any(
+        path.as_posix().startswith(".sandbox-mountpoint-env/")
+        for path in inner.persist_workspace_skip_paths()
+    )
     serialized_events = "\n".join(event.model_dump_json() for event in events)
     for sensitive_value in ("access", "secret", "token"):
         assert sensitive_value not in command
