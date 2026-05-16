@@ -1106,12 +1106,17 @@ class TestToolCallExecution:
             arguments="{}",
         )
 
-        with pytest.raises(ToolTimeoutError, match="timed out"):
-            await session._handle_tool_call(tool_call_event)
+        # After the fix: exception is caught, error output is sent to the model,
+        # and _handle_tool_call returns normally without re-raising.
+        await session._handle_tool_call(tool_call_event)
 
-        assert len(mock_model.sent_tool_outputs) == 0
+        assert len(mock_model.sent_tool_outputs) == 1
+        sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_call == tool_call_event
+        assert "error" in sent_output.lower()
+        assert start_response is True
+
         assert session._event_queue.qsize() == 1
-
         tool_start_event = await session._event_queue.get()
         assert isinstance(tool_start_event, RealtimeToolStart)
         assert tool_start_event.tool == timeout_tool
@@ -1194,26 +1199,30 @@ class TestToolCallExecution:
         assert len(tool_call_tasks) == 1
         await asyncio.gather(*tool_call_tasks, return_exceptions=True)
 
-        assert isinstance(session._stored_exception, ToolTimeoutError)
-        assert session._stored_exception.tool_name == "slow_tool"
-        assert len(mock_model.sent_tool_outputs) == 0
+        # After the fix: the exception is caught inside _handle_tool_call, an error
+        # message is sent to the model, and the task completes normally — so
+        # _stored_exception is NOT set (session stays alive) and the model DOES receive
+        # a tool output so it can continue rather than hanging for 30+ seconds.
+        assert session._stored_exception is None
+        assert len(mock_model.sent_tool_outputs) == 1
+        sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_call == tool_call_event
+        assert "error" in sent_output.lower()
+        assert start_response is True
 
+        # Drain all queued events and verify the basic lifecycle events are present.
         events = []
-        while True:
-            event = await asyncio.wait_for(session._event_queue.get(), timeout=1)
-            events.append(event)
-            if isinstance(event, RealtimeError):
-                break
+        while not session._event_queue.empty():
+            events.append(session._event_queue.get_nowait())
 
         assert any(
             isinstance(event, RealtimeRawModelEvent) and event.data == tool_call_event
             for event in events
         )
         assert any(isinstance(event, RealtimeToolStart) for event in events)
-
-        error_event = next(event for event in events if isinstance(event, RealtimeError))
-        assert "Tool call task failed" in error_event.error["message"]
-        assert "timed out" in error_event.error["message"]
+        # No RealtimeError should be emitted via the task-done callback since the
+        # exception was handled gracefully inside _handle_tool_call.
+        assert not any(isinstance(event, RealtimeError) for event in events)
 
     @pytest.mark.asyncio
     async def test_function_tool_with_multiple_tools_available(self, mock_model, mock_agent):
@@ -1605,7 +1614,8 @@ class TestToolCallExecution:
     async def test_function_tool_exception_handling(
         self, mock_model, mock_agent, mock_function_tool
     ):
-        """Test that exceptions in function tools are handled (currently they propagate)"""
+        """Test that exceptions in function tools are caught and an error message is sent to
+        the model, so the session doesn't hang waiting for a tool output that never arrives."""
         # Set up tool to raise exception
         mock_function_tool.on_invoke_tool.side_effect = ValueError("Tool error")
         mock_agent.get_all_tools.return_value = [mock_function_tool]
@@ -1616,9 +1626,8 @@ class TestToolCallExecution:
             name="test_function", call_id="call_error", arguments="{}"
         )
 
-        # Currently exceptions propagate (no error handling implemented)
-        with pytest.raises(ValueError, match="Tool error"):
-            await session._handle_tool_call(tool_call_event)
+        # Exception is now caught — _handle_tool_call returns normally.
+        await session._handle_tool_call(tool_call_event)
 
         # Tool start event should have been queued before the error
         assert session._event_queue.qsize() == 1
@@ -1626,8 +1635,12 @@ class TestToolCallExecution:
         assert isinstance(tool_start_event, RealtimeToolStart)
         assert tool_start_event.arguments == "{}"
 
-        # But no tool output should have been sent and no end event queued
-        assert len(mock_model.sent_tool_outputs) == 0
+        # An error tool output IS sent so the model can continue rather than hang.
+        assert len(mock_model.sent_tool_outputs) == 1
+        sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_call == tool_call_event
+        assert "error" in sent_output.lower()
+        assert start_response is True
 
     @pytest.mark.asyncio
     async def test_tool_call_with_complex_arguments(

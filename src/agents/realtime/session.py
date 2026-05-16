@@ -22,7 +22,12 @@ from ..items import ToolApprovalItem
 from ..logger import logger
 from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
-from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, invoke_function_tool
+from ..tool import (
+    DEFAULT_APPROVAL_REJECTION_MESSAGE,
+    FunctionTool,
+    default_tool_error_function,
+    invoke_function_tool,
+)
 from ..tool_context import ToolContext
 from ..util._approvals import evaluate_needs_approval_setting
 from .agent import RealtimeAgent
@@ -694,11 +699,28 @@ class RealtimeSession(RealtimeModelListener):
                 tool_arguments=event.arguments,
                 agent=agent,
             )
-            result = await invoke_function_tool(
-                function_tool=func_tool,
-                context=tool_context,
-                arguments=event.arguments,
-            )
+            try:
+                result = await invoke_function_tool(
+                    function_tool=func_tool,
+                    context=tool_context,
+                    arguments=event.arguments,
+                )
+            except Exception as exc:
+                error_message = default_tool_error_function(self._context_wrapper, exc)
+                logger.warning(
+                    "Tool %r raised %s: %s; sending error output to model.",
+                    event.name,
+                    type(exc).__name__,
+                    exc,
+                )
+                await self._model.send_event(
+                    RealtimeModelSendToolOutput(
+                        tool_call=event,
+                        output=error_message,
+                        start_response=True,
+                    )
+                )
+                return
 
             await self._model.send_event(
                 RealtimeModelSendToolOutput(
