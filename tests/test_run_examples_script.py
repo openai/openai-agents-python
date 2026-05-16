@@ -77,6 +77,13 @@ def test_artifact_dir_for_example_uses_tmp_safe_stem(tmp_path: Path) -> None:
     assert artifact_dir == tmp_path / "examples__sandbox__tutorials__vision_website_clone__main"
 
 
+def test_discover_examples_finds_qianfan_provider() -> None:
+    examples = run_examples.discover_examples(["qianfan_provider.py"])
+    relpaths = {example.relpath for example in examples}
+
+    assert "examples/model_providers/qianfan_provider.py" in relpaths
+
+
 def test_prepare_redis_for_example_uses_existing_local_redis(monkeypatch) -> None:
     env: dict[str, str] = {}
     monkeypatch.setattr(run_examples, "redis_ping_url", lambda url, timeout=0.5: True)

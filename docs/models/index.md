@@ -226,6 +226,8 @@ You can integrate other LLM providers with these built-in paths:
 2. [`ModelProvider`][agents.models.interface.ModelProvider] is at the `Runner.run` level. This lets you say "use a custom model provider for all agents in this run". See a configurable example in [examples/model_providers/custom_example_provider.py](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_provider.py).
 3. [`Agent.model`][agents.agent.Agent.model] lets you specify the model on a specific Agent instance. This enables you to mix and match different providers for different agents. See a configurable example in [examples/model_providers/custom_example_agent.py](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_agent.py).
 
+If you want one concrete OpenAI-compatible provider example, see [examples/model_providers/qianfan_provider.py](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/qianfan_provider.py), which shows the same built-in pattern against Baidu Qianfan with `AsyncOpenAI`, `set_default_openai_client`, and the Chat Completions path.
+
 In cases where you do not have an API key from `platform.openai.com`, we recommend disabling tracing via `set_tracing_disabled()`, or setting up a [different tracing processor](../tracing.md).
 
 ``` python

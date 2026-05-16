@@ -22,3 +22,11 @@ Direct-model examples let you override the target model:
 uv run examples/model_providers/any_llm_provider.py --model openrouter/openai/gpt-5.4-mini
 uv run examples/model_providers/litellm_provider.py --model openrouter/openai/gpt-5.4-mini
 ```
+
+For a built-in OpenAI-compatible provider example using Baidu Qianfan:
+
+```bash
+export QIANFAN_API_KEY="..."
+export QIANFAN_MODEL="ernie-5.0"
+uv run examples/model_providers/qianfan_provider.py
+```
