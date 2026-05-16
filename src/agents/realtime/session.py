@@ -574,6 +574,18 @@ class RealtimeSession(RealtimeModelListener):
             )
         )
 
+    async def _send_tool_failure_output(
+        self, event: RealtimeModelToolCallEvent, error: Exception
+    ) -> None:
+        """Complete a failed known tool call with model-visible output."""
+        await self._model.send_event(
+            RealtimeModelSendToolOutput(
+                tool_call=event,
+                output=f"Tool {event.name} failed: {error}",
+                start_response=True,
+            )
+        )
+
     async def _resolve_approval_rejection_message(self, *, tool: FunctionTool, call_id: str) -> str:
         """Resolve model-visible output text for approval rejections."""
         explicit_message = self._context_wrapper.get_rejection_message(
@@ -694,11 +706,15 @@ class RealtimeSession(RealtimeModelListener):
                 tool_arguments=event.arguments,
                 agent=agent,
             )
-            result = await invoke_function_tool(
-                function_tool=func_tool,
-                context=tool_context,
-                arguments=event.arguments,
-            )
+            try:
+                result = await invoke_function_tool(
+                    function_tool=func_tool,
+                    context=tool_context,
+                    arguments=event.arguments,
+                )
+            except Exception as exc:
+                await self._send_tool_failure_output(event, exc)
+                raise
 
             await self._model.send_event(
                 RealtimeModelSendToolOutput(
@@ -729,11 +745,15 @@ class RealtimeSession(RealtimeModelListener):
             )
 
             # Execute the handoff to get the new agent
-            result = await handoff.on_invoke_handoff(self._context_wrapper, event.arguments)
-            if not isinstance(result, RealtimeAgent):
-                raise UserError(
-                    f"Handoff {handoff.tool_name} returned invalid result: {type(result)}"
-                )
+            try:
+                result = await handoff.on_invoke_handoff(self._context_wrapper, event.arguments)
+                if not isinstance(result, RealtimeAgent):
+                    raise UserError(
+                        f"Handoff {handoff.tool_name} returned invalid result: {type(result)}"
+                    )
+            except Exception as exc:
+                await self._send_tool_failure_output(event, exc)
+                raise
 
             # Store previous agent for event
             previous_agent = agent
