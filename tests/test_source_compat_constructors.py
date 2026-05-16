@@ -197,6 +197,34 @@ def test_function_tool_positional_arguments_keep_guardrail_positions() -> None:
     assert tool.timeout_error_function is None
 
 
+def test_agent_connectors_append_preserves_reset_tool_choice_position() -> None:
+    model_settings = ModelSettings()
+    agent = Agent(
+        "agent",
+        None,
+        [],
+        [],
+        {},
+        "instructions",
+        None,
+        [],
+        None,
+        model_settings,
+        [],
+        [],
+        None,
+        None,
+        "stop_on_first_tool",
+        False,
+    )
+
+    assert agent.instructions == "instructions"
+    assert agent.model_settings is model_settings
+    assert agent.tool_use_behavior == "stop_on_first_tool"
+    assert agent.reset_tool_choice is False
+    assert agent.connectors == []
+
+
 def test_agent_hook_context_third_positional_argument_is_turn_input() -> None:
     turn_input = ItemHelpers.input_to_new_input_list("hello")
     context = AgentHookContext(None, Usage(), turn_input)
