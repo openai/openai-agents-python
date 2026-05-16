@@ -47,6 +47,7 @@ from agents.items import ToolCallOutputItem
 from agents.run_internal import run_loop
 from agents.run_internal.run_loop import ComputerAction, ToolRunComputerAction
 from agents.tool import ComputerToolSafetyCheckData
+from agents.tool_context import ToolContext
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
@@ -501,18 +502,18 @@ class LoggingRunHooks(RunHooks[Any]):
 
     def __init__(self) -> None:
         super().__init__()
-        self.started: list[tuple[Agent[Any], Any]] = []
-        self.ended: list[tuple[Agent[Any], Any, str]] = []
+        self.started: list[tuple[RunContextWrapper[Any], Agent[Any], Any]] = []
+        self.ended: list[tuple[RunContextWrapper[Any], Agent[Any], Any, str]] = []
 
     async def on_tool_start(
         self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
     ) -> None:
-        self.started.append((agent, tool))
+        self.started.append((context, agent, tool))
 
     async def on_tool_end(
         self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any, result: str
     ) -> None:
-        self.ended.append((agent, tool, result))
+        self.ended.append((context, agent, tool, result))
 
 
 class LoggingAgentHooks(AgentHooks[Any]):
@@ -520,18 +521,18 @@ class LoggingAgentHooks(AgentHooks[Any]):
 
     def __init__(self) -> None:
         super().__init__()
-        self.started: list[tuple[Agent[Any], Any]] = []
-        self.ended: list[tuple[Agent[Any], Any, str]] = []
+        self.started: list[tuple[RunContextWrapper[Any], Agent[Any], Any]] = []
+        self.ended: list[tuple[RunContextWrapper[Any], Agent[Any], Any, str]] = []
 
     async def on_tool_start(
         self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
     ) -> None:
-        self.started.append((agent, tool))
+        self.started.append((context, agent, tool))
 
     async def on_tool_end(
         self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any, result: str
     ) -> None:
-        self.ended.append((agent, tool, result))
+        self.ended.append((context, agent, tool, result))
 
 
 @pytest.mark.asyncio
@@ -572,13 +573,25 @@ async def test_execute_invokes_hooks_and_returns_tool_call_output() -> None:
     assert len(run_hooks.started) == 1 and len(agent_hooks.started) == 1
     assert len(run_hooks.ended) == 1 and len(agent_hooks.ended) == 1
     # The hook invocations should refer to our agent and tool.
-    assert run_hooks.started[0][0] is agent
-    assert run_hooks.ended[0][0] is agent
-    assert run_hooks.started[0][1] is comptool
-    assert run_hooks.ended[0][1] is comptool
+    run_start_context = run_hooks.started[0][0]
+    run_end_context = run_hooks.ended[0][0]
+    agent_start_context = agent_hooks.started[0][0]
+    agent_end_context = agent_hooks.ended[0][0]
+    assert isinstance(run_start_context, ToolContext)
+    assert run_start_context is run_end_context
+    assert isinstance(agent_start_context, ToolContext)
+    assert agent_start_context is agent_end_context
+    assert run_start_context.tool_call_id == "tool123"
+    assert agent_start_context.tool_call_id == "tool123"
+    assert run_start_context.tool_name == comptool.name
+    assert json.loads(run_start_context.tool_arguments)["type"] == "click"
+    assert run_hooks.started[0][1] is agent
+    assert run_hooks.ended[0][1] is agent
+    assert run_hooks.started[0][2] is comptool
+    assert run_hooks.ended[0][2] is comptool
     # The result passed to on_tool_end should be the raw screenshot string.
-    assert run_hooks.ended[0][2] == "xyz"
-    assert agent_hooks.ended[0][2] == "xyz"
+    assert run_hooks.ended[0][3] == "xyz"
+    assert agent_hooks.ended[0][3] == "xyz"
     # The computer should have performed a click then a screenshot.
     assert computer.calls == [("click", (1, 2, "left")), ("screenshot", ())]
     # The returned item should include the agent, output string, and a ComputerCallOutput.

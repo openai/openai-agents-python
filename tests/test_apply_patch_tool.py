@@ -18,6 +18,7 @@ from agents import (
 from agents.editor import ApplyPatchOperation, ApplyPatchResult
 from agents.items import ToolApprovalItem, ToolCallOutputItem
 from agents.run_internal.run_loop import ApplyPatchAction, ToolRunApplyPatchCall
+from agents.tool_context import ToolContext
 
 from .testing_processor import SPAN_PROCESSOR_TESTING
 from .utils.hitl import (
@@ -83,6 +84,25 @@ class RecordingEditor:
         return ApplyPatchResult(output=f"Deleted {operation.path}")
 
 
+class RecordingRunHooks(RunHooks[Any]):
+    """Capture apply_patch hook contexts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_contexts: list[RunContextWrapper[Any]] = []
+        self.end_contexts: list[RunContextWrapper[Any]] = []
+
+    async def on_tool_start(
+        self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
+    ) -> None:
+        self.start_contexts.append(context)
+
+    async def on_tool_end(
+        self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any, result: str
+    ) -> None:
+        self.end_contexts.append(context)
+
+
 @pytest.mark.asyncio
 async def test_apply_patch_tool_success() -> None:
     editor = RecordingEditor()
@@ -90,11 +110,12 @@ async def test_apply_patch_tool_success() -> None:
     agent, context_wrapper, tool_run = build_apply_patch_call(
         tool, "call_apply", {"type": "update_file", "path": "tasks.md", "diff": "-a\n+b\n"}
     )
+    hooks = RecordingRunHooks()
 
     result = await ApplyPatchAction.execute(
         agent=agent,
         call=tool_run,
-        hooks=RunHooks[Any](),
+        hooks=hooks,
         context_wrapper=context_wrapper,
         config=RunConfig(),
     )
@@ -109,6 +130,13 @@ async def test_apply_patch_tool_success() -> None:
     assert editor.operations[0].ctx_wrapper is context_wrapper
     assert isinstance(raw_item["output"], str)
     assert raw_item["output"].startswith("Updated tasks.md")
+    assert len(hooks.start_contexts) == 1
+    assert hooks.start_contexts == hooks.end_contexts
+    hook_context = hooks.start_contexts[0]
+    assert isinstance(hook_context, ToolContext)
+    assert hook_context.tool_call_id == "call_apply"
+    assert hook_context.tool_name == tool.name
+    assert json.loads(hook_context.tool_arguments)[0]["path"] == "tasks.md"
     input_payload = result.to_input_item()
     assert isinstance(input_payload, dict)
     payload_dict = cast(dict[str, Any], input_payload)

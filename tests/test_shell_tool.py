@@ -21,6 +21,7 @@ from agents import (
 from agents.items import ToolApprovalItem, ToolCallOutputItem
 from agents.run_internal.run_loop import ShellAction, ToolRunShellCall, execute_shell_calls
 from agents.tool import ShellOnApprovalFunctionResult
+from agents.tool_context import ToolContext
 
 from .testing_processor import SPAN_PROCESSOR_TESTING
 from .utils.hitl import (
@@ -57,6 +58,25 @@ def _shell_call(call_id: str = "call_shell") -> dict[str, Any]:
             status="completed",
         ),
     )
+
+
+class RecordingRunHooks(RunHooks[Any]):
+    """Capture shell tool hook contexts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_contexts: list[RunContextWrapper[Any]] = []
+        self.end_contexts: list[RunContextWrapper[Any]] = []
+
+    async def on_tool_start(
+        self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
+    ) -> None:
+        self.start_contexts.append(context)
+
+    async def on_tool_end(
+        self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any, result: str
+    ) -> None:
+        self.end_contexts.append(context)
 
 
 def test_shell_tool_defaults_to_local_environment() -> None:
@@ -251,11 +271,12 @@ async def test_shell_tool_structured_output_is_rendered() -> None:
     tool_run = ToolRunShellCall(tool_call=tool_call, shell_tool=shell_tool)
     agent = Agent(name="shell-agent", tools=[shell_tool])
     context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+    hooks = RecordingRunHooks()
 
     result = await ShellAction.execute(
         agent=agent,
         call=tool_run,
-        hooks=RunHooks[Any](),
+        hooks=hooks,
         context_wrapper=context_wrapper,
         config=RunConfig(),
     )
@@ -277,6 +298,13 @@ async def test_shell_tool_structured_output_is_rendered() -> None:
     assert first_output["outcome"]["type"] == "exit"
     assert first_output["outcome"]["exit_code"] == 0
     assert "command" not in first_output
+    assert len(hooks.start_contexts) == 1
+    assert hooks.start_contexts == hooks.end_contexts
+    hook_context = hooks.start_contexts[0]
+    assert isinstance(hook_context, ToolContext)
+    assert hook_context.tool_call_id == "call_shell"
+    assert hook_context.tool_name == shell_tool.name
+    assert json.loads(hook_context.tool_arguments)["commands"] == ["echo hi", "ls"]
     input_payload = result.to_input_item()
     assert isinstance(input_payload, dict)
     payload_dict = cast(dict[str, Any], input_payload)
