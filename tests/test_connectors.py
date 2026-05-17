@@ -8,6 +8,7 @@ import pytest
 from agents import (
     Agent,
     Connector,
+    HostedConnectorAuthorization,
     HostedMCPTool,
     RunContextWrapper,
     ToolSearchTool,
@@ -16,6 +17,12 @@ from agents import (
 )
 from agents.mcp import MCPServerStdio, MCPServerStreamableHttp
 from tests.mcp.helpers import FakeMCPServer
+
+
+def test_hosted_connector_authorization_is_exported() -> None:
+    authorization: HostedConnectorAuthorization = "conn_123"
+
+    assert authorization == "conn_123"
 
 
 @pytest.mark.asyncio
@@ -170,6 +177,88 @@ def test_connector_from_package_rejects_paths_outside_package(tmp_path) -> None:
 
     with pytest.raises(UserError, match="must stay inside the connector package"):
         Connector.from_package(plugin_dir)
+
+
+def test_connector_from_package_loads_app_manifest_with_authorization_mapping(tmp_path) -> None:
+    plugin_dir = tmp_path / "workspace"
+    plugin_config_dir = plugin_dir / ".codex-plugin"
+    plugin_config_dir.mkdir(parents=True)
+    (plugin_config_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "workspace",
+                "description": "Workspace connectors.",
+                "apps": "./.app.json",
+            }
+        )
+    )
+    (plugin_dir / ".app.json").write_text(
+        json.dumps(
+            {
+                "apps": {
+                    "calendar": {
+                        "id": "connector_googlecalendar",
+                    }
+                }
+            }
+        )
+    )
+
+    connector = Connector.from_package(
+        plugin_dir,
+        authorization={"calendar": "conn_calendar"},
+        hosted_mcp_require_approval="always",
+    )
+
+    assert connector.policy_labels == {"network"}
+    assert len(connector.tools) == 1
+    tool = connector.tools[0]
+    assert isinstance(tool, HostedMCPTool)
+    tool_config = cast(dict[str, Any], tool.tool_config)
+    assert tool_config["type"] == "mcp"
+    assert tool_config["server_label"] == "calendar"
+    assert tool_config["connector_id"] == "connector_googlecalendar"
+    assert tool_config["authorization"] == "conn_calendar"
+    assert tool_config["require_approval"] == "always"
+
+
+def test_connector_from_package_skips_app_manifest_without_authorization(tmp_path) -> None:
+    plugin_dir = tmp_path / "workspace"
+    plugin_config_dir = plugin_dir / ".codex-plugin"
+    plugin_config_dir.mkdir(parents=True)
+    (plugin_config_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "workspace",
+                "description": "Workspace connectors.",
+                "apps": "./.app.json",
+            }
+        )
+    )
+    (plugin_dir / ".app.json").write_text(
+        json.dumps(
+            {
+                "apps": {
+                    "calendar": {
+                        "id": "connector_googlecalendar",
+                    }
+                }
+            }
+        )
+    )
+
+    connector = Connector.from_package(plugin_dir)
+
+    assert connector.tools == []
+    assert connector.policy_labels == set()
+
+
+def test_agent_rejects_invalid_connectors() -> None:
+    with pytest.raises(TypeError, match="Agent connectors must be a list"):
+        Agent(name="assistant", connectors=cast(Any, ()))
+
+    with pytest.raises(TypeError, match="Agent connectors must contain Connector instances"):
+        Agent(name="assistant", connectors=cast(Any, [object()]))
 
 
 def test_connector_from_hosted_connector_accepts_extra_tool_config() -> None:
