@@ -159,3 +159,50 @@ These arrays accumulate across the run, so they are useful for logging decisions
 [`context_wrapper`][agents.result.RunResultBase.context_wrapper] exposes your app context together with SDK-managed runtime metadata such as approvals, usage, and nested `tool_input`.
 
 Usage is tracked on `context_wrapper.usage`. For streamed runs, the usage totals can lag until the stream's final chunks have been processed. See [Context management](context.md) for the full wrapper shape and persistence caveats.
+
+## Auditable final output receipts
+
+For safety-sensitive workflows, treat `final_output` as the agent's final answer, not as proof that every claim in the answer is supported.
+
+A final answer such as:
+
+```text
+Done. All tests passed. Ready to publish.
+```
+
+contains several different claims:
+
+- the task is complete
+- tests passed
+- the result is ready for an external action
+
+Those claims may need evidence from different result surfaces, such as `new_items`, tool outputs, approval metadata, guardrail results, file diffs, logs, or human review.
+
+One practical pattern is to ask the last agent to produce a small completion receipt alongside its user-facing answer:
+
+```yaml
+status_code: 412
+status_text: missing_evidence
+summary: "The agent claimed completion and test success, but did not attach command output."
+claims:
+  - claim: "Task is complete."
+    support_status: unverified
+    evidence: []
+    required_fix: "Attach the relevant tool output, file diff, or trace item."
+  - claim: "All tests passed."
+    support_status: unsupported
+    evidence: []
+    required_fix: "Attach the test command and output, or downgrade the claim."
+next_owner: ProducingAgent
+human_decision_required: false
+```
+
+A receipt should make these boundaries explicit:
+
+- what the agent claimed
+- which evidence supports each claim
+- which claims are unsupported or need review
+- who owns the next step
+- whether human approval is required before publishing, deploying, saving memory, or taking another external action
+
+This pattern complements tracing and guardrails. Traces show what happened during the run; guardrails can block or flag unsafe behavior; a receipt summarizes the final work state so humans and downstream systems can audit the completion claim.
