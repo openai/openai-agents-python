@@ -34,6 +34,7 @@ class BackendSpanExporter(TracingExporter):
     _OPENAI_TRACING_INGEST_ENDPOINT = "https://api.openai.com/v1/traces/ingest"
     _OPENAI_TRACING_MAX_FIELD_BYTES = 100_000
     _OPENAI_TRACING_STRING_TRUNCATION_SUFFIX = "... [truncated]"
+    _MAX_JAVASCRIPT_SAFE_INTEGER = 9_007_199_254_740_991
     _OPENAI_TRACING_ALLOWED_USAGE_KEYS = frozenset(
         {
             "input_tokens",
@@ -251,7 +252,7 @@ class BackendSpanExporter(TracingExporter):
         for field_name in ("input", "output"):
             if field_name not in span_data:
                 continue
-            sanitized_field = self._truncate_span_field_value(span_data[field_name])
+            sanitized_field = self._sanitize_span_field_value(span_data[field_name])
             if sanitized_field is span_data[field_name]:
                 continue
             if not did_mutate:
@@ -343,6 +344,61 @@ class BackendSpanExporter(TracingExporter):
             return self._truncated_preview(value)
 
         return self._truncate_json_value_for_limit(sanitized_value, max_bytes)
+
+    def _sanitize_span_field_value(self, value: Any) -> Any:
+        normalized_value = self._normalize_trace_numbers_for_json_viewers(value)
+        truncated_value = self._truncate_span_field_value(normalized_value)
+        if truncated_value is value:
+            return value
+        return truncated_value
+
+    def _normalize_trace_numbers_for_json_viewers(self, value: Any) -> Any:
+        """Stringify unsafe integers so browser-based trace viewers do not round them."""
+        if isinstance(value, str):
+            try:
+                parsed_value = json.loads(value)
+            except (TypeError, ValueError):
+                return value
+            normalized_value = self._normalize_trace_numbers_for_json_viewers(parsed_value)
+            if normalized_value is parsed_value:
+                return value
+            return json.dumps(normalized_value, ensure_ascii=False, separators=(",", ":"))
+
+        if isinstance(value, bool):
+            return value
+
+        if isinstance(value, int):
+            if abs(value) > self._MAX_JAVASCRIPT_SAFE_INTEGER:
+                return str(value)
+            return value
+
+        if isinstance(value, dict):
+            normalized_dict: dict[Any, Any] | None = None
+            for key, nested_value in value.items():
+                normalized_nested = self._normalize_trace_numbers_for_json_viewers(nested_value)
+                if normalized_nested is nested_value:
+                    if normalized_dict is not None:
+                        normalized_dict[key] = nested_value
+                    continue
+                if normalized_dict is None:
+                    normalized_dict = dict(value)
+                normalized_dict[key] = normalized_nested
+            return value if normalized_dict is None else normalized_dict
+
+        if isinstance(value, list):
+            normalized_list: list[Any] | None = None
+            for index, nested_value in enumerate(value):
+                normalized_nested = self._normalize_trace_numbers_for_json_viewers(nested_value)
+                if normalized_nested is nested_value:
+                    if normalized_list is not None:
+                        normalized_list.append(nested_value)
+                    continue
+                if normalized_list is None:
+                    normalized_list = value[:index]
+                normalized_list.append(normalized_nested)
+            return value if normalized_list is None else normalized_list
+
+        return value
 
     def _truncate_json_value_for_limit(self, value: Any, max_bytes: int) -> Any:
         if self._value_json_size_bytes(value) <= max_bytes:

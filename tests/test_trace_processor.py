@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import subprocess
@@ -1136,6 +1137,97 @@ def test_sanitize_for_openai_tracing_api_keeps_small_input_without_mutation():
     }
 
     assert exporter._sanitize_for_openai_tracing_api(payload) is payload
+    exporter.close()
+
+
+def test_sanitize_for_openai_tracing_api_stringifies_unsafe_integers_in_json_input():
+    exporter = BackendSpanExporter(api_key="test_key")
+    unsafe_integer = BackendSpanExporter._MAX_JAVASCRIPT_SAFE_INTEGER + 1
+    payload = {
+        "object": "trace.span",
+        "span_data": {
+            "type": "function",
+            "input": json.dumps(
+                {
+                    "safe": BackendSpanExporter._MAX_JAVASCRIPT_SAFE_INTEGER,
+                    "unsafe": unsafe_integer,
+                    "nested": [unsafe_integer * -1],
+                    "flag": True,
+                }
+            ),
+        },
+    }
+
+    sanitized = exporter._sanitize_for_openai_tracing_api(payload)
+
+    assert sanitized is not payload
+    assert json.loads(sanitized["span_data"]["input"]) == {
+        "safe": BackendSpanExporter._MAX_JAVASCRIPT_SAFE_INTEGER,
+        "unsafe": str(unsafe_integer),
+        "nested": [str(unsafe_integer * -1)],
+        "flag": True,
+    }
+    assert json.loads(payload["span_data"]["input"])["unsafe"] == unsafe_integer
+    exporter.close()
+
+
+def test_sanitize_for_openai_tracing_api_stringifies_unsafe_integers_in_structured_output():
+    exporter = BackendSpanExporter(api_key="test_key")
+    unsafe_integer = BackendSpanExporter._MAX_JAVASCRIPT_SAFE_INTEGER + 1
+    payload = {
+        "object": "trace.span",
+        "span_data": {
+            "type": "function",
+            "output": {
+                "safe": BackendSpanExporter._MAX_JAVASCRIPT_SAFE_INTEGER,
+                "unsafe": unsafe_integer,
+                "nested": [{"value": unsafe_integer}],
+            },
+        },
+    }
+
+    sanitized = exporter._sanitize_for_openai_tracing_api(payload)
+
+    assert sanitized["span_data"]["output"] == {
+        "safe": BackendSpanExporter._MAX_JAVASCRIPT_SAFE_INTEGER,
+        "unsafe": str(unsafe_integer),
+        "nested": [{"value": str(unsafe_integer)}],
+    }
+    assert payload["span_data"]["output"]["unsafe"] == unsafe_integer
+    exporter.close()
+
+
+@patch("httpx.Client")
+def test_backend_span_exporter_keeps_unsafe_integers_for_custom_endpoint(mock_client):
+    class DummyItem:
+        tracing_api_key = None
+
+        def __init__(self):
+            self.unsafe_integer = BackendSpanExporter._MAX_JAVASCRIPT_SAFE_INTEGER + 1
+            self.exported_payload = {
+                "object": "trace.span",
+                "span_data": {
+                    "type": "function",
+                    "input": json.dumps({"unsafe": self.unsafe_integer}),
+                },
+            }
+
+        def export(self):
+            return self.exported_payload
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(
+        api_key="test_key",
+        endpoint="https://example.com/v1/traces/ingest",
+    )
+    item = DummyItem()
+    exporter.export([cast(Any, item)])
+
+    sent_payload = mock_client.return_value.post.call_args.kwargs["json"]["data"][0]
+    assert sent_payload["span_data"]["input"] == item.exported_payload["span_data"]["input"]
     exporter.close()
 
 
