@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Any, cast
@@ -1477,5 +1478,51 @@ async def test_delete_branch_removes_branch_only_base_messages():
             {"role": "user", "content": "main question"},
             {"role": "assistant", "content": "main answer"},
         ]
+    finally:
+        session.close()
+
+
+@pytest.mark.skipif(
+    not hasattr(sqlite3.Connection, "setlimit"),
+    reason="sqlite3.Connection.setlimit requires Python 3.11+",
+)
+async def test_cleanup_orphaned_messages_exceeds_sqlite_variable_limit():
+    """Regression for codex review on #3380.
+
+    The previous orphan cleanup built `DELETE ... WHERE id IN (?, ?, ...)` with
+    one bound parameter per orphan id, so deleting a branch with more orphans
+    than `SQLITE_MAX_VARIABLE_NUMBER` raised `OperationalError: too many SQL
+    variables`. We drop the per-connection variable limit so the failure
+    reproduces with a small number of rows; the set-based DELETE binds only
+    `session_id`, so the orphan count no longer matters.
+    """
+    session = AdvancedSQLiteSession(
+        session_id="cleanup_under_low_limit",
+        create_tables=True,
+    )
+
+    try:
+        SQLITE_LIMIT_VARIABLE_NUMBER = 9
+        low_limit = 5
+
+        with session._locked_connection() as conn:
+            conn.setlimit(SQLITE_LIMIT_VARIABLE_NUMBER, low_limit)
+
+            orphan_count = low_limit * 4
+            conn.executemany(
+                f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+                [(session.session_id, "{}") for _ in range(orphan_count)],
+            )
+            conn.commit()
+
+        deleted = await session._cleanup_orphaned_messages()
+        assert deleted == orphan_count
+
+        with session._locked_connection() as conn:
+            (remaining,) = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()
+        assert remaining == 0
     finally:
         session.close()

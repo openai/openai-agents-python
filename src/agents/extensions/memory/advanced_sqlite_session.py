@@ -487,30 +487,26 @@ class AdvancedSQLiteSession(SQLiteSession):
 
     def _cleanup_orphaned_messages_sync(self, conn: sqlite3.Connection) -> int:
         with closing(conn.cursor()) as cursor:
-            # Find messages without structure metadata.
+            # Delete branch-orphaned messages in a single set-based statement so
+            # we never bind one parameter per orphan id. The previous IN (?, ?, ...)
+            # form raised "too many SQL variables" once the cleanup batch grew past
+            # SQLITE_MAX_VARIABLE_NUMBER (999 on older SQLite builds, 32766 on newer).
             cursor.execute(
                 f"""
-                SELECT am.id
-                FROM {self.messages_table} am
-                LEFT JOIN message_structure ms ON am.id = ms.message_id
-                WHERE am.session_id = ? AND ms.message_id IS NULL
+                DELETE FROM {self.messages_table}
+                WHERE id IN (
+                    SELECT am.id
+                    FROM {self.messages_table} am
+                    LEFT JOIN message_structure ms ON am.id = ms.message_id
+                    WHERE am.session_id = ? AND ms.message_id IS NULL
+                )
             """,
                 (self.session_id,),
             )
 
-            orphaned_ids = [row[0] for row in cursor.fetchall()]
-
-            if not orphaned_ids:
-                return 0
-
-            placeholders = ",".join("?" * len(orphaned_ids))
-            cursor.execute(
-                f"DELETE FROM {self.messages_table} WHERE id IN ({placeholders})",
-                orphaned_ids,
-            )
-
             deleted_count = cursor.rowcount
-            self._logger.info(f"Cleaned up {deleted_count} orphaned messages")
+            if deleted_count > 0:
+                self._logger.info(f"Cleaned up {deleted_count} orphaned messages")
             return deleted_count
 
     def _classify_message_type(self, item: TResponseInputItem) -> str:
