@@ -684,7 +684,12 @@ class ItemHelpers:
             return ""
         last_content = message.content[-1]
         if isinstance(last_content, ResponseOutputText):
-            return last_content.text
+            # ``last_content.text`` is typed as ``str`` per the Responses API schema,
+            # but provider gateways (e.g. LiteLLM) and ``model_construct`` paths during
+            # streaming have been observed surfacing ``None``. Coerce so callers relying
+            # on the ``-> str`` return type don't see a ``None``. Same rationale as
+            # ``extract_text`` below.
+            return last_content.text or ""
         elif isinstance(last_content, ResponseOutputRefusal):
             return last_content.refusal
         else:

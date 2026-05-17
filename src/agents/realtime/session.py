@@ -1007,8 +1007,14 @@ class RealtimeSession(RealtimeModelListener):
                 )
                 if result.output.tripwire_triggered:
                     triggered_results.append(result)
-            except Exception:
-                # Continue with other guardrails if one fails
+            except Exception as exc:
+                logger.warning(
+                    "Output guardrail %r raised %s: %s; skipping it.",
+                    guardrail.get_name(),
+                    type(exc).__name__,
+                    exc,
+                )
+                logger.debug("Output guardrail failure details.", exc_info=True)
                 continue
 
         if triggered_results:

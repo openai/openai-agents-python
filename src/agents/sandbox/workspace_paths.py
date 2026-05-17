@@ -114,6 +114,8 @@ class WorkspacePathPolicy:
     ) -> None:
         self._root = Path(root)
         self._sandbox_root = coerce_posix_path(root)
+        if not self._root.is_absolute() and not self._sandbox_root.is_absolute():
+            raise ValueError("sandbox workspace root must be absolute")
         self._root_is_existing_host_path = self._path_exists(self._root)
         self._extra_path_grants = extra_path_grants
 

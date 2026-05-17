@@ -732,6 +732,27 @@ async def test_copied_function_tool_invalid_input_uses_current_name(copy_style: 
         )
 
 
+def test_function_tool_does_not_mutate_params_json_schema() -> None:
+    async def noop(ctx: ToolContext[Any], input: str) -> str:
+        return ""
+
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+    schema_snapshot = copy.deepcopy(schema)
+
+    tool = FunctionTool(
+        name="t",
+        description="d",
+        params_json_schema=schema,
+        on_invoke_tool=noop,
+        strict_json_schema=True,
+    )
+
+    assert schema == schema_snapshot
+    assert tool.params_json_schema is not schema
+    assert tool.params_json_schema["additionalProperties"] is False
+    assert tool.params_json_schema["required"] == ["x"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("input_json", ["[]", '"value"', "123", "null", "true"])
 async def test_function_tool_rejects_non_object_json_input(input_json: str) -> None:

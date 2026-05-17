@@ -79,6 +79,12 @@ _VERCEL_TRANSIENT_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
     httpx.ProtocolError,
 )
 
+# Sandbox status values from which the sandbox can still transition to RUNNING.
+# Only "pending" qualifies: a freshly created sandbox transitions PENDING -> RUNNING.
+# Other non-RUNNING states ("stopping", "stopped", "failed", "aborted",
+# "snapshotting") cannot reach RUNNING, so waiting is futile.
+_VERCEL_TRANSIENT_SANDBOX_STATUSES: frozenset[str] = frozenset({"pending"})
+
 
 def _is_transient_create_error(exc: BaseException) -> bool:
     if exception_chain_has_status_code(exc, {408, 425, 429, 500, 502, 503, 504}):
@@ -754,15 +760,22 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
                     project_id=resolved_project_id,
                     team_id=resolved_team_id,
                 )
-                # XXX(scotttrinh): This will wait even if in a terminal state.
-                # We should make wait_for_status smarter about the possible
-                # transitions to avoid waiting for a status if it's impossible
-                # to transition to it from the current status.
-                await sandbox.wait_for_status(
-                    SandboxStatus.RUNNING,
-                    timeout=DEFAULT_VERCEL_WAIT_FOR_RUNNING_TIMEOUT_S,
-                )
-                reconnected = True
+                current_status = str(sandbox.status)
+                if current_status == str(SandboxStatus.RUNNING):
+                    # Already running; skip the wait entirely.
+                    reconnected = True
+                elif current_status in _VERCEL_TRANSIENT_SANDBOX_STATUSES:
+                    # Still transitioning toward RUNNING (e.g. PENDING); wait normally.
+                    await sandbox.wait_for_status(
+                        SandboxStatus.RUNNING,
+                        timeout=DEFAULT_VERCEL_WAIT_FOR_RUNNING_TIMEOUT_S,
+                    )
+                    reconnected = True
+                else:
+                    # Cannot reach RUNNING from here (STOPPING, STOPPED, FAILED,
+                    # ABORTED, SNAPSHOTTING). Drop the handle and recreate below.
+                    await sandbox.client.aclose()
+                    sandbox = None
             except TimeoutError:
                 if sandbox is not None:
                     await sandbox.client.aclose()

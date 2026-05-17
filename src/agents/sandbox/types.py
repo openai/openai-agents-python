@@ -181,5 +181,8 @@ class ExposedPortEndpoint:
             base = f"{prefix}://{host}:{self.port}/"
 
         if self.query:
-            return f"{base}?{self.query}"
+            query = self.query[1:] if self.query.startswith("?") else self.query
+            if query:
+                return f"{base}?{query}"
+
         return base
