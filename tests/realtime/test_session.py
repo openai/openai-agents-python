@@ -62,7 +62,7 @@ from agents.realtime.model_inputs import (
 )
 from agents.realtime.session import REJECTION_MESSAGE, RealtimeSession, _serialize_tool_output
 from agents.run_context import RunContextWrapper
-from agents.tool import FunctionTool, tool_namespace
+from agents.tool import FunctionTool, function_tool, tool_namespace
 from agents.tool_context import ToolContext
 
 
@@ -222,6 +222,33 @@ async def test_handle_tool_call_handoff_invalid_result_raises():
 
 
 @pytest.mark.asyncio
+async def test_handle_tool_call_rejects_ambiguous_function_handoff_name():
+    model = _DummyModel()
+    target = RealtimeAgent(name="billing")
+    tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
+    handoff = Handoff(
+        tool_name="transfer_to_billing",
+        tool_description="Transfer to billing",
+        input_json_schema={},
+        on_invoke_handoff=AsyncMock(return_value=target),
+        input_filter=None,
+        agent_name=target.name,
+        is_enabled=True,
+    )
+    agent = RealtimeAgent(name="agent", tools=[tool], handoffs=[handoff])
+    session = RealtimeSession(model, agent, None)
+
+    with pytest.raises(UserError, match="function tool and handoff"):
+        await session._handle_tool_call(
+            RealtimeModelToolCallEvent(
+                name="transfer_to_billing",
+                call_id="c1",
+                arguments="{}",
+            )
+        )
+
+
+@pytest.mark.asyncio
 async def test_on_guardrail_task_done_emits_error_event():
     model = _DummyModel()
     agent = RealtimeAgent(name="agent")
@@ -273,6 +300,52 @@ async def test_get_handoffs_async_is_enabled(monkeypatch):
     enabled = await RealtimeSession._get_handoffs(a, session._context_wrapper)
     # Both should be enabled
     assert len(enabled) == 2
+
+
+@pytest.mark.asyncio
+async def test_updated_model_settings_ignores_disabled_handoff_name_conflict():
+    tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
+    disabled_handoff = Handoff(
+        tool_name="transfer_to_billing",
+        tool_description="Transfer to billing",
+        input_json_schema={},
+        on_invoke_handoff=AsyncMock(return_value=RealtimeAgent(name="billing")),
+        input_filter=None,
+        agent_name="billing",
+        is_enabled=False,
+    )
+    agent = RealtimeAgent(name="agent", tools=[tool], handoffs=[disabled_handoff])
+    session = RealtimeSession(_DummyModel(), agent, None)
+
+    settings = await session._get_updated_model_settings_from_agent(None, agent)
+
+    assert settings["tools"] == [tool]
+    assert settings["handoffs"] == []
+
+
+@pytest.mark.asyncio
+async def test_updated_model_settings_validates_final_tool_names_after_overrides():
+    agent_tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
+    agent_handoff = Handoff(
+        tool_name="transfer_to_billing",
+        tool_description="Transfer to billing",
+        input_json_schema={},
+        on_invoke_handoff=AsyncMock(return_value=RealtimeAgent(name="billing")),
+        input_filter=None,
+        agent_name="billing",
+        is_enabled=True,
+    )
+    override_tool = function_tool(lambda: "ok", name_override="lookup_account")
+    agent = RealtimeAgent(name="agent", tools=[agent_tool], handoffs=[agent_handoff])
+    session = RealtimeSession(_DummyModel(), agent, None)
+
+    settings = await session._get_updated_model_settings_from_agent(
+        {"tools": [override_tool], "handoffs": []},
+        agent,
+    )
+
+    assert settings["tools"] == [override_tool]
+    assert settings["handoffs"] == []
 
 
 class MockRealtimeModel(RealtimeModel):

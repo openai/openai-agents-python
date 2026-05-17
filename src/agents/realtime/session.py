@@ -25,6 +25,7 @@ from ..run_context import RunContextWrapper, TContext
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, invoke_function_tool
 from ..tool_context import ToolContext
 from ..util._approvals import evaluate_needs_approval_setting
+from ._tool_validation import validate_realtime_tool_names
 from .agent import RealtimeAgent
 from .config import RealtimeRunConfig, RealtimeSessionModelSettings, RealtimeUserInput
 from .events import (
@@ -741,6 +742,7 @@ class RealtimeSession(RealtimeModelListener):
                 agent.get_all_tools(self._context_wrapper),
                 self._get_handoffs(agent, self._context_wrapper),
             )
+            validate_realtime_tool_names(tools, handoffs)
             function_map = {tool.name: tool for tool in tools if isinstance(tool, FunctionTool)}
             handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
 
@@ -1276,6 +1278,11 @@ class RealtimeSession(RealtimeModelListener):
         # Apply starting settings (from model config) next
         if starting_settings:
             updated_settings.update(starting_settings)
+
+        validate_realtime_tool_names(
+            updated_settings.get("tools", []),
+            updated_settings.get("handoffs", []),
+        )
 
         disable_tracing = self._run_config.get("tracing_disabled", False)
         if disable_tracing:
