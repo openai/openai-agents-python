@@ -427,6 +427,35 @@ class TestEventHandling:
         assert isinstance(done_session_event, RealtimeAudioEnd)
 
     @pytest.mark.asyncio
+    async def test_audio_done_marks_assistant_history_item_completed(self, mock_model, mock_agent):
+        """Test that audio done events complete matching assistant history items."""
+        session = RealtimeSession(
+            mock_model, mock_agent, None, run_config={"async_tool_calls": False}
+        )
+        session._history = [
+            AssistantMessageItem(
+                item_id="item_1",
+                role="assistant",
+                status="in_progress",
+                content=[AssistantAudio(audio=None, transcript="Hello")],
+            )
+        ]
+
+        await session.on_event(RealtimeModelAudioDoneEvent(item_id="item_1", content_index=0))
+
+        updated_item = cast(AssistantMessageItem, session._history[0])
+        assert updated_item.status == "completed"
+
+        assert session._event_queue.qsize() == 3
+        await session._event_queue.get()  # raw event
+        audio_done_event = await session._event_queue.get()
+        assert isinstance(audio_done_event, RealtimeAudioEnd)
+        history_event = await session._event_queue.get()
+        assert isinstance(history_event, RealtimeHistoryUpdated)
+        history_item = cast(AssistantMessageItem, history_event.history[0])
+        assert history_item.status == "completed"
+
+    @pytest.mark.asyncio
     async def test_turn_events_transformation(self, mock_model, mock_agent):
         """Test that turn start/end events are properly transformed"""
         session = RealtimeSession(

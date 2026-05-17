@@ -303,6 +303,12 @@ class RealtimeSession(RealtimeModelListener):
                     info=self._event_info, item_id=event.item_id, content_index=event.content_index
                 )
             )
+            new_history = self._mark_assistant_item_completed(self._history, event.item_id)
+            if new_history is not self._history:
+                self._history = new_history
+                await self._put_event(
+                    RealtimeHistoryUpdated(info=self._event_info, history=self._history)
+                )
         elif event.type == "input_audio_transcription_completed":
             prev_len = len(self._history)
             self._history = RealtimeSession._get_new_history(self._history, event)
@@ -785,6 +791,30 @@ class RealtimeSession(RealtimeModelListener):
                     error={"message": error_message},
                 )
             )
+
+    @staticmethod
+    def _mark_assistant_item_completed(
+        old_history: list[RealtimeItem],
+        item_id: str,
+    ) -> list[RealtimeItem]:
+        existing_index = next(
+            (i for i, item in enumerate(old_history) if item.item_id == item_id),
+            None,
+        )
+        if existing_index is None:
+            return old_history
+
+        existing_item = old_history[existing_index]
+        if (
+            existing_item.type != "message"
+            or existing_item.role != "assistant"
+            or existing_item.status == "completed"
+        ):
+            return old_history
+
+        new_history = old_history.copy()
+        new_history[existing_index] = existing_item.model_copy(update={"status": "completed"})
+        return new_history
 
     @classmethod
     def _get_new_history(
