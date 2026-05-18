@@ -1109,7 +1109,7 @@ class TestToolCallExecution:
         with pytest.raises(ToolTimeoutError, match="timed out"):
             await session._handle_tool_call(tool_call_event)
 
-        assert len(mock_model.sent_tool_outputs) == 0
+        assert len(mock_model.sent_tool_outputs) == 1
         assert session._event_queue.qsize() == 1
 
         tool_start_event = await session._event_queue.get()
@@ -1196,7 +1196,7 @@ class TestToolCallExecution:
 
         assert isinstance(session._stored_exception, ToolTimeoutError)
         assert session._stored_exception.tool_name == "slow_tool"
-        assert len(mock_model.sent_tool_outputs) == 0
+        assert len(mock_model.sent_tool_outputs) == 1
 
         events = []
         while True:
@@ -1626,8 +1626,8 @@ class TestToolCallExecution:
         assert isinstance(tool_start_event, RealtimeToolStart)
         assert tool_start_event.arguments == "{}"
 
-        # But no tool output should have been sent and no end event queued
-        assert len(mock_model.sent_tool_outputs) == 0
+        # An error tool output should be sent to the model before re-raising
+        assert len(mock_model.sent_tool_outputs) == 1
 
     @pytest.mark.asyncio
     async def test_tool_call_with_complex_arguments(
