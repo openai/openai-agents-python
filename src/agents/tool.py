@@ -389,6 +389,18 @@ class FunctionTool:
     _emit_tool_origin: bool = field(default=True, kw_only=True, repr=False)
     """Whether runtime item generation should emit tool origin metadata for this tool."""
 
+    _method_tool_factory: Callable[[Any], FunctionTool] | None = field(
+        default=None,
+        kw_only=True,
+        repr=False,
+    )
+    """Internal descriptor hook used for instance methods decorated with `@function_tool`."""
+
+    def __get__(self, instance: Any, owner: type[Any] | None = None) -> FunctionTool:
+        if instance is None or self._method_tool_factory is None:
+            return self
+        return self._method_tool_factory(instance)
+
     @property
     def qualified_name(self) -> str:
         """Return the public qualified name used to identify this function tool."""
@@ -1827,8 +1839,17 @@ def function_tool(
             explicitly loads it.
     """
 
-    def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
+    def _is_instance_method_tool(the_func: ToolFunction[...]) -> bool:
+        parameters = tuple(inspect.signature(the_func).parameters.values())
+        return bool(parameters) and parameters[0].name == "self"
+
+    def _create_function_tool(
+        the_func: ToolFunction[...],
+        *,
+        method_tool_instance: Any | None = None,
+    ) -> FunctionTool:
         is_sync_function_tool = not inspect.iscoroutinefunction(the_func)
+        is_instance_method_tool = _is_instance_method_tool(the_func)
         schema = function_schema(
             func=the_func,
             name_override=name_override,
@@ -1836,9 +1857,15 @@ def function_tool(
             docstring_style=docstring_style,
             use_docstring_info=use_docstring_info,
             strict_json_schema=strict_mode,
+            skip_first_parameter=is_instance_method_tool,
         )
 
         async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
+            if is_instance_method_tool and method_tool_instance is None:
+                raise UserError(
+                    f"Instance method tool {schema.name} must be accessed from an instance"
+                )
+
             tool_name = ctx.tool_name
             json_data = _parse_function_tool_json_input(tool_name=tool_name, input_json=input)
             _log_function_tool_invocation(tool_name=tool_name, input_json=input)
@@ -1857,16 +1884,16 @@ def function_tool(
             if not _debug.DONT_LOG_TOOL_DATA:
                 logger.debug(f"Tool call args: {args}, kwargs: {kwargs_dict}")
 
+            leading_args: list[Any] = []
+            if is_instance_method_tool:
+                leading_args.append(method_tool_instance)
+            if schema.takes_context:
+                leading_args.append(ctx)
+
             if not is_sync_function_tool:
-                if schema.takes_context:
-                    result = await the_func(ctx, *args, **kwargs_dict)
-                else:
-                    result = await the_func(*args, **kwargs_dict)
+                result = await the_func(*leading_args, *args, **kwargs_dict)
             else:
-                if schema.takes_context:
-                    result = await asyncio.to_thread(the_func, ctx, *args, **kwargs_dict)
-                else:
-                    result = await asyncio.to_thread(the_func, *args, **kwargs_dict)
+                result = await asyncio.to_thread(the_func, *leading_args, *args, **kwargs_dict)
 
             if _debug.DONT_LOG_TOOL_DATA:
                 logger.debug(f"Tool {tool_name} completed.")
@@ -1897,6 +1924,11 @@ def function_tool(
             defer_loading=defer_loading,
             sync_invoker=is_sync_function_tool,
         )
+        if is_instance_method_tool and method_tool_instance is None:
+            function_tool._method_tool_factory = lambda instance: _create_function_tool(
+                the_func,
+                method_tool_instance=instance,
+            )
         return function_tool
 
     # If func is actually a callable, we were used as @function_tool with no parentheses
