@@ -34,6 +34,7 @@ from ...models._response_terminal import (
     response_terminal_failure_error,
 )
 from ...models._retry_runtime import should_disable_provider_managed_retries
+from ...models._trace import model_config_for_trace
 from ...models.chatcmpl_converter import Converter
 from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
@@ -467,12 +468,11 @@ class AnyLLMModel(Model):
     ) -> ModelResponse:
         with generation_span(
             model=str(self.model),
-            model_config=model_settings.to_json_dict()
-            | {
-                "base_url": str(self.base_url or ""),
-                "provider": self._provider_name,
-                "model_impl": "any-llm",
-            },
+            model_config=model_config_for_trace(
+                model_settings,
+                base_url=self.base_url or "",
+                extra_config={"provider": self._provider_name, "model_impl": "any-llm"},
+            ),
             disabled=tracing.is_disabled(),
         ) as span_generation:
             response = await self._fetch_chat_response(
@@ -570,12 +570,11 @@ class AnyLLMModel(Model):
     ) -> AsyncIterator[TResponseStreamEvent]:
         with generation_span(
             model=str(self.model),
-            model_config=model_settings.to_json_dict()
-            | {
-                "base_url": str(self.base_url or ""),
-                "provider": self._provider_name,
-                "model_impl": "any-llm",
-            },
+            model_config=model_config_for_trace(
+                model_settings,
+                base_url=self.base_url or "",
+                extra_config={"provider": self._provider_name, "model_impl": "any-llm"},
+            ),
             disabled=tracing.is_disabled(),
         ) as span_generation:
             response, stream = await self._fetch_chat_response(

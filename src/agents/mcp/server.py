@@ -99,7 +99,7 @@ def _create_default_streamable_http_client(
     timeout: httpx.Timeout | None = None,
     auth: httpx.Auth | None = None,
 ) -> httpx.AsyncClient:
-    kwargs: dict[str, Any] = {"follow_redirects": True}
+    kwargs: dict[str, Any] = {"follow_redirects": False}
     if timeout is not None:
         kwargs["timeout"] = timeout
     if headers is not None:
@@ -1441,8 +1441,9 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 auth=self.params.get("auth"),
                 transport_factory=_InitializedNotificationTolerantStreamableHTTPTransport,
             )
-        if httpx_client_factory is not None:
-            kwargs["httpx_client_factory"] = httpx_client_factory
+        kwargs["httpx_client_factory"] = (
+            httpx_client_factory or _create_default_streamable_http_client
+        )
         if "auth" in self.params:
             kwargs["auth"] = self.params["auth"]
         return streamablehttp_client(**kwargs)
