@@ -14,9 +14,17 @@ from agents.tracing import (
     custom_span,
     function_span,
     generation_span,
+    guardrail_span,
     handoff_span,
+    mcp_tools_span,
+    response_span,
     set_trace_processors,
+    speech_group_span,
+    speech_span,
+    task_span,
     trace,
+    transcription_span,
+    turn_span,
 )
 from agents.tracing.spans import SpanError
 
@@ -517,6 +525,76 @@ def test_processor_can_lookup_trace_metadata_by_span_trace_id():
 
     assert processor.looked_up_metadata == metadata
     assert processor.span_trace_metadata == metadata
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(lambda md: agent_span(name="a", metadata=md), id="agent"),
+        pytest.param(lambda md: task_span(name="t", metadata=md), id="task"),
+        pytest.param(
+            lambda md: turn_span(turn=1, agent_name="a", metadata=md),
+            id="turn",
+        ),
+        pytest.param(lambda md: response_span(metadata=md), id="response"),
+        pytest.param(lambda md: function_span(name="fn", metadata=md), id="function"),
+        pytest.param(lambda md: generation_span(metadata=md), id="generation"),
+        pytest.param(
+            lambda md: handoff_span(from_agent="a", to_agent="b", metadata=md),
+            id="handoff",
+        ),
+        pytest.param(lambda md: guardrail_span(name="g", metadata=md), id="guardrail"),
+        pytest.param(lambda md: mcp_tools_span(server="s", metadata=md), id="mcp_tools"),
+        pytest.param(
+            lambda md: custom_span(name="c", data={"k": "v"}, metadata=md),
+            id="custom",
+        ),
+        pytest.param(
+            lambda md: transcription_span(model="m", metadata=md),
+            id="transcription",
+        ),
+        pytest.param(lambda md: speech_span(model="m", metadata=md), id="speech"),
+        pytest.param(
+            lambda md: speech_group_span(input="hi", metadata=md),
+            id="speech_group",
+        ),
+    ],
+)
+def test_span_factories_accept_metadata_and_export_it(factory):
+    """Issue #1844: every public span helper must accept a ``metadata`` kwarg
+    and surface it under the exported payload's top-level ``metadata`` field.
+
+    Covers all 13 public factories exported from ``agents.tracing``.
+    """
+
+    custom_metadata = {"agent_name": "support", "current_turn": 3}
+
+    with trace(workflow_name="test"):
+        with factory(custom_metadata) as span:
+            pass
+
+        export = span.export()
+
+    assert export is not None
+    assert export.get("metadata") == custom_metadata
+
+
+def test_span_data_metadata_can_be_mutated_after_creation():
+    """Code holding a direct reference to a span can mutate
+    ``span.span_data.metadata`` after construction and the value will appear
+    in the exported payload.
+    """
+
+    custom_metadata = {"current_turn": 2}
+
+    with trace(workflow_name="test"):
+        with response_span() as span:
+            span.span_data.metadata = custom_metadata
+
+        export = span.export()
+
+    assert export is not None
+    assert export.get("metadata") == custom_metadata
 
 
 def test_trace_to_json_only_includes_tracing_api_key_when_requested():
