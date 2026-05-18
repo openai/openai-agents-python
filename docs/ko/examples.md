@@ -120,6 +120,24 @@ SDK의 다양한 샘플 구현은 [리포지토리](https://github.com/openai/op
 -   **[research_bot](https://github.com/openai/openai-agents-python/tree/main/examples/research_bot):**
     복잡한 다중 에이전트 연구 워크플로를 보여 주는 간단한 딥 리서치 클론입니다.
 
+-   **[sandbox](https://github.com/openai/openai-agents-python/tree/main/examples/sandbox):**
+    격리된 워크스페이스에서 에이전트를 실행하는 방법을 보여 주는 예제입니다([Sandbox 에이전트 빠른 시작](sandbox_agents.md) 참조). 포함 항목:
+
+    -   매니페스트를 이용한 기본 sandbox 세션 (`examples/sandbox/basic.py`)
+    -   sandbox 기반 에이전트를 사용하는 핸드오프 (`examples/sandbox/handoffs.py`)
+    -   워크스페이스 capabilities를 갖는 sandbox 에이전트 구성 (`examples/sandbox/sandbox_agent_capabilities.py`)
+    -   sandbox capabilities와 호스트 정의 도구 결합 (`examples/sandbox/sandbox_agent_with_tools.py`)
+    -   다른 에이전트의 도구로서 sandbox 에이전트 노출 (`examples/sandbox/sandbox_agents_as_tools.py`)
+    -   원격 sandbox 스냅샷으로부터 시작 (`examples/sandbox/sandbox_agent_with_remote_snapshot.py`)
+    -   sandbox 실행 간 에이전트 메모리 (`examples/sandbox/memory.py`)
+    -   공유 워크스페이스에서의 다중 에이전트 멀티턴 메모리 (`examples/sandbox/memory_multi_agent_multiturn.py`)
+    -   Docker sandbox에서 S3 기반 메모리 (`examples/sandbox/memory_s3.py`)
+    -   Unix 로컬 sandbox에서의 대화형 가상 터미널 (`examples/sandbox/unix_local_pty.py`)
+    -   Unix 로컬 sandbox 백엔드에 직접 실행 (`examples/sandbox/unix_local_runner.py`)
+    -   클라우드 백엔드 확장 (E2B, Modal, Daytona, Blaxel, Cloudflare, Vercel, Runloop) (`examples/sandbox/extensions/`)
+    -   정책 에이전트, 메모리, 인간 승인을 포함한 의료 지원 워크플로 (`examples/sandbox/healthcare_support/`)
+    -   튜토리얼: `sandbox_resume`, `dataroom_qa`, `dataroom_metric_extract`, `repo_code_review`, `vision_website_clone`
+
 -   **[tools](https://github.com/openai/openai-agents-python/tree/main/examples/tools):**
     다음과 같은 OpenAI 호스트하는 도구와 실험적 Codex 도구 기능을 구현하는 방법을 알아봅니다:
 

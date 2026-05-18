@@ -120,6 +120,24 @@ SDK のさまざまなサンプル実装は、[リポジトリ](https://github.c
 -   **[research_bot](https://github.com/openai/openai-agents-python/tree/main/examples/research_bot):**
     複雑なマルチエージェントリサーチワークフローを示す、シンプルなディープリサーチのクローンです。
 
+-   **[sandbox](https://github.com/openai/openai-agents-python/tree/main/examples/sandbox):**
+    分離されたワークスペースでエージェントを実行する方法を示すコード例です（[Sandbox エージェントのクイックスタート](sandbox_agents.md)を参照）。以下を含みます:
+
+    -   マニフェストからの基本的な sandbox セッション (`examples/sandbox/basic.py`)
+    -   sandbox バックエンドエージェントを使用したハンドオフ (`examples/sandbox/handoffs.py`)
+    -   ワークスペース capabilities を持つ sandbox エージェントの設定 (`examples/sandbox/sandbox_agent_capabilities.py`)
+    -   sandbox capabilities とホスト定義ツールの組み合わせ (`examples/sandbox/sandbox_agent_with_tools.py`)
+    -   別のエージェントのツールとして sandbox エージェントを公開 (`examples/sandbox/sandbox_agents_as_tools.py`)
+    -   リモート sandbox スナップショットからの起動 (`examples/sandbox/sandbox_agent_with_remote_snapshot.py`)
+    -   sandbox 実行をまたいだエージェントメモリ (`examples/sandbox/memory.py`)
+    -   共有ワークスペースでのマルチエージェント・マルチターンメモリ (`examples/sandbox/memory_multi_agent_multiturn.py`)
+    -   Docker sandbox での S3 バックエンドメモリ (`examples/sandbox/memory_s3.py`)
+    -   Unix ローカル sandbox での仮想端末 (`examples/sandbox/unix_local_pty.py`)
+    -   Unix ローカル sandbox バックエンドへの直接実行 (`examples/sandbox/unix_local_runner.py`)
+    -   クラウドバックエンド拡張 (E2B、Modal、Daytona、Blaxel、Cloudflare、Vercel、Runloop) (`examples/sandbox/extensions/`)
+    -   ポリシーエージェント・メモリ・人間承認を含むヘルスケアサポートワークフロー (`examples/sandbox/healthcare_support/`)
+    -   チュートリアル: `sandbox_resume`、`dataroom_qa`、`dataroom_metric_extract`、`repo_code_review`、`vision_website_clone`
+
 -   **[tools](https://github.com/openai/openai-agents-python/tree/main/examples/tools):**
     OpenAI がホストするツールや、次のような実験的な Codex ツール群の実装方法を学びます:
 
