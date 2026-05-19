@@ -2431,7 +2431,7 @@ wheels = [
 
 [[package]]
 name = "openai-agents"
-version = "0.17.2"
+version = "0.17.3"
 source = { editable = "." }
 dependencies = [
     { name = "griffelib" },
