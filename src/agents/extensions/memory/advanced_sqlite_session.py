@@ -133,26 +133,15 @@ class AdvancedSQLiteSession(SQLiteSession):
         def _add_items_sync():
             """Synchronous helper to add items and structure metadata together."""
             with self._locked_connection() as conn:
-                # Keep both writes in one critical section so message IDs and metadata stay aligned.
-                self._insert_items(conn, items)
-                conn.commit()
+                # Both writes are in one transaction so a metadata failure rolls
+                # back the message rows too and the caller gets a clean exception.
                 try:
+                    self._insert_items(conn, items)
                     self._insert_structure_metadata(conn, items)
                     conn.commit()
-                except Exception as e:
+                except Exception:
                     conn.rollback()
-                    self._logger.error(
-                        f"Failed to add structure metadata for session {self.session_id}: {e}"
-                    )
-                    try:
-                        deleted_count = self._cleanup_orphaned_messages_sync(conn)
-                        if deleted_count:
-                            conn.commit()
-                        else:
-                            conn.rollback()
-                    except Exception as cleanup_error:
-                        conn.rollback()
-                        self._logger.error(f"Failed to cleanup orphaned messages: {cleanup_error}")
+                    raise
 
         await asyncio.to_thread(_add_items_sync)
 
