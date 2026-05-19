@@ -46,6 +46,17 @@ RealtimeAudioFormat: TypeAlias = (
 """The audio format for realtime audio streams."""
 
 
+class RealtimeCustomVoice(TypedDict):
+    """A custom Realtime voice object."""
+
+    id: str
+    """The custom voice ID."""
+
+
+RealtimeVoice: TypeAlias = str | RealtimeCustomVoice | Mapping[str, Any]
+"""The voice to use for realtime audio output."""
+
+
 RealtimeReasoningEffort: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh"] | str
 """The reasoning effort for realtime model responses."""
 
@@ -124,7 +135,7 @@ class RealtimeAudioOutputConfig(TypedDict, total=False):
     """Configuration for audio output in realtime sessions."""
 
     format: RealtimeAudioFormat | OpenAIRealtimeAudioFormats
-    voice: str
+    voice: RealtimeVoice
     speed: float
 
 
@@ -163,7 +174,7 @@ class RealtimeSessionModelSettings(TypedDict):
     audio: NotRequired[RealtimeAudioConfig]
     """The audio configuration for the session."""
 
-    voice: NotRequired[str]
+    voice: NotRequired[RealtimeVoice]
     """The voice to use for audio output."""
 
     speed: NotRequired[float]

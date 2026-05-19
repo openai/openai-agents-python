@@ -7,7 +7,7 @@ requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "OpenAI", email = "support@openai.com" }]
 dependencies = [
-    "openai>=2.26.0,<3",
+    "openai>=2.36.0,<3",
     "pydantic>=2.12.2, <3",
     "griffelib>=2, <3",
     "typing-extensions>=4.12.2, <5",
