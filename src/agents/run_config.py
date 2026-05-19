@@ -63,13 +63,14 @@ class CallModelData(Generic[TContext]):
 
 CallModelInputFilter = Callable[[CallModelData[Any]], MaybeAwaitable[ModelInputData]]
 ReasoningItemIdPolicy = Literal["preserve", "omit"]
+ToolNotFoundBehavior = Literal["raise_error", "return_error_to_model"]
 
 
 @dataclass
 class ToolErrorFormatterArgs(Generic[TContext]):
     """Data passed to ``RunConfig.tool_error_formatter`` callbacks."""
 
-    kind: Literal["approval_rejected"]
+    kind: Literal["approval_rejected", "tool_not_found"]
     """The category of tool error being formatted."""
 
     tool_type: Literal["function", "computer", "shell", "apply_patch", "custom"]
@@ -319,6 +320,14 @@ class RunConfig:
 
     tool_execution: ToolExecutionConfig | None = None
     """Optional SDK-side execution settings for local tool calls."""
+
+    tool_not_found_behavior: ToolNotFoundBehavior = "raise_error"
+    """Controls unresolved function tool calls emitted by the model.
+
+    - ``"raise_error"`` preserves the default behavior and raises ``ModelBehaviorError``.
+    - ``"return_error_to_model"`` returns a model-visible ``function_call_output`` error and lets
+      the run continue.
+    """
 
 
 class RunOptions(TypedDict, Generic[TContext]):
