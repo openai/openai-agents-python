@@ -691,7 +691,7 @@ class ItemHelpers:
             # ``extract_text`` below.
             return last_content.text or ""
         elif isinstance(last_content, ResponseOutputRefusal):
-            return last_content.refusal
+            return last_content.refusal or ""
         else:
             raise ModelBehaviorError(f"Unexpected content type: {type(last_content)}")
 
