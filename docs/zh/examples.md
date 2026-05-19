@@ -120,24 +120,6 @@ search:
 -   **[research_bot](https://github.com/openai/openai-agents-python/tree/main/examples/research_bot):**
     一个简单的深度研究克隆，展示复杂的多智能体研究工作流。
 
--   **[sandbox](https://github.com/openai/openai-agents-python/tree/main/examples/sandbox):**
-    展示如何在隔离工作区中运行智能体的示例（参见[沙盒智能体快速入门](sandbox_agents.md)），包括：
-
-    -   从清单创建基本沙盒会话（`examples/sandbox/basic.py`）
-    -   使用沙盒后端智能体进行任务转移（`examples/sandbox/handoffs.py`）
-    -   配置具备工作区能力的沙盒智能体（`examples/sandbox/sandbox_agent_capabilities.py`）
-    -   将沙盒能力与主机定义工具结合（`examples/sandbox/sandbox_agent_with_tools.py`）
-    -   将沙盒智能体作为另一个智能体的工具公开（`examples/sandbox/sandbox_agents_as_tools.py`）
-    -   从远程沙盒快照启动（`examples/sandbox/sandbox_agent_with_remote_snapshot.py`）
-    -   跨沙盒运行的智能体记忆（`examples/sandbox/memory.py`）
-    -   共享工作区中的多智能体多轮记忆（`examples/sandbox/memory_multi_agent_multiturn.py`）
-    -   Docker 沙盒中基于 S3 的记忆存储（`examples/sandbox/memory_s3.py`）
-    -   Unix 本地沙盒中的交互式伪终端（`examples/sandbox/unix_local_pty.py`）
-    -   直接使用 Unix 本地沙盒后端运行（`examples/sandbox/unix_local_runner.py`）
-    -   云后端扩展（E2B、Modal、Daytona、Blaxel、Cloudflare、Vercel、Runloop）位于 `examples/sandbox/extensions/`
-    -   包含策略智能体、记忆和人工审批的医疗支持工作流（`examples/sandbox/healthcare_support/`）
-    -   教程：`sandbox_resume`、`dataroom_qa`、`dataroom_metric_extract`、`repo_code_review`、`vision_website_clone`
-
 -   **[tools](https://github.com/openai/openai-agents-python/tree/main/examples/tools):**
     了解如何实现由OpenAI托管的工具以及实验性 Codex 工具，例如：
 
