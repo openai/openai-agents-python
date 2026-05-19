@@ -8,6 +8,7 @@ import pytest
 from agents import (
     Agent,
     Connector,
+    ConnectorRegistry,
     HostedConnectorAuthorization,
     HostedMCPTool,
     RunContextWrapper,
@@ -248,6 +249,116 @@ def test_connector_from_package_skips_app_manifest_without_authorization(tmp_pat
     )
 
     connector = Connector.from_package(plugin_dir)
+
+    assert connector.tools == []
+    assert connector.policy_labels == set()
+
+
+def test_connector_registry_loads_installed_plugin_package(tmp_path) -> None:
+    plugin_dir = tmp_path / "orders"
+    plugin_config_dir = plugin_dir / ".codex-plugin"
+    plugin_config_dir.mkdir(parents=True)
+    (plugin_config_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "orders",
+                "version": "1.0.0",
+                "description": "Order lookup plugin.",
+                "mcpServers": "./.mcp.json",
+            }
+        )
+    )
+    (plugin_dir / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "orders": {
+                        "command": "python",
+                        "args": ["server.py"],
+                        "cwd": ".",
+                    }
+                }
+            }
+        )
+    )
+
+    registry = ConnectorRegistry.from_plugin_records(
+        [
+            {
+                "id": "plugin_orders",
+                "name": "orders",
+                "package_path": str(plugin_dir),
+                "source": "unified_plugins",
+            }
+        ]
+    )
+    connector = Connector.from_installed_plugin("plugin_orders", registry)
+
+    assert [plugin.id for plugin in registry.list_plugins()] == ["plugin_orders"]
+    assert connector.name == "orders"
+    assert connector.description == "Order lookup plugin."
+    assert connector.metadata["unified_plugin"]["id"] == "plugin_orders"
+    assert connector.metadata["unified_plugin"]["source"] == "unified_plugins"
+    assert connector.policy_labels == {"local_execution"}
+    assert len(connector.mcp_servers) == 1
+    server = connector.mcp_servers[0]
+    assert isinstance(server, MCPServerStdio)
+    assert str(server.params.cwd) == str(plugin_dir)
+
+
+def test_connector_registry_loads_hosted_app_connector_record() -> None:
+    registry = ConnectorRegistry.from_plugin_records(
+        [
+            {
+                "id": "plugin_workspace",
+                "name": "workspace",
+                "description": "Workspace apps.",
+                "apps": {
+                    "calendar": {
+                        "id": "connector_googlecalendar",
+                    }
+                },
+            }
+        ]
+    )
+
+    connector = Connector.from_installed_plugin(
+        "workspace",
+        registry,
+        authorization={"calendar": "conn_calendar"},
+        hosted_mcp_require_approval="always",
+    )
+
+    assert connector.name == "workspace"
+    assert connector.description == "Workspace apps."
+    assert connector.policy_labels == {"network"}
+    assert len(connector.tools) == 1
+    tool = connector.tools[0]
+    assert isinstance(tool, HostedMCPTool)
+    tool_config = cast(dict[str, Any], tool.tool_config)
+    assert tool_config["type"] == "mcp"
+    assert tool_config["server_label"] == "calendar"
+    assert tool_config["connector_id"] == "connector_googlecalendar"
+    assert tool_config["authorization"] == "conn_calendar"
+    assert tool_config["require_approval"] == "always"
+
+
+def test_connector_registry_skips_hosted_apps_without_authorization() -> None:
+    registry = ConnectorRegistry.from_plugin_records(
+        [
+            {
+                "id": "plugin_workspace",
+                "name": "workspace",
+                "apps": {
+                    "calendar": {
+                        "id": "connector_googlecalendar",
+                    }
+                },
+            }
+        ]
+    )
+
+    connector = Connector.from_installed_plugin("plugin_workspace", registry)
 
     assert connector.tools == []
     assert connector.policy_labels == set()

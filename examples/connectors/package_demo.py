@@ -8,7 +8,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from agents import Agent, Connector, FunctionTool, HostedMCPTool, RunContextWrapper, function_tool
+from agents import (
+    Agent,
+    Connector,
+    ConnectorRegistry,
+    FunctionTool,
+    HostedMCPTool,
+    RunContextWrapper,
+    function_tool,
+)
 from agents.mcp import MCPServerManager
 from agents.tool_context import ToolContext
 
@@ -29,13 +37,25 @@ def build_sdk_tool_connector() -> Connector:
 
 
 def build_hosted_connector() -> Connector:
-    return Connector.from_hosted_connector(
-        "calendar",
-        connector_id="connector_googlecalendar",
-        authorization="demo_access_token",
-        server_label="calendar",
-        require_approval="never",
-        description="Hosted Google Calendar connector shape.",
+    registry = ConnectorRegistry.from_plugin_records(
+        [
+            {
+                "id": "plugin_calendar",
+                "name": "calendar",
+                "description": "Hosted Google Calendar connector shape.",
+                "apps": {
+                    "calendar": {
+                        "id": "connector_googlecalendar",
+                    }
+                },
+            }
+        ]
+    )
+    return Connector.from_installed_plugin(
+        "plugin_calendar",
+        registry,
+        authorization={"calendar": "demo_access_token"},
+        hosted_mcp_require_approval="never",
     )
 
 
@@ -94,7 +114,17 @@ def write_demo_plugin_package(package_root: Path) -> Path:
 
 
 def build_package_connector(package_root: Path) -> Connector:
-    return Connector.from_package(package_root)
+    registry = ConnectorRegistry.from_plugin_records(
+        [
+            {
+                "id": "plugin_orders",
+                "name": "orders",
+                "package_path": str(package_root),
+                "source": "unified_plugins_demo",
+            }
+        ]
+    )
+    return Connector.from_installed_plugin("plugin_orders", registry)
 
 
 async def verify_connector_demo() -> dict[str, Any]:
@@ -144,6 +174,7 @@ async def verify_connector_demo() -> dict[str, Any]:
         "mcp_tool_result": mcp_tool_result,
         "package_connector_name": package_connector.name,
         "package_policy_labels": sorted(package_connector.policy_labels),
+        "package_registry_source": package_connector.metadata["unified_plugin"]["source"],
         "hosted_connector_label": hosted_tool.tool_config["server_label"],
         "hosted_connector_id": hosted_tool.tool_config["connector_id"],
     }
@@ -191,7 +222,8 @@ def print_summary(summary: dict[str, Any]) -> None:
     print(
         "Package connector: "
         f"{summary['package_connector_name']} "
-        f"({', '.join(summary['package_policy_labels'])})"
+        f"({', '.join(summary['package_policy_labels'])}, "
+        f"{summary['package_registry_source']})"
     )
     print(
         "Hosted connector config: "

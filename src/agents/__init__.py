@@ -19,7 +19,9 @@ from .computer import AsyncComputer, Button, Computer, Environment
 from .connectors import (
     Connector,
     ConnectorComponents,
+    ConnectorPlugin,
     ConnectorPolicyLabel,
+    ConnectorRegistry,
     HostedConnectorAuthorization,
 )
 from .editor import ApplyPatchEditor, ApplyPatchOperation, ApplyPatchResult
@@ -367,7 +369,9 @@ __all__ = [
     "Button",
     "Connector",
     "ConnectorComponents",
+    "ConnectorPlugin",
     "ConnectorPolicyLabel",
+    "ConnectorRegistry",
     "HostedConnectorAuthorization",
     "AgentsException",
     "InputGuardrailTripwireTriggered",

@@ -10,6 +10,58 @@ separate runtime. A connector resolves to existing SDK primitives:
 Use connectors when you want to mount a named bundle of tools or package-provided MCP servers on
 one or more agents without manually copying every tool and server into each agent definition.
 
+## Installed plugin registries
+
+Use [`ConnectorRegistry`][agents.connectors.ConnectorRegistry] when your application already has
+installed plugin records from a Unified Plugins-style directory, marketplace, or workspace plugin
+service. The SDK does not fetch those records itself; the registry is an adapter over records that
+Codex, ChatGPT, your control plane, or tests have already provided.
+
+A registry record can point at a mounted local package, hosted app connector IDs, or both. Loading
+the record still produces a normal [`Connector`][agents.connectors.Connector].
+
+```python
+from agents import Agent, Connector, ConnectorRegistry
+
+
+registry = ConnectorRegistry.from_plugin_records(
+    [
+        {
+            "id": "plugin_orders",
+            "name": "orders",
+            "package_path": "./orders-plugin",
+        },
+        {
+            "id": "plugin_calendar",
+            "name": "calendar",
+            "apps": {
+                "calendar": {
+                    "id": "connector_googlecalendar",
+                }
+            },
+        },
+    ]
+)
+
+orders = Connector.from_installed_plugin("plugin_orders", registry)
+calendar = Connector.from_installed_plugin(
+    "plugin_calendar",
+    registry,
+    authorization={"calendar": "conn_calendar_access_token"},
+    hosted_mcp_require_approval="always",
+)
+
+agent = Agent(
+    name="Assistant",
+    instructions="Use installed connector plugins when needed.",
+    connectors=[orders, calendar],
+)
+```
+
+This keeps package discovery, marketplace installation, workspace sharing, admin policy, and cloud
+sync outside the SDK runtime while giving those systems a stable place to hand installed plugin
+records to the SDK.
+
 ## SDK tool connectors
 
 Use [`Connector.from_tools()`][agents.connectors.Connector.from_tools] when your integration is
@@ -115,8 +167,9 @@ They are sent to the Responses API like other hosted tools.
 ## End-to-end demo
 
 See `examples/connectors/package_demo.py` for a deterministic demo that needs no API key. It builds
-a direct Python tool connector, creates a temporary plugin-style MCP package, mounts both on an
-agent, invokes the discovered tools, and inspects a hosted connector config.
+a direct Python tool connector, creates a temporary plugin-style MCP package, loads that package
+through a `ConnectorRegistry` record, mounts the resolved connector on an agent, invokes the
+discovered tools, and inspects a hosted connector config loaded from a registry record.
 
 Run it with:
 

@@ -33,6 +33,73 @@ HostedConnectorAuthorization = (
 
 
 @dataclass(frozen=True)
+class ConnectorPlugin:
+    """Installed plugin record that can be loaded as an Agents SDK connector.
+
+    This is intentionally a small adapter surface for Unified Plugins-style directory records. The
+    SDK does not fetch from a specific cloud API here; callers pass the records they got from Codex,
+    ChatGPT, or another plugin registry.
+    """
+
+    id: str
+    name: str
+    description: str | None = None
+    package_path: Path | None = None
+    hosted_connectors: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_record(
+        cls,
+        record: Mapping[str, Any],
+        *,
+        package_root: str | Path | None = None,
+    ) -> ConnectorPlugin:
+        """Create a plugin descriptor from a Unified Plugins-style directory record."""
+        plugin_id = _optional_record_str(record, ("id", "plugin_id", "pluginId"), "Plugin id")
+        name = _optional_record_str(record, ("name", "slug"), "Plugin name")
+        if plugin_id is None and name is None:
+            raise UserError("Plugin record must include a non-empty 'id' or 'name'")
+        plugin_id = plugin_id or cast(str, name)
+        name = name or plugin_id
+
+        description = _optional_record_str(record, ("description",), "Plugin description")
+        package_path = _plugin_package_path(record, package_root=package_root)
+        hosted_connectors = _plugin_hosted_connector_configs(record)
+        metadata = {
+            key: value
+            for key, value in record.items()
+            if key
+            not in {
+                "apps",
+                "connectors",
+                "description",
+                "hostedConnectors",
+                "hosted_connectors",
+                "id",
+                "localPath",
+                "local_path",
+                "name",
+                "packagePath",
+                "package_path",
+                "path",
+                "pluginId",
+                "plugin_id",
+                "slug",
+            }
+        }
+
+        return cls(
+            id=plugin_id,
+            name=name,
+            description=description,
+            package_path=package_path,
+            hosted_connectors=hosted_connectors,
+            metadata=metadata,
+        )
+
+
+@dataclass(frozen=True)
 class ConnectorComponents:
     """Resolved runtime surfaces exposed by a connector package."""
 
@@ -280,6 +347,105 @@ class Connector:
             policy_labels=policy_labels,
         )
 
+    @classmethod
+    def from_installed_plugin(
+        cls,
+        plugin: str,
+        registry: ConnectorRegistry,
+        *,
+        authorization: HostedConnectorAuthorization | None = None,
+        hosted_mcp_require_approval: RequireApprovalSetting = None,
+    ) -> Connector:
+        """Load an installed Unified Plugins-style record through a connector registry.
+
+        The registry is caller-provided so the SDK can consume records from Codex, ChatGPT, a
+        workspace plugin service, or tests without depending on one cloud transport.
+        """
+        return registry.load(
+            plugin,
+            authorization=authorization,
+            hosted_mcp_require_approval=hosted_mcp_require_approval,
+        )
+
+
+class ConnectorRegistry:
+    """In-memory adapter over installed plugin records.
+
+    `ConnectorRegistry` is the bridge point for Unified Plugins integration. It accepts
+    already-fetched directory records and resolves them into the same `Connector` surface used by
+    local package connectors.
+    """
+
+    def __init__(self, plugins: Iterable[ConnectorPlugin]) -> None:
+        self._plugins = tuple(plugins)
+        by_id: dict[str, ConnectorPlugin] = {}
+        by_name: dict[str, ConnectorPlugin] = {}
+        for plugin in self._plugins:
+            if plugin.id in by_id:
+                raise UserError(f"Duplicate connector plugin id: {plugin.id}")
+            by_id[plugin.id] = plugin
+            if plugin.name in by_name:
+                raise UserError(f"Duplicate connector plugin name: {plugin.name}")
+            by_name[plugin.name] = plugin
+        self._by_id = by_id
+        self._by_name = by_name
+
+    @classmethod
+    def from_plugin_records(
+        cls,
+        records: Iterable[Mapping[str, Any]],
+        *,
+        package_root: str | Path | None = None,
+    ) -> ConnectorRegistry:
+        """Create a registry from Unified Plugins-style directory records."""
+        return cls(
+            ConnectorPlugin.from_record(record, package_root=package_root) for record in records
+        )
+
+    def list_plugins(self) -> tuple[ConnectorPlugin, ...]:
+        """Return installed plugin descriptors in registry order."""
+        return self._plugins
+
+    def get(self, plugin: str) -> ConnectorPlugin:
+        """Resolve a plugin by id or name."""
+        if plugin in self._by_id:
+            return self._by_id[plugin]
+        if plugin in self._by_name:
+            return self._by_name[plugin]
+        raise UserError(f"Connector plugin not found: {plugin}")
+
+    def load(
+        self,
+        plugin: str,
+        *,
+        authorization: HostedConnectorAuthorization | None = None,
+        hosted_mcp_require_approval: RequireApprovalSetting = None,
+    ) -> Connector:
+        """Load an installed plugin as a connector."""
+        plugin_record = self.get(plugin)
+        if plugin_record.package_path is not None:
+            connector = Connector.from_package(
+                plugin_record.package_path,
+                authorization=authorization,
+                hosted_mcp_require_approval=hosted_mcp_require_approval,
+            )
+        else:
+            connector = Connector(
+                name=plugin_record.name,
+                description=plugin_record.description,
+            )
+
+        hosted_tools = _load_hosted_connector_tools(
+            plugin_record.hosted_connectors,
+            authorization=authorization,
+            require_approval=hosted_mcp_require_approval,
+        )
+        connector.tools.extend(hosted_tools)
+        if hosted_tools:
+            connector.policy_labels.add("network")
+        connector.metadata["unified_plugin"] = _plugin_metadata(plugin_record)
+        return connector
+
 
 def _build_hosted_mcp_tool_config(
     *,
@@ -427,16 +593,24 @@ def _load_manifest_app_tools(
     app_manifest_path = _resolve_package_path(package_root, apps_manifest_value, "apps")
     app_manifest = _read_json_object(app_manifest_path)
     apps = app_manifest.get("apps")
-    if not isinstance(apps, Mapping):
-        raise UserError(f"App manifest must contain an 'apps' object: {app_manifest_path}")
+    app_configs = _hosted_connector_configs(apps, f"App manifest apps: {app_manifest_path}")
 
+    return _load_hosted_connector_tools(
+        app_configs,
+        authorization=authorization,
+        require_approval=require_approval,
+    )
+
+
+def _load_hosted_connector_tools(
+    app_configs: Mapping[str, Mapping[str, Any]],
+    *,
+    authorization: HostedConnectorAuthorization | None,
+    require_approval: RequireApprovalSetting,
+) -> list[Tool]:
     tools: list[Tool] = []
-    for app_name, raw_config in apps.items():
-        if not isinstance(app_name, str):
-            raise UserError("App names must be strings")
-        if not isinstance(raw_config, Mapping):
-            raise UserError(f"App config for {app_name!r} must be an object")
-        connector_id = _expect_str(raw_config.get("id"), f"App id for {app_name!r}")
+    for app_name, raw_config in app_configs.items():
+        connector_id = _hosted_connector_id(raw_config, f"App id for {app_name!r}")
         resolved_authorization = _resolve_authorization(
             authorization, app_name, connector_id, raw_config
         )
@@ -452,6 +626,93 @@ def _load_manifest_app_tools(
         tools.extend(connector.tools)
 
     return tools
+
+
+def _plugin_package_path(
+    record: Mapping[str, Any],
+    *,
+    package_root: str | Path | None,
+) -> Path | None:
+    path_value = _optional_record_str(
+        record,
+        ("package_path", "packagePath", "local_path", "localPath", "path"),
+        "Plugin package path",
+    )
+    if path_value is None:
+        return None
+    path = Path(path_value).expanduser()
+    if not path.is_absolute() and package_root is not None:
+        path = Path(package_root).expanduser() / path
+    return path.resolve()
+
+
+def _plugin_hosted_connector_configs(
+    record: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    for key in ("apps", "hosted_connectors", "hostedConnectors", "connectors"):
+        raw_configs = record.get(key)
+        if raw_configs is not None:
+            return _hosted_connector_configs(raw_configs, f"Plugin {key}")
+    return {}
+
+
+def _hosted_connector_configs(value: Any, field_name: str) -> dict[str, dict[str, Any]]:
+    if isinstance(value, Mapping):
+        configs: dict[str, dict[str, Any]] = {}
+        for app_name, raw_config in value.items():
+            if not isinstance(app_name, str):
+                raise UserError(f"{field_name} names must be strings")
+            configs[app_name] = _hosted_connector_config(raw_config, f"{field_name} {app_name!r}")
+        return configs
+
+    if isinstance(value, list):
+        configs = {}
+        for raw_config in value:
+            if not isinstance(raw_config, Mapping):
+                raise UserError(f"{field_name} entries must be objects")
+            config = dict(raw_config)
+            connector_id = _hosted_connector_id(config, f"{field_name} id")
+            app_name = (
+                _optional_str(config.get("name"), f"{field_name} name")
+                or _optional_str(config.get("server_label"), f"{field_name} server_label")
+                or _optional_str(config.get("serverLabel"), f"{field_name} serverLabel")
+                or connector_id
+            )
+            config.setdefault("id", connector_id)
+            configs[app_name] = config
+        return configs
+
+    raise UserError(f"{field_name} must be an object or a list of objects")
+
+
+def _hosted_connector_config(value: Any, field_name: str) -> dict[str, Any]:
+    if isinstance(value, str):
+        return {"id": value}
+    if not isinstance(value, Mapping):
+        raise UserError(f"{field_name} config must be an object")
+    return dict(value)
+
+
+def _hosted_connector_id(config: Mapping[str, Any], field_name: str) -> str:
+    return _expect_str(
+        config.get("id") or config.get("connector_id") or config.get("connectorId"),
+        field_name,
+    )
+
+
+def _plugin_metadata(plugin: ConnectorPlugin) -> dict[str, Any]:
+    metadata = dict(plugin.metadata)
+    metadata["id"] = plugin.id
+    metadata["name"] = plugin.name
+    if plugin.description is not None:
+        metadata["description"] = plugin.description
+    if plugin.package_path is not None:
+        metadata["package_path"] = str(plugin.package_path)
+    if plugin.hosted_connectors:
+        metadata["hosted_connectors"] = {
+            app_name: dict(config) for app_name, config in plugin.hosted_connectors.items()
+        }
+    return metadata
 
 
 def _resolve_authorization(
@@ -511,6 +772,18 @@ def _optional_str(value: Any, field_name: str) -> str | None:
     if value is None:
         return None
     return _expect_str(value, field_name)
+
+
+def _optional_record_str(
+    record: Mapping[str, Any],
+    keys: tuple[str, ...],
+    field_name: str,
+) -> str | None:
+    for key in keys:
+        value = record.get(key)
+        if value is not None:
+            return _expect_str(value, field_name)
+    return None
 
 
 def _expect_str_list(value: Any, field_name: str) -> list[str]:
