@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from .sandbox.session.sandbox_client import BaseSandboxClient
     from .sandbox.session.sandbox_session_state import SandboxSessionState
     from .sandbox.snapshot import SnapshotBase, SnapshotSpec
+    from .turn_interceptor import TurnInterceptor
 
 
 DEFAULT_MAX_TURNS = 10
@@ -350,6 +351,9 @@ class RunOptions(TypedDict, Generic[TContext]):
 
     error_handlers: NotRequired[RunErrorHandlers[TContext] | None]
     """Error handlers keyed by error kind."""
+
+    turn_interceptor: NotRequired[TurnInterceptor | None]
+    """A TurnInterceptor for injecting messages between turns (streaming only)."""
 
 
 __all__ = [

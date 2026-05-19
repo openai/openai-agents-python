@@ -121,6 +121,7 @@ from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
 from .tracing.context import TraceCtxManager, create_trace_for_run
 from .tracing.span_data import AgentSpanData, TaskSpanData
+from .turn_interceptor import TurnInterceptor
 from .util import _error_tracing
 
 DEFAULT_AGENT_RUNNER: AgentRunner = None  # type: ignore
@@ -374,6 +375,7 @@ class Runner:
         session: Session | None = None,
         *,
         error_handlers: RunErrorHandlers[TContext] | None = None,
+        turn_interceptor: TurnInterceptor | None = None,
     ) -> RunResultStreaming:
         """
         Run a workflow starting at the given agent in streaming mode.
@@ -436,6 +438,7 @@ class Runner:
             auto_previous_response_id=auto_previous_response_id,
             conversation_id=conversation_id,
             session=session,
+            turn_interceptor=turn_interceptor,
         )
 
 
@@ -1657,6 +1660,7 @@ class AgentRunner:
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
+        turn_interceptor = kwargs.get("turn_interceptor")
 
         if run_config is None:
             run_config = RunConfig()
@@ -1867,6 +1871,7 @@ class AgentRunner:
                 run_state=run_state,
                 is_resumed_state=is_resumed_state,
                 sandbox_runtime=sandbox_runtime,
+                turn_interceptor=turn_interceptor,
             )
         )
         if sandbox_runtime.enabled:
