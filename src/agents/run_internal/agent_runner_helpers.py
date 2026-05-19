@@ -262,8 +262,6 @@ def resolve_trace_settings(
             group_id = trace_state.group_id
         if metadata is None and trace_state.metadata is not None:
             metadata = dict(trace_state.metadata)
-        if tracing is None and trace_state.tracing_api_key:
-            tracing = {"api_key": trace_state.tracing_api_key}
 
     metadata = add_openai_harness_id_to_metadata(
         metadata,

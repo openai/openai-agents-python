@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from agents.mcp import MCPServerSse, MCPServerStreamableHttp
+from agents.mcp.server import _create_default_streamable_http_client
 
 
 class TestMCPServerSseAuthAndFactory:
@@ -120,6 +121,7 @@ class TestMCPServerStreamableHttpAuth:
                 timeout=5,
                 sse_read_timeout=300,
                 terminate_on_close=True,
+                httpx_client_factory=_create_default_streamable_http_client,
             )
 
     @pytest.mark.asyncio
@@ -138,6 +140,7 @@ class TestMCPServerStreamableHttpAuth:
                 timeout=5,
                 sse_read_timeout=300,
                 terminate_on_close=True,
+                httpx_client_factory=_create_default_streamable_http_client,
                 auth=auth,
             )
 

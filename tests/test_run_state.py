@@ -29,7 +29,7 @@ from openai.types.responses.response_output_item import LocalShellCall, McpAppro
 from openai.types.responses.tool_param import Mcp
 from pydantic import BaseModel
 
-from agents import Agent, Model, ModelSettings, Runner, handoff, trace
+from agents import Agent, Model, ModelSettings, RunConfig, Runner, handoff, trace
 from agents.computer import Computer
 from agents.exceptions import UserError
 from agents.guardrail import (
@@ -56,6 +56,7 @@ from agents.items import (
     TResponseStreamEvent,
 )
 from agents.run_context import RunContextWrapper
+from agents.run_internal.agent_runner_helpers import resolve_trace_settings
 from agents.run_internal.items import run_items_to_input_items
 from agents.run_internal.run_loop import (
     NextStepInterruption,
@@ -722,6 +723,18 @@ class TestRunState:
             restored_without_key._trace_state.tracing_api_key_hash
             == default_json["trace"]["tracing_api_key_hash"]
         )
+
+        *_, restored_config = resolve_trace_settings(
+            run_state=restored_with_key,
+            run_config=RunConfig(),
+        )
+        assert restored_config is None
+
+        *_, explicit_config = resolve_trace_settings(
+            run_state=restored_with_key,
+            run_config=RunConfig(tracing={"api_key": "explicit-trace-key"}),
+        )
+        assert explicit_config == {"api_key": "explicit-trace-key"}
 
     async def test_throws_error_if_schema_version_is_missing_or_invalid(self):
         """Test that deserialization fails with missing or invalid schema version."""
