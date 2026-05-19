@@ -43,9 +43,17 @@ def build_hosted_connector() -> Connector:
                 "id": "plugin_calendar",
                 "name": "calendar",
                 "description": "Hosted Google Calendar connector shape.",
+                "policy": {
+                    "labels": ["read_only"],
+                },
                 "apps": {
                     "calendar": {
-                        "id": "connector_googlecalendar",
+                        "connectorId": "connector_googlecalendar",
+                        "authorizationAlias": "calendar_connection",
+                        "serverLabel": "google_calendar",
+                        "allowedTools": ["events_search"],
+                        "requireApproval": "never",
+                        "deferLoading": True,
                     }
                 },
             }
@@ -54,8 +62,8 @@ def build_hosted_connector() -> Connector:
     return Connector.from_installed_plugin(
         "plugin_calendar",
         registry,
-        authorization={"calendar": "demo_access_token"},
-        hosted_mcp_require_approval="never",
+        authorization={"calendar_connection": "demo_access_token"},
+        hosted_mcp_require_approval="always",
     )
 
 
@@ -119,10 +127,14 @@ def build_package_connector(package_root: Path) -> Connector:
             {
                 "id": "plugin_orders",
                 "name": "orders",
-                "package_path": str(package_root),
+                "mount": {
+                    "path": package_root.name,
+                },
+                "policyLabels": ["read_only"],
                 "source": "unified_plugins_demo",
             }
-        ]
+        ],
+        package_root=package_root.parent,
     )
     return Connector.from_installed_plugin("plugin_orders", registry)
 
@@ -177,6 +189,7 @@ async def verify_connector_demo() -> dict[str, Any]:
         "package_registry_source": package_connector.metadata["unified_plugin"]["source"],
         "hosted_connector_label": hosted_tool.tool_config["server_label"],
         "hosted_connector_id": hosted_tool.tool_config["connector_id"],
+        "hosted_allowed_tools": hosted_tool.tool_config["allowed_tools"],
     }
 
 
@@ -238,7 +251,8 @@ async def main(*, verify: bool) -> None:
         expected = {
             "direct_tool_result": "discount=25.00",
             "mcp_tool_result": "order demo_order_1001: fulfilled",
-            "hosted_connector_label": "calendar",
+            "hosted_connector_label": "google_calendar",
+            "hosted_allowed_tools": ["events_search"],
         }
         mismatches = {
             key: (summary.get(key), expected_value)

@@ -343,6 +343,140 @@ def test_connector_registry_loads_hosted_app_connector_record() -> None:
     assert tool_config["require_approval"] == "always"
 
 
+def test_connector_registry_resolves_auth_alias_and_hosted_options() -> None:
+    registry = ConnectorRegistry.from_plugin_records(
+        [
+            {
+                "id": "plugin_workspace",
+                "name": "workspace",
+                "apps": {
+                    "calendar": {
+                        "connectorId": "connector_googlecalendar",
+                        "authorizationAlias": "google_calendar_connection",
+                        "serverLabel": "google_calendar",
+                        "allowedTools": ["events_search"],
+                        "requireApproval": "never",
+                        "deferLoading": True,
+                    }
+                },
+            }
+        ]
+    )
+
+    connector = Connector.from_installed_plugin(
+        "plugin_workspace",
+        registry,
+        authorization={"google_calendar_connection": "conn_calendar"},
+        hosted_mcp_require_approval="always",
+    )
+
+    tool = connector.tools[0]
+    assert isinstance(tool, HostedMCPTool)
+    tool_config = cast(dict[str, Any], tool.tool_config)
+    assert tool_config["server_label"] == "google_calendar"
+    assert tool_config["connector_id"] == "connector_googlecalendar"
+    assert tool_config["authorization"] == "conn_calendar"
+    assert tool_config["allowed_tools"] == ["events_search"]
+    assert tool_config["require_approval"] == "never"
+    assert tool_config["defer_loading"] is True
+
+
+def test_connector_registry_merges_policy_labels_from_plugin_record() -> None:
+    registry = ConnectorRegistry.from_plugin_records(
+        [
+            {
+                "id": "plugin_workspace",
+                "name": "workspace",
+                "policy": {
+                    "labels": ["read_only", "external_send"],
+                },
+                "apps": {
+                    "calendar": {
+                        "id": "connector_googlecalendar",
+                    }
+                },
+            }
+        ]
+    )
+
+    connector = Connector.from_installed_plugin(
+        "plugin_workspace",
+        registry,
+        authorization={"calendar": "conn_calendar"},
+    )
+
+    assert connector.policy_labels == {"read_only", "external_send", "network"}
+    assert connector.metadata["unified_plugin"]["policy_labels"] == [
+        "external_send",
+        "read_only",
+    ]
+
+
+def test_connector_registry_resolves_mounted_package_paths(tmp_path) -> None:
+    plugins_root = tmp_path / "mounted-plugins"
+    plugin_dir = plugins_root / "orders"
+    plugin_config_dir = plugin_dir / ".codex-plugin"
+    plugin_config_dir.mkdir(parents=True)
+    (plugin_config_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "orders",
+                "version": "1.0.0",
+                "description": "Mounted order plugin.",
+                "mcpServers": "./.mcp.json",
+            }
+        )
+    )
+    (plugin_dir / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "orders": {
+                        "command": "python",
+                        "args": ["server.py"],
+                        "cwd": ".",
+                    }
+                }
+            }
+        )
+    )
+
+    registry = ConnectorRegistry.from_plugin_records(
+        [
+            {
+                "id": "plugin_orders",
+                "name": "orders",
+                "mount": {
+                    "path": "orders",
+                },
+            }
+        ],
+        package_root=plugins_root,
+    )
+
+    connector = Connector.from_installed_plugin("plugin_orders", registry)
+
+    assert connector.metadata["unified_plugin"]["package_path"] == str(plugin_dir.resolve())
+    assert connector.description == "Mounted order plugin."
+    assert len(connector.mcp_servers) == 1
+
+
+def test_connector_registry_rejects_mounted_paths_outside_package_root(tmp_path) -> None:
+    with pytest.raises(UserError, match="must stay inside the connector package root"):
+        ConnectorRegistry.from_plugin_records(
+            [
+                {
+                    "id": "plugin_orders",
+                    "name": "orders",
+                    "mount": {
+                        "path": "../outside",
+                    },
+                }
+            ],
+            package_root=tmp_path / "mounted-plugins",
+        )
+
+
 def test_connector_registry_skips_hosted_apps_without_authorization() -> None:
     registry = ConnectorRegistry.from_plugin_records(
         [

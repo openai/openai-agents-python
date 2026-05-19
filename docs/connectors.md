@@ -29,25 +29,36 @@ registry = ConnectorRegistry.from_plugin_records(
         {
             "id": "plugin_orders",
             "name": "orders",
-            "package_path": "./orders-plugin",
+            "mount": {
+                "path": "orders-plugin",
+            },
+            "policyLabels": ["read_only"],
         },
         {
             "id": "plugin_calendar",
             "name": "calendar",
+            "policy": {
+                "labels": ["read_only"],
+            },
             "apps": {
                 "calendar": {
-                    "id": "connector_googlecalendar",
+                    "connectorId": "connector_googlecalendar",
+                    "authorizationAlias": "calendar_connection",
+                    "serverLabel": "google_calendar",
+                    "allowedTools": ["events_search"],
+                    "requireApproval": "never",
                 }
             },
         },
-    ]
+    ],
+    package_root="./mounted-plugins",
 )
 
 orders = Connector.from_installed_plugin("plugin_orders", registry)
 calendar = Connector.from_installed_plugin(
     "plugin_calendar",
     registry,
-    authorization={"calendar": "conn_calendar_access_token"},
+    authorization={"calendar_connection": "conn_calendar_access_token"},
     hosted_mcp_require_approval="always",
 )
 
@@ -61,6 +72,13 @@ agent = Agent(
 This keeps package discovery, marketplace installation, workspace sharing, admin policy, and cloud
 sync outside the SDK runtime while giving those systems a stable place to hand installed plugin
 records to the SDK.
+
+Registry records accept either direct package paths such as `package_path` or nested mounted-package
+paths such as `mount.path`. When `package_root` is supplied, relative and absolute package paths
+must resolve inside that root. Hosted app records can declare auth aliases, server labels, allowed
+tools, approval settings, and deferred loading flags; auth aliases are resolved through the
+`authorization` mapping passed to `Connector.from_installed_plugin()`. Top-level `policyLabels` or
+`policy.labels` are merged into the connector's policy labels.
 
 ## SDK tool connectors
 

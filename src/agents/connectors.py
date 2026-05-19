@@ -25,6 +25,17 @@ ConnectorPolicyLabel = Literal[
 ]
 """Coarse policy labels callers can use to route connector approval and sandbox decisions."""
 
+_CONNECTOR_POLICY_LABELS: set[str] = {
+    "read_only",
+    "write",
+    "destructive",
+    "external_send",
+    "network",
+    "secret_access",
+    "local_execution",
+    "sandbox_required",
+}
+
 
 HostedConnectorAuthorization = (
     str | Mapping[str, str] | Callable[[str, str, Mapping[str, Any]], str | None]
@@ -47,6 +58,7 @@ class ConnectorPlugin:
     package_path: Path | None = None
     hosted_connectors: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    policy_labels: tuple[ConnectorPolicyLabel, ...] = ()
 
     @classmethod
     def from_record(
@@ -66,6 +78,7 @@ class ConnectorPlugin:
         description = _optional_record_str(record, ("description",), "Plugin description")
         package_path = _plugin_package_path(record, package_root=package_root)
         hosted_connectors = _plugin_hosted_connector_configs(record)
+        policy_labels = _plugin_policy_labels(record)
         metadata = {
             key: value
             for key, value in record.items()
@@ -83,6 +96,9 @@ class ConnectorPlugin:
                 "packagePath",
                 "package_path",
                 "path",
+                "policy",
+                "policyLabels",
+                "policy_labels",
                 "pluginId",
                 "plugin_id",
                 "slug",
@@ -96,6 +112,7 @@ class ConnectorPlugin:
             package_path=package_path,
             hosted_connectors=hosted_connectors,
             metadata=metadata,
+            policy_labels=policy_labels,
         )
 
 
@@ -440,6 +457,7 @@ class ConnectorRegistry:
             authorization=authorization,
             require_approval=hosted_mcp_require_approval,
         )
+        connector.policy_labels.update(plugin_record.policy_labels)
         connector.tools.extend(hosted_tools)
         if hosted_tools:
             connector.policy_labels.add("network")
@@ -611,6 +629,20 @@ def _load_hosted_connector_tools(
     tools: list[Tool] = []
     for app_name, raw_config in app_configs.items():
         connector_id = _hosted_connector_id(raw_config, f"App id for {app_name!r}")
+        server_label = (
+            _optional_record_str(raw_config, ("server_label", "serverLabel"), "App server label")
+            or app_name
+        )
+        allowed_tools = _optional_record_str_list(
+            raw_config, ("allowed_tools", "allowedTools"), f"Allowed tools for {app_name!r}"
+        )
+        app_require_approval = cast(
+            RequireApprovalSetting,
+            raw_config.get("require_approval", raw_config.get("requireApproval", require_approval)),
+        )
+        defer_loading = _optional_record_bool(
+            raw_config, ("defer_loading", "deferLoading"), f"Defer loading for {app_name!r}"
+        )
         resolved_authorization = _resolve_authorization(
             authorization, app_name, connector_id, raw_config
         )
@@ -620,8 +652,10 @@ def _load_hosted_connector_tools(
             app_name,
             connector_id=connector_id,
             authorization=resolved_authorization,
-            server_label=app_name,
-            require_approval=require_approval,
+            server_label=server_label,
+            allowed_tools=allowed_tools,
+            require_approval=app_require_approval,
+            defer_loading=defer_loading,
         )
         tools.extend(connector.tools)
 
@@ -633,17 +667,66 @@ def _plugin_package_path(
     *,
     package_root: str | Path | None,
 ) -> Path | None:
+    path_value = _plugin_package_path_value(record)
+    if path_value is None:
+        return None
+    root_path = Path(package_root).expanduser().resolve() if package_root is not None else None
+    path = Path(path_value).expanduser()
+    candidate = (
+        path.resolve() if path.is_absolute() else ((root_path or Path.cwd()) / path).resolve()
+    )
+    if root_path is not None and not _is_relative_to(candidate, root_path):
+        raise UserError(
+            f"Plugin package path must stay inside the connector package root: {path_value}"
+        )
+    return candidate
+
+
+def _plugin_package_path_value(record: Mapping[str, Any]) -> str | None:
     path_value = _optional_record_str(
         record,
         ("package_path", "packagePath", "local_path", "localPath", "path"),
         "Plugin package path",
     )
-    if path_value is None:
-        return None
-    path = Path(path_value).expanduser()
-    if not path.is_absolute() and package_root is not None:
-        path = Path(package_root).expanduser() / path
-    return path.resolve()
+    if path_value is not None:
+        return path_value
+
+    for key in ("package", "mount", "local_package", "localPackage"):
+        nested = record.get(key)
+        if nested is None:
+            continue
+        if not isinstance(nested, Mapping):
+            raise UserError(f"Plugin {key} must be an object")
+        path_value = _optional_record_str(
+            nested,
+            ("path", "package_path", "packagePath", "local_path", "localPath"),
+            f"Plugin {key} path",
+        )
+        if path_value is not None:
+            return path_value
+    return None
+
+
+def _plugin_policy_labels(record: Mapping[str, Any]) -> tuple[ConnectorPolicyLabel, ...]:
+    policy_labels = _optional_record_policy_labels(
+        record, ("policy_labels", "policyLabels"), "Plugin policy labels"
+    )
+    if policy_labels is not None:
+        return policy_labels
+
+    policy = record.get("policy")
+    if policy is None:
+        return ()
+    if not isinstance(policy, Mapping):
+        raise UserError("Plugin policy must be an object")
+    return (
+        _optional_record_policy_labels(
+            policy,
+            ("labels", "policy_labels", "policyLabels"),
+            "Plugin policy labels",
+        )
+        or ()
+    )
 
 
 def _plugin_hosted_connector_configs(
@@ -712,6 +795,8 @@ def _plugin_metadata(plugin: ConnectorPlugin) -> dict[str, Any]:
         metadata["hosted_connectors"] = {
             app_name: dict(config) for app_name, config in plugin.hosted_connectors.items()
         }
+    if plugin.policy_labels:
+        metadata["policy_labels"] = sorted(plugin.policy_labels)
     return metadata
 
 
@@ -726,8 +811,36 @@ def _resolve_authorization(
     if isinstance(authorization, str):
         return authorization
     if isinstance(authorization, Mapping):
-        return authorization.get(app_name) or authorization.get(connector_id)
+        for key in _authorization_lookup_keys(app_name, connector_id, app_config):
+            token = authorization.get(key)
+            if token is not None:
+                return token
+        return None
     return authorization(app_name, connector_id, app_config)
+
+
+def _authorization_lookup_keys(
+    app_name: str,
+    connector_id: str,
+    app_config: Mapping[str, Any],
+) -> tuple[str, ...]:
+    keys = [app_name, connector_id]
+    for field_name in (
+        "authorization_alias",
+        "authorizationAlias",
+        "authorization_ref",
+        "authorizationRef",
+        "auth_alias",
+        "authAlias",
+        "auth_reference",
+        "authReference",
+        "connection_id",
+        "connectionId",
+    ):
+        value = app_config.get(field_name)
+        if isinstance(value, str) and value:
+            keys.append(value)
+    return tuple(dict.fromkeys(keys))
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -784,6 +897,53 @@ def _optional_record_str(
         if value is not None:
             return _expect_str(value, field_name)
     return None
+
+
+def _optional_record_str_list(
+    record: Mapping[str, Any],
+    keys: tuple[str, ...],
+    field_name: str,
+) -> list[str] | None:
+    for key in keys:
+        value = record.get(key)
+        if value is not None:
+            return _expect_str_list(value, field_name)
+    return None
+
+
+def _optional_record_bool(
+    record: Mapping[str, Any],
+    keys: tuple[str, ...],
+    field_name: str,
+) -> bool:
+    for key in keys:
+        value = record.get(key)
+        if value is not None:
+            if not isinstance(value, bool):
+                raise UserError(f"{field_name} must be a boolean")
+            return value
+    return False
+
+
+def _optional_record_policy_labels(
+    record: Mapping[str, Any],
+    keys: tuple[str, ...],
+    field_name: str,
+) -> tuple[ConnectorPolicyLabel, ...] | None:
+    for key in keys:
+        value = record.get(key)
+        if value is not None:
+            return _expect_policy_labels(value, field_name)
+    return None
+
+
+def _expect_policy_labels(value: Any, field_name: str) -> tuple[ConnectorPolicyLabel, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise UserError(f"{field_name} must be a list of policy label strings")
+    unknown = sorted(set(value) - _CONNECTOR_POLICY_LABELS)
+    if unknown:
+        raise UserError(f"{field_name} contains unknown labels: {', '.join(unknown)}")
+    return tuple(cast(ConnectorPolicyLabel, item) for item in value)
 
 
 def _expect_str_list(value: Any, field_name: str) -> list[str]:
