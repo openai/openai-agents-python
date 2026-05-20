@@ -1192,6 +1192,13 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
         stream: Literal[True] | Literal[False] = False,
         prompt: ResponsePromptParam | None = None,
     ) -> Response | AsyncIterator[ResponseStreamEvent]:
+        if model_settings.background:
+            raise UserError(
+                "ModelSettings.background=True is not supported by "
+                "OpenAIResponsesWSModel; the WebSocket transport always streams "
+                "and cannot decouple submit from poll. Use OpenAIResponsesModel "
+                "(HTTP transport) instead."
+            )
         create_kwargs = self._build_response_create_kwargs(
             system_instructions=system_instructions,
             input=input,

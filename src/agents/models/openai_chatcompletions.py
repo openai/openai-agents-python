@@ -71,6 +71,15 @@ class OpenAIChatCompletionsModel(Model):
     def _supports_default_prompt_cache_key(self) -> bool:
         return ChatCmplHelpers.is_openai(self._get_client())
 
+    @staticmethod
+    def _handle_unsupported_background(model_settings: ModelSettings) -> None:
+        if model_settings.background:
+            raise UserError(
+                "ModelSettings.background=True is not supported by "
+                "OpenAIChatCompletionsModel; the Chat Completions API has no "
+                "background-mode equivalent. Use OpenAIResponsesModel instead."
+            )
+
     def _handle_unsupported_prompt(self, prompt: ResponsePromptParam | None) -> None:
         if prompt is None:
             return
@@ -140,6 +149,7 @@ class OpenAIChatCompletionsModel(Model):
         conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
+        self._handle_unsupported_background(model_settings)
         self._handle_unsupported_server_managed_conversation_state(
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
@@ -274,6 +284,7 @@ class OpenAIChatCompletionsModel(Model):
         """
         Yields a partial message as it is generated, as well as the usage information.
         """
+        self._handle_unsupported_background(model_settings)
         self._handle_unsupported_server_managed_conversation_state(
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
