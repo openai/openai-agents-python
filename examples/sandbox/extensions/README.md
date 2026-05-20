@@ -243,6 +243,51 @@ export DAYTONA_API_KEY=...
 uv run python examples/sandbox/extensions/daytona/daytona_runner.py --stream
 ```
 
+## Superserve
+
+### Setup
+
+Install the repo extra:
+
+```bash
+uv sync --extra superserve
+```
+
+Create a Superserve account at <https://console.superserve.ai>, generate an API key, and export
+the required environment variables:
+
+```bash
+export OPENAI_API_KEY=...
+export SUPERSERVE_API_KEY=...
+```
+
+To target staging instead of production, also set:
+
+```bash
+export SUPERSERVE_BASE_URL=https://api-staging.superserve.ai
+```
+
+### Run
+
+```bash
+uv run python examples/sandbox/extensions/superserve_runner.py --stream
+```
+
+Useful flags:
+
+- `--template superserve/python-3.11` — use a different curated template (others:
+  `superserve/base`, `superserve/node-22`, `superserve/code-interpreter`,
+  `superserve/python-ml`, `superserve/claude-code`). Team-owned template UUIDs also work.
+- `--pause-on-exit` — pause the sandbox on shutdown instead of killing it. Superserve sandboxes
+  never die on their own by default, so this lets you reconnect with `SuperserveSandboxClient.resume`
+  later without recreating workspace state.
+- `--timeout-seconds 300` — opt into an inactivity timeout (off by default).
+- `--skip-snapshot-check` — skip the pause/resume snapshot round-trip verification.
+
+Pause/resume is a first-class part of the Superserve API surface, so the example exercises both
+the standard create→exec→shutdown flow and the explicit
+`pause → serialize state → resume → read` round-trip.
+
 ## Runloop
 
 ### Setup
