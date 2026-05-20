@@ -64,6 +64,7 @@ plugins:
                 - Guardrails: guardrails.md
                 - Running agents: running_agents.md
                 - Streaming: streaming.md
+                - Background mode: background.md
                 - Agent orchestration: multi_agent.md
                 - Handoffs: handoffs.md
                 - Results: results.md
@@ -213,6 +214,7 @@ plugins:
                 - guardrails.md
                 - running_agents.md
                 - streaming.md
+                - background.md
                 - multi_agent.md
                 - handoffs.md
                 - results.md
@@ -256,6 +258,7 @@ plugins:
                 - guardrails.md
                 - running_agents.md
                 - streaming.md
+                - background.md
                 - multi_agent.md
                 - handoffs.md
                 - results.md
@@ -299,6 +302,7 @@ plugins:
                 - guardrails.md
                 - running_agents.md
                 - streaming.md
+                - background.md
                 - multi_agent.md
                 - handoffs.md
                 - results.md
