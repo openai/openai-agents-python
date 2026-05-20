@@ -92,6 +92,32 @@ _RESPONSE_INCLUDABLE_VALUES = frozenset(
     value for value in get_args(ResponseIncludable) if isinstance(value, str)
 )
 
+# Terminal `Response.status` values per the OpenAI Responses API. Mirrors the
+# `ResponseStatus` literal type in `openai-python`. A response whose status is
+# absent from this set (`queued` / `in_progress`) is still being generated and
+# must be polled.
+_RESPONSE_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {"completed", "failed", "cancelled", "incomplete"}
+)
+
+# Default polling interval when `background=True` and no explicit interval or
+# server header is available. Matches the fallback used by openai-python's
+# `create_and_poll` helpers.
+_DEFAULT_BACKGROUND_POLL_INTERVAL_SECONDS = 1.0
+
+# Server-sent hint header advising the next poll delay (in milliseconds). When
+# the caller has not pinned an explicit `background_poll_interval_seconds`, we
+# honor this header so the loop adapts to server backpressure.
+_BACKGROUND_POLL_AFTER_HEADER = "openai-poll-after-ms"
+
+
+def _is_response_terminal_status(status: str | None) -> bool:
+    """True when `status` is a terminal value (or unset, which we treat as
+    terminal to avoid spinning on unexpected payloads)."""
+    if status is None:
+        return True
+    return status in _RESPONSE_TERMINAL_STATUSES
+
 
 class _NamespaceToolParam(TypedDict):
     type: Literal["namespace"]
@@ -444,6 +470,82 @@ class OpenAIResponsesModel(Model):
         except Exception as exc:
             logger.debug(f"Background stream cleanup failed after cancellation: {exc}")
 
+    def _schedule_background_response_cancel(self, client: AsyncOpenAI, response_id: str) -> None:
+        """Best-effort fire-and-forget cancel of an in-flight background response.
+
+        Invoked when the poll loop is cancelled or hits a non-recoverable error
+        before reaching a terminal state, so that server-side compute is not
+        leaked. Failures from the cancel call itself are swallowed.
+        """
+
+        async def _do_cancel() -> None:
+            try:
+                await client.responses.cancel(response_id)
+            except Exception as exc:
+                logger.debug(
+                    f"Background response cancel for {response_id} failed (ignored): {exc}"
+                )
+
+        try:
+            task = asyncio.create_task(_do_cancel())
+        except RuntimeError:
+            # No running loop available (e.g. interpreter shutdown). Nothing we
+            # can do here; the server response will time out on its own.
+            return
+        task.add_done_callback(self._consume_background_cleanup_task_result)
+
+    async def _poll_background_response_until_terminal(
+        self,
+        *,
+        client: AsyncOpenAI,
+        response: Response,
+        poll_interval_seconds: float | None,
+    ) -> Response:
+        """Poll `responses.retrieve(id)` until the response reaches a terminal status.
+
+        When `poll_interval_seconds` is provided it pins the cadence; otherwise the
+        loop honors the `openai-poll-after-ms` response header and falls back to
+        ``_DEFAULT_BACKGROUND_POLL_INTERVAL_SECONDS`` when no header is present.
+        Mirrors the adaptive-polling pattern used by `openai-python`'s
+        `create_and_poll` helpers.
+
+        On cancellation or unexpected error mid-poll, the in-flight server-side
+        response is cancelled best-effort via
+        `_schedule_background_response_cancel` so compute is not leaked.
+        Reaching a non-`completed` terminal state (`failed` / `cancelled` /
+        `incomplete`) raises `ModelBehaviorError`.
+        """
+        response_id = response.id
+        explicit_interval = poll_interval_seconds
+        interval = (
+            explicit_interval
+            if explicit_interval is not None
+            else _DEFAULT_BACKGROUND_POLL_INTERVAL_SECONDS
+        )
+        try:
+            while not _is_response_terminal_status(response.status):
+                await asyncio.sleep(interval)
+                raw = await client.responses.with_raw_response.retrieve(response_id)
+                response = raw.parse()
+                if explicit_interval is None:
+                    header_value = raw.headers.get(_BACKGROUND_POLL_AFTER_HEADER)
+                    if header_value is not None:
+                        try:
+                            interval = float(header_value) / 1000.0
+                        except (TypeError, ValueError):
+                            # Server sent a malformed header; keep current interval.
+                            pass
+        except BaseException:
+            self._schedule_background_response_cancel(client, response_id)
+            raise
+
+        if response.status != "completed":
+            # Non-`completed` terminal status; the server has already finished
+            # so we don't need to cancel. Raise a model-error so callers see a
+            # consistent failure type.
+            raise response_terminal_failure_error(f"response.{response.status}", response)
+        return response
+
     async def get_response(
         self,
         system_instructions: str | None,
@@ -693,7 +795,14 @@ class OpenAIResponsesModel(Model):
 
         if not stream:
             response = await client.responses.create(**create_kwargs)
-            return cast(Response, response)
+            response = cast(Response, response)
+            if model_settings.background and not _is_response_terminal_status(response.status):
+                response = await self._poll_background_response_until_terminal(
+                    client=client,
+                    response=response,
+                    poll_interval_seconds=model_settings.background_poll_interval_seconds,
+                )
+            return response
 
         streaming_response = getattr(client.responses, "with_streaming_response", None)
         stream_create = getattr(streaming_response, "create", None)
@@ -849,6 +958,7 @@ class OpenAIResponsesModel(Model):
             "extra_body": model_settings.extra_body,
             "text": response_format,
             "store": self._non_null_or_omit(model_settings.store),
+            "background": self._non_null_or_omit(model_settings.background),
             "prompt_cache_retention": self._non_null_or_omit(model_settings.prompt_cache_retention),
             "reasoning": self._non_null_or_omit(model_settings.reasoning),
             "metadata": self._non_null_or_omit(model_settings.metadata),
