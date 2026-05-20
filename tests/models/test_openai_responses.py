@@ -3819,3 +3819,440 @@ def test_websocket_pre_event_disconnect_retry_respects_websocket_retry_disable()
 
     with websocket_pre_event_retries_disabled(True):
         assert _should_retry_pre_event_websocket_disconnect() is False
+
+
+# --- Background + poll mode -------------------------------------------------
+
+
+def _make_status_response(
+    status: str,
+    response_id: str = "resp-bg-1",
+    output: list[Any] | None = None,
+) -> Any:
+    """Build a `Response` stub with the requested `status` field set.
+
+    The default `get_response_obj` helper leaves `status=None`, which the
+    background-poll loop treats as terminal. Tests that exercise the loop need
+    a non-terminal status, so we patch the field after construction (the
+    pydantic model accepts assignment).
+    """
+    response = get_response_obj(output or [], response_id=response_id)
+    response.status = cast(Any, status)
+    return response
+
+
+class _DummyRawResponse:
+    """Mimics `openai-python`'s `LegacyAPIResponse` — sync `.parse()` + `.headers`."""
+
+    def __init__(self, response: Any, headers: dict[str, str] | None = None) -> None:
+        self._response = response
+        self.headers = headers or {}
+
+    def parse(self) -> Any:
+        return self._response
+
+
+class _DummyWithRawResponse:
+    def __init__(self, retrievals: list[Any]) -> None:
+        self._retrievals = retrievals
+        self.calls: list[str] = []
+
+    async def retrieve(self, response_id: str) -> Any:
+        self.calls.append(response_id)
+        if not self._retrievals:
+            raise AssertionError(
+                f"retrieve({response_id!r}) called more times than the test queued"
+            )
+        return self._retrievals.pop(0)
+
+
+class _DummyBackgroundResponses:
+    """Mock for `client.responses` with `create`, `with_raw_response.retrieve`,
+    `cancel`, and a record of each call's arguments."""
+
+    def __init__(
+        self,
+        create_return: Any,
+        retrievals: list[Any] | None = None,
+        cancel_error: Exception | None = None,
+    ) -> None:
+        self.create_kwargs: dict[str, Any] = {}
+        self._create_return = create_return
+        self.with_raw_response = _DummyWithRawResponse(retrievals or [])
+        self.cancel_calls: list[str] = []
+        self._cancel_error = cancel_error
+
+    async def create(self, **kwargs: Any) -> Any:
+        self.create_kwargs = kwargs
+        return self._create_return
+
+    async def cancel(self, response_id: str) -> Any:
+        self.cancel_calls.append(response_id)
+        if self._cancel_error is not None:
+            raise self._cancel_error
+        return self._create_return
+
+
+class _DummyBackgroundClient:
+    def __init__(self, responses: _DummyBackgroundResponses) -> None:
+        self.responses = responses
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_background_terminal_on_first_response_no_poll() -> None:
+    completed = _make_status_response("completed")
+    responses = _DummyBackgroundResponses(create_return=completed)
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=cast(AsyncOpenAI, _DummyBackgroundClient(responses)),
+    )
+
+    result = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(background=True),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+
+    assert result.response_id == "resp-bg-1"
+    assert responses.create_kwargs.get("background") is True
+    assert responses.with_raw_response.calls == []
+    assert responses.cancel_calls == []
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_background_polls_until_completed(monkeypatch: pytest.MonkeyPatch) -> None:
+    queued = _make_status_response("queued")
+    in_progress = _make_status_response("in_progress")
+    completed = _make_status_response("completed")
+    responses = _DummyBackgroundResponses(
+        create_return=queued,
+        retrievals=[_DummyRawResponse(in_progress), _DummyRawResponse(completed)],
+    )
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=cast(AsyncOpenAI, _DummyBackgroundClient(responses)),
+    )
+
+    # Skip real sleeps so the test runs fast.
+    sleep_durations: list[float] = []
+
+    async def _fake_sleep(duration: float) -> None:
+        sleep_durations.append(duration)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+
+    result = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(background=True, background_poll_interval_seconds=0.25),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+
+    assert result.response_id == "resp-bg-1"
+    assert responses.with_raw_response.calls == ["resp-bg-1", "resp-bg-1"]
+    assert responses.cancel_calls == []
+    assert sleep_durations == [0.25, 0.25]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_status", ["failed", "cancelled", "incomplete"])
+async def test_background_non_completed_terminal_status_raises(
+    monkeypatch: pytest.MonkeyPatch, terminal_status: str
+) -> None:
+    queued = _make_status_response("queued")
+    terminal = _make_status_response(terminal_status)
+    responses = _DummyBackgroundResponses(
+        create_return=queued,
+        retrievals=[_DummyRawResponse(terminal)],
+    )
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=cast(AsyncOpenAI, _DummyBackgroundClient(responses)),
+    )
+
+    async def _fake_sleep(_duration: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+
+    with pytest.raises(ModelBehaviorError):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(background=True, background_poll_interval_seconds=0.01),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+
+    # Server already reached a terminal state on its own, so we do not cancel.
+    assert responses.cancel_calls == []
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_background_honors_openai_poll_after_ms_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued = _make_status_response("queued")
+    in_progress = _make_status_response("in_progress")
+    completed = _make_status_response("completed")
+    responses = _DummyBackgroundResponses(
+        create_return=queued,
+        retrievals=[
+            _DummyRawResponse(in_progress, headers={"openai-poll-after-ms": "250"}),
+            _DummyRawResponse(completed, headers={"openai-poll-after-ms": "750"}),
+        ],
+    )
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=cast(AsyncOpenAI, _DummyBackgroundClient(responses)),
+    )
+
+    sleep_durations: list[float] = []
+
+    async def _fake_sleep(duration: float) -> None:
+        sleep_durations.append(duration)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(background=True),  # no explicit interval
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+
+    # First sleep uses the fallback (1.0s) because no header has been seen yet.
+    # Subsequent sleeps adopt the server-hinted interval (250ms -> 0.25s).
+    assert sleep_durations == [1.0, 0.25]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_background_explicit_interval_overrides_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued = _make_status_response("queued")
+    in_progress = _make_status_response("in_progress")
+    completed = _make_status_response("completed")
+    responses = _DummyBackgroundResponses(
+        create_return=queued,
+        retrievals=[
+            _DummyRawResponse(in_progress, headers={"openai-poll-after-ms": "9999"}),
+            _DummyRawResponse(completed, headers={"openai-poll-after-ms": "9999"}),
+        ],
+    )
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=cast(AsyncOpenAI, _DummyBackgroundClient(responses)),
+    )
+
+    sleep_durations: list[float] = []
+
+    async def _fake_sleep(duration: float) -> None:
+        sleep_durations.append(duration)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(background=True, background_poll_interval_seconds=0.05),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+
+    # Explicit interval pins the cadence — header value is ignored.
+    assert sleep_durations == [0.05, 0.05]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_background_cancelled_error_schedules_response_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued = _make_status_response("queued")
+    responses = _DummyBackgroundResponses(create_return=queued)
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=cast(AsyncOpenAI, _DummyBackgroundClient(responses)),
+    )
+
+    # Keep a reference to the unpatched sleep so we can yield to the background
+    # cancel task after the poll loop raises CancelledError.
+    real_sleep = asyncio.sleep
+
+    async def _raise_cancel(_duration: float) -> None:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(asyncio, "sleep", _raise_cancel)
+
+    with pytest.raises(asyncio.CancelledError):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(background=True, background_poll_interval_seconds=0.01),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+
+    # Best-effort cancel runs in a background task — let it complete via the
+    # real sleep so we don't trip the monkeypatched CancelledError again.
+    monkeypatch.undo()
+    for _ in range(3):
+        await real_sleep(0)
+    assert responses.cancel_calls == ["resp-bg-1"]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_background_passes_through_in_create_kwargs() -> None:
+    completed = _make_status_response("completed")
+    responses = _DummyBackgroundResponses(create_return=completed)
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=cast(AsyncOpenAI, _DummyBackgroundClient(responses)),
+    )
+
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(background=True),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+
+    assert responses.create_kwargs.get("background") is True
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_background_extra_args_conflict_raises_typeerror() -> None:
+    completed = _make_status_response("completed")
+    responses = _DummyBackgroundResponses(create_return=completed)
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=cast(AsyncOpenAI, _DummyBackgroundClient(responses)),
+    )
+
+    with pytest.raises(TypeError, match="background"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(
+                background=True,
+                extra_args={"background": True},
+            ),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_background_streaming_passes_through() -> None:
+    """`background=True` is plumbed into the streaming create call; the existing
+    SSE consumption path is unchanged."""
+    called_kwargs: dict[str, Any] = {}
+
+    class DummyStream:
+        def __aiter__(self) -> Any:
+            async def gen() -> Any:
+                yield ResponseCompletedEvent(
+                    type="response.completed",
+                    response=get_response_obj([]),
+                    sequence_number=0,
+                )
+
+            return gen()
+
+    class DummyResponses:
+        async def create(self, **kwargs: Any) -> Any:
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return DummyStream()
+
+    class DummyResponsesClient:
+        def __init__(self) -> None:
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=cast(AsyncOpenAI, DummyResponsesClient()),
+    )
+
+    stream = model.stream_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(background=True),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+    async for _ in stream:
+        pass
+
+    assert called_kwargs.get("background") is True
+    assert called_kwargs.get("stream") is True
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_ws_model_rejects_background_get_response() -> None:
+    async_client = AsyncOpenAI(api_key="test")
+    model = OpenAIResponsesWSModel(model="gpt-4o-realtime", openai_client=async_client)
+
+    with pytest.raises(UserError, match="background=True"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(background=True),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_ws_model_rejects_background_stream_response() -> None:
+    async_client = AsyncOpenAI(api_key="test")
+    model = OpenAIResponsesWSModel(model="gpt-4o-realtime", openai_client=async_client)
+
+    stream = model.stream_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(background=True),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+    with pytest.raises(UserError, match="background=True"):
+        async for _ in stream:
+            pass

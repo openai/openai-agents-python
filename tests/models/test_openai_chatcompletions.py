@@ -322,6 +322,59 @@ async def test_get_response_rejects_prompt_in_strict_mode(monkeypatch) -> None:
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_get_response_rejects_background_mode(monkeypatch) -> None:
+    """`background=True` is a Responses-API feature; Chat Completions must fail
+    loudly so the user-opted durability guarantee isn't silently demoted."""
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        raise AssertionError("_fetch_response should not run when background=True")
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    with pytest.raises(UserError, match="background=True"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(background=True),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_rejects_background_mode(monkeypatch) -> None:
+    async def patched_fetch_response(self, *args, **kwargs):
+        raise AssertionError("_fetch_response should not run when background=True")
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    stream = model.stream_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(background=True),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+    with pytest.raises(UserError, match="background=True"):
+        async for _ in stream:
+            pass
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_get_response_rejects_non_text_tool_output_in_strict_mode() -> None:
     class DummyCompletions:
         async def create(self, **kwargs: Any) -> Any:
