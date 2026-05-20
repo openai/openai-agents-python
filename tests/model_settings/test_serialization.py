@@ -76,6 +76,8 @@ def test_all_fields_serialization() -> None:
             ),
         ),
         context_management=[{"type": "compaction", "compact_threshold": 200000}],
+        background=True,
+        background_poll_interval_seconds=0.5,
     )
 
     # Verify that every single field is set to a non-None value

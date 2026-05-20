@@ -79,6 +79,7 @@ _TRACEABLE_MODEL_SETTING_FIELDS = (
     "top_logprobs",
     "retry",
     "context_management",
+    "background",
 )
 
 
@@ -189,6 +190,29 @@ class ModelSettings:
 
     For example, use ``[{"type": "compaction", "compact_threshold": 200000}]``
     to enable server-side compaction when the rendered context crosses a token threshold.
+    """
+
+    background: bool | None = None
+    """Whether to run the model response in the background.
+
+    When ``True``, the SDK submits via ``client.responses.create(background=True)``
+    and polls ``client.responses.retrieve(...)`` until the response reaches a
+    terminal state. Background mode lets long single-turn calls (reasoning models,
+    deep-research workloads) survive HTTP / proxy / serverless timeouts.
+
+    Only supported by ``OpenAIResponsesModel`` (HTTP transport). Setting this on
+    ``OpenAIResponsesWSModel`` or ``OpenAIChatCompletionsModel`` raises ``UserError``.
+    Background mode is not ZDR-compatible and response data is retained server-side
+    for ~10 minutes.
+    `Learn more <https://platform.openai.com/docs/guides/background>`_.
+    """
+
+    background_poll_interval_seconds: float | None = None
+    """Polling interval (seconds) when ``background=True``.
+
+    When unset, the SDK honors the ``openai-poll-after-ms`` response header from
+    the most recent ``retrieve()``; falls back to 1.0 second when the header is
+    absent. Ignored when ``background`` is not enabled.
     """
 
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
