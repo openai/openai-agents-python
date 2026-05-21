@@ -14,6 +14,9 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import math
+import shlex
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -59,6 +62,11 @@ DEFAULT_SUPERSERVE_WORKSPACE_ROOT = "/workspace"
 DEFAULT_SUPERSERVE_TEMPLATE = "superserve/base"
 _DEFAULT_MANIFEST_ROOT = cast(str, Manifest.model_fields["root"].default)
 _SUPERSERVE_TRANSIENT_STATUS_CODES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
+_SUPERSERVE_ACTIVE_STATUSES: frozenset[str] = frozenset({"active"})
+_SUPERSERVE_RESUMING_STATUSES: frozenset[str] = frozenset({"paused", "resuming"})
+_SUPERSERVE_TERMINAL_STATUSES: frozenset[str] = frozenset({"failed"})
+_RESUME_READY_TIMEOUT_S: float = 60.0
+_RESUME_READY_POLL_INTERVAL_S: float = 1.0
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +125,46 @@ def _provider_error_detail(error: BaseException) -> str | None:
     return ": ".join(parts)
 
 
+def _superserve_error_context(error: BaseException) -> dict[str, object]:
+    """Structured error context — split status/code/message so consumers don't parse strings."""
+    context: dict[str, object] = {
+        "backend": "superserve",
+        "cause_type": type(error).__name__,
+    }
+    message = str(error)
+    if message:
+        context["provider_message"] = message
+    status = getattr(error, "status_code", None)
+    if isinstance(status, int):
+        context["http_status"] = status
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code:
+        context["provider_code"] = code
+    return context
+
+
+def _superserve_exec_transport_error(
+    *,
+    command: tuple[str | Path, ...],
+    cause: BaseException,
+    sandbox_id: str | None = None,
+) -> ExecTransportError:
+    context = _superserve_error_context(cause)
+    if sandbox_id:
+        context["sandbox_id"] = sandbox_id
+    detail = _provider_error_detail(cause)
+    message = "Superserve exec failed"
+    if detail:
+        message = f"{message}: {detail}"
+    return ExecTransportError(command=command, context=context, cause=cause, message=message)
+
+
+def _is_superserve_conflict(error: BaseException, conflict_exc: type[BaseException] | None) -> bool:
+    if conflict_exc is not None and isinstance(error, conflict_exc):
+        return True
+    return exception_chain_has_status_code(error, frozenset({409}))
+
+
 def _is_transient_error(exc: BaseException) -> bool:
     return exception_chain_has_status_code(
         exc, _SUPERSERVE_TRANSIENT_STATUS_CODES
@@ -124,6 +172,15 @@ def _is_transient_error(exc: BaseException) -> bool:
 
 
 def _resolve_manifest_root(manifest: Manifest | None) -> Manifest:
+    """Resolve the manifest root for a Superserve sandbox.
+
+    - No manifest → fresh manifest rooted at `/workspace`.
+    - Manifest whose root is the SDK's default placeholder (`Manifest.model_fields["root"].default`)
+      → rewrite the root to the Superserve default `/workspace` for ergonomics.
+    - Caller-provided non-default root (anywhere on the filesystem) → keep verbatim. We do not
+      reject arbitrary roots; this mirrors Vercel's behaviour and lets callers stage work outside
+      `/workspace` deliberately. If you need confinement, set extra path grants on the manifest.
+    """
     if manifest is None:
         return Manifest(root=DEFAULT_SUPERSERVE_WORKSPACE_ROOT)
     if manifest.root == _DEFAULT_MANIFEST_ROOT:
@@ -147,6 +204,8 @@ class SuperserveSandboxTimeouts(BaseModel):
     file_upload_s: int = Field(default=300, ge=1)
     file_download_s: int = Field(default=300, ge=1)
     workspace_tar_s: int = Field(default=300, ge=1)
+    resume_ready_timeout_s: int = Field(default=60, ge=1)
+    resume_ready_poll_interval_s: float = Field(default=1.0, gt=0)
 
 
 class SuperserveSandboxClientOptions(BaseSandboxClientOptions):
@@ -275,6 +334,10 @@ class SuperserveSandboxSession(BaseSandboxSession):
     def _runtime_helpers(self) -> tuple[RuntimeHelperScript, ...]:
         return (RESOLVE_WORKSPACE_PATH_HELPER,)
 
+    def _current_runtime_helper_cache_key(self) -> object | None:
+        """Invalidate helper-script cache when the backing sandbox is swapped on resume."""
+        return self.state.sandbox_id or None
+
     async def _resolved_envs(self) -> dict[str, str]:
         manifest_envs = await self.state.manifest.environment.resolve()
         resolved: dict[str, str] = {}
@@ -290,6 +353,8 @@ class SuperserveSandboxSession(BaseSandboxSession):
             return sandbox
 
         AsyncSandbox, NetworkConfig = _import_superserve_sdk()
+        sup_errors = _import_superserve_errors()
+        conflict_exc = sup_errors.get("conflict")
         env_vars = await self._resolved_envs()
         network_payload = self.state.base_network
         network = (
@@ -307,9 +372,14 @@ class SuperserveSandboxSession(BaseSandboxSession):
                 base_url=self.state.base_url,
             )
         except Exception as exc:
+            reason = (
+                "name_collision" if _is_superserve_conflict(exc, conflict_exc) else "create_failed"
+            )
+            context = _superserve_error_context(exc)
+            context["reason"] = reason
             raise WorkspaceStartError(
                 path=self._workspace_root_path(),
-                context={"backend": "superserve", "reason": "create_failed"},
+                context=context,
                 cause=exc,
                 message=f"failed to start Superserve sandbox: {_provider_error_detail(exc)}",
             ) from exc
@@ -318,18 +388,84 @@ class SuperserveSandboxSession(BaseSandboxSession):
         self.state.sandbox_id = sandbox.id
         return sandbox
 
+    async def _wait_until_active(
+        self,
+        *,
+        timeout_s: float | None = None,
+        poll_interval_s: float | None = None,
+    ) -> None:
+        """Poll get_info() until status is `active`, or raise.
+
+        Used after `await sandbox.resume()` to guarantee the sandbox is ready before the caller
+        runs the first exec. Superserve's resume() returns once the API has accepted the request;
+        the sandbox may still be in `resuming` for a short window.
+        """
+        sandbox = self._sandbox
+        if sandbox is None:
+            return
+        deadline = time.monotonic() + (timeout_s or self.state.timeouts.resume_ready_timeout_s)
+        interval = poll_interval_s or self.state.timeouts.resume_ready_poll_interval_s
+        last_status: str | None = None
+        while True:
+            try:
+                info = await asyncio.wait_for(
+                    sandbox.get_info(),
+                    timeout=self.state.timeouts.keepalive_s,
+                )
+            except Exception as exc:
+                raise WorkspaceStartError(
+                    path=self._workspace_root_path(),
+                    context=_superserve_error_context(exc) | {"reason": "wait_until_active_failed"},
+                    cause=exc,
+                    message=f"failed to confirm sandbox active: {_provider_error_detail(exc)}",
+                ) from exc
+            status = getattr(info, "status", None)
+            last_status = getattr(status, "value", status)
+            if last_status in _SUPERSERVE_ACTIVE_STATUSES:
+                return
+            if last_status in _SUPERSERVE_TERMINAL_STATUSES:
+                raise WorkspaceStartError(
+                    path=self._workspace_root_path(),
+                    context={
+                        "backend": "superserve",
+                        "reason": "sandbox_failed_during_resume",
+                        "sandbox_status": last_status,
+                    },
+                    message=(
+                        f"sandbox reached terminal status {last_status!r} during resume"
+                    ),
+                )
+            if time.monotonic() >= deadline:
+                raise WorkspaceStartError(
+                    path=self._workspace_root_path(),
+                    context={
+                        "backend": "superserve",
+                        "reason": "wait_until_active_timeout",
+                        "sandbox_status": last_status,
+                        "timeout_s": timeout_s or self.state.timeouts.resume_ready_timeout_s,
+                    },
+                    message=(
+                        f"sandbox did not become active within "
+                        f"{timeout_s or self.state.timeouts.resume_ready_timeout_s}s "
+                        f"(last status: {last_status!r})"
+                    ),
+                )
+            await asyncio.sleep(interval)
+
     async def _prepare_backend_workspace(self) -> None:
         root = self._workspace_root_path()
         sandbox = await self._ensure_sandbox()
         try:
             result = await sandbox.commands.run(
-                f"mkdir -p -- {_shell_quote(root.as_posix())}",
+                f"mkdir -p -- {shlex.quote(root.as_posix())}",
                 timeout_seconds=self.state.timeouts.fast_op_s,
             )
         except Exception as exc:
+            context = _superserve_error_context(exc)
+            context["reason"] = "workspace_root_setup_failed"
             raise WorkspaceStartError(
                 path=root,
-                context={"backend": "superserve", "reason": "workspace_root_setup_failed"},
+                context=context,
                 cause=exc,
                 message=(
                     "failed to start session: Superserve workspace root setup failed: "
@@ -400,14 +536,11 @@ class SuperserveSandboxSession(BaseSandboxSession):
         if not normalized:
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
 
-        command_str = " ".join(_shell_quote(part) for part in normalized)
+        command_str = shlex.join(normalized)
         envs = await self._resolved_envs()
         cwd = sandbox_path_str(self.state.manifest.root)
-        timeout_seconds = (
-            None
-            if timeout is None
-            else max(1, int(timeout + 0.999))  # round up; Superserve only accepts ints
-        )
+        # Superserve accepts only int seconds; round up so we never undershoot the caller.
+        timeout_seconds = None if timeout is None else max(1, math.ceil(timeout))
 
         try:
             result = await sandbox.commands.run(
@@ -425,14 +558,10 @@ class SuperserveSandboxSession(BaseSandboxSession):
                 raise ExecTimeoutError(
                     command=tuple(normalized), timeout_s=timeout, cause=exc
                 ) from exc
-            raise ExecTransportError(
+            raise _superserve_exec_transport_error(
                 command=tuple(normalized),
-                context={
-                    "backend": "superserve",
-                    "sandbox_id": self.state.sandbox_id,
-                    "provider_error": _provider_error_detail(exc),
-                },
                 cause=exc,
+                sandbox_id=self.state.sandbox_id,
             ) from exc
 
         stdout = (getattr(result, "stdout", "") or "").encode("utf-8", errors="replace")
@@ -506,16 +635,22 @@ class SuperserveSandboxSession(BaseSandboxSession):
     async def persist_workspace(self) -> io.IOBase:
         return await with_ephemeral_mounts_removed(
             self,
-            self._persist_workspace_internal,
+            self._persist_workspace_with_retry,
             error_path=self._workspace_root_path(),
             error_cls=WorkspaceArchiveReadError,
             operation_error_context_key="snapshot_error_before_remount_corruption",
         )
 
+    @retry_async(retry_if=lambda exc, self: _is_transient_error(exc))
+    async def _persist_workspace_with_retry(self) -> io.IOBase:
+        return await self._persist_workspace_internal()
+
     async def _persist_workspace_internal(self) -> io.IOBase:
         root = self._workspace_root_path()
         archive_path = posix_path_as_path(
-            coerce_posix_path(f"/tmp/openai-agents-{self.state.session_id.hex}.tar")
+            coerce_posix_path(
+                f"/tmp/openai-agents-persist-{self.state.session_id.hex}.tar"
+            )
         )
         excludes = [
             f"--exclude=./{rel_path.as_posix()}"
@@ -584,16 +719,22 @@ class SuperserveSandboxSession(BaseSandboxSession):
 
         await with_ephemeral_mounts_removed(
             self,
-            lambda: self._hydrate_workspace_internal(bytes(raw)),
+            lambda: self._hydrate_workspace_with_retry(bytes(raw)),
             error_path=self._workspace_root_path(),
             error_cls=WorkspaceArchiveWriteError,
             operation_error_context_key="hydrate_error_before_remount_corruption",
         )
 
+    @retry_async(retry_if=lambda exc, self, _raw: _is_transient_error(exc))
+    async def _hydrate_workspace_with_retry(self, raw: bytes) -> None:
+        await self._hydrate_workspace_internal(raw)
+
     async def _hydrate_workspace_internal(self, raw: bytes) -> None:
         root = self._workspace_root_path()
         archive_path = posix_path_as_path(
-            coerce_posix_path(f"/tmp/openai-agents-{self.state.session_id.hex}.tar")
+            coerce_posix_path(
+                f"/tmp/openai-agents-hydrate-{self.state.session_id.hex}.tar"
+            )
         )
         tar_command = ("tar", "xf", archive_path.as_posix(), "-C", root.as_posix())
 
@@ -641,13 +782,6 @@ class SuperserveSandboxSession(BaseSandboxSession):
                 )
             except Exception:
                 pass
-
-
-def _shell_quote(value: str) -> str:
-    """Minimal shlex.quote without importing shlex twice — keeps Vercel/Daytona-style quoting."""
-    import shlex
-
-    return shlex.quote(value)
 
 
 class SuperserveSandboxClient(BaseSandboxClient[SuperserveSandboxClientOptions]):
@@ -753,33 +887,13 @@ class SuperserveSandboxClient(BaseSandboxClient[SuperserveSandboxClientOptions])
         reconnected = False
 
         if state.sandbox_id:
-            try:
-                sandbox = await AsyncSandbox.connect(
-                    state.sandbox_id,
-                    api_key=api_key,
-                    base_url=base_url,
-                )
-                status = getattr(sandbox, "status", None)
-                status_value = getattr(status, "value", status)
-                if status_value == "paused":
-                    await sandbox.resume()
-                elif status_value == "resuming":
-                    await sandbox.resume()
-                elif status_value == "failed":
-                    sandbox = None
-                # else status_value == "active" → already running
-                if sandbox is not None:
-                    reconnected = True
-            except Exception as exc:
-                if not_found_exc is not None and isinstance(exc, not_found_exc):
-                    logger.debug(
-                        "superserve sandbox %s not found, will recreate", state.sandbox_id
-                    )
-                else:
-                    logger.debug(
-                        "superserve connect/resume failed (will recreate): %s", exc
-                    )
-                sandbox = None
+            sandbox, reconnected = await self._reattach_sandbox(
+                AsyncSandbox=AsyncSandbox,
+                state=state,
+                api_key=api_key,
+                base_url=base_url,
+                not_found_exc=not_found_exc,
+            )
 
         if sandbox is None:
             state.sandbox_id = ""
@@ -790,6 +904,87 @@ class SuperserveSandboxClient(BaseSandboxClient[SuperserveSandboxClientOptions])
             await inner._ensure_sandbox()
         inner._set_start_state_preserved(reconnected, system=reconnected)
         return self._wrap_session(inner, instrumentation=self._instrumentation)
+
+    async def _reattach_sandbox(
+        self,
+        *,
+        AsyncSandbox: Any,
+        state: SuperserveSandboxSessionState,
+        api_key: str | None,
+        base_url: str | None,
+        not_found_exc: type[BaseException] | None,
+    ) -> tuple[Any | None, bool]:
+        """Try to reattach to an existing Superserve sandbox by id.
+
+        Returns (sandbox, reconnected). On any failure path, returns (None, False) so the caller
+        falls back to recreating from scratch.
+        """
+        try:
+            sandbox = await AsyncSandbox.connect(
+                state.sandbox_id,
+                api_key=api_key,
+                base_url=base_url,
+            )
+        except Exception as exc:
+            if not_found_exc is not None and isinstance(exc, not_found_exc):
+                logger.debug(
+                    "superserve sandbox %s not found, will recreate", state.sandbox_id
+                )
+            else:
+                logger.debug(
+                    "superserve connect failed for %s (will recreate): %s",
+                    state.sandbox_id,
+                    exc,
+                )
+            return None, False
+
+        status = getattr(sandbox, "status", None)
+        status_value = getattr(status, "value", status)
+
+        if status_value in _SUPERSERVE_TERMINAL_STATUSES:
+            logger.debug(
+                "superserve sandbox %s is in terminal status %r; recreating",
+                state.sandbox_id,
+                status_value,
+            )
+            return None, False
+
+        if status_value in _SUPERSERVE_RESUMING_STATUSES:
+            # Only call resume() if the sandbox is paused; for `resuming` just wait. Calling
+            # resume() while resume is in flight typically 409s on the API.
+            if status_value == "paused":
+                try:
+                    await sandbox.resume()
+                except Exception as exc:
+                    logger.debug(
+                        "superserve resume() failed for %s, will recreate: %s",
+                        state.sandbox_id,
+                        exc,
+                    )
+                    return None, False
+
+            probe = SuperserveSandboxSession.from_state(state, sandbox=sandbox)
+            try:
+                await probe._wait_until_active()
+            except WorkspaceStartError as exc:
+                logger.debug(
+                    "superserve sandbox %s did not become active after resume: %s",
+                    state.sandbox_id,
+                    exc,
+                )
+                return None, False
+            return sandbox, True
+
+        if status_value in _SUPERSERVE_ACTIVE_STATUSES:
+            return sandbox, True
+
+        # Unknown or transitional status (e.g. "stopping", future enum values) — don't trust it.
+        logger.debug(
+            "superserve sandbox %s has unrecognized status %r; recreating",
+            state.sandbox_id,
+            status_value,
+        )
+        return None, False
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
         return SuperserveSandboxSessionState.model_validate(payload)

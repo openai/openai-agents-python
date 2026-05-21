@@ -257,6 +257,10 @@ class _FakeAsyncSandbox:
         self.kill_calls += 1
         self.status = "deleted"
 
+async def _noop_sleep(*_args: object, **_kwargs: object) -> None:
+    return None
+
+
 def _load_superserve_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     _FakeAsyncSandbox.reset()
 
@@ -691,6 +695,182 @@ async def test_superserve_resume_calls_resume_for_paused_sandbox(
     assert existing.resume_calls == 1
     assert resumed._inner.state.sandbox_id == existing.id
     assert _FakeAsyncSandbox.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_superserve_resume_polls_until_active_after_resume_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    superserve_module = _load_superserve_module(monkeypatch)
+    existing = _FakeAsyncSandbox(sandbox_id="sup-paused-poll", status="paused")
+    _FakeAsyncSandbox.sandboxes[existing.id] = existing
+
+    # Make sandbox.resume() leave the status at "resuming" so _wait_until_active has to poll.
+    original_resume = _FakeAsyncSandbox.resume
+
+    async def _slow_resume(self: _FakeAsyncSandbox) -> None:
+        self.resume_calls += 1
+        self.status = "resuming"
+
+    monkeypatch.setattr(_FakeAsyncSandbox, "resume", _slow_resume)
+
+    # On the second get_info call, flip status to "active" so polling succeeds.
+    get_info_count = {"n": 0}
+
+    async def _get_info_then_active(self: _FakeAsyncSandbox) -> _FakeSandboxInfo:
+        get_info_count["n"] += 1
+        if get_info_count["n"] >= 2:
+            self.status = "active"
+        return _FakeSandboxInfo(status=self.status)
+
+    monkeypatch.setattr(_FakeAsyncSandbox, "get_info", _get_info_then_active)
+
+    # Tighten the poll cadence so the test doesn't actually sleep.
+    state = superserve_module.SuperserveSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000043",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=existing.id,
+        timeouts=superserve_module.SuperserveSandboxTimeouts(
+            resume_ready_poll_interval_s=0.001,
+            resume_ready_timeout_s=5,
+        ),
+    )
+
+    client = superserve_module.SuperserveSandboxClient()
+    resumed = await client.resume(state)
+
+    # Restore original method to avoid leaking into other tests.
+    monkeypatch.setattr(_FakeAsyncSandbox, "resume", original_resume)
+
+    assert existing.resume_calls == 1
+    assert get_info_count["n"] >= 2  # polled at least twice
+    assert resumed._inner.state.sandbox_id == existing.id
+    assert existing.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_superserve_resume_skips_resume_call_when_already_resuming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    superserve_module = _load_superserve_module(monkeypatch)
+    existing = _FakeAsyncSandbox(sandbox_id="sup-already-resuming", status="resuming")
+    _FakeAsyncSandbox.sandboxes[existing.id] = existing
+
+    # Flip to active on first get_info so the poll exits immediately.
+    async def _get_info_active(self: _FakeAsyncSandbox) -> _FakeSandboxInfo:
+        self.status = "active"
+        return _FakeSandboxInfo(status="active")
+
+    monkeypatch.setattr(_FakeAsyncSandbox, "get_info", _get_info_active)
+
+    state = superserve_module.SuperserveSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000044",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=existing.id,
+    )
+
+    client = superserve_module.SuperserveSandboxClient()
+    resumed = await client.resume(state)
+
+    # Critical: do NOT call resume() when status is already "resuming".
+    assert existing.resume_calls == 0
+    assert resumed._inner.state.sandbox_id == existing.id
+
+
+@pytest.mark.asyncio
+async def test_superserve_resume_recreates_on_unknown_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    superserve_module = _load_superserve_module(monkeypatch)
+    existing = _FakeAsyncSandbox(sandbox_id="sup-stopping", status="stopping")
+    _FakeAsyncSandbox.sandboxes[existing.id] = existing
+
+    state = superserve_module.SuperserveSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000045",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=existing.id,
+        template="superserve/python-3.11",
+    )
+
+    client = superserve_module.SuperserveSandboxClient()
+    resumed = await client.resume(state)
+
+    # Unknown/stopping → recreate.
+    assert len(_FakeAsyncSandbox.create_calls) == 1
+    assert resumed._inner.state.sandbox_id != existing.id
+    assert resumed._inner._workspace_state_preserved_on_start() is False
+
+
+@pytest.mark.asyncio
+async def test_superserve_resume_recreates_on_failed_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    superserve_module = _load_superserve_module(monkeypatch)
+    existing = _FakeAsyncSandbox(sandbox_id="sup-failed", status="failed")
+    _FakeAsyncSandbox.sandboxes[existing.id] = existing
+
+    state = superserve_module.SuperserveSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000046",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=existing.id,
+    )
+
+    client = superserve_module.SuperserveSandboxClient()
+    resumed = await client.resume(state)
+
+    assert len(_FakeAsyncSandbox.create_calls) == 1
+    assert resumed._inner.state.sandbox_id != existing.id
+    # Original sandbox never had resume() called on it.
+    assert existing.resume_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Error classification
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_superserve_create_classifies_conflict_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    superserve_module = _load_superserve_module(monkeypatch)
+    _FakeAsyncSandbox.create_failures = [_SuperserveConflictError("name already exists")]
+
+    client = superserve_module.SuperserveSandboxClient()
+    with pytest.raises(Exception) as exc_info:
+        await client.create(
+            manifest=Manifest(),
+            options=superserve_module.SuperserveSandboxClientOptions(name="duplicate-name"),
+        )
+    assert exc_info.value.context.get("reason") == "name_collision"
+    assert exc_info.value.context.get("http_status") == 409
+
+
+def test_superserve_runtime_helper_cache_key_is_sandbox_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    superserve_module = _load_superserve_module(monkeypatch)
+    state = superserve_module.SuperserveSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000060",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sup-cache-key",
+    )
+    session = superserve_module.SuperserveSandboxSession.from_state(state)
+    assert session._current_runtime_helper_cache_key() == "sup-cache-key"
+
+    empty_state = superserve_module.SuperserveSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000061",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="",
+    )
+    empty_session = superserve_module.SuperserveSandboxSession.from_state(empty_state)
+    assert empty_session._current_runtime_helper_cache_key() is None
 
 
 @pytest.mark.asyncio
