@@ -1213,6 +1213,7 @@ class AgentRunner:
                                     reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                                     prompt_cache_key_resolver=prompt_cache_key_resolver,
                                     error_handlers=error_handlers,
+                                    sandbox_runtime=sandbox_runtime,
                                 )
                             )
 
@@ -1269,6 +1270,7 @@ class AgentRunner:
                                 reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                                 prompt_cache_key_resolver=prompt_cache_key_resolver,
                                 error_handlers=error_handlers,
+                                sandbox_runtime=sandbox_runtime,
                             )
                     finally:
                         attach_usage_to_span(

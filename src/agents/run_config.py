@@ -22,6 +22,7 @@ from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .models.openai_agent_runtime_auth import OpenAIAgentRuntimeAuthConfig
     from .run_context import RunContextWrapper
     from .sandbox.manifest import Manifest
     from .sandbox.session.base_sandbox_session import BaseSandboxSession
@@ -198,6 +199,9 @@ class SandboxRunConfig:
     Set to `None` to preserve the default behavior with no SDK archive resource limits.
     Use `SandboxArchiveLimits()` to enable SDK defaults.
     """
+
+    agent_runtime_auth: OpenAIAgentRuntimeAuthConfig | None = None
+    """Opt-in verified runtime/task auth for sandbox-backed OpenAI Responses calls."""
 
 
 @dataclass

@@ -82,6 +82,7 @@ from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider, ModelTracing
 from .models.multi_provider import MultiProvider
 from .models.openai_agent_registration import OpenAIAgentRegistrationConfig
+from .models.openai_agent_runtime_auth import OpenAIAgentRuntimeAuthConfig
 from .models.openai_chatcompletions import OpenAIChatCompletionsModel
 from .models.openai_provider import OpenAIProvider
 from .models.openai_responses import (
@@ -352,6 +353,7 @@ __all__ = [
     "MultiProvider",
     "OpenAIProvider",
     "OpenAIAgentRegistrationConfig",
+    "OpenAIAgentRuntimeAuthConfig",
     "OpenAIResponsesModel",
     "OpenAIResponsesWSModel",
     "AgentOutputSchema",
