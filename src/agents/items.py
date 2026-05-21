@@ -403,6 +403,15 @@ class ToolCallOutputItem(RunItemBase[Any]):
     tool_origin: ToolOrigin | None = None
     """Optional metadata describing the source of a function-tool-backed item."""
 
+    mcp_response_meta: dict[str, Any] | None = None
+    """Optional ``_meta`` returned by an MCP server in ``CallToolResult``.
+
+    Populated when this item was produced by an MCP tool call whose server returned a
+    non-empty ``_meta`` field, per the MCP specification. The value is a deep copy and is
+    not forwarded to the model; it is intended for application-side consumers (e.g.
+    streaming UIs that need auxiliary payloads without polluting LLM context).
+    """
+
     @property
     def call_id(self) -> str | None:
         """Return the call identifier from the raw item, if available."""
