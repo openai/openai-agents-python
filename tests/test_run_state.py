@@ -3665,6 +3665,54 @@ class TestRunStateSerializationEdgeCases:
         result_shell = _deserialize_items([item_data_shell], {"TestAgent": agent})
         assert len(result_shell) == 1
 
+    async def test_deserialize_tool_call_output_item_preserves_mcp_response_meta(self):
+        """``mcp_response_meta`` round-trips through serialization for MCP-backed items."""
+        agent = Agent(name="TestAgent")
+
+        item_data = {
+            "type": "tool_call_output_item",
+            "agent": {"name": "TestAgent"},
+            "raw_item": {
+                "type": "function_call_output",
+                "call_id": "call_meta",
+                "output": "ok",
+            },
+            "output": "ok",
+            "mcp_response_meta": {
+                "tool_meta": {"type": "chart", "vis_config": {"chart_type": "line"}}
+            },
+        }
+
+        restored = _deserialize_items([item_data], {"TestAgent": agent})
+        assert len(restored) == 1
+        item = restored[0]
+        assert isinstance(item, ToolCallOutputItem)
+        assert item.mcp_response_meta == {
+            "tool_meta": {"type": "chart", "vis_config": {"chart_type": "line"}}
+        }
+
+    async def test_deserialize_tool_call_output_item_treats_empty_mcp_response_meta_as_none(self):
+        """An empty ``mcp_response_meta`` payload should restore as ``None`` for consistency."""
+        agent = Agent(name="TestAgent")
+
+        item_data = {
+            "type": "tool_call_output_item",
+            "agent": {"name": "TestAgent"},
+            "raw_item": {
+                "type": "function_call_output",
+                "call_id": "call_no_meta",
+                "output": "ok",
+            },
+            "output": "ok",
+            "mcp_response_meta": {},
+        }
+
+        restored = _deserialize_items([item_data], {"TestAgent": agent})
+        assert len(restored) == 1
+        item = restored[0]
+        assert isinstance(item, ToolCallOutputItem)
+        assert item.mcp_response_meta is None
+
     async def test_deserialize_reasoning_item(self):
         """Test deserialization of reasoning_item."""
         agent = Agent(name="TestAgent")
@@ -4636,6 +4684,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.7",
                 "1.8",
                 "1.9",
+                "1.10",
                 CURRENT_SCHEMA_VERSION,
             }
         )
