@@ -20,7 +20,7 @@ from mcp.types import (
 
 from agents.mcp import MCPServer
 from agents.mcp.server import _UNSET, _MCPServerWithClientSession, _UnsetType
-from agents.mcp.util import MCPToolMetaResolver, ToolFilter
+from agents.mcp.util import MCPToolCallResultCallback, MCPToolMetaResolver, ToolFilter
 from agents.tool import ToolErrorFunction
 
 tee = shutil.which("tee") or ""
@@ -76,12 +76,14 @@ class FakeMCPServer(MCPServer):
         require_approval: object | None = None,
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
+        tool_call_result_callback: MCPToolCallResultCallback | None = None,
     ):
         super().__init__(
             use_structured_content=False,
             require_approval=require_approval,  # type: ignore[arg-type]
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
+            tool_call_result_callback=tool_call_result_callback,
         )
         self.tools: list[MCPTool] = tools or []
         self.tool_calls: list[str] = []

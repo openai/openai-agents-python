@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     )
 
 from .util import (
+    MCPToolCallResultCallback,
+    MCPToolCallResultContext,
     MCPToolMetaContext,
     MCPToolMetaResolver,
     MCPUtil,
@@ -50,6 +52,8 @@ __all__ = [
     "MCPServerManager",
     "LocalMCPApprovalCallable",
     "MCPUtil",
+    "MCPToolCallResultCallback",
+    "MCPToolCallResultContext",
     "MCPToolMetaContext",
     "MCPToolMetaResolver",
     "ToolFilter",

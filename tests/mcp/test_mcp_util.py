@@ -532,6 +532,88 @@ async def test_mcp_meta_resolver_does_not_mutate_arguments():
 
 
 @pytest.mark.asyncio
+async def test_mcp_tool_call_result_callback_observes_result_without_mutating_output():
+    captured: dict[str, Any] = {}
+
+    def tool_call_result_callback(context):
+        captured["run_context"] = context.run_context
+        captured["server_name"] = context.server_name
+        captured["tool_name"] = context.tool_name
+        captured["tool_display_name"] = context.tool_display_name
+        captured["arguments"] = dict(context.arguments)
+        captured["result_meta"] = dict(context.result_meta or {})
+        captured["structured_content"] = dict(context.structured_content or {})
+        captured["is_error"] = context.is_error
+        captured["tool_output"] = context.tool_output
+
+        with pytest.raises(TypeError):
+            context.arguments["mutated"] = True
+
+        if isinstance(context.tool_output, dict):
+            context.tool_output["text"] = "mutated"
+
+    class ResultMCPServer(FakeMCPServer):
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None = None,
+        ) -> CallToolResult:
+            self.tool_calls.append(tool_name)
+            self.tool_metas.append(meta)
+            return CallToolResult(
+                content=[TextContent(text="model summary", type="text")],
+                structuredContent={"rows": 1245},
+                isError=False,
+                _meta={"frontend": {"type": "chart"}},
+            )
+
+    server = ResultMCPServer(
+        server_name="analytics",
+        tool_call_result_callback=tool_call_result_callback,
+    )
+    ctx: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={"frontend_events": []})
+    tool = MCPTool(name="query_sales", inputSchema={})
+
+    output = await MCPUtil.invoke_mcp_tool(
+        server,
+        tool,
+        ctx,
+        '{"sql": "select 1"}',
+        tool_display_name="analytics__query_sales",
+    )
+
+    assert output == {"type": "text", "text": "model summary"}
+    assert captured == {
+        "run_context": ctx,
+        "server_name": "analytics",
+        "tool_name": "query_sales",
+        "tool_display_name": "analytics__query_sales",
+        "arguments": {"sql": "select 1"},
+        "result_meta": {"frontend": {"type": "chart"}},
+        "structured_content": {"rows": 1245},
+        "is_error": False,
+        "tool_output": {"type": "text", "text": "mutated"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_call_result_callback_can_be_async():
+    captured: list[str] = []
+
+    async def tool_call_result_callback(context):
+        captured.append(context.tool_name)
+
+    server = FakeMCPServer(tool_call_result_callback=tool_call_result_callback)
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    assert captured == ["test_tool_1"]
+
+
+@pytest.mark.asyncio
 async def test_to_function_tool_passes_static_mcp_meta():
     server = FakeMCPServer()
     tool = MCPTool(

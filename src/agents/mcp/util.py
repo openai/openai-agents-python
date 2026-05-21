@@ -7,8 +7,9 @@ import hashlib
 import inspect
 import json
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol, Union
 
 import httpx
@@ -149,13 +150,50 @@ class MCPToolMetaContext:
     """The parsed tool arguments."""
 
 
+@dataclass(frozen=True)
+class MCPToolCallResultContext:
+    """Context information available when an MCP tool call returns a result."""
+
+    run_context: RunContextWrapper[Any]
+    """The current run context."""
+
+    server_name: str
+    """The name of the MCP server."""
+
+    tool_name: str
+    """The original MCP tool name invoked on the server."""
+
+    tool_display_name: str
+    """The public tool name exposed through the Agents SDK."""
+
+    arguments: Mapping[str, Any]
+    """The parsed tool arguments."""
+
+    result_meta: Mapping[str, Any] | None
+    """The MCP tool result `_meta` payload, if present."""
+
+    structured_content: Mapping[str, Any] | None
+    """The MCP tool result `structuredContent` payload, if present."""
+
+    is_error: bool | None
+    """The MCP tool result `isError` flag, if present."""
+
+    tool_output: ToolOutput
+    """The model-visible tool output produced by the Agents SDK."""
+
+
 if TYPE_CHECKING:
     MCPToolMetaResolver = Callable[
         [MCPToolMetaContext],
         MaybeAwaitable[dict[str, Any] | None],
     ]
+    MCPToolCallResultCallback = Callable[
+        [MCPToolCallResultContext],
+        MaybeAwaitable[None],
+    ]
 else:
     MCPToolMetaResolver = Callable[..., Any]
+    MCPToolCallResultCallback = Callable[..., Any]
 """A function that produces MCP request metadata for tool calls.
 
 Args:
@@ -164,6 +202,7 @@ Args:
 Returns:
     A dict to send as MCP `_meta`, or None to omit metadata.
 """
+"""A callback that observes MCP tool call results without changing tool output."""
 
 
 def create_static_tool_filter(
@@ -541,6 +580,43 @@ class MCPUtil:
             merged.update(copy.deepcopy(explicit_meta))
         return merged
 
+    @staticmethod
+    def _copy_mapping_proxy(value: Any) -> Mapping[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        return MappingProxyType(copy.deepcopy(value))
+
+    @classmethod
+    async def _maybe_call_tool_result_callback(
+        cls,
+        *,
+        server: MCPServer,
+        context: RunContextWrapper[Any],
+        tool_name: str,
+        tool_display_name: str,
+        arguments: dict[str, Any],
+        result: Any,
+        tool_output: ToolOutput,
+    ) -> None:
+        callback = getattr(server, "tool_call_result_callback", None)
+        if callback is None:
+            return
+
+        callback_context = MCPToolCallResultContext(
+            run_context=context,
+            server_name=server.name,
+            tool_name=tool_name,
+            tool_display_name=tool_display_name,
+            arguments=MappingProxyType(copy.deepcopy(arguments)),
+            result_meta=cls._copy_mapping_proxy(getattr(result, "meta", None)),
+            structured_content=cls._copy_mapping_proxy(getattr(result, "structuredContent", None)),
+            is_error=getattr(result, "isError", None),
+            tool_output=copy.deepcopy(tool_output),
+        )
+        callback_result = callback(callback_context)
+        if inspect.isawaitable(callback_result):
+            await callback_result
+
     @classmethod
     async def _resolve_meta(
         cls,
@@ -687,6 +763,16 @@ class MCPUtil:
                 tool_output = tool_output_list[0]
             else:
                 tool_output = tool_output_list
+
+        await cls._maybe_call_tool_result_callback(
+            server=server,
+            context=context,
+            tool_name=tool.name,
+            tool_display_name=tool_name_for_display,
+            arguments=json_data,
+            result=result,
+            tool_output=tool_output,
+        )
 
         current_span = get_current_span()
         if current_span:
