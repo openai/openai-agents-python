@@ -1297,8 +1297,9 @@ class MCPServerSse(_MCPServerWithClientSession):
         }
         if "auth" in self.params:
             kwargs["auth"] = self.params["auth"]
-        if "httpx_client_factory" in self.params:
-            kwargs["httpx_client_factory"] = self.params["httpx_client_factory"]
+        kwargs["httpx_client_factory"] = (
+            self.params.get("httpx_client_factory") or _create_default_streamable_http_client
+        )
         return sse_client(**kwargs)
 
     @property
