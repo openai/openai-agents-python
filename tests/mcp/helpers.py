@@ -90,6 +90,7 @@ class FakeMCPServer(MCPServer):
         self.tool_filter = tool_filter
         self._server_name = server_name
         self._custom_content: list[Content] | None = None
+        self._response_meta: dict[str, Any] | None = None
 
     def add_tool(self, name: str, input_schema: dict[str, Any]):
         self.tools.append(MCPTool(name=name, inputSchema=input_schema))
@@ -123,10 +124,14 @@ class FakeMCPServer(MCPServer):
 
         # Allow testing custom content scenarios
         if self._custom_content is not None:
-            return CallToolResult(content=self._custom_content)
+            return CallToolResult(
+                content=self._custom_content,
+                _meta=self._response_meta,
+            )
 
         return CallToolResult(
             content=[TextContent(text=self.tool_results[-1], type="text")],
+            _meta=self._response_meta,
         )
 
     async def list_prompts(self, run_context=None, agent=None) -> ListPromptsResult:
