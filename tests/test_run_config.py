@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agents import Agent, RunConfig, Runner, ToolExecutionConfig
+from agents import Agent, RunConfig, Runner, ToolExecutionConfig, ToolNotFoundBehavior
 from agents.model_settings import ModelSettings
 from agents.models.interface import Model, ModelProvider
 
@@ -200,3 +200,16 @@ def test_tool_execution_config_is_public_from_agents_package() -> None:
 
     assert config.tool_execution is not None
     assert config.tool_execution.max_function_tool_concurrency == 2
+
+
+def test_tool_not_found_behavior_defaults_to_raise_error() -> None:
+    config = RunConfig()
+
+    assert config.tool_not_found_behavior == "raise_error"
+
+
+def test_tool_not_found_behavior_is_public_from_agents_package() -> None:
+    behavior: ToolNotFoundBehavior = "return_error_to_model"
+    config = RunConfig(tool_not_found_behavior=behavior)
+
+    assert config.tool_not_found_behavior == "return_error_to_model"

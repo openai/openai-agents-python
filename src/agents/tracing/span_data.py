@@ -161,7 +161,7 @@ class FunctionSpanData(SpanData):
             "type": self.type,
             "name": self.name,
             "input": self.input,
-            "output": str(self.output) if self.output else None,
+            "output": str(self.output) if self.output is not None else None,
             "mcp_data": self.mcp_data,
         }
 

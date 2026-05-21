@@ -111,6 +111,7 @@ from .run import (
     ToolErrorFormatter,
     ToolErrorFormatterArgs,
     ToolExecutionConfig,
+    ToolNotFoundBehavior,
 )
 from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .run_error_handlers import (
@@ -438,6 +439,7 @@ __all__ = [
     "ToolExecutionConfig",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
+    "ToolNotFoundBehavior",
     "RunState",
     "RawResponsesStreamEvent",
     "RunItemStreamEvent",
