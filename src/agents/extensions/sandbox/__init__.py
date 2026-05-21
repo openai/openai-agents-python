@@ -109,6 +109,18 @@ try:
 except Exception:  # pragma: no cover
     _HAS_VERCEL = False
 
+try:
+    from .openshell import (
+        OpenShellSandboxClient as OpenShellSandboxClient,
+        OpenShellSandboxClientOptions as OpenShellSandboxClientOptions,
+        OpenShellSandboxSession as OpenShellSandboxSession,
+        OpenShellSandboxSessionState as OpenShellSandboxSessionState,
+    )
+
+    _HAS_OPENSHELL = True
+except Exception:  # pragma: no cover
+    _HAS_OPENSHELL = False
+
 __all__: list[str] = []
 
 if _HAS_E2B:
@@ -205,5 +217,15 @@ if _HAS_RUNLOOP:
             "RunloopTimeouts",
             "RunloopTunnelConfig",
             "RunloopUserParameters",
+        ]
+    )
+
+if _HAS_OPENSHELL:
+    __all__.extend(
+        [
+            "OpenShellSandboxClient",
+            "OpenShellSandboxClientOptions",
+            "OpenShellSandboxSession",
+            "OpenShellSandboxSessionState",
         ]
     )
