@@ -321,6 +321,7 @@ class TranscriptionSpanData(SpanData):
 
     __slots__ = (
         "input",
+        "input_format",
         "output",
         "model",
         "model_config",
@@ -363,7 +364,7 @@ class SpeechSpanData(SpanData):
     Includes input, output, model, model configuration, and first content timestamp.
     """
 
-    __slots__ = ("input", "output", "model", "model_config", "first_content_at")
+    __slots__ = ("input", "output", "output_format", "model", "model_config", "first_content_at")
 
     def __init__(
         self,
