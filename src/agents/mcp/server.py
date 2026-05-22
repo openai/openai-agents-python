@@ -45,6 +45,7 @@ from ..tool import ToolErrorFunction
 from ..util._types import MaybeAwaitable
 from .util import (
     HttpClientFactory,
+    MCPToolCustomDataExtractor,
     MCPToolMetaResolver,
     ToolFilter,
     ToolFilterContext,
@@ -229,6 +230,7 @@ class MCPServer(abc.ABC):
         require_approval: RequireApprovalSetting = None,
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
+        custom_data_extractor: MCPToolCustomDataExtractor | None = None,
     ):
         """
         Args:
@@ -248,6 +250,8 @@ class MCPServer(abc.ABC):
                 SDK default) will be used.
             tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
+            custom_data_extractor: Optional callable that produces SDK-only custom data for
+                emitted MCP tool output items.
         """
         self.use_structured_content = use_structured_content
         self._needs_approval_policy = self._normalize_needs_approval(
@@ -255,6 +259,7 @@ class MCPServer(abc.ABC):
         )
         self._failure_error_function = failure_error_function
         self.tool_meta_resolver = tool_meta_resolver
+        self.custom_data_extractor = custom_data_extractor
 
     @abc.abstractmethod
     async def connect(self):
@@ -544,6 +549,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         require_approval: RequireApprovalSetting = None,
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
+        custom_data_extractor: MCPToolCustomDataExtractor | None = None,
     ):
         """
         Args:
@@ -576,12 +582,15 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 SDK default) will be used.
             tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
+            custom_data_extractor: Optional callable that produces SDK-only custom data for
+                emitted MCP tool output items.
         """
         super().__init__(
             use_structured_content=use_structured_content,
             require_approval=require_approval,
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
+            custom_data_extractor=custom_data_extractor,
         )
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
@@ -1108,6 +1117,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
         require_approval: RequireApprovalSetting = None,
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
+        custom_data_extractor: MCPToolCustomDataExtractor | None = None,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -1145,6 +1155,8 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 SDK default) will be used.
             tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
+            custom_data_extractor: Optional callable that produces SDK-only custom data for
+                emitted MCP tool output items.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -1157,6 +1169,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
             require_approval=require_approval,
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
+            custom_data_extractor=custom_data_extractor,
         )
 
         self.params = StdioServerParameters(
@@ -1229,6 +1242,7 @@ class MCPServerSse(_MCPServerWithClientSession):
         require_approval: RequireApprovalSetting = None,
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
+        custom_data_extractor: MCPToolCustomDataExtractor | None = None,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -1268,6 +1282,8 @@ class MCPServerSse(_MCPServerWithClientSession):
                 SDK default) will be used.
             tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
+            custom_data_extractor: Optional callable that produces SDK-only custom data for
+                emitted MCP tool output items.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -1280,6 +1296,7 @@ class MCPServerSse(_MCPServerWithClientSession):
             require_approval=require_approval,
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
+            custom_data_extractor=custom_data_extractor,
         )
 
         self.params = params
@@ -1365,6 +1382,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         require_approval: RequireApprovalSetting = None,
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
+        custom_data_extractor: MCPToolCustomDataExtractor | None = None,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -1405,6 +1423,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 SDK default) will be used.
             tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
+            custom_data_extractor: Optional callable that produces SDK-only custom data for
+                emitted MCP tool output items.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -1417,6 +1437,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             require_approval=require_approval,
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
+            custom_data_extractor=custom_data_extractor,
         )
 
         self.params = params
