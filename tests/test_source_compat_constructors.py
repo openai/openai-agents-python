@@ -167,6 +167,13 @@ def test_run_config_tool_not_found_behavior_append_preserves_tool_execution_posi
     assert config.tool_not_found_behavior == "return_error_to_model"
 
 
+def test_tool_execution_config_pre_approval_append_preserves_max_concurrency() -> None:
+    config = ToolExecutionConfig(2, True)
+
+    assert config.max_function_tool_concurrency == 2
+    assert config.pre_approval_tool_input_guardrails is True
+
+
 def test_model_settings_context_management_append_preserves_retry_position() -> None:
     retry = ModelRetrySettings(max_retries=1)
     settings = ModelSettings(

@@ -1651,6 +1651,36 @@ class _FunctionToolBatchExecutor:
             tool_lookup_key=tool_lookup_key,
         )
         if approval_status is None:
+            if self._should_run_pre_approval_tool_input_guardrails():
+                tool_context_namespace = get_tool_call_namespace(raw_tool_call)
+                if tool_context_namespace is None:
+                    tool_context_namespace = get_tool_call_namespace(tool_call)
+                tool_context = ToolContext.from_agent_context(
+                    self.context_wrapper,
+                    tool_call.call_id,
+                    tool_call=raw_tool_call,
+                    tool_namespace=tool_context_namespace,
+                    agent=self.public_agent,
+                    run_config=self.config,
+                )
+                rejected_message = await _execute_tool_input_guardrails(
+                    func_tool=func_tool,
+                    tool_context=tool_context,
+                    agent=self.public_agent,
+                    tool_input_guardrail_results=self.tool_input_guardrail_results,
+                )
+                if rejected_message is not None:
+                    return FunctionToolResult(
+                        tool=func_tool,
+                        output=rejected_message,
+                        run_item=function_rejection_item(
+                            self.public_agent,
+                            tool_call,
+                            rejection_message=rejected_message,
+                            scope_id=self.tool_state_scope_id,
+                            tool_origin=get_function_tool_origin(func_tool),
+                        ),
+                    )
             approval_item = ToolApprovalItem(
                 agent=self.public_agent,
                 raw_item=raw_tool_call,
@@ -1741,6 +1771,12 @@ class _FunctionToolBatchExecutor:
         )
         task_state.invoke_task = invoke_task
         return await self._await_invoke_task(outer_task=outer_task, invoke_task=invoke_task)
+
+    def _should_run_pre_approval_tool_input_guardrails(self) -> bool:
+        tool_execution = self.config.tool_execution
+        if tool_execution is None:
+            return False
+        return tool_execution.pre_approval_tool_input_guardrails
 
     async def _invoke_tool_and_run_post_invoke(
         self,
