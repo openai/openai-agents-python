@@ -109,6 +109,18 @@ try:
 except Exception:  # pragma: no cover
     _HAS_VERCEL = False
 
+try:
+    from .northflank import (
+        NorthflankSandboxClient as NorthflankSandboxClient,
+        NorthflankSandboxClientOptions as NorthflankSandboxClientOptions,
+        NorthflankSandboxSession as NorthflankSandboxSession,
+        NorthflankSandboxSessionState as NorthflankSandboxSessionState,
+    )
+
+    _HAS_NORTHFLANK = True
+except Exception:  # pragma: no cover
+    _HAS_NORTHFLANK = False
+
 __all__: list[str] = []
 
 if _HAS_E2B:
@@ -205,5 +217,15 @@ if _HAS_RUNLOOP:
             "RunloopTimeouts",
             "RunloopTunnelConfig",
             "RunloopUserParameters",
+        ]
+    )
+
+if _HAS_NORTHFLANK:
+    __all__.extend(
+        [
+            "NorthflankSandboxClient",
+            "NorthflankSandboxClientOptions",
+            "NorthflankSandboxSession",
+            "NorthflankSandboxSessionState",
         ]
     )
