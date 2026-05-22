@@ -830,7 +830,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         try:
             # Return from cache if caching is enabled, we have tools, and the cache is not dirty
-            if self.cache_tools_list and not self._cache_dirty and self._tools_list:
+            if self.cache_tools_list and not self._cache_dirty and self._tools_list is not None:
                 tools = self._tools_list
             else:
                 # Fetch the tools from the server
