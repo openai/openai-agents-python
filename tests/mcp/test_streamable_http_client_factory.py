@@ -37,17 +37,16 @@ class TestMCPServerStreamableHttpClientFactory:
                 }
             )
 
-            # Create streams should not pass httpx_client_factory when not provided
             server.create_streams()
 
-            # Verify streamablehttp_client was called with correct parameters
+            # Verify streamablehttp_client was called with the hardened default factory.
             mock_client.assert_called_once_with(
                 url="http://localhost:8000/mcp",
                 headers={"Authorization": "Bearer token"},
                 timeout=10,
                 sse_read_timeout=300,  # Default value
                 terminate_on_close=True,  # Default value
-                # httpx_client_factory should not be passed when not provided
+                httpx_client_factory=_create_default_streamable_http_client,
             )
 
     @pytest.mark.asyncio
@@ -334,6 +333,7 @@ async def test_streamable_http_server_passes_ignore_initialized_notification_fai
         assert kwargs["timeout"] == 5
         assert kwargs["sse_read_timeout"] == 300
         assert kwargs["terminate_on_close"] is True
+        assert kwargs["httpx_client_factory"] is _create_default_streamable_http_client
         assert (
             kwargs["transport_factory"] is _InitializedNotificationTolerantStreamableHTTPTransport
         )
@@ -437,6 +437,6 @@ async def test_default_streamable_http_client_matches_expected_defaults():
         assert client.timeout.write == timeout.write
         assert client.timeout.pool == timeout.pool
         assert client.auth is auth
-        assert client.follow_redirects is True
+        assert client.follow_redirects is False
     finally:
         await client.aclose()

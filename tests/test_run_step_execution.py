@@ -46,6 +46,7 @@ from agents import (
     TResponseInputItem,
     Usage,
     UserError,
+    _debug,
     tool_namespace,
     tool_output_guardrail,
     trace,
@@ -2814,7 +2815,11 @@ async def test_multiple_final_output_leads_to_final_output_next_step():
 
 
 @pytest.mark.asyncio
-async def test_input_guardrail_runs_on_invalid_json():
+async def test_input_guardrail_runs_on_invalid_json(monkeypatch: pytest.MonkeyPatch):
+    # Opt in to payload logging so the JSON decode error chain is preserved and the
+    # default failure formatter can recover the friendly "parsing tool arguments" message.
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
     guardrail_calls: list[str] = []
 
     def guardrail(data) -> ToolGuardrailFunctionOutput:

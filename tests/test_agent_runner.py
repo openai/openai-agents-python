@@ -4327,6 +4327,132 @@ async def test_dynamic_tool_addition_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tool_not_found_behavior_returns_error_to_model() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("missing_tool", "{}", call_id="call_missing")],
+            [get_text_message("recovered")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
+    )
+
+    assert result.final_output == "recovered"
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    tool_outputs = [
+        item
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ]
+    assert tool_outputs == [
+        {
+            "call_id": "call_missing",
+            "output": "Tool 'missing_tool' not found.",
+            "type": "function_call_output",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_not_found_behavior_uses_tool_error_formatter() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("missing_tool", "{}", call_id="call_missing")],
+            [get_text_message("recovered")],
+        ]
+    )
+    seen_kinds: list[str] = []
+
+    async def formatter(args: Any) -> str | None:
+        seen_kinds.append(args.kind)
+        if args.kind != "tool_not_found":
+            return None
+        return f"{args.tool_name} unavailable for {args.call_id}"
+
+    result = await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(
+            tool_not_found_behavior="return_error_to_model",
+            tool_error_formatter=formatter,
+        ),
+    )
+
+    assert result.final_output == "recovered"
+    assert seen_kinds == ["tool_not_found"]
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    tool_outputs = [
+        item
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ]
+    assert tool_outputs == [
+        {
+            "call_id": "call_missing",
+            "output": "missing_tool unavailable for call_missing",
+            "type": "function_call_output",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_not_found_behavior_handles_mixed_function_tool_calls() -> None:
+    model = FakeModel()
+    calls: list[str] = []
+
+    @function_tool(name_override="known_tool")
+    async def known_tool() -> str:
+        calls.append("known_tool")
+        return "known result"
+
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[known_tool],
+        tool_use_behavior="run_llm_again",
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call("missing_tool", "{}", call_id="call_missing"),
+                get_function_tool_call("known_tool", "{}", call_id="call_known"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
+    )
+
+    assert calls == ["known_tool"]
+    assert result.final_output == "done"
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    tool_outputs = {
+        item.get("call_id"): item.get("output")
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    }
+    assert tool_outputs == {
+        "call_known": "known result",
+        "call_missing": "Tool 'missing_tool' not found.",
+    }
+
+
+@pytest.mark.asyncio
 async def test_session_add_items_called_multiple_times_for_multi_turn_completion():
     """Test that SQLiteSession.add_items is called multiple times
     during a multi-turn agent completion.
