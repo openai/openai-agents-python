@@ -6,6 +6,7 @@ functions and approval plumbing live in tool_execution.py.
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import inspect
 import json
@@ -171,7 +172,7 @@ class ComputerAction:
                     tool=action.computer_tool,
                     tool_call=action.tool_call,
                     output=image_url,
-                    raw_item=raw_item,
+                    raw_item=copy.deepcopy(raw_item),
                 ),
             )
 
@@ -711,7 +712,7 @@ class CustomToolAction:
                     tool=custom_tool,
                     input=tool_input,
                     output=output_text,
-                    raw_item=raw_item,
+                    raw_item=copy.deepcopy(raw_item),
                 ),
             )
 
@@ -913,7 +914,7 @@ class ApplyPatchAction:
                     operations=operations,
                     output=output_text,
                     status=status,
-                    raw_item=raw_item,
+                    raw_item=copy.deepcopy(raw_item),
                 ),
             )
 

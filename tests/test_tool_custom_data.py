@@ -49,6 +49,7 @@ def _tool_output_items(items: list[Any]) -> list[ToolCallOutputItem]:
 @pytest.mark.asyncio
 async def test_function_tool_custom_data_is_attached_but_not_replayed() -> None:
     def extract_custom_data(ctx: Any) -> dict[str, Any]:
+        ctx.raw_item["renderer"] = "chart"
         return {"call_id": ctx.raw_item["call_id"], "output": ctx.output}
 
     @function_tool(custom_data_extractor=extract_custom_data)
@@ -71,6 +72,8 @@ async def test_function_tool_custom_data_is_attached_but_not_replayed() -> None:
     replay_payload = tool_output.to_input_item()
     assert isinstance(replay_payload, dict)
     assert "custom_data" not in replay_payload
+    assert "renderer" not in replay_payload
+    assert "renderer" not in cast(dict[str, Any], tool_output.raw_item)
     assert all(
         not (isinstance(item, dict) and "custom_data" in item)
         for item in model.last_turn_args["input"]
@@ -122,12 +125,16 @@ async def test_custom_tool_custom_data_is_attached() -> None:
     async def invoke(_ctx: ToolContext[Any], raw_input: str) -> str:
         return raw_input.upper()
 
+    def extract_custom_data(ctx: Any) -> dict[str, Any]:
+        ctx.raw_item["renderer"] = "chart"
+        return {"input": ctx.input, "output": ctx.output}
+
     tool = CustomTool(
         name="raw_editor",
         description="Edit raw text.",
         on_invoke_tool=invoke,
         format={"type": "text"},
-        custom_data_extractor=lambda ctx: {"input": ctx.input, "output": ctx.output},
+        custom_data_extractor=extract_custom_data,
     )
     agent = Agent(name="custom-agent", tools=[tool])
     tool_call = ResponseCustomToolCall(
@@ -147,6 +154,7 @@ async def test_custom_tool_custom_data_is_attached() -> None:
 
     assert isinstance(result, ToolCallOutputItem)
     assert result.custom_data == {"input": "hello", "output": "HELLO"}
+    assert "renderer" not in cast(dict[str, Any], result.raw_item)
 
 
 class ScreenshotComputer(Computer):
@@ -180,9 +188,13 @@ class ScreenshotComputer(Computer):
 
 @pytest.mark.asyncio
 async def test_computer_tool_custom_data_is_attached() -> None:
+    def extract_custom_data(ctx: Any) -> dict[str, Any]:
+        ctx.raw_item["output"]["image_url"] = "mutated"
+        return {"call_id": ctx.tool_call.call_id}
+
     computer_tool = ComputerTool(
         computer=ScreenshotComputer(),
-        custom_data_extractor=lambda ctx: {"call_id": ctx.tool_call.call_id},
+        custom_data_extractor=extract_custom_data,
     )
     tool_call = ResponseComputerToolCall(
         id="computer_1",
@@ -204,6 +216,10 @@ async def test_computer_tool_custom_data_is_attached() -> None:
 
     assert isinstance(result, ToolCallOutputItem)
     assert result.custom_data == {"call_id": "call_computer"}
+    assert (
+        cast(dict[str, Any], result.raw_item)["output"]["image_url"]
+        == "data:image/png;base64,base64png"
+    )
 
 
 class RecordingEditor:
@@ -219,12 +235,17 @@ class RecordingEditor:
 
 @pytest.mark.asyncio
 async def test_apply_patch_tool_custom_data_is_attached() -> None:
-    tool = ApplyPatchTool(
-        editor=RecordingEditor(),
-        custom_data_extractor=lambda ctx: {
+    def extract_custom_data(ctx: Any) -> dict[str, Any]:
+        ctx.raw_item["status"] = "failed"
+        ctx.raw_item["renderer"] = "patch"
+        return {
             "status": ctx.status,
             "paths": [operation.path for operation in ctx.operations],
-        },
+        }
+
+    tool = ApplyPatchTool(
+        editor=RecordingEditor(),
+        custom_data_extractor=extract_custom_data,
     )
     call = DummyApplyPatchCall(
         type="apply_patch_call",
@@ -243,4 +264,7 @@ async def test_apply_patch_tool_custom_data_is_attached() -> None:
 
     assert isinstance(result, ToolCallOutputItem)
     assert result.custom_data == {"status": "completed", "paths": ["tasks.md"]}
-    assert "custom_data" not in cast(dict[str, Any], result.to_input_item())
+    replay_payload = cast(dict[str, Any], result.to_input_item())
+    assert "custom_data" not in replay_payload
+    assert "renderer" not in replay_payload
+    assert replay_payload["status"] == "completed"

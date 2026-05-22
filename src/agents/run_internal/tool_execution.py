@@ -6,6 +6,7 @@ approval plumbing, and payload coercion. Action classes live in tool_actions.py.
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import functools
 import inspect
@@ -1801,7 +1802,7 @@ class _FunctionToolBatchExecutor:
                 tool_context=tool_context,
                 tool=func_tool,
                 output=final_result,
-                raw_item=raw_output_item,
+                raw_item=copy.deepcopy(raw_output_item),
             ),
         )
         custom_data = merge_custom_data(tool_context._custom_data, extracted_custom_data)
