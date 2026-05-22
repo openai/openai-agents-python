@@ -227,6 +227,51 @@ async def test_function_tool_does_not_treat_self_named_argument_as_method():
 
 
 @pytest.mark.asyncio
+async def test_staticmethod_function_tool_keeps_first_parameter():
+    class AccountTools:
+        @staticmethod
+        @function_tool
+        def lookup(account_id: str) -> str:
+            """Look up an account."""
+            return f"acct:{account_id}"
+
+    tool = AccountTools.lookup
+
+    assert isinstance(tool, FunctionTool)
+    assert "account_id" in tool.params_json_schema["properties"]
+
+    result = await tool.on_invoke_tool(
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=""),
+        '{"account_id": "123"}',
+    )
+
+    assert result == "acct:123"
+
+
+@pytest.mark.asyncio
+async def test_staticmethod_function_tool_allows_self_named_parameter():
+    class AccountTools:
+        @staticmethod
+        @function_tool
+        def lookup(self: str, account_id: str) -> str:
+            """Look up an account."""
+            return f"{self}:{account_id}"
+
+    tool = AccountTools.lookup
+
+    assert isinstance(tool, FunctionTool)
+    assert "self" in tool.params_json_schema["properties"]
+    assert "account_id" in tool.params_json_schema["properties"]
+
+    result = await tool.on_invoke_tool(
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=""),
+        '{"self": "acct", "account_id": "123"}',
+    )
+
+    assert result == "acct:123"
+
+
+@pytest.mark.asyncio
 async def test_instance_method_function_tool_supports_context_after_self():
     class AccountTools:
         @function_tool

@@ -396,10 +396,52 @@ class FunctionTool:
     )
     """Internal descriptor hook used for instance methods decorated with `@function_tool`."""
 
+    _staticmethod_tool_factory: Callable[[], FunctionTool] | None = field(
+        default=None,
+        kw_only=True,
+        repr=False,
+    )
+    """Internal fallback for class-scoped tools wrapped in `staticmethod`."""
+
+    _method_tool_bound_to_class: bool = field(default=False, kw_only=True, repr=False)
+    """Whether Python installed this tool directly on a class via `__set_name__`."""
+
+    def __set_name__(self, owner: type[Any], name: str) -> None:
+        if self._staticmethod_tool_factory is not None:
+            self._method_tool_bound_to_class = True
+
+    def __getattribute__(self, name: str) -> Any:
+        if not name.startswith("_") and name not in {"__class__", "__dict__"}:
+            object.__getattribute__(self, "_maybe_apply_staticmethod_tool")()
+        return object.__getattribute__(self, name)
+
     def __get__(self, instance: Any, owner: type[Any] | None = None) -> FunctionTool:
         if instance is None or self._method_tool_factory is None:
             return self
         return self._method_tool_factory(instance)
+
+    def _maybe_apply_staticmethod_tool(self) -> None:
+        try:
+            staticmethod_tool_factory = object.__getattribute__(self, "_staticmethod_tool_factory")
+            method_tool_bound_to_class = object.__getattribute__(
+                self, "_method_tool_bound_to_class"
+            )
+        except AttributeError:
+            return
+
+        if staticmethod_tool_factory is None or method_tool_bound_to_class:
+            return
+
+        # `staticmethod` does not forward `__set_name__` to the wrapped FunctionTool.
+        # Rebuild as a normal tool before exposing schema or invocation state.
+        object.__setattr__(self, "_staticmethod_tool_factory", None)
+        staticmethod_tool = staticmethod_tool_factory()
+        for tool_field in dataclasses.fields(FunctionTool):
+            object.__setattr__(self, tool_field.name, getattr(staticmethod_tool, tool_field.name))
+
+        bind_to_function_tool = getattr(self.on_invoke_tool, "__agents_bind_function_tool__", None)
+        if callable(bind_to_function_tool):
+            self.on_invoke_tool = bind_to_function_tool(self)
 
     @property
     def qualified_name(self) -> str:
@@ -1860,9 +1902,15 @@ def function_tool(
         the_func: ToolFunction[...],
         *,
         method_tool_instance: Any | None = None,
+        treat_as_instance_method: bool | None = None,
+        enable_method_binding: bool = True,
     ) -> FunctionTool:
         is_sync_function_tool = not inspect.iscoroutinefunction(the_func)
-        is_instance_method_tool = _is_instance_method_tool(the_func)
+        is_instance_method_tool = (
+            _is_instance_method_tool(the_func)
+            if treat_as_instance_method is None
+            else treat_as_instance_method
+        )
         schema = function_schema(
             func=the_func,
             name_override=name_override,
@@ -1937,10 +1985,17 @@ def function_tool(
             defer_loading=defer_loading,
             sync_invoker=is_sync_function_tool,
         )
-        if is_instance_method_tool and method_tool_instance is None:
+        if enable_method_binding and is_instance_method_tool and method_tool_instance is None:
             function_tool._method_tool_factory = lambda instance: _create_function_tool(
                 the_func,
                 method_tool_instance=instance,
+                treat_as_instance_method=True,
+                enable_method_binding=False,
+            )
+            function_tool._staticmethod_tool_factory = lambda: _create_function_tool(
+                the_func,
+                treat_as_instance_method=False,
+                enable_method_binding=False,
             )
         return function_tool
 
