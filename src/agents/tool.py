@@ -1841,7 +1841,11 @@ def function_tool(
 
     def _is_instance_method_tool(the_func: ToolFunction[...]) -> bool:
         parameters = tuple(inspect.signature(the_func).parameters.values())
-        return bool(parameters) and parameters[0].name == "self"
+        if not parameters:
+            return False
+
+        parent_name = the_func.__qualname__.rsplit(".", 1)[0]
+        return "." in the_func.__qualname__ and not parent_name.endswith("<locals>")
 
     def _create_function_tool(
         the_func: ToolFunction[...],
