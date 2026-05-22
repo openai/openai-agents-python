@@ -163,7 +163,7 @@ Nested handoffs are available as an opt-in beta. Enable the collapsed-transcript
 
 ##### `tool_execution`
 
-Use `tool_execution` when you want the SDK to limit local function-tool concurrency for a run.
+Use `tool_execution` when you want to configure SDK-side behavior for local function tools, such as limiting local function-tool concurrency for a run.
 
 ```python
 from agents import Agent, RunConfig, Runner, ToolExecutionConfig
@@ -174,7 +174,10 @@ result = await Runner.run(
     agent,
     "Run the required tool calls.",
     run_config=RunConfig(
-        tool_execution=ToolExecutionConfig(max_function_tool_concurrency=2),
+        tool_execution=ToolExecutionConfig(
+            max_function_tool_concurrency=2,
+            pre_approval_tool_input_guardrails=True,
+        ),
     ),
 )
 ```
@@ -182,6 +185,8 @@ result = await Runner.run(
 `max_function_tool_concurrency=None` preserves the default behavior: when a model emits multiple function tool calls in a turn, the SDK starts all emitted local function tool calls. Set an integer value to cap how many of those local function tools run at once.
 
 This is separate from provider-side [`ModelSettings.parallel_tool_calls`][agents.model_settings.ModelSettings.parallel_tool_calls]. `parallel_tool_calls` controls whether the model is allowed to emit multiple tool calls in a single response. `tool_execution.max_function_tool_concurrency` controls how the SDK executes local function tool calls after the model has emitted them.
+
+`pre_approval_tool_input_guardrails=False` preserves the default approval flow: if a function tool needs approval, the run pauses first and the tool input guardrails run only after approval, immediately before execution. Set it to `True` when you want function-tool input guardrails to run before the pending approval interruption is emitted. Calls that pass this pre-approval check still run the same input guardrails again after approval, so time-sensitive checks are revalidated before execution.
 
 ##### `tool_error_formatter`
 
