@@ -58,6 +58,7 @@ from .items import (
     ItemHelpers,
     MCPApprovalRequestItem,
     MCPApprovalResponseItem,
+    MCPListToolsItem,
     MessageOutputItem,
     ModelResponse,
     ReasoningItem,
@@ -65,6 +66,8 @@ from .items import (
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
     TResponseInputItem,
 )
 from .lifecycle import AgentHooks, RunHooks
@@ -403,8 +406,11 @@ __all__ = [
     "ToolApprovalItem",
     "MCPApprovalRequestItem",
     "MCPApprovalResponseItem",
+    "MCPListToolsItem",
     "ToolCallItem",
     "ToolCallOutputItem",
+    "ToolSearchCallItem",
+    "ToolSearchOutputItem",
     "ToolOrigin",
     "ToolOriginType",
     "ReasoningItem",
