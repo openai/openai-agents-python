@@ -1396,6 +1396,46 @@ async def test_concurrent_add_items_preserves_message_structure_for_file_db():
         session.close()
 
 
+async def test_add_items_is_atomic_on_structure_metadata_failure():
+    """Regression: add_items must be fully atomic.
+
+    If _insert_structure_metadata raises, the message rows must roll back so that
+    callers observe a clean failure rather than a half-written state where get_items()
+    returns nothing but the messages table contains orphaned rows.
+    """
+    session = AdvancedSQLiteSession(session_id="atomic_test", create_tables=True)
+
+    items: list[TResponseInputItem] = [{"role": "user", "content": "hello"}]
+
+    original_insert_metadata = session._insert_structure_metadata
+
+    def failing_insert_structure_metadata(conn, items):  # type: ignore[override]
+        raise RuntimeError("simulated metadata failure")
+
+    session._insert_structure_metadata = failing_insert_structure_metadata  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="simulated metadata failure"):
+        await session.add_items(items)
+
+    session._insert_structure_metadata = original_insert_metadata
+
+    # Messages table must be empty; the transaction was rolled back.
+    with session._locked_connection() as conn:
+        count = conn.execute(
+            f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()[0]
+    assert count == 0, "orphaned message rows must not remain after a failed add_items call"
+
+    # A subsequent successful call must work normally.
+    await session.add_items(items)
+    result = await session.get_items()
+    assert len(result) == 1
+    assert result[0]["content"] == "hello"  # type: ignore[index]
+
+    session.close()
+
+
 async def test_output_tokens_details_persisted_when_input_details_missing():
     """Regression: output_tokens_details must persist even if input_tokens_details is None.
 
