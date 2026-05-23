@@ -989,6 +989,61 @@ async def test_exposed_port_resolution_caches_proxy_hostname(
 
 
 @pytest.mark.asyncio
+async def test_custom_proxy_exposed_port_resolution_retries_after_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_tensorlake_module(monkeypatch)
+    state = module.TensorlakeSandboxSessionState(
+        session_id=uuid.UUID("00000000-0000-0000-0000-00000000004a"),
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snap"),
+        sandbox_id="sandbox-dev",
+        name="dev-env",
+        exposed_ports=(8080,),
+        proxy_url="https://sandbox.tensorlake.dev",
+    )
+    fake = _FakeSandbox(
+        sandbox_id="sandbox-dev",
+        name="dev-env",
+        sandbox_url=None,
+    )
+
+    info_failures = {"count": 1}
+    status_failures = {"count": 1}
+    original_info = fake.info
+    original_status = fake.status
+
+    async def flaky_info() -> Any:
+        if info_failures["count"] > 0:
+            info_failures["count"] -= 1
+            raise RuntimeError("transient info() failure")
+        return await original_info()
+
+    async def flaky_status() -> Any:
+        if status_failures["count"] > 0:
+            status_failures["count"] -= 1
+            raise RuntimeError("transient status() failure")
+        return await original_status()
+
+    fake.info = flaky_info  # type: ignore[assignment]
+    fake.status = flaky_status  # type: ignore[assignment]
+
+    session = module.TensorlakeSandboxSession.from_state(state, sandbox=fake)
+
+    # First lookup hits the transient failures and falls back to the public template;
+    # because this is a custom-control-plane deployment, the cache must NOT latch.
+    first = await session.resolve_exposed_port(8080)
+    assert first.host == "8080-dev-env.sandbox.tensorlake.ai"
+
+    # Recover and supply a sandbox_url so the next info() refresh returns it.
+    fake.sandbox_url = "https://dev-env.sandbox.tensorlake.dev"
+
+    # The retry must reach the backend instead of short-circuiting on the cached miss.
+    second = await session.resolve_exposed_port(8080)
+    assert second.host == "8080-dev-env.sandbox.tensorlake.dev"
+
+
+@pytest.mark.asyncio
 async def test_delete_terminates_remote_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_tensorlake_module(monkeypatch)
     client = module.TensorlakeSandboxClient()

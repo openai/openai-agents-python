@@ -890,15 +890,17 @@ class TensorlakeSandboxSession(BaseSandboxSession):
             if parsed and parsed not in _LOOPBACK_HOSTS:
                 hostname = parsed
         self._cached_proxy_hostname = hostname
-        self._proxy_hostname_resolved = True
+        # For custom control planes, an unresolved hostname is almost certainly a
+        # transient info()/status() failure rather than a steady-state answer (the
+        # public template fallback cannot route to a custom deployment). Leave the
+        # cache "unresolved" so a later call can retry instead of permanently
+        # returning the wrong fallback for the rest of the session.
+        self._proxy_hostname_resolved = hostname is not None or not custom_control_plane
         if hostname is None and custom_control_plane:
-            # Custom deployments cannot be reached via the public
-            # `<port>-<sandbox>.sandbox.tensorlake.ai` template; warn once so callers
-            # know the fallback URL likely won't route to their backend.
             logger.warning(
                 "Could not resolve Tensorlake sandbox URL from info(); falling back to the "
                 "public exposed-port template, which will not route correctly for this "
-                "custom proxy_url/api_url deployment.",
+                "custom proxy_url/api_url deployment. Will retry on the next lookup.",
                 extra={
                     "sandbox_id": self.state.sandbox_id,
                     "proxy_url": self.state.proxy_url,
