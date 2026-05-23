@@ -243,6 +243,45 @@ export DAYTONA_API_KEY=...
 uv run python examples/sandbox/extensions/daytona/daytona_runner.py --stream
 ```
 
+## Tensorlake
+
+### Setup
+
+Install the repo extra:
+
+```bash
+uv sync --extra tensorlake
+```
+
+Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/) (or run `tl login`)
+and export the required environment variables:
+
+```bash
+export OPENAI_API_KEY=...
+export TENSORLAKE_API_KEY=...
+```
+
+### Run
+
+```bash
+uv run python examples/sandbox/extensions/tensorlake_runner.py --stream
+```
+
+Useful flags:
+
+- `--image <name>` to pin a specific Tensorlake registered image.
+- `--timeout-secs 600`
+- `--workspace-persistence snapshot` specify snapshot as the mechanism for persistence.
+- `--env KEY=VAL` to inject an environment variable into the sandbox. Repeatable.
+- `--secret NAME` to inject a Tensorlake-managed secret into the sandbox by name. Repeatable.
+- `--cpus <n>` to set the sandbox CPU allocation.
+- `--memory-mb <n>` to set the sandbox memory allocation, in megabytes.
+  Must be between 1024 and 8192 MB **per CPU core**, so scale this up
+  alongside `--cpus` (for example, `--cpus 2` requires at least
+  `--memory-mb 2048`).
+- `--disk-mb <n>` to set the sandbox disk allocation, in megabytes.
+  Must be between 10240 and 102400 MiB (10–100 GiB).
+
 ## Runloop
 
 ### Setup
