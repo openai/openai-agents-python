@@ -32,7 +32,7 @@ from openai.types.responses.response_output_item import (
 )
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 
-from agents import Agent, HandoffCallItem, Runner, function_tool
+from agents import Agent, HandoffCallItem, RunConfig, Runner, function_tool
 from agents.extensions.handoff_filters import remove_all_tools
 from agents.handoffs import handoff
 from agents.items import (
@@ -354,7 +354,9 @@ async def test_complete_streaming_events():
         ]
     )
 
-    result = Runner.run_streamed(agent, input="Hello")
+    result = Runner.run_streamed(
+        agent, input="Hello", run_config=RunConfig(emit_reasoning_deltas=True)
+    )
 
     events = []
     async for event in result.stream_events():

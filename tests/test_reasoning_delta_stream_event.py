@@ -5,11 +5,14 @@ from __future__ import annotations
 import pytest
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 
-from agents import Agent, Runner
+from agents import Agent, RunConfig, Runner
 from agents.stream_events import RawResponsesStreamEvent, ReasoningDeltaEvent
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
+
+# ReasoningDeltaEvent is opt-in, so every streaming run in this module enables it.
+_REASONING_CONFIG = RunConfig(emit_reasoning_deltas=True)
 
 
 def _make_reasoning_item(text: str) -> ResponseReasoningItem:
@@ -32,7 +35,7 @@ async def test_reasoning_delta_event_emitted_during_streaming() -> None:
     )
 
     agent = Agent(name="A", model=model)
-    result = Runner.run_streamed(agent, input="hi")
+    result = Runner.run_streamed(agent, input="hi", run_config=_REASONING_CONFIG)
 
     reasoning_deltas: list[ReasoningDeltaEvent] = []
     async for event in result.stream_events():
@@ -57,7 +60,7 @@ async def test_reasoning_delta_snapshot_accumulates() -> None:
     )
 
     agent = Agent(name="A", model=model)
-    result = Runner.run_streamed(agent, input="hi")
+    result = Runner.run_streamed(agent, input="hi", run_config=_REASONING_CONFIG)
 
     snapshots: list[str] = []
     async for event in result.stream_events():
@@ -84,7 +87,7 @@ async def test_no_reasoning_delta_event_without_reasoning() -> None:
     model.set_next_output([get_text_message("plain text answer")])
 
     agent = Agent(name="A", model=model)
-    result = Runner.run_streamed(agent, input="hi")
+    result = Runner.run_streamed(agent, input="hi", run_config=_REASONING_CONFIG)
 
     event_count = 0
     async for event in result.stream_events():
@@ -110,7 +113,7 @@ async def test_reasoning_delta_event_type_field() -> None:
     )
 
     agent = Agent(name="A", model=model)
-    result = Runner.run_streamed(agent, input="hi")
+    result = Runner.run_streamed(agent, input="hi", run_config=_REASONING_CONFIG)
 
     found = False
     async for event in result.stream_events():
@@ -133,7 +136,7 @@ async def test_raw_response_events_still_emitted_alongside_reasoning_delta() -> 
     )
 
     agent = Agent(name="A", model=model)
-    result = Runner.run_streamed(agent, input="hi")
+    result = Runner.run_streamed(agent, input="hi", run_config=_REASONING_CONFIG)
 
     raw_events: list[RawResponsesStreamEvent] = []
     reasoning_events: list[ReasoningDeltaEvent] = []
@@ -147,6 +150,31 @@ async def test_raw_response_events_still_emitted_alongside_reasoning_delta() -> 
     # Both types should be present
     assert len(raw_events) > 0
     assert len(reasoning_events) > 0
+
+
+@pytest.mark.asyncio
+async def test_no_reasoning_delta_event_by_default() -> None:
+    """ReasoningDeltaEvent is not emitted unless emit_reasoning_deltas is enabled."""
+    model = FakeModel()
+    model.set_next_output(
+        [
+            _make_reasoning_item("Let me think..."),
+            get_text_message("Answer"),
+        ]
+    )
+
+    agent = Agent(name="A", model=model)
+    # No run_config, so emit_reasoning_deltas stays at its default of False.
+    result = Runner.run_streamed(agent, input="hi")
+
+    event_count = 0
+    async for event in result.stream_events():
+        event_count += 1
+        assert not isinstance(event, ReasoningDeltaEvent), (
+            "ReasoningDeltaEvent should not be emitted when emit_reasoning_deltas is False"
+        )
+
+    assert event_count > 0, "expected the stream to yield at least one event"
 
 
 @pytest.mark.asyncio

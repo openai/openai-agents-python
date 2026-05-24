@@ -1500,19 +1500,21 @@ async def run_single_turn_streamed(
             _reasoning_snapshot = ""
 
         # Emit a ReasoningDeltaEvent for reasoning/thinking deltas so consumers don't have
-        # to unwrap the raw event themselves.
-        if isinstance(event, ResponseReasoningSummaryTextDeltaEvent):
-            delta_text: str = event.delta or ""
-            _reasoning_snapshot += delta_text
-            streamed_result._event_queue.put_nowait(
-                ReasoningDeltaEvent(delta=delta_text, snapshot=_reasoning_snapshot)
-            )
-        elif isinstance(event, ResponseReasoningTextDeltaEvent):
-            delta_text = event.delta or ""
-            _reasoning_snapshot += delta_text
-            streamed_result._event_queue.put_nowait(
-                ReasoningDeltaEvent(delta=delta_text, snapshot=_reasoning_snapshot)
-            )
+        # to unwrap the raw event themselves. Off by default (opt in via
+        # RunConfig.emit_reasoning_deltas) so the default streamed event count is unchanged.
+        if run_config.emit_reasoning_deltas:
+            if isinstance(event, ResponseReasoningSummaryTextDeltaEvent):
+                delta_text: str = event.delta or ""
+                _reasoning_snapshot += delta_text
+                streamed_result._event_queue.put_nowait(
+                    ReasoningDeltaEvent(delta=delta_text, snapshot=_reasoning_snapshot)
+                )
+            elif isinstance(event, ResponseReasoningTextDeltaEvent):
+                delta_text = event.delta or ""
+                _reasoning_snapshot += delta_text
+                streamed_result._event_queue.put_nowait(
+                    ReasoningDeltaEvent(delta=delta_text, snapshot=_reasoning_snapshot)
+                )
 
         terminal_response: Response | None = None
         is_completed_event = False
