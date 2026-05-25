@@ -1213,6 +1213,51 @@ def test_write_accepts_text_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     assert sailbox.files["/workspace/notes.txt"] == b"hello"
 
 
+def test_write_with_user_stages_then_writes_through_user_exec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
+    sailbox = _FakeSailbox()
+    session = _session(sailbox)
+
+    asyncio.run(session.write(Path("notes.txt"), io.BytesIO(b"hello"), user="app"))
+
+    temp_paths = [path for path in sailbox.files if path.startswith("/tmp/openai-agents-write-")]
+    assert len(temp_paths) == 1
+    assert sailbox.files[temp_paths[0]] == b"hello"
+    assert "/workspace/notes.txt" not in sailbox.files
+    assert len(sailbox.exec_commands) == 3
+    assert "sudo -u app --" in sailbox.exec_commands[0][0]
+    assert "sudo -u app --" in sailbox.exec_commands[1][0]
+    assert "cat \"$1\" > \"$2\"" in sailbox.exec_commands[1][0]
+    assert temp_paths[0] in sailbox.exec_commands[1][0]
+    assert "/workspace/notes.txt" in sailbox.exec_commands[1][0]
+    assert "sudo -u app --" not in sailbox.exec_commands[2][0]
+    assert temp_paths[0] in sailbox.exec_commands[2][0]
+
+
+def test_write_with_user_nonzero_exec_maps_archive_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
+    sailbox = _ScriptedExecSailbox(
+        [
+            _FakeExecResult(returncode=0),
+            _FakeExecResult(stdout="out", stderr="err", returncode=23),
+            _FakeExecResult(returncode=0),
+        ]
+    )
+    session = _session(sailbox)
+
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+        asyncio.run(session.write(Path("notes.txt"), io.BytesIO(b"hello"), user="app"))
+
+    assert exc_info.value.context["reason"] == "write_as_user_nonzero_exit"
+    assert exc_info.value.context["exit_code"] == 23
+    assert exc_info.value.context["stdout"] == "out"
+    assert exc_info.value.context["stderr"] == "err"
+
+
 def test_write_rejects_invalid_payload_type(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
     session = _session(_FakeSailbox())

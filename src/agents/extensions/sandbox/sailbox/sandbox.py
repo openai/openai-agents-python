@@ -486,14 +486,20 @@ class SailboxSandboxSession(BaseSandboxSession):
         *,
         user: str | User | None = None,
     ) -> None:
+        workspace_path: Path | None = None
         if user is not None:
-            await self._check_write_with_exec(path, user=user)
+            workspace_path = await self._check_write_with_exec(path, user=user)
 
         payload = data.read()
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         if not isinstance(payload, bytes | bytearray):
             raise WorkspaceWriteTypeError(path=Path(path), actual_type=type(payload).__name__)
+
+        if user is not None:
+            assert workspace_path is not None
+            await self._write_payload_as_user(workspace_path, bytes(payload), user=user)
+            return
 
         workspace_path = await self._validate_path_access(path, for_write=True)
         try:
@@ -504,6 +510,49 @@ class SailboxSandboxSession(BaseSandboxSession):
             )
         except Exception as exc:
             raise WorkspaceArchiveWriteError(path=workspace_path, cause=exc) from exc
+
+    async def _write_payload_as_user(
+        self,
+        workspace_path: Path,
+        payload: bytes,
+        *,
+        user: str | User,
+    ) -> None:
+        temp_path = f"/tmp/openai-agents-write-{self.state.session_id.hex}-{uuid.uuid4().hex}"
+        try:
+            await _call_sailbox(self.sailbox.write, temp_path, payload)
+            # Sailbox's file API does not accept a user. Stage the bytes in /tmp,
+            # then copy into place from an exec running as the requested user so
+            # ownership and permission behavior match user-scoped writes.
+            result = await self.exec(
+                "sh",
+                "-lc",
+                'mkdir -p "$(dirname "$2")" && cat "$1" > "$2"',
+                "sh",
+                temp_path,
+                sandbox_path_str(workspace_path),
+                shell=False,
+                user=user,
+            )
+            if not result.ok():
+                raise WorkspaceArchiveWriteError(
+                    path=workspace_path,
+                    context={
+                        "reason": "write_as_user_nonzero_exit",
+                        "exit_code": result.exit_code,
+                        "stdout": result.stdout.decode("utf-8", errors="replace"),
+                        "stderr": result.stderr.decode("utf-8", errors="replace"),
+                    },
+                )
+        except WorkspaceArchiveWriteError:
+            raise
+        except Exception as exc:
+            raise WorkspaceArchiveWriteError(path=workspace_path, cause=exc) from exc
+        finally:
+            try:
+                await self.exec("rm", "-f", temp_path, shell=False)
+            except Exception:
+                pass
 
     async def running(self) -> bool:
         return self._sailbox is not None and self.state.status == "running"
