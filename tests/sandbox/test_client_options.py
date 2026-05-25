@@ -4,10 +4,12 @@ import importlib
 from typing import Literal
 
 import pytest
+from sail.app import App
 
 from agents.extensions.sandbox.cloudflare import CloudflareSandboxClientOptions
 from agents.extensions.sandbox.daytona import DaytonaSandboxClientOptions
 from agents.extensions.sandbox.e2b import E2BSandboxClientOptions
+from agents.extensions.sandbox.sailbox import SailboxSandboxClientOptions
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 from agents.sandbox.sandboxes import DockerSandboxClientOptions, UnixLocalSandboxClientOptions
 from agents.sandbox.session import BaseSandboxClientOptions
@@ -69,6 +71,11 @@ def test_sandbox_client_options_exclude_unset_preserves_type_discriminator() -> 
         E2BSandboxClientOptions(sandbox_type="e2b", template="base"),
         DaytonaSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE),
         CloudflareSandboxClientOptions(worker_url="https://example.com"),
+        SailboxSandboxClientOptions(
+            app=App(id="app_test", name="agents", created_at=1),
+            app_name=None,
+            exposed_ports=(8080,),
+        ),
     ],
 )
 def test_sandbox_client_options_roundtrip_preserves_concrete_type(
