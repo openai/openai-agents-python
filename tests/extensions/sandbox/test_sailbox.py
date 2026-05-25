@@ -24,6 +24,7 @@ from agents.sandbox.errors import (
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
     WorkspaceStartError,
+    WorkspaceWriteTypeError,
 )
 from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.session import SandboxSession, SandboxSessionState
@@ -317,9 +318,11 @@ def test_client_create_creates_sailbox(monkeypatch: pytest.MonkeyPatch) -> None:
     inner = session._inner
     assert isinstance(inner, SailboxSandboxSession)
     assert inner.state.sailbox_id == "sb-created"
+    assert inner.state.image is Image.debian_amd64
     assert inner.state.exposed_ports == (8080,)
     assert inner.state.pause_on_exit is True
     assert created[0]["app"] == app
+    assert created[0]["image"] is Image.debian_amd64
     assert created[0]["ingress_ports"] == [8080]
 
 
@@ -606,6 +609,7 @@ def test_client_resume_recreates_sailbox_when_reconnect_fails(
     app = App(id="app_test", name="agents", created_at=1)
     state = _state(_FakeSailbox("sb-missing"))
     state.app_name = "agents"
+    state.image = Image.debian_amd64
     state.workspace_root_ready = True
     client = SailboxSandboxClient(app=app)
 
@@ -617,6 +621,7 @@ def test_client_resume_recreates_sailbox_when_reconnect_fails(
     assert inner.state.workspace_root_ready is False
     assert inner._workspace_state_preserved_on_start() is False
     assert created[0]["app"] == app
+    assert created[0]["image"] is Image.debian_amd64
 
 
 def test_client_create_failure_includes_provider_error(
@@ -893,6 +898,7 @@ def test_session_state_defaults_are_serializable() -> None:
     assert payload["type"] == "sailbox"
     assert payload["sailbox_id"] == ""
     assert payload["image_build_timeout"] == 1800
+    assert payload["image"] is None
     assert payload["memory_mib"] == 1024
     assert payload["cpu"] == 1
     assert payload["disk_gib"] == 8
@@ -1121,10 +1127,10 @@ def test_write_rejects_invalid_payload_type(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
     session = _session(_FakeSailbox())
 
-    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+    with pytest.raises(WorkspaceWriteTypeError) as exc_info:
         asyncio.run(session.write(Path("notes.txt"), _InvalidPayload()))
 
-    assert exc_info.value.context["reason"] == "invalid_write_payload"
+    assert exc_info.value.context["actual_type"] == "object"
 
 
 def test_write_generic_failure_maps_archive_error(monkeypatch: pytest.MonkeyPatch) -> None:
