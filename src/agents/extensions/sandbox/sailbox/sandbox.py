@@ -249,7 +249,21 @@ class SailboxSandboxSession(BaseSandboxSession):
     async def _ensure_backend_started(self) -> None:
         if self._sailbox is not None:
             if self._sailbox.status != "running":
-                await _call_sailbox(self._sailbox.resume)
+                try:
+                    await _call_sailbox(self._sailbox.resume)
+                except Exception as exc:
+                    raise WorkspaceStartError(
+                        path=self._workspace_root_path(),
+                        context=_sailbox_error_context(
+                            cause=exc,
+                            extra={
+                                "reason": "resume_failed",
+                                "sailbox_id": self.state.sailbox_id,
+                            },
+                        ),
+                        cause=exc,
+                        message=_sailbox_error_message("Sailbox resume failed", exc),
+                    ) from exc
                 self._set_sailbox(self._sailbox)
             return
 
