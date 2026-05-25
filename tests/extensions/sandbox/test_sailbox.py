@@ -27,7 +27,7 @@ from agents.sandbox.errors import (
     WorkspaceWriteTypeError,
 )
 from agents.sandbox.manifest import Environment, Manifest
-from agents.sandbox.session import SandboxSession, SandboxSessionState
+from agents.sandbox.session import BaseSandboxClientOptions, SandboxSession, SandboxSessionState
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult
@@ -389,9 +389,36 @@ def test_options_json_dump_serializes_sdk_objects() -> None:
     dumped = options.model_dump(mode="json")
 
     assert dumped["type"] == "sailbox"
-    assert dumped["app"] == "app_test"
+    assert dumped["app"] == {"id": "app_test", "name": "agents", "created_at": 1}
     assert dumped["image"] is None
     assert dumped["exposed_ports"] == [8080]
+
+
+def test_options_json_roundtrip_preserves_app() -> None:
+    options = SailboxSandboxClientOptions(
+        app=App(id="app_test", name="agents", created_at=1),
+        app_name=None,
+        exposed_ports=(8080,),
+    )
+
+    parsed = BaseSandboxClientOptions.parse(options.model_dump(mode="json"))
+
+    assert isinstance(parsed, SailboxSandboxClientOptions)
+    assert parsed == options
+    assert parsed.app == App(id="app_test", name="agents", created_at=1)
+
+
+def test_options_json_parse_accepts_legacy_app_id_string() -> None:
+    parsed = BaseSandboxClientOptions.parse(
+        {
+            "type": "sailbox",
+            "app": "app_test",
+            "app_name": None,
+        }
+    )
+
+    assert isinstance(parsed, SailboxSandboxClientOptions)
+    assert parsed.app == App(id="app_test", name="app_test", created_at=0)
 
 
 def test_prepare_backend_workspace_bootstraps_root_without_cd() -> None:
