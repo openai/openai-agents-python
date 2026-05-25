@@ -7,7 +7,7 @@ They intentionally keep the flow simple:
 
 1. Build a tiny manifest in memory.
 2. Create a `SandboxAgent` that inspects that workspace through one shell tool.
-3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel, or Vercel.
+3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Sailbox, Blaxel, or Vercel.
 
 All of these examples require `OPENAI_API_KEY`, because they call the model through the normal
 `Runner` path. Each cloud backend also needs its own provider credentials.
@@ -328,6 +328,36 @@ the default home and working directory become `/root`, so the example also uses
 `/root` as its manifest workspace root. If you configure root launch in your
 own code, either rely on that root-mode default or explicitly choose a
 `manifest.root` under `/root`.
+
+## Sailbox
+
+### Setup
+
+Install the repo extra:
+
+```bash
+uv sync --extra sailbox
+```
+
+Export the required environment variables:
+
+```bash
+export OPENAI_API_KEY=...
+export SAIL_API_KEY=...
+```
+
+### Run
+
+```bash
+uv run python examples/sandbox/extensions/sailbox_runner.py --stream
+```
+
+Useful flags:
+
+- `--image debian-arm64`
+- `--image debian-amd64`
+- `--pause-on-exit`
+
 ## Blaxel
 
 ### Setup

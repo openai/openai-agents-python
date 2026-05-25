@@ -98,6 +98,18 @@ except Exception:  # pragma: no cover
     _HAS_RUNLOOP = False
 
 try:
+    from .sailbox import (
+        SailboxSandboxClient as SailboxSandboxClient,
+        SailboxSandboxClientOptions as SailboxSandboxClientOptions,
+        SailboxSandboxSession as SailboxSandboxSession,
+        SailboxSandboxSessionState as SailboxSandboxSessionState,
+    )
+
+    _HAS_SAILBOX = True
+except Exception:  # pragma: no cover
+    _HAS_SAILBOX = False
+
+try:
     from .vercel import (
         VercelSandboxClient as VercelSandboxClient,
         VercelSandboxClientOptions as VercelSandboxClientOptions,
@@ -174,6 +186,16 @@ if _HAS_CLOUDFLARE:
             "CloudflareSandboxClientOptions",
             "CloudflareSandboxSession",
             "CloudflareSandboxSessionState",
+        ]
+    )
+
+if _HAS_SAILBOX:
+    __all__.extend(
+        [
+            "SailboxSandboxClient",
+            "SailboxSandboxClientOptions",
+            "SailboxSandboxSession",
+            "SailboxSandboxSessionState",
         ]
     )
 
