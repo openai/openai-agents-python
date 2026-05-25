@@ -237,6 +237,11 @@ class _FailingPauseSailbox(_FakeSailbox):
         raise RuntimeError("pause failed")
 
 
+class _FailingResumeSailbox(_FakeSailbox):
+    def resume(self) -> _FakeSailbox:
+        raise RuntimeError("resume failed")
+
+
 class _FailingTerminateSailbox(_FakeSailbox):
     def terminate(self) -> None:
         raise RuntimeError("terminate failed")
@@ -940,6 +945,20 @@ def test_ensure_backend_started_resumes_paused_sailbox() -> None:
 
     assert sailbox.status == "running"
     assert session.state.status == "running"
+
+
+def test_ensure_backend_started_resume_failure_maps_start_error() -> None:
+    sailbox = _FailingResumeSailbox("sb-paused")
+    sailbox.status = "paused"
+    session = SailboxSandboxSession.from_state(_state(sailbox), sailbox=sailbox)
+
+    with pytest.raises(WorkspaceStartError) as exc_info:
+        asyncio.run(session._ensure_backend_started())
+
+    assert exc_info.value.context["backend"] == "sailbox"
+    assert exc_info.value.context["reason"] == "resume_failed"
+    assert exc_info.value.context["sailbox_id"] == "sb-paused"
+    assert "Sailbox resume failed: RuntimeError: resume failed" in str(exc_info.value)
 
 
 def test_ensure_backend_started_requires_sailbox_id() -> None:
