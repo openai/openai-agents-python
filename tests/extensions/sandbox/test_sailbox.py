@@ -1226,14 +1226,12 @@ def test_write_with_user_stages_then_writes_through_user_exec(
     assert len(temp_paths) == 1
     assert sailbox.files[temp_paths[0]] == b"hello"
     assert "/workspace/notes.txt" not in sailbox.files
-    assert len(sailbox.exec_commands) == 3
-    assert "sudo -u app --" in sailbox.exec_commands[0][0]
-    assert "sudo -u app --" in sailbox.exec_commands[1][0]
-    assert "cat \"$1\" > \"$2\"" in sailbox.exec_commands[1][0]
+    assert len(sailbox.exec_commands) == 2
+    assert sailbox.exec_commands[0][0].startswith("runuser -u app -- sh -lc")
+    assert "cat \"$tmp\" > \"$target\"" in sailbox.exec_commands[0][0]
+    assert temp_paths[0] in sailbox.exec_commands[0][0]
+    assert "/workspace/notes.txt" in sailbox.exec_commands[0][0]
     assert temp_paths[0] in sailbox.exec_commands[1][0]
-    assert "/workspace/notes.txt" in sailbox.exec_commands[1][0]
-    assert "sudo -u app --" not in sailbox.exec_commands[2][0]
-    assert temp_paths[0] in sailbox.exec_commands[2][0]
 
 
 def test_write_with_user_nonzero_exec_maps_archive_error(
@@ -1242,7 +1240,6 @@ def test_write_with_user_nonzero_exec_maps_archive_error(
     monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
     sailbox = _ScriptedExecSailbox(
         [
-            _FakeExecResult(returncode=0),
             _FakeExecResult(stdout="out", stderr="err", returncode=23),
             _FakeExecResult(returncode=0),
         ]
