@@ -154,8 +154,23 @@ class SailboxSandboxClientOptions(BaseSandboxClientOptions):
         super().__init__(**values)
 
     @field_serializer("app", when_used="json")
-    def _serialize_app(self, app: App | None) -> str | None:
-        return app.id if app is not None else None
+    def _serialize_app(self, app: App | None) -> dict[str, object] | None:
+        if app is None:
+            return None
+        return {"id": app.id, "name": app.name, "created_at": app.created_at}
+
+    @field_validator("app", mode="before")
+    @classmethod
+    def _deserialize_app(cls, app: object) -> object:
+        if isinstance(app, str):
+            return App(id=app, name=app, created_at=0)
+        if isinstance(app, dict):
+            app_id = app.get("id")
+            name = app.get("name")
+            created_at = app.get("created_at")
+            if isinstance(app_id, str) and isinstance(name, str) and isinstance(created_at, int):
+                return App(id=app_id, name=name, created_at=created_at)
+        return app
 
     @field_serializer("image", when_used="json")
     def _serialize_image(self, image: ImageDefinition | None) -> str | None:
