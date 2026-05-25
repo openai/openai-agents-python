@@ -763,6 +763,7 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
                 "exec_endpoint",
                 "worker_address",
                 "status",
+                "image",
                 "image_build_timeout",
                 "memory_mib",
                 "cpu",
