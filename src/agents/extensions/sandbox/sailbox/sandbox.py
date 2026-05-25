@@ -486,22 +486,17 @@ class SailboxSandboxSession(BaseSandboxSession):
         *,
         user: str | User | None = None,
     ) -> None:
-        workspace_path: Path | None = None
-        if user is not None:
-            workspace_path = await self._check_write_with_exec(path, user=user)
-
         payload = data.read()
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         if not isinstance(payload, bytes | bytearray):
             raise WorkspaceWriteTypeError(path=Path(path), actual_type=type(payload).__name__)
 
+        workspace_path = await self._validate_path_access(path, for_write=True)
         if user is not None:
-            assert workspace_path is not None
             await self._write_payload_as_user(workspace_path, bytes(payload), user=user)
             return
 
-        workspace_path = await self._validate_path_access(path, for_write=True)
         try:
             await _call_sailbox(
                 self.sailbox.write,
@@ -518,30 +513,69 @@ class SailboxSandboxSession(BaseSandboxSession):
         *,
         user: str | User,
     ) -> None:
+        user_name = user.name if isinstance(user, User) else user
         temp_path = f"/tmp/openai-agents-write-{self.state.session_id.hex}-{uuid.uuid4().hex}"
+        target_path = sandbox_path_str(workspace_path)
+        write_script = (
+            'tmp="$1"\n'
+            'target="$2"\n'
+            'if [ -e "$target" ]; then\n'
+            '    [ -f "$target" ] && [ -w "$target" ] || exit $?\n'
+            "else\n"
+            '    parent=$(dirname "$target")\n'
+            '    while [ ! -e "$parent" ]; do\n'
+            '        next=$(dirname "$parent")\n'
+            '        if [ "$next" = "$parent" ]; then\n'
+            "            exit 1\n"
+            "        fi\n"
+            '        parent="$next"\n'
+            "    done\n"
+            '    [ -d "$parent" ] && [ -w "$parent" ] && [ -x "$parent" ] || exit $?\n'
+            "fi\n"
+            'mkdir -p "$(dirname "$target")" && cat "$tmp" > "$target"\n'
+        )
         try:
             await _call_sailbox(self.sailbox.write, temp_path, payload)
             # Sailbox's file API does not accept a user. Stage the bytes in /tmp,
-            # then copy into place from an exec running as the requested user so
-            # ownership and permission behavior match user-scoped writes.
-            result = await self.exec(
-                "sh",
-                "-lc",
-                'mkdir -p "$(dirname "$2")" && cat "$1" > "$2"',
-                "sh",
-                temp_path,
-                sandbox_path_str(workspace_path),
-                shell=False,
-                user=user,
+            # then switch user inside the guest for the final copy. The base
+            # exec(user=...) wrapper uses sudo, which is not present in Sailbox
+            # base images, so this path uses runuser directly.
+            request = await _call_sailbox(
+                self.sailbox.exec,
+                " ".join(
+                    [
+                        "runuser",
+                        "-u",
+                        shlex.quote(user_name),
+                        "--",
+                        "sh",
+                        "-lc",
+                        shlex.quote(write_script),
+                        "sh",
+                        shlex.quote(temp_path),
+                        shlex.quote(target_path),
+                    ]
+                ),
             )
-            if not result.ok():
+            result = await _call_sailbox(request.wait)
+            if result.returncode != 0:
+                stdout = (
+                    result.stdout
+                    if isinstance(result.stdout, str)
+                    else result.stdout.decode("utf-8", errors="replace")
+                )
+                stderr = (
+                    result.stderr
+                    if isinstance(result.stderr, str)
+                    else result.stderr.decode("utf-8", errors="replace")
+                )
                 raise WorkspaceArchiveWriteError(
                     path=workspace_path,
                     context={
                         "reason": "write_as_user_nonzero_exit",
-                        "exit_code": result.exit_code,
-                        "stdout": result.stdout.decode("utf-8", errors="replace"),
-                        "stderr": result.stderr.decode("utf-8", errors="replace"),
+                        "exit_code": result.returncode,
+                        "stdout": stdout,
+                        "stderr": stderr,
                     },
                 )
         except WorkspaceArchiveWriteError:
