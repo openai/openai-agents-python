@@ -2587,7 +2587,7 @@ requires-dist = [
     { name = "redis", marker = "extra == 'redis'", specifier = ">=7" },
     { name = "requests", specifier = ">=2.0,<3" },
     { name = "runloop-api-client", marker = "extra == 'runloop'", specifier = ">=1.16.0,<2.0.0" },
-    { name = "sail-sdk", marker = "extra == 'sailbox'", specifier = ">=0.1.24" },
+    { name = "sail-sdk", marker = "extra == 'sailbox'", specifier = ">=0.1.32" },
     { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0" },
     { name = "temporalio", marker = "extra == 'temporal'", specifier = "==1.26.0" },
     { name = "textual", marker = "extra == 'temporal'", specifier = ">=8.2.3,<8.3" },
