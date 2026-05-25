@@ -12,6 +12,7 @@ full type navigation.
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import math
 import shlex
@@ -21,7 +22,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
 from urllib.parse import urlsplit
 
-from pydantic import field_serializer
+from pydantic import field_serializer, field_validator
 from sail.app import App
 from sail.image import Image, ImageDefinition
 from sail.sailbox import Sailbox
@@ -33,6 +34,7 @@ from ....sandbox.errors import (
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
     WorkspaceStartError,
+    WorkspaceWriteTypeError,
 )
 from ....sandbox.manifest import Manifest
 from ....sandbox.session import SandboxSession, SandboxSessionState
@@ -162,11 +164,49 @@ class SailboxSandboxSessionState(SandboxSessionState):
     exec_endpoint: str = ""
     worker_address: str = ""
     status: str = ""
+    image: ImageDefinition | None = None
     image_build_timeout: int = _DEFAULT_IMAGE_BUILD_TIMEOUT
     memory_mib: int = _DEFAULT_MEMORY_MIB
     cpu: int = _DEFAULT_CPU
     disk_gib: int = _DEFAULT_DISK_GIB
     pause_on_exit: bool = False
+
+    @field_serializer("image", when_used="json")
+    def _serialize_image(self, image: ImageDefinition | None) -> dict[str, str | None] | None:
+        if image is None:
+            return None
+        to_proto = getattr(image, "to_proto", None)
+        if not callable(to_proto):
+            return None
+        spec = to_proto()
+        serialize = getattr(spec, "SerializeToString", None)
+        if not callable(serialize):
+            return None
+        return {
+            "image_id": getattr(image, "_image_id", None),
+            "spec": base64.b64encode(serialize()).decode("ascii"),
+        }
+
+    @field_validator("image", mode="before")
+    @classmethod
+    def _deserialize_image(cls, image: object) -> object:
+        if isinstance(image, dict):
+            raw_spec = image.get("spec")
+            if not isinstance(raw_spec, str):
+                return None
+            raw_image_id = image.get("image_id")
+            image_id = raw_image_id if isinstance(raw_image_id, str) else None
+            try:
+                from sail.pb.image.v1 import image_pb2
+
+                spec = image_pb2.ImageSpec()
+                spec.ParseFromString(base64.b64decode(raw_spec))
+                return ImageDefinition(spec, _image_id=image_id)
+            except Exception:
+                return None
+        if isinstance(image, str):
+            return None
+        return image
 
 
 class SailboxSandboxSession(BaseSandboxSession):
@@ -414,13 +454,7 @@ class SailboxSandboxSession(BaseSandboxSession):
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         if not isinstance(payload, bytes | bytearray):
-            raise WorkspaceArchiveWriteError(
-                path=Path(path),
-                context={
-                    "reason": "invalid_write_payload",
-                    "type": type(payload).__name__,
-                },
-            )
+            raise WorkspaceWriteTypeError(path=Path(path), actual_type=type(payload).__name__)
 
         workspace_path = await self._validate_path_access(path, for_write=True)
         try:
@@ -593,6 +627,7 @@ class SailboxSandboxClient(BaseSandboxClient[SailboxSandboxClientOptions | None]
             exec_endpoint=sailbox.exec_endpoint,
             worker_address=sailbox.worker_address,
             status=sailbox.status,
+            image=resolved_options.image,
             image_build_timeout=resolved_options.image_build_timeout,
             memory_mib=resolved_options.memory_mib,
             cpu=resolved_options.cpu,
@@ -631,6 +666,7 @@ class SailboxSandboxClient(BaseSandboxClient[SailboxSandboxClientOptions | None]
         options = self._resolve_options(
             SailboxSandboxClientOptions(
                 app_name=state.app_name or self._app_name,
+                image=state.image,
                 image_build_timeout=state.image_build_timeout,
                 memory_mib=state.memory_mib,
                 cpu=state.cpu,
