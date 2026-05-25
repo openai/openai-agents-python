@@ -46,9 +46,29 @@ class App:
         return App(id=f"app_{name}", name=name, created_at=0)
 
 
+class _FakeImageSpec:
+    def __init__(self, payload: bytes = b"") -> None:
+        self.payload = payload
+
+    def SerializeToString(self) -> bytes:
+        return self.payload
+
+    def ParseFromString(self, payload: bytes) -> None:
+        self.payload = payload
+
+
+@dataclass(frozen=True)
+class ImageDefinition:
+    _spec: _FakeImageSpec
+    _image_id: str | None = None
+
+    def to_proto(self) -> _FakeImageSpec:
+        return self._spec
+
+
 class Image:
-    debian_amd64 = object()
-    debian_arm64 = object()
+    debian_amd64 = ImageDefinition(_FakeImageSpec(b"debian-amd64"))
+    debian_arm64 = ImageDefinition(_FakeImageSpec(b"debian-arm64"))
 
 
 class _SdkSailbox:
@@ -67,16 +87,25 @@ def _install_fake_sail_sdk() -> None:
     sail_module = types.ModuleType("sail")
     app_module = types.ModuleType("sail.app")
     image_module = types.ModuleType("sail.image")
+    sail_pb_module = types.ModuleType("sail.pb")
+    sail_pb_image_module = types.ModuleType("sail.pb.image")
+    sail_pb_image_v1_module = types.ModuleType("sail.pb.image.v1")
+    image_pb2_module = types.ModuleType("sail.pb.image.v1.image_pb2")
     sailbox_module = types.ModuleType("sail.sailbox")
 
     cast(Any, app_module).App = App
     cast(Any, image_module).Image = Image
-    cast(Any, image_module).ImageDefinition = object
+    cast(Any, image_module).ImageDefinition = ImageDefinition
+    cast(Any, image_pb2_module).ImageSpec = _FakeImageSpec
     cast(Any, sailbox_module).Sailbox = _SdkSailbox
 
     sys.modules.setdefault("sail", sail_module)
     sys.modules["sail.app"] = app_module
     sys.modules["sail.image"] = image_module
+    sys.modules["sail.pb"] = sail_pb_module
+    sys.modules["sail.pb.image"] = sail_pb_image_module
+    sys.modules["sail.pb.image.v1"] = sail_pb_image_v1_module
+    sys.modules["sail.pb.image.v1.image_pb2"] = image_pb2_module
     sys.modules["sail.sailbox"] = sailbox_module
 
 
@@ -425,7 +454,7 @@ def test_options_json_dump_serializes_sdk_objects() -> None:
 
     assert dumped["type"] == "sailbox"
     assert dumped["app"] == {"id": "app_test", "name": "agents", "created_at": 1}
-    assert dumped["image"] is None
+    assert dumped["image"] == {"image_id": None, "spec": "ZGViaWFuLWFtZDY0"}
     assert dumped["exposed_ports"] == [8080]
 
 
@@ -441,6 +470,34 @@ def test_options_json_roundtrip_preserves_app() -> None:
     assert isinstance(parsed, SailboxSandboxClientOptions)
     assert parsed == options
     assert parsed.app == App(id="app_test", name="agents", created_at=1)
+
+
+def test_options_json_roundtrip_preserves_image_definition() -> None:
+    options = SailboxSandboxClientOptions(
+        image=ImageDefinition(_FakeImageSpec(b"custom-image"), _image_id="img_123"),
+        exposed_ports=(8080,),
+    )
+
+    parsed = BaseSandboxClientOptions.parse(options.model_dump(mode="json"))
+
+    assert isinstance(parsed, SailboxSandboxClientOptions)
+    assert isinstance(parsed.image, ImageDefinition)
+    assert parsed.image._image_id == "img_123"
+    assert parsed.image.to_proto().SerializeToString() == b"custom-image"
+    assert parsed.exposed_ports == (8080,)
+
+
+def test_options_json_parse_accepts_legacy_image_id_string() -> None:
+    parsed = BaseSandboxClientOptions.parse(
+        {
+            "type": "sailbox",
+            "image": "img_legacy",
+        }
+    )
+
+    assert isinstance(parsed, SailboxSandboxClientOptions)
+    assert isinstance(parsed.image, ImageDefinition)
+    assert parsed.image._image_id == "img_legacy"
 
 
 def test_options_json_parse_accepts_legacy_app_id_string() -> None:
