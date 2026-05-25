@@ -112,6 +112,47 @@ def _sailbox_exec_output_bytes(value: object) -> bytes:
     return str(value).encode("utf-8", errors="replace")
 
 
+def _serialize_sail_image(image: ImageDefinition | None) -> dict[str, str | None] | None:
+    if image is None:
+        return None
+    to_proto = getattr(image, "to_proto", None)
+    if not callable(to_proto):
+        return None
+    spec = to_proto()
+    serialize = getattr(spec, "SerializeToString", None)
+    if not callable(serialize):
+        return None
+    return {
+        "image_id": getattr(image, "_image_id", None),
+        "spec": base64.b64encode(serialize()).decode("ascii"),
+    }
+
+
+def _deserialize_sail_image(image: object) -> object:
+    if isinstance(image, dict):
+        raw_spec = image.get("spec")
+        if not isinstance(raw_spec, str):
+            return None
+        raw_image_id = image.get("image_id")
+        image_id = raw_image_id if isinstance(raw_image_id, str) else None
+        try:
+            from sail.pb.image.v1 import image_pb2
+
+            spec = image_pb2.ImageSpec()
+            spec.ParseFromString(base64.b64decode(raw_spec))
+            return ImageDefinition(spec, _image_id=image_id)
+        except Exception:
+            return None
+    if isinstance(image, str):
+        try:
+            from sail.pb.image.v1 import image_pb2
+
+            return ImageDefinition(image_pb2.ImageSpec(), _image_id=image)
+        except Exception:
+            return None
+    return image
+
+
 class SailboxSandboxClientOptions(BaseSandboxClientOptions):
     """Client options for creating OpenAI Agents SDK sessions on Sailboxes."""
 
@@ -185,10 +226,13 @@ class SailboxSandboxClientOptions(BaseSandboxClientOptions):
         return app
 
     @field_serializer("image", when_used="json")
-    def _serialize_image(self, image: ImageDefinition | None) -> str | None:
-        # ImageDefinition contains protobuf state. Options are not persisted by
-        # OpenAI Agents run state, but keep model_dump(mode="json") well-defined.
-        return getattr(image, "_image_id", None) if image is not None else None
+    def _serialize_image(self, image: ImageDefinition | None) -> dict[str, str | None] | None:
+        return _serialize_sail_image(image)
+
+    @field_validator("image", mode="before")
+    @classmethod
+    def _deserialize_image(cls, image: object) -> object:
+        return _deserialize_sail_image(image)
 
 
 class SailboxSandboxSessionState(SandboxSessionState):
@@ -210,40 +254,12 @@ class SailboxSandboxSessionState(SandboxSessionState):
 
     @field_serializer("image", when_used="json")
     def _serialize_image(self, image: ImageDefinition | None) -> dict[str, str | None] | None:
-        if image is None:
-            return None
-        to_proto = getattr(image, "to_proto", None)
-        if not callable(to_proto):
-            return None
-        spec = to_proto()
-        serialize = getattr(spec, "SerializeToString", None)
-        if not callable(serialize):
-            return None
-        return {
-            "image_id": getattr(image, "_image_id", None),
-            "spec": base64.b64encode(serialize()).decode("ascii"),
-        }
+        return _serialize_sail_image(image)
 
     @field_validator("image", mode="before")
     @classmethod
     def _deserialize_image(cls, image: object) -> object:
-        if isinstance(image, dict):
-            raw_spec = image.get("spec")
-            if not isinstance(raw_spec, str):
-                return None
-            raw_image_id = image.get("image_id")
-            image_id = raw_image_id if isinstance(raw_image_id, str) else None
-            try:
-                from sail.pb.image.v1 import image_pb2
-
-                spec = image_pb2.ImageSpec()
-                spec.ParseFromString(base64.b64decode(raw_spec))
-                return ImageDefinition(spec, _image_id=image_id)
-            except Exception:
-                return None
-        if isinstance(image, str):
-            return None
-        return image
+        return _deserialize_sail_image(image)
 
 
 class SailboxSandboxSession(BaseSandboxSession):
