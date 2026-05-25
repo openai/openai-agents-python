@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import shlex
 import sys
 import tarfile
 import time
@@ -231,6 +232,27 @@ class _NoSudoSailbox(_FakeSailbox):
         if "sudo" in command:
             raise RuntimeError("sudo: not found")
         return super().exec(command, timeout=timeout)
+
+
+class _OwnershipTrackingSailbox(_FakeSailbox):
+    def __init__(self) -> None:
+        super().__init__()
+        self.owners: dict[str, str] = {}
+
+    def write(self, path: str, data: bytes) -> None:
+        super().write(path, data)
+        self.owners[path] = "root"
+
+    def exec(self, command: str, *, timeout: int | None = None) -> Any:
+        self.exec_commands.append((command, timeout))
+        if command.startswith("runuser "):
+            parts = shlex.split(command)
+            user = parts[2]
+            temp_path = parts[-2]
+            target_path = parts[-1]
+            self.files[target_path] = self.files[temp_path]
+            self.owners[target_path] = user
+        return _FakeExecRequest(_FakeExecResult(stdout="ok\n", returncode=0))
 
 
 class _FailingListenerSailbox(_FakeSailbox):
@@ -1250,6 +1272,19 @@ def test_write_with_user_does_not_require_sudo(monkeypatch: pytest.MonkeyPatch) 
 
     assert all("sudo" not in command for command, _ in sailbox.exec_commands)
     assert sailbox.exec_commands[0][0].startswith("runuser -u app --")
+
+
+def test_write_with_user_creates_destination_as_requested_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
+    sailbox = _OwnershipTrackingSailbox()
+    session = _session(sailbox)
+
+    asyncio.run(session.write(Path("notes.txt"), io.BytesIO(b"hello"), user="app"))
+
+    assert sailbox.files["/workspace/notes.txt"] == b"hello"
+    assert sailbox.owners["/workspace/notes.txt"] == "app"
 
 
 def test_write_with_user_nonzero_exec_maps_archive_error(
