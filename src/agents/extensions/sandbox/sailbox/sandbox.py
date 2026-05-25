@@ -100,6 +100,18 @@ def _sailbox_error_message(prefix: str, cause: BaseException) -> str:
     return prefix
 
 
+def _sailbox_exec_output_bytes(value: object) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, str):
+        return value.encode("utf-8", errors="replace")
+    if value is None:
+        return b""
+    return str(value).encode("utf-8", errors="replace")
+
+
 class SailboxSandboxClientOptions(BaseSandboxClientOptions):
     """Client options for creating OpenAI Agents SDK sessions on Sailboxes."""
 
@@ -393,8 +405,8 @@ class SailboxSandboxSession(BaseSandboxSession):
             ) from exc
 
         return ExecResult(
-            stdout=result.stdout.encode("utf-8", errors="replace"),
-            stderr=result.stderr.encode("utf-8", errors="replace"),
+            stdout=_sailbox_exec_output_bytes(result.stdout),
+            stderr=_sailbox_exec_output_bytes(result.stderr),
             exit_code=result.returncode,
         )
 
