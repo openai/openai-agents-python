@@ -102,8 +102,8 @@ def test_sailbox_package_re_exports_backend_symbols() -> None:
 
 @dataclass
 class _FakeExecResult:
-    stdout: str = ""
-    stderr: str = ""
+    stdout: object = ""
+    stderr: object = ""
     returncode: int = 0
 
 
@@ -198,6 +198,12 @@ class _NonzeroExecSailbox(_FakeSailbox):
     def exec(self, command: str, *, timeout: int | None = None) -> Any:
         self.exec_commands.append((command, timeout))
         return _FakeExecRequest(_FakeExecResult(stdout="out", stderr="err", returncode=7))
+
+
+class _BytesExecSailbox(_FakeSailbox):
+    def exec(self, command: str, *, timeout: int | None = None) -> Any:
+        self.exec_commands.append((command, timeout))
+        return _FakeExecRequest(_FakeExecResult(stdout=b"\xffok\n", stderr=bytearray(b"\xfeerr\n")))
 
 
 class _ScriptedExecSailbox(_FakeSailbox):
@@ -1202,6 +1208,26 @@ def test_exec_nonzero_result_is_returned_to_caller() -> None:
     assert result.exit_code == 7
     assert result.stdout == b"out"
     assert result.stderr == b"err"
+
+
+def test_exec_accepts_bytes_stdout_and_stderr() -> None:
+    session = _session(_BytesExecSailbox())
+
+    result = asyncio.run(session.exec("printf ok"))
+
+    assert result.exit_code == 0
+    assert result.stdout == b"\xffok\n"
+    assert result.stderr == b"\xfeerr\n"
+
+
+def test_exec_normalizes_none_stdout_and_non_string_stderr() -> None:
+    sailbox = _ScriptedExecSailbox([_FakeExecResult(stdout=None, stderr=123, returncode=0)])
+    session = _session(sailbox)
+
+    result = asyncio.run(session.exec("printf ok"))
+
+    assert result.stdout == b""
+    assert result.stderr == b"123"
 
 
 def test_exec_wait_failure_maps_transport_error() -> None:
