@@ -65,8 +65,6 @@ _SUPERSERVE_TRANSIENT_STATUS_CODES: frozenset[int] = frozenset({408, 425, 429, 5
 _SUPERSERVE_ACTIVE_STATUSES: frozenset[str] = frozenset({"active"})
 _SUPERSERVE_RESUMING_STATUSES: frozenset[str] = frozenset({"paused", "resuming"})
 _SUPERSERVE_TERMINAL_STATUSES: frozenset[str] = frozenset({"failed"})
-_RESUME_READY_TIMEOUT_S: float = 60.0
-_RESUME_READY_POLL_INTERVAL_S: float = 1.0
 
 logger = logging.getLogger(__name__)
 
@@ -177,9 +175,9 @@ def _resolve_manifest_root(manifest: Manifest | None) -> Manifest:
     - No manifest → fresh manifest rooted at `/workspace`.
     - Manifest whose root is the SDK's default placeholder (`Manifest.model_fields["root"].default`)
       → rewrite the root to the Superserve default `/workspace` for ergonomics.
-    - Caller-provided non-default root (anywhere on the filesystem) → keep verbatim. We do not
-      reject arbitrary roots; this mirrors Vercel's behaviour and lets callers stage work outside
-      `/workspace` deliberately. If you need confinement, set extra path grants on the manifest.
+    - Caller-provided non-default root (anywhere on the filesystem) → keep verbatim. Arbitrary
+      roots are accepted so callers can stage work outside `/workspace` deliberately. For
+      confinement, set extra path grants on the manifest.
     """
     if manifest is None:
         return Manifest(root=DEFAULT_SUPERSERVE_WORKSPACE_ROOT)

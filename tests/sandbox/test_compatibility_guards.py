@@ -325,6 +325,22 @@ def test_core_sandbox_public_export_surface_is_stable() -> None:
             },
         ),
         (
+            "agents.extensions.sandbox.superserve",
+            {
+                "DEFAULT_SUPERSERVE_WORKSPACE_ROOT",
+                "ExecTimeoutError",
+                "ExecTransportError",
+                "SuperserveSandboxClient",
+                "SuperserveSandboxClientOptions",
+                "SuperserveSandboxSession",
+                "SuperserveSandboxSessionState",
+                "SuperserveSandboxTimeouts",
+                "WorkspaceArchiveReadError",
+                "WorkspaceArchiveWriteError",
+                "WorkspaceReadNotFoundError",
+            },
+        ),
+        (
             "agents.extensions.sandbox.vercel",
             {
                 "VercelSandboxClient",
@@ -491,6 +507,23 @@ def test_optional_sandbox_dataclass_constructor_field_order_is_stable(
                 "mcp",
                 "metadata",
                 "managed_secrets",
+            ),
+        ),
+        (
+            "agents.extensions.sandbox.superserve",
+            "SuperserveSandboxClientOptions",
+            (
+                "template",
+                "name",
+                "env_vars",
+                "metadata",
+                "network",
+                "timeout_seconds",
+                "pause_on_exit",
+                "api_key",
+                "base_url",
+                "exposed_ports",
+                "timeouts",
             ),
         ),
         (
@@ -721,6 +754,31 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
             ),
         ),
         (
+            "agents.extensions.sandbox.superserve",
+            "SuperserveSandboxSessionState",
+            (
+                "type",
+                "session_id",
+                "snapshot",
+                "manifest",
+                "exposed_ports",
+                "snapshot_fingerprint",
+                "snapshot_fingerprint_version",
+                "workspace_root_ready",
+                "sandbox_id",
+                "template",
+                "name",
+                "base_env_vars",
+                "base_metadata",
+                "base_network",
+                "timeout_seconds",
+                "pause_on_exit",
+                "base_url",
+                "api_key",
+                "timeouts",
+            ),
+        ),
+        (
             "agents.extensions.sandbox.vercel",
             "VercelSandboxSessionState",
             (
@@ -785,6 +843,12 @@ def test_sandbox_session_state_field_order_is_stable(
         ),
         ("agents.extensions.sandbox.daytona", "DaytonaSandboxClientOptions", (), "daytona"),
         ("agents.extensions.sandbox.runloop", "RunloopSandboxClientOptions", (), "runloop"),
+        (
+            "agents.extensions.sandbox.superserve",
+            "SuperserveSandboxClientOptions",
+            (),
+            "superserve",
+        ),
         ("agents.extensions.sandbox.vercel", "VercelSandboxClientOptions", (), "vercel"),
     ],
 )
@@ -845,6 +909,11 @@ def test_optional_sandbox_client_options_json_round_trip_preserves_type(
             "agents.extensions.sandbox.runloop",
             "RunloopSandboxSessionState",
             {"devbox_id": "devbox-123"},
+        ),
+        (
+            "agents.extensions.sandbox.superserve",
+            "SuperserveSandboxSessionState",
+            {"sandbox_id": "sandbox-123"},
         ),
         (
             "agents.extensions.sandbox.vercel",

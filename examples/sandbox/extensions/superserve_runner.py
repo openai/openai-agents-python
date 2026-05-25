@@ -204,9 +204,9 @@ if __name__ == "__main__":
         "--template",
         default=DEFAULT_TEMPLATE,
         help=(
-            "Superserve template name or UUID. Defaults to `superserve/base`. "
+            "Superserve template to use. Defaults to `superserve/base`. "
             "Other curated templates: superserve/python-3.11, superserve/node-22, "
-            "superserve/code-interpreter, superserve/python-ml, superserve/claude-code."
+            "superserve/code-interpreter, superserve/python-ml."
         ),
     )
     parser.add_argument(

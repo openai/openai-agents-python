@@ -7,7 +7,7 @@ They intentionally keep the flow simple:
 
 1. Build a tiny manifest in memory.
 2. Create a `SandboxAgent` that inspects that workspace through one shell tool.
-3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel, or Vercel.
+3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel, Superserve, or Vercel.
 
 All of these examples require `OPENAI_API_KEY`, because they call the model through the normal
 `Runner` path. Each cloud backend also needs its own provider credentials.
@@ -261,12 +261,6 @@ export OPENAI_API_KEY=...
 export SUPERSERVE_API_KEY=...
 ```
 
-To target staging instead of production, also set:
-
-```bash
-export SUPERSERVE_BASE_URL=https://api-staging.superserve.ai
-```
-
 ### Run
 
 ```bash
@@ -275,18 +269,15 @@ uv run python examples/sandbox/extensions/superserve_runner.py --stream
 
 Useful flags:
 
-- `--template superserve/python-3.11` — use a different curated template (others:
-  `superserve/base`, `superserve/node-22`, `superserve/code-interpreter`,
-  `superserve/python-ml`, `superserve/claude-code`). Team-owned template UUIDs also work.
-- `--pause-on-exit` — pause the sandbox on shutdown instead of killing it. Superserve sandboxes
-  never die on their own by default, so this lets you reconnect with `SuperserveSandboxClient.resume`
-  later without recreating workspace state.
-- `--timeout-seconds 300` — opt into an inactivity timeout (off by default).
-- `--skip-snapshot-check` — skip the pause/resume snapshot round-trip verification.
+- `--template <name>` -- use a different template; defaults to `superserve/base`.
+  Other curated templates: `superserve/python-3.11`, `superserve/node-22`,
+  `superserve/code-interpreter`, `superserve/python-ml`.
+- `--pause-on-exit` -- pause the sandbox on shutdown instead of killing it.
+- `--timeout-seconds 300` -- inactivity timeout in seconds (off by default).
+- `--skip-snapshot-check` -- skip the pause/resume snapshot round-trip verification.
 
-Pause/resume is a first-class part of the Superserve API surface, so the example exercises both
-the standard create→exec→shutdown flow and the explicit
-`pause → serialize state → resume → read` round-trip.
+The example runs a pause/resume round-trip before the agent run to verify that workspace state
+survives shutdown.
 
 ## Runloop
 
