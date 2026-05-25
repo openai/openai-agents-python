@@ -226,6 +226,13 @@ class _FailingWriteSailbox(_FakeSailbox):
         raise RuntimeError("write failed")
 
 
+class _NoSudoSailbox(_FakeSailbox):
+    def exec(self, command: str, *, timeout: int | None = None) -> Any:
+        if "sudo" in command:
+            raise RuntimeError("sudo: not found")
+        return super().exec(command, timeout=timeout)
+
+
 class _FailingListenerSailbox(_FakeSailbox):
     def listener(self, port: int) -> _FakeListener:
         _ = port
@@ -1232,6 +1239,17 @@ def test_write_with_user_stages_then_writes_through_user_exec(
     assert temp_paths[0] in sailbox.exec_commands[0][0]
     assert "/workspace/notes.txt" in sailbox.exec_commands[0][0]
     assert temp_paths[0] in sailbox.exec_commands[1][0]
+
+
+def test_write_with_user_does_not_require_sudo(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
+    sailbox = _NoSudoSailbox()
+    session = _session(sailbox)
+
+    asyncio.run(session.write(Path("notes.txt"), io.BytesIO(b"hello"), user="app"))
+
+    assert all("sudo" not in command for command, _ in sailbox.exec_commands)
+    assert sailbox.exec_commands[0][0].startswith("runuser -u app --")
 
 
 def test_write_with_user_nonzero_exec_maps_archive_error(
