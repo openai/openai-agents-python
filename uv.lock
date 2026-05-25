@@ -12,6 +12,9 @@ resolution-markers = [
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
 
+[options.exclude-newer-package]
+sail-sdk = "2026-05-25T06:00:00Z"
+
 [[package]]
 name = "aiofiles"
 version = "24.1.0"
@@ -2598,7 +2601,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<17" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<17" },
 ]
-provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "docker", "blaxel", "daytona", "cloudflare", "e2b", "modal", "runloop", "vercel", "sailbox", "s3", "temporal"]
+provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "docker", "blaxel", "daytona", "cloudflare", "e2b", "modal", "runloop", "sailbox", "vercel", "s3", "temporal"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3830,7 +3833,7 @@ wheels = [
 
 [[package]]
 name = "sail-sdk"
-version = "0.1.24"
+version = "0.1.33"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -3839,10 +3842,11 @@ dependencies = [
     { name = "pathspec" },
     { name = "protobuf" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
+    { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d5/97/2334c4669e2cd29fb65183d784c5a011cc3ca9cfaac37a7f4923a0645db4/sail_sdk-0.1.24.tar.gz", hash = "sha256:1b38fd5ea2c302ab6ab7e99e37596ebb1682d3f544338f73cf4fb9fd0d6d160c", size = 142463, upload-time = "2026-05-17T06:18:18.419Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/87/ea/83435959cbe909ed329a17cfa4b1b6302f4b1180a8e69acf8851e638f507/sail_sdk-0.1.33.tar.gz", hash = "sha256:d010202309611f706c275ac7dd083e8564df852786e914d04228755dc6ca14a0", size = 191083, upload-time = "2026-05-25T05:51:34.32Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4b/0d/e4aa622f02d8e4244d32afe27289a6002d4b00bdf239436c73cb73177296/sail_sdk-0.1.24-py3-none-any.whl", hash = "sha256:1395c0c937cfcb77eda7029f26f0931a863eb365f0587764364b59b9daedbbf8", size = 94124, upload-time = "2026-05-17T06:18:19.863Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/5a/d72df7739903e70474c405da7290c2240f670e1948d6a56c9c4831f3d37d/sail_sdk-0.1.33-py3-none-any.whl", hash = "sha256:14b4e353ab261ce374d1ead51ae67353273645d98cb961b80eb615ad4669380f", size = 116002, upload-time = "2026-05-25T05:51:32.921Z" },
 ]
 
 [[package]]
