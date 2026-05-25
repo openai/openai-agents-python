@@ -679,6 +679,7 @@ def test_client_options_defaults_match_provider_defaults() -> None:
     options = SailboxSandboxClientOptions()
 
     assert options.type == "sailbox"
+    assert options.model_fields_set == {"type"}
     assert options.app_name == "openai-agents-sandbox"
     assert options.name_prefix == "openai-agent"
     assert options.memory_mib == 1024
@@ -720,6 +721,11 @@ def test_client_resolve_options_prefers_explicit_values() -> None:
         app=App(id="app_client", name="client", created_at=1),
         image=Image.debian_arm64,
         name_prefix="client-prefix",
+        image_build_timeout=33,
+        memory_mib=2048,
+        cpu=2,
+        disk_gib=16,
+        pause_on_exit=True,
     )
     explicit_app = App(id="app_explicit", name="explicit", created_at=2)
 
@@ -729,7 +735,12 @@ def test_client_resolve_options_prefers_explicit_values() -> None:
             app_name="explicit-app",
             image=Image.debian_amd64,
             name_prefix="explicit-prefix",
+            image_build_timeout=44,
+            memory_mib=4096,
+            cpu=4,
+            disk_gib=32,
             exposed_ports=(3000, 8080),
+            pause_on_exit=False,
         )
     )
 
@@ -737,7 +748,40 @@ def test_client_resolve_options_prefers_explicit_values() -> None:
     assert options.app_name == "explicit-app"
     assert options.image is Image.debian_amd64
     assert options.name_prefix == "explicit-prefix"
+    assert options.image_build_timeout == 44
+    assert options.memory_mib == 4096
+    assert options.cpu == 4
+    assert options.disk_gib == 32
     assert options.exposed_ports == (3000, 8080)
+    assert options.pause_on_exit is False
+
+
+def test_client_resolve_options_partial_options_preserve_client_defaults() -> None:
+    app = App(id="app_client", name="client", created_at=1)
+    client = SailboxSandboxClient(
+        app=app,
+        app_name="client-app",
+        image=Image.debian_amd64,
+        name_prefix="client-prefix",
+        image_build_timeout=33,
+        memory_mib=2048,
+        cpu=2,
+        disk_gib=16,
+        pause_on_exit=True,
+    )
+
+    options = client._resolve_options(SailboxSandboxClientOptions(exposed_ports=(8080,)))
+
+    assert options.app == app
+    assert options.app_name == "client-app"
+    assert options.image is Image.debian_amd64
+    assert options.name_prefix == "client-prefix"
+    assert options.image_build_timeout == 33
+    assert options.memory_mib == 2048
+    assert options.cpu == 2
+    assert options.disk_gib == 16
+    assert options.exposed_ports == (8080,)
+    assert options.pause_on_exit is True
 
 
 def test_client_resolve_options_falls_back_to_client_app() -> None:

@@ -57,6 +57,7 @@ _DEFAULT_MEMORY_MIB = 1024
 _DEFAULT_CPU = 1
 _DEFAULT_DISK_GIB = 8
 _DEFAULT_IMAGE_BUILD_TIMEOUT = 1800
+_UNSET = object()
 
 R = TypeVar("R")
 
@@ -116,32 +117,41 @@ class SailboxSandboxClientOptions(BaseSandboxClientOptions):
 
     def __init__(
         self,
-        app: App | None = None,
-        app_name: str | None = _DEFAULT_APP_NAME,
-        image: ImageDefinition | None = None,
-        name_prefix: str = _DEFAULT_NAME_PREFIX,
-        image_build_timeout: int = _DEFAULT_IMAGE_BUILD_TIMEOUT,
-        memory_mib: int = _DEFAULT_MEMORY_MIB,
-        cpu: int = _DEFAULT_CPU,
-        disk_gib: int = _DEFAULT_DISK_GIB,
-        exposed_ports: tuple[int, ...] = (),
-        pause_on_exit: bool = False,
+        app: App | None | object = _UNSET,
+        app_name: str | None | object = _UNSET,
+        image: ImageDefinition | None | object = _UNSET,
+        name_prefix: str | object = _UNSET,
+        image_build_timeout: int | object = _UNSET,
+        memory_mib: int | object = _UNSET,
+        cpu: int | object = _UNSET,
+        disk_gib: int | object = _UNSET,
+        exposed_ports: tuple[int, ...] | object = _UNSET,
+        pause_on_exit: bool | object = _UNSET,
         *,
         type: Literal["sailbox"] = "sailbox",
     ) -> None:
-        super().__init__(
-            type=type,
-            app=app,
-            app_name=app_name,
-            image=image,
-            name_prefix=name_prefix,
-            image_build_timeout=image_build_timeout,
-            memory_mib=memory_mib,
-            cpu=cpu,
-            disk_gib=disk_gib,
-            exposed_ports=tuple(exposed_ports),
-            pause_on_exit=pause_on_exit,
-        )
+        values: dict[str, object] = {"type": type}
+        if app is not _UNSET:
+            values["app"] = app
+        if app_name is not _UNSET:
+            values["app_name"] = app_name
+        if image is not _UNSET:
+            values["image"] = image
+        if name_prefix is not _UNSET:
+            values["name_prefix"] = name_prefix
+        if image_build_timeout is not _UNSET:
+            values["image_build_timeout"] = image_build_timeout
+        if memory_mib is not _UNSET:
+            values["memory_mib"] = memory_mib
+        if cpu is not _UNSET:
+            values["cpu"] = cpu
+        if disk_gib is not _UNSET:
+            values["disk_gib"] = disk_gib
+        if exposed_ports is not _UNSET:
+            values["exposed_ports"] = tuple(cast(Any, exposed_ports))
+        if pause_on_exit is not _UNSET:
+            values["pause_on_exit"] = pause_on_exit
+        super().__init__(**values)
 
     @field_serializer("app", when_used="json")
     def _serialize_app(self, app: App | None) -> str | None:
@@ -705,6 +715,18 @@ class SailboxSandboxClient(BaseSandboxClient[SailboxSandboxClientOptions | None]
         self,
         options: SailboxSandboxClientOptions | None,
     ) -> SailboxSandboxClientOptions:
+        def option_or_default(field: str, client_default: R) -> R:
+            if options is not None and field in options.model_fields_set:
+                return cast(R, getattr(options, field))
+            return client_default
+
+        def optional_option_or_default(field: str, client_default: R | None) -> R | None:
+            if options is not None and field in options.model_fields_set:
+                value = getattr(options, field)
+                if value is not None:
+                    return cast(R, value)
+            return client_default
+
         if options is None:
             return SailboxSandboxClientOptions(
                 app=self._app,
@@ -718,16 +740,18 @@ class SailboxSandboxClient(BaseSandboxClient[SailboxSandboxClientOptions | None]
                 pause_on_exit=self._pause_on_exit,
             )
         return SailboxSandboxClientOptions(
-            app=options.app or self._app,
-            app_name=(options.app_name if options.app_name is not None else self._app_name),
-            image=options.image or self._image or Image.debian_arm64,
-            name_prefix=options.name_prefix or self._name_prefix,
-            image_build_timeout=options.image_build_timeout,
-            memory_mib=options.memory_mib,
-            cpu=options.cpu,
-            disk_gib=options.disk_gib,
-            exposed_ports=options.exposed_ports,
-            pause_on_exit=options.pause_on_exit,
+            app=optional_option_or_default("app", self._app),
+            app_name=optional_option_or_default("app_name", self._app_name),
+            image=optional_option_or_default("image", self._image) or Image.debian_arm64,
+            name_prefix=option_or_default("name_prefix", self._name_prefix),
+            image_build_timeout=option_or_default(
+                "image_build_timeout", self._image_build_timeout
+            ),
+            memory_mib=option_or_default("memory_mib", self._memory_mib),
+            cpu=option_or_default("cpu", self._cpu),
+            disk_gib=option_or_default("disk_gib", self._disk_gib),
+            exposed_ports=option_or_default("exposed_ports", ()),
+            pause_on_exit=option_or_default("pause_on_exit", self._pause_on_exit),
         )
 
     async def _resolve_app(self, options: SailboxSandboxClientOptions) -> App:
