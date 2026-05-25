@@ -20,13 +20,16 @@ from agents.sandbox.entries import File
 from agents.sandbox.errors import (
     ExecTransportError,
     ExposedPortUnavailableError,
+    WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
     WorkspaceStartError,
 )
-from agents.sandbox.manifest import Manifest
-from agents.sandbox.session import SandboxSessionState
+from agents.sandbox.manifest import Environment, Manifest
+from agents.sandbox.session import SandboxSession, SandboxSessionState
+from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
+from agents.sandbox.types import ExecResult
 
 
 @dataclass
@@ -157,15 +160,85 @@ class _FakeSailbox:
         self.paused = True
         self.status = "paused"
 
+    def resume(self) -> _FakeSailbox:
+        self.status = "running"
+        return self
+
     def terminate(self) -> None:
         self.terminated = True
         self.status = "terminated"
+
+
+class _StatusError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class _WaitFailingRequest:
+    def wait(self) -> _FakeExecResult:
+        raise RuntimeError("wait failed")
+
+
+class _WaitFailingSailbox(_FakeSailbox):
+    def exec(self, command: str, *, timeout: int | None = None) -> Any:
+        self.exec_commands.append((command, timeout))
+        return _WaitFailingRequest()
 
 
 class _FailingExecSailbox(_FakeSailbox):
     def exec(self, command: str, *, timeout: int | None = None) -> Any:
         _ = (command, timeout)
         raise RuntimeError("worker unavailable")
+
+
+class _NonzeroExecSailbox(_FakeSailbox):
+    def exec(self, command: str, *, timeout: int | None = None) -> Any:
+        self.exec_commands.append((command, timeout))
+        return _FakeExecRequest(_FakeExecResult(stdout="out", stderr="err", returncode=7))
+
+
+class _ScriptedExecSailbox(_FakeSailbox):
+    def __init__(self, results: list[_FakeExecResult | BaseException]) -> None:
+        super().__init__()
+        self.results = results
+
+    def exec(self, command: str, *, timeout: int | None = None) -> Any:
+        self.exec_commands.append((command, timeout))
+        if not self.results:
+            return super().exec(command, timeout=timeout)
+        result = self.results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return _FakeExecRequest(result)
+
+
+class _FailingReadSailbox(_FakeSailbox):
+    def read(self, path: str) -> bytes:
+        _ = path
+        raise RuntimeError("read failed")
+
+
+class _FailingWriteSailbox(_FakeSailbox):
+    def write(self, path: str, data: bytes) -> None:
+        _ = (path, data)
+        raise RuntimeError("write failed")
+
+
+class _FailingListenerSailbox(_FakeSailbox):
+    def listener(self, port: int) -> _FakeListener:
+        _ = port
+        raise RuntimeError("listener failed")
+
+
+class _FailingPauseSailbox(_FakeSailbox):
+    def pause(self) -> None:
+        raise RuntimeError("pause failed")
+
+
+class _FailingTerminateSailbox(_FakeSailbox):
+    def terminate(self) -> None:
+        raise RuntimeError("terminate failed")
 
 
 class _BlockingFakeSailbox(_FakeSailbox):
@@ -193,6 +266,26 @@ def _state(sailbox: _FakeSailbox) -> SailboxSandboxSessionState:
         status=sailbox.status,
         exposed_ports=(8080,),
     )
+
+
+def _session(sailbox: _FakeSailbox) -> SailboxSandboxSession:
+    return SailboxSandboxSession.from_state(_state(sailbox), sailbox=sailbox)
+
+
+def _tar_bytes(name: str = "README.md", payload: bytes = b"hello") -> io.BytesIO:
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w") as archive:
+        info = tarfile.TarInfo(name)
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    raw.seek(0)
+    return raw
+
+
+class _InvalidPayload(io.IOBase):
+    def read(self, *args: object, **kwargs: object) -> object:
+        _ = (args, kwargs)
+        return object()
 
 
 def test_client_create_creates_sailbox(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -570,3 +663,658 @@ def test_shutdown_pauses_or_terminates_sailbox() -> None:
     asyncio.run(terminated_session.shutdown())
     assert terminated_sailbox.terminated is True
     assert terminated_session.state.status == "terminated"
+
+
+def test_client_options_defaults_match_provider_defaults() -> None:
+    options = SailboxSandboxClientOptions()
+
+    assert options.type == "sailbox"
+    assert options.app_name == "openai-agents-sandbox"
+    assert options.name_prefix == "openai-agent"
+    assert options.memory_mib == 1024
+    assert options.cpu == 1
+    assert options.disk_gib == 8
+    assert options.exposed_ports == ()
+    assert options.pause_on_exit is False
+
+
+def test_client_resolve_options_uses_client_defaults() -> None:
+    app = App(id="app_client", name="client", created_at=1)
+    client = SailboxSandboxClient(
+        app=app,
+        app_name="client-app",
+        image=Image.debian_amd64,
+        name_prefix="client-prefix",
+        image_build_timeout=33,
+        memory_mib=2048,
+        cpu=2,
+        disk_gib=16,
+        pause_on_exit=True,
+    )
+
+    options = client._resolve_options(None)
+
+    assert options.app == app
+    assert options.app_name == "client-app"
+    assert options.image is Image.debian_amd64
+    assert options.name_prefix == "client-prefix"
+    assert options.image_build_timeout == 33
+    assert options.memory_mib == 2048
+    assert options.cpu == 2
+    assert options.disk_gib == 16
+    assert options.pause_on_exit is True
+
+
+def test_client_resolve_options_prefers_explicit_values() -> None:
+    client = SailboxSandboxClient(
+        app=App(id="app_client", name="client", created_at=1),
+        image=Image.debian_arm64,
+        name_prefix="client-prefix",
+    )
+    explicit_app = App(id="app_explicit", name="explicit", created_at=2)
+
+    options = client._resolve_options(
+        SailboxSandboxClientOptions(
+            app=explicit_app,
+            app_name="explicit-app",
+            image=Image.debian_amd64,
+            name_prefix="explicit-prefix",
+            exposed_ports=(3000, 8080),
+        )
+    )
+
+    assert options.app == explicit_app
+    assert options.app_name == "explicit-app"
+    assert options.image is Image.debian_amd64
+    assert options.name_prefix == "explicit-prefix"
+    assert options.exposed_ports == (3000, 8080)
+
+
+def test_client_resolve_options_falls_back_to_client_app() -> None:
+    app = App(id="app_client", name="client", created_at=1)
+    client = SailboxSandboxClient(app=app, app_name="client-app")
+
+    options = client._resolve_options(SailboxSandboxClientOptions(app_name=None))
+
+    assert options.app == app
+    assert options.app_name == "client-app"
+
+
+def test_resolve_app_returns_explicit_app_without_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = App(id="app_direct", name="direct", created_at=1)
+    client = SailboxSandboxClient()
+
+    def fail_find(**kwargs: object) -> App:
+        _ = kwargs
+        raise AssertionError("App.find should not be called")
+
+    monkeypatch.setattr("agents.extensions.sandbox.sailbox.sandbox.App.find", fail_find)
+
+    resolved = asyncio.run(client._resolve_app(SailboxSandboxClientOptions(app=app)))
+
+    assert resolved == app
+
+
+def test_resolve_app_finds_and_mints_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+    client = SailboxSandboxClient()
+
+    def fake_find(**kwargs: object) -> App:
+        calls.append(kwargs)
+        return App(id="app_found", name=cast(str, kwargs["name"]), created_at=1)
+
+    monkeypatch.setattr("agents.extensions.sandbox.sailbox.sandbox.App.find", fake_find)
+
+    resolved = asyncio.run(
+        client._resolve_app(SailboxSandboxClientOptions(app=None, app_name="agents"))
+    )
+
+    assert resolved.id == "app_found"
+    assert calls == [{"name": "agents", "mint_if_missing": True}]
+
+
+def test_resolve_app_requires_app_or_name() -> None:
+    client = SailboxSandboxClient()
+
+    with pytest.raises(ValueError, match="requires app or app_name"):
+        asyncio.run(client._resolve_app(SailboxSandboxClientOptions(app=None, app_name=None)))
+
+
+def test_create_without_manifest_uses_default_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_sailbox = _FakeSailbox("sb-default-manifest")
+
+    monkeypatch.setattr(
+        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.create",
+        staticmethod(lambda **kwargs: fake_sailbox),
+    )
+
+    session = asyncio.run(
+        SailboxSandboxClient(app=App(id="app_test", name="agents", created_at=1)).create()
+    )
+
+    assert session.state.manifest.root == "/workspace"
+    assert session.state.sailbox_id == "sb-default-manifest"
+
+
+def test_create_passes_resource_options_and_generated_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[dict[str, object]] = []
+    fake_sailbox = _FakeSailbox("sb-resources")
+
+    def fake_create(**kwargs: object) -> _FakeSailbox:
+        created.append(kwargs)
+        return fake_sailbox
+
+    monkeypatch.setattr(
+        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.create",
+        staticmethod(fake_create),
+    )
+    app = App(id="app_test", name="agents", created_at=1)
+
+    session = asyncio.run(
+        SailboxSandboxClient(app=app).create(
+            options=SailboxSandboxClientOptions(
+                image=Image.debian_amd64,
+                name_prefix="custom-prefix",
+                image_build_timeout=44,
+                memory_mib=4096,
+                cpu=4,
+                disk_gib=32,
+                exposed_ports=(8080, 3000),
+            )
+        )
+    )
+
+    assert session.state.sailbox_name == fake_sailbox.name
+    assert created[0]["image"] is Image.debian_amd64
+    assert created[0]["app"] == app
+    assert cast(str, created[0]["name"]).startswith("custom-prefix-")
+    assert len(cast(str, created[0]["name"]).removeprefix("custom-prefix-")) == 12
+    assert created[0]["image_build_timeout"] == 44
+    assert created[0]["memory_mib"] == 4096
+    assert created[0]["cpu"] == 4
+    assert created[0]["disk_gib"] == 32
+    assert created[0]["ingress_ports"] == [8080, 3000]
+
+
+def test_create_failure_context_includes_http_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_create(**kwargs: object) -> _FakeSailbox:
+        _ = kwargs
+        raise _StatusError("forbidden", status_code=403)
+
+    monkeypatch.setattr(
+        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.create",
+        staticmethod(fake_create),
+    )
+
+    client = SailboxSandboxClient(app=App(id="app_test", name="agents", created_at=1))
+
+    with pytest.raises(WorkspaceStartError) as exc_info:
+        asyncio.run(client.create())
+
+    assert exc_info.value.context["backend"] == "sailbox"
+    assert exc_info.value.context["http_status"] == 403
+    assert exc_info.value.context["provider_error"] == "HTTP 403: forbidden"
+
+
+def test_resume_rejects_wrong_state_type() -> None:
+    state = SandboxSessionState(
+        type="other",
+        session_id=uuid.uuid4(),
+        snapshot=NoopSnapshot(id="test"),
+        manifest=Manifest(),
+    )
+
+    with pytest.raises(TypeError, match="SailboxSandboxSessionState"):
+        asyncio.run(SailboxSandboxClient().resume(state))
+
+
+def test_deserialize_session_state_returns_sailbox_state() -> None:
+    state = _state(_FakeSailbox("sb-json"))
+    payload = json.loads(state.model_dump_json())
+
+    parsed = SailboxSandboxClient().deserialize_session_state(payload)
+
+    assert isinstance(parsed, SailboxSandboxSessionState)
+    assert parsed.sailbox_id == "sb-json"
+    assert parsed.exposed_ports == (8080,)
+
+
+def test_session_state_defaults_are_serializable() -> None:
+    state = SailboxSandboxSessionState(
+        session_id=uuid.uuid4(),
+        snapshot=NoopSnapshot(id="test"),
+        manifest=Manifest(),
+    )
+
+    payload = state.model_dump(mode="json")
+
+    assert payload["type"] == "sailbox"
+    assert payload["sailbox_id"] == ""
+    assert payload["image_build_timeout"] == 1800
+    assert payload["memory_mib"] == 1024
+    assert payload["cpu"] == 1
+    assert payload["disk_gib"] == 8
+
+
+def test_running_false_without_backend_or_when_paused() -> None:
+    state = _state(_FakeSailbox())
+    state.status = "paused"
+    without_backend = SailboxSandboxSession.from_state(state, sailbox=None)
+    paused = SailboxSandboxSession.from_state(state, sailbox=_FakeSailbox())
+    paused.state.status = "paused"
+
+    assert asyncio.run(without_backend.running()) is False
+    assert asyncio.run(paused.running()) is False
+
+
+def test_set_sailbox_updates_state_fields() -> None:
+    session = SailboxSandboxSession.from_state(_state(_FakeSailbox("sb-old")))
+    sailbox = _FakeSailbox("sb-new")
+    sailbox.name = "new-name"
+    sailbox.worker_address = "worker-new:50051"
+    sailbox.exec_endpoint = "exec-new:443"
+
+    session._set_sailbox(sailbox)
+
+    assert session.state.sailbox_id == "sb-new"
+    assert session.state.sailbox_name == "new-name"
+    assert session.state.status == "running"
+    assert session.state.worker_address == "worker-new:50051"
+    assert session.state.exec_endpoint == "exec-new:443"
+
+
+def test_ensure_backend_started_resumes_paused_sailbox() -> None:
+    sailbox = _FakeSailbox("sb-paused")
+    sailbox.status = "paused"
+    session = SailboxSandboxSession.from_state(_state(sailbox), sailbox=sailbox)
+
+    asyncio.run(session._ensure_backend_started())
+
+    assert sailbox.status == "running"
+    assert session.state.status == "running"
+
+
+def test_ensure_backend_started_requires_sailbox_id() -> None:
+    state = _state(_FakeSailbox())
+    state.sailbox_id = ""
+    session = SailboxSandboxSession.from_state(state)
+
+    with pytest.raises(WorkspaceStartError) as exc_info:
+        asyncio.run(session._ensure_backend_started())
+
+    assert exc_info.value.context["reason"] == "missing_sailbox_id"
+
+
+def test_ensure_backend_started_connects_existing_sailbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connected = _FakeSailbox("sb-connect")
+
+    monkeypatch.setattr(
+        "agents.extensions.sandbox.sailbox.sandbox._connect_sailbox",
+        lambda sailbox_id: connected,
+    )
+
+    session = SailboxSandboxSession.from_state(_state(_FakeSailbox("sb-connect")))
+    asyncio.run(session._ensure_backend_started())
+
+    assert session.sailbox is connected
+    assert session._workspace_state_preserved_on_start() is True
+
+
+def test_ensure_backend_started_connect_failure_maps_start_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "agents.extensions.sandbox.sailbox.sandbox._connect_sailbox",
+        lambda sailbox_id: (_ for _ in ()).throw(RuntimeError("gone")),
+    )
+
+    session = SailboxSandboxSession.from_state(_state(_FakeSailbox("sb-missing")))
+
+    with pytest.raises(WorkspaceStartError) as exc_info:
+        asyncio.run(session._ensure_backend_started())
+
+    assert exc_info.value.context["backend"] == "sailbox"
+    assert exc_info.value.context["reason"] == "connect_failed"
+    assert exc_info.value.context["sailbox_id"] == "sb-missing"
+
+
+def test_prepare_backend_workspace_nonzero_raises_start_error() -> None:
+    sailbox = _NonzeroExecSailbox()
+    session = _session(sailbox)
+
+    with pytest.raises(WorkspaceStartError) as exc_info:
+        asyncio.run(session._prepare_backend_workspace())
+
+    assert exc_info.value.context["exit_code"] == 7
+    assert exc_info.value.context["stdout"] == "out"
+    assert exc_info.value.context["stderr"] == "err"
+
+
+def test_prepare_backend_workspace_wait_failure_maps_start_error() -> None:
+    session = _session(_WaitFailingSailbox())
+
+    with pytest.raises(WorkspaceStartError) as exc_info:
+        asyncio.run(session._prepare_backend_workspace())
+
+    assert exc_info.value.context["backend"] == "sailbox"
+    assert exc_info.value.context["reason"] == "mkdir_failed"
+
+
+@pytest.mark.parametrize(
+    ("timeout", "expected"),
+    [
+        (None, None),
+        (0, 1),
+        (-1, 1),
+        (1.01, 2),
+    ],
+)
+def test_exec_timeout_is_coerced(timeout: float | None, expected: int | None) -> None:
+    sailbox = _FakeSailbox()
+    session = _session(sailbox)
+
+    asyncio.run(session.exec("printf ok", timeout=timeout))
+
+    assert sailbox.exec_commands[-1][1] == expected
+
+
+def test_exec_shell_false_uses_direct_command() -> None:
+    sailbox = _FakeSailbox()
+    session = _session(sailbox)
+
+    asyncio.run(session.exec("printf", "ok", shell=False))
+
+    assert sailbox.exec_commands[-1] == ("cd /workspace && printf ok", None)
+
+
+def test_exec_custom_shell_prefix_is_respected() -> None:
+    sailbox = _FakeSailbox()
+    session = _session(sailbox)
+
+    asyncio.run(session.exec("printf ok", shell=["bash", "-lc"]))
+
+    assert sailbox.exec_commands[-1] == ("cd /workspace && bash -lc 'printf ok'", None)
+
+
+def test_exec_user_wraps_command_with_sudo() -> None:
+    sailbox = _FakeSailbox()
+    session = _session(sailbox)
+
+    asyncio.run(session.exec("id", shell=False, user="sandbox-user"))
+
+    assert sailbox.exec_commands[-1] == (
+        "cd /workspace && sudo -u sandbox-user -- id",
+        None,
+    )
+
+
+def test_exec_includes_sorted_manifest_environment() -> None:
+    sailbox = _FakeSailbox()
+    state = _state(sailbox)
+    state.manifest = Manifest(
+        root="/workspace",
+        environment=Environment(value={"ZED": "two words", "ALPHA": "1"}),
+    )
+    session = SailboxSandboxSession.from_state(state, sailbox=sailbox)
+
+    asyncio.run(session.exec("printf ok"))
+
+    assert sailbox.exec_commands[-1] == (
+        "cd /workspace && env ALPHA=1 ZED='two words' sh -lc 'printf ok'",
+        None,
+    )
+
+
+def test_exec_nonzero_result_is_returned_to_caller() -> None:
+    session = _session(_NonzeroExecSailbox())
+
+    result = asyncio.run(session.exec("false"))
+
+    assert result.exit_code == 7
+    assert result.stdout == b"out"
+    assert result.stderr == b"err"
+
+
+def test_exec_wait_failure_maps_transport_error() -> None:
+    session = _session(_WaitFailingSailbox())
+
+    with pytest.raises(ExecTransportError) as exc_info:
+        asyncio.run(session.exec("printf ok"))
+
+    assert exc_info.value.context["backend"] == "sailbox"
+    assert "wait failed" in exc_info.value.context["provider_error"]
+
+
+async def _validate_direct_path(
+    self: SailboxSandboxSession,
+    path: Path | str,
+    *,
+    for_write: bool = False,
+) -> Path:
+    _ = (self, for_write)
+    return Path("/workspace") / Path(path)
+
+
+def test_read_generic_failure_maps_archive_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
+    session = _session(_FailingReadSailbox())
+
+    with pytest.raises(WorkspaceArchiveReadError):
+        asyncio.run(session.read(Path("notes.txt")))
+
+
+def test_write_accepts_text_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
+    sailbox = _FakeSailbox()
+    session = _session(sailbox)
+
+    asyncio.run(session.write(Path("notes.txt"), io.StringIO("hello")))
+
+    assert sailbox.files["/workspace/notes.txt"] == b"hello"
+
+
+def test_write_rejects_invalid_payload_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
+    session = _session(_FakeSailbox())
+
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+        asyncio.run(session.write(Path("notes.txt"), _InvalidPayload()))
+
+    assert exc_info.value.context["reason"] == "invalid_write_payload"
+
+
+def test_write_generic_failure_maps_archive_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
+    session = _session(_FailingWriteSailbox())
+
+    with pytest.raises(WorkspaceArchiveWriteError):
+        asyncio.run(session.write(Path("notes.txt"), io.BytesIO(b"hello")))
+
+
+def test_resolve_exposed_port_rejects_unconfigured_port() -> None:
+    session = _session(_FakeSailbox())
+
+    with pytest.raises(ExposedPortUnavailableError) as exc_info:
+        asyncio.run(session.resolve_exposed_port(3000))
+
+    assert exc_info.value.context["reason"] == "not_configured"
+
+
+def test_resolve_exposed_port_listener_failure_maps_error() -> None:
+    state = _state(_FailingListenerSailbox())
+    state.exposed_ports = (8080,)
+    session = SailboxSandboxSession.from_state(state, sailbox=_FailingListenerSailbox())
+
+    with pytest.raises(ExposedPortUnavailableError) as exc_info:
+        asyncio.run(session.resolve_exposed_port(8080))
+
+    assert exc_info.value.context["reason"] == "backend_unavailable"
+    assert exc_info.value.context["backend"] == "sailbox"
+    assert exc_info.value.context["detail"] == "listener_lookup_failed"
+
+
+def test_resolve_exposed_port_parses_http_default_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_FakeListener, "url", "http://listener.example.test/path")
+    session = _session(_FakeSailbox())
+
+    endpoint = asyncio.run(session.resolve_exposed_port(8080))
+
+    assert endpoint.host == "listener.example.test"
+    assert endpoint.port == 80
+    assert endpoint.tls is False
+    assert endpoint.query == ""
+
+
+def test_persist_workspace_nonzero_tar_raises_archive_error() -> None:
+    session = _session(_NonzeroExecSailbox())
+
+    with pytest.raises(WorkspaceArchiveReadError) as exc_info:
+        asyncio.run(session.persist_workspace())
+
+    assert exc_info.value.context["exit_code"] == 7
+    assert exc_info.value.context["stdout"] == "out"
+    assert exc_info.value.context["stderr"] == "err"
+
+
+def test_persist_workspace_read_failure_maps_archive_error() -> None:
+    session = _session(_FailingReadSailbox())
+
+    with pytest.raises(WorkspaceArchiveReadError):
+        asyncio.run(session.persist_workspace())
+
+
+def test_persist_workspace_cleanup_failure_is_suppressed() -> None:
+    sailbox = _ScriptedExecSailbox(
+        [
+            _FakeExecResult(returncode=0),
+            RuntimeError("cleanup failed"),
+        ]
+    )
+    state = _state(sailbox)
+    archive_path = f"/tmp/openai-agents-{state.session_id.hex}.tar"
+    sailbox.files[archive_path] = b"archive"
+    session = SailboxSandboxSession.from_state(state, sailbox=sailbox)
+
+    archive = asyncio.run(session.persist_workspace())
+
+    assert archive.read() == b"archive"
+    assert len(sailbox.exec_commands) == 2
+
+
+def test_hydrate_workspace_rejects_invalid_payload_type() -> None:
+    session = _session(_FakeSailbox())
+
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+        asyncio.run(session.hydrate_workspace(_InvalidPayload()))
+
+    assert exc_info.value.context["reason"] == "invalid_archive_payload"
+
+
+def test_hydrate_workspace_write_failure_maps_archive_error() -> None:
+    session = _session(_FailingWriteSailbox())
+
+    with pytest.raises(WorkspaceArchiveWriteError):
+        asyncio.run(session.hydrate_workspace(_tar_bytes()))
+
+
+def test_hydrate_workspace_extract_failure_maps_archive_error() -> None:
+    sailbox = _ScriptedExecSailbox(
+        [
+            _FakeExecResult(returncode=0),
+            _FakeExecResult(stdout="out", stderr="err", returncode=2),
+            _FakeExecResult(returncode=0),
+        ]
+    )
+    session = _session(sailbox)
+
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+        asyncio.run(session.hydrate_workspace(_tar_bytes()))
+
+    assert exc_info.value.context["exit_code"] == 2
+    assert exc_info.value.context["stdout"] == "out"
+    assert exc_info.value.context["stderr"] == "err"
+
+
+def test_hydrate_workspace_cleanup_failure_is_suppressed() -> None:
+    sailbox = _ScriptedExecSailbox(
+        [
+            _FakeExecResult(returncode=0),
+            _FakeExecResult(returncode=0),
+            RuntimeError("cleanup failed"),
+        ]
+    )
+    session = _session(sailbox)
+
+    asyncio.run(session.hydrate_workspace(_tar_bytes()))
+
+    assert len(sailbox.exec_commands) == 3
+
+
+def test_shutdown_pause_failure_propagates() -> None:
+    state = _state(_FailingPauseSailbox())
+    state.pause_on_exit = True
+    session = SailboxSandboxSession.from_state(state, sailbox=_FailingPauseSailbox())
+
+    with pytest.raises(RuntimeError, match="pause failed"):
+        asyncio.run(session.shutdown())
+
+
+def test_shutdown_terminate_failure_propagates() -> None:
+    session = _session(_FailingTerminateSailbox())
+
+    with pytest.raises(RuntimeError, match="terminate failed"):
+        asyncio.run(session.shutdown())
+
+
+def test_client_delete_rejects_non_sailbox_session() -> None:
+    class _OtherInner(BaseSandboxSession):
+        state: SandboxSessionState
+
+        def __init__(self) -> None:
+            self.state = SandboxSessionState(
+                type="other",
+                session_id=uuid.uuid4(),
+                snapshot=NoopSnapshot(id="test"),
+                manifest=Manifest(),
+            )
+
+        async def _exec_internal(
+            self,
+            *command: str | Path,
+            timeout: float | None = None,
+        ) -> ExecResult:
+            _ = (command, timeout)
+            return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+        async def read(self, path: Path, *, user: str | None = None) -> io.IOBase:
+            _ = (path, user)
+            return io.BytesIO()
+
+        async def write(
+            self,
+            path: Path,
+            data: io.IOBase,
+            *,
+            user: str | None = None,
+        ) -> None:
+            _ = (path, data, user)
+
+        async def running(self) -> bool:
+            return True
+
+        async def persist_workspace(self) -> io.IOBase:
+            return io.BytesIO()
+
+        async def hydrate_workspace(self, data: io.IOBase) -> None:
+            _ = data
+
+    other = SandboxSession(_OtherInner())
+
+    with pytest.raises(TypeError, match="SailboxSandboxSession"):
+        asyncio.run(SailboxSandboxClient().delete(other))
