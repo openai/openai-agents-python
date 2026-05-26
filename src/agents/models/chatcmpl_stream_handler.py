@@ -295,6 +295,7 @@ class ChatCmplStreamHandler:
     ) -> AsyncIterator[ChatCompletionChunk]:
         """Buffer streamed function tool-call deltas until they are complete."""
         buffered_calls: dict[int, _BufferedToolCall] = {}
+        passthrough_tool_call_indexes: set[int] = set()
         last_chunk: ChatCompletionChunk | None = None
 
         async for chunk in stream:
@@ -306,26 +307,38 @@ class ChatCmplStreamHandler:
 
             passthrough_choices: list[Choice] = []
             for choice in chunk.choices:
+                if choice.index != 0:
+                    passthrough_choices.append(choice)
+                    continue
+
                 delta = choice.delta
 
                 if tool_call_deltas := (delta.tool_calls if delta and delta.tool_calls else None):
                     remaining_tool_calls: list[ChoiceDeltaToolCall] = []
                     for tool_call_delta in tool_call_deltas:
-                        if cls._should_buffer_tool_call_delta(tool_call_delta):
+                        if tool_call_delta.index in passthrough_tool_call_indexes:
+                            remaining_tool_calls.append(tool_call_delta)
+                        elif cls._should_buffer_tool_call_delta(tool_call_delta):
                             cls._accumulate_tool_call_delta(buffered_calls, tool_call_delta)
                         else:
+                            passthrough_tool_call_indexes.add(tool_call_delta.index)
                             remaining_tool_calls.append(tool_call_delta)
 
                     delta = delta.model_copy(update={"tool_calls": remaining_tool_calls or None})
                     choice = choice.model_copy(update={"delta": delta})
 
-                if cls._choice_finished_tool_calls(choice) and not buffered_calls:
+                has_passthrough_output = cls._delta_has_passthrough_output(choice.delta)
+                if (
+                    cls._choice_finished_tool_calls(choice)
+                    and not buffered_calls
+                    and not has_passthrough_output
+                ):
                     raise ModelBehaviorError(
                         "Chat Completions stream finished with finish_reason='tool_calls' "
                         "but did not include any streamed tool call deltas."
                     )
 
-                if cls._delta_has_passthrough_output(choice.delta):
+                if has_passthrough_output:
                     passthrough_choices.append(choice)
 
             if passthrough_choices or chunk.usage is not None:
