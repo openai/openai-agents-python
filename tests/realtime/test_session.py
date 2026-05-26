@@ -1387,6 +1387,42 @@ class TestToolCallExecution:
         assert session._current_agent == second_agent
 
     @pytest.mark.asyncio
+    async def test_handoff_session_update_preserves_custom_voice(self, mock_model):
+        custom_voice = {"id": "voice_test"}
+        first_agent = RealtimeAgent(
+            name="first_agent",
+            instructions="first_agent_instructions",
+            tools=[],
+            handoffs=[],
+        )
+        second_agent = RealtimeAgent(
+            name="second_agent",
+            instructions="second_agent_instructions",
+            tools=[],
+            handoffs=[],
+        )
+        first_agent.handoffs = [second_agent]
+        session = RealtimeSession(
+            mock_model,
+            first_agent,
+            None,
+            model_config={"initial_model_settings": {"voice": custom_voice}},
+        )
+
+        await session._handle_tool_call(
+            RealtimeModelToolCallEvent(
+                name=Handoff.default_tool_name(second_agent),
+                call_id="call_789",
+                arguments="{}",
+            )
+        )
+
+        session_update_event = mock_model.sent_events[0]
+        assert isinstance(session_update_event, RealtimeModelSendSessionUpdate)
+        assert session_update_event.session_settings["voice"] == custom_voice
+        assert mock_model.sent_events[1].start_response is True
+
+    @pytest.mark.asyncio
     async def test_unknown_tool_handling(self, mock_model, mock_agent, mock_function_tool):
         """Test that unknown tools complete the model call without starting a response."""
         # Set up agent to return different tool than what's called
