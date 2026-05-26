@@ -773,6 +773,7 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
                 "base_network",
                 "timeout_seconds",
                 "pause_on_exit",
+                "base_url",
                 "timeouts",
             ),
         ),

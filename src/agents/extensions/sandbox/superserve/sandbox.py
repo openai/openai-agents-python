@@ -266,6 +266,7 @@ class SuperserveSandboxSessionState(SandboxSessionState):
     base_network: dict[str, object] | None = None
     timeout_seconds: int | None = None
     pause_on_exit: bool = False
+    base_url: str | None = None
     timeouts: SuperserveSandboxTimeouts = Field(default_factory=SuperserveSandboxTimeouts)
 
 
@@ -853,6 +854,7 @@ class SuperserveSandboxClient(BaseSandboxClient[SuperserveSandboxClientOptions])
             base_network=dict(options.network) if options.network is not None else None,
             timeout_seconds=options.timeout_seconds,
             pause_on_exit=options.pause_on_exit,
+            base_url=base_url,
             timeouts=timeouts,
             exposed_ports=options.exposed_ports,
         )
@@ -883,7 +885,7 @@ class SuperserveSandboxClient(BaseSandboxClient[SuperserveSandboxClientOptions])
         not_found_exc = sup_errors.get("not_found")
 
         api_key = self._api_key
-        base_url = self._base_url
+        base_url = state.base_url or self._base_url
 
         sandbox: Any | None = None
         reconnected = False
@@ -934,13 +936,8 @@ class SuperserveSandboxClient(BaseSandboxClient[SuperserveSandboxClientOptions])
                 logger.debug(
                     "superserve sandbox %s not found, will recreate", state.sandbox_id
                 )
-            else:
-                logger.debug(
-                    "superserve connect failed for %s (will recreate): %s",
-                    state.sandbox_id,
-                    exc,
-                )
-            return None, False
+                return None, False
+            raise
 
         status = getattr(sandbox, "status", None)
         status_value = getattr(status, "value", status)

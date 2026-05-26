@@ -805,6 +805,79 @@ async def test_superserve_resume_recreates_on_unknown_status(
 
 
 @pytest.mark.asyncio
+async def test_superserve_resume_reraises_transient_connect_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient/auth/server errors during connect must not silently orphan the sandbox."""
+    superserve_module = _load_superserve_module(monkeypatch)
+
+    class _TransientError(Exception):
+        status_code = 503
+
+    async def _flaky_connect(cls: type, sandbox_id: str, **kwargs: object) -> _FakeAsyncSandbox:
+        raise _TransientError("upstream blip")
+
+    monkeypatch.setattr(_FakeAsyncSandbox, "connect", classmethod(_flaky_connect))
+
+    state = superserve_module.SuperserveSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000047",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sup-flaky",
+    )
+
+    client = superserve_module.SuperserveSandboxClient()
+    with pytest.raises(_TransientError):
+        await client.resume(state)
+
+    # Should not have fallen back to recreating.
+    assert _FakeAsyncSandbox.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_superserve_resume_uses_state_base_url_over_client_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    superserve_module = _load_superserve_module(monkeypatch)
+    existing = _FakeAsyncSandbox(sandbox_id="sup-base-url", status="active")
+    _FakeAsyncSandbox.sandboxes[existing.id] = existing
+
+    state = superserve_module.SuperserveSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000048",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=existing.id,
+        base_url="https://api-staging.superserve.ai",
+    )
+
+    client = superserve_module.SuperserveSandboxClient(base_url="https://api.superserve.ai")
+    await client.resume(state)
+
+    # base_url on state wins over the client default.
+    assert _FakeAsyncSandbox.connect_calls[0]["base_url"] == "https://api-staging.superserve.ai"
+
+
+@pytest.mark.asyncio
+async def test_superserve_exec_uses_unbounded_timeout_when_caller_passes_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    superserve_module = _load_superserve_module(monkeypatch)
+    state = superserve_module.SuperserveSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000049",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sup-existing",
+        timeouts=superserve_module.SuperserveSandboxTimeouts(exec_timeout_unbounded_s=12345),
+    )
+    sandbox = _FakeAsyncSandbox(sandbox_id="sup-existing")
+    session = superserve_module.SuperserveSandboxSession.from_state(state, sandbox=sandbox)
+
+    await session.exec("echo", "hello", shell=False)
+
+    assert sandbox.commands.calls[0]["timeout_seconds"] == 12345
+
+
+@pytest.mark.asyncio
 async def test_superserve_resume_recreates_on_failed_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
