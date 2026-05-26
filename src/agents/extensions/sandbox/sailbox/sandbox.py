@@ -858,8 +858,25 @@ class SailboxSandboxClient(BaseSandboxClient[SailboxSandboxClientOptions | None]
         inner = session._inner
         if not isinstance(inner, SailboxSandboxSession):
             raise TypeError("SailboxSandboxClient.delete expects a SailboxSandboxSession")
-        # The OpenAI Agents cleanup lifecycle calls session.shutdown() before
-        # delete(). Sailbox shutdown already pauses or terminates the backend.
+
+        sailbox = inner._sailbox
+        if sailbox is None:
+            if not inner.state.sailbox_id:
+                return session
+            try:
+                sailbox = await _call_sailbox(_connect_sailbox, inner.state.sailbox_id)
+            except Exception:
+                return session
+
+        try:
+            await _call_sailbox(sailbox.terminate)
+        except Exception:
+            return session
+
+        inner._sailbox = sailbox
+        inner.state.status = "terminated"
+        inner.state.worker_address = ""
+        object.__setattr__(sailbox, "status", "terminated")
         return session
 
     async def resume(self, state: SandboxSessionState) -> SandboxSession:
