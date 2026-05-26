@@ -303,25 +303,30 @@ class SailboxSandboxSession(BaseSandboxSession):
         self.state.worker_address = sailbox.worker_address
         self.state.exec_endpoint = sailbox.exec_endpoint
 
+    async def _resume_sailbox(self, sailbox: Sailbox) -> None:
+        try:
+            resumed = await _call_sailbox(sailbox.resume)
+        except Exception as exc:
+            raise WorkspaceStartError(
+                path=self._workspace_root_path(),
+                context=_sailbox_error_context(
+                    cause=exc,
+                    extra={
+                        "reason": "resume_failed",
+                        "sailbox_id": self.state.sailbox_id or sailbox.sailbox_id,
+                    },
+                ),
+                cause=exc,
+                message=_sailbox_error_message("Sailbox resume failed", exc),
+            ) from exc
+        if resumed is not None:
+            sailbox = cast(Sailbox, resumed)
+        self._set_sailbox(sailbox)
+
     async def _ensure_backend_started(self) -> None:
         if self._sailbox is not None:
             if self._sailbox.status != "running":
-                try:
-                    await _call_sailbox(self._sailbox.resume)
-                except Exception as exc:
-                    raise WorkspaceStartError(
-                        path=self._workspace_root_path(),
-                        context=_sailbox_error_context(
-                            cause=exc,
-                            extra={
-                                "reason": "resume_failed",
-                                "sailbox_id": self.state.sailbox_id,
-                            },
-                        ),
-                        cause=exc,
-                        message=_sailbox_error_message("Sailbox resume failed", exc),
-                    ) from exc
-                self._set_sailbox(self._sailbox)
+                await self._resume_sailbox(self._sailbox)
             return
 
         if not self.state.sailbox_id:
@@ -346,6 +351,8 @@ class SailboxSandboxSession(BaseSandboxSession):
                 message=_sailbox_error_message("Sailbox connect failed", exc),
             ) from exc
         self._set_sailbox(sailbox)
+        if sailbox.status != "running":
+            await self._resume_sailbox(sailbox)
         self._set_start_state_preserved(True)
 
     async def _prepare_backend_workspace(self) -> None:
