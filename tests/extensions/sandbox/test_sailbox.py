@@ -1225,6 +1225,26 @@ def test_ensure_backend_started_connects_existing_sailbox(
     assert session._workspace_state_preserved_on_start() is True
 
 
+def test_ensure_backend_started_resumes_reconnected_paused_sailbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connected = _FakeSailbox("sb-connect-paused")
+    connected.status = "paused"
+
+    monkeypatch.setattr(
+        "agents.extensions.sandbox.sailbox.sandbox._connect_sailbox",
+        lambda sailbox_id: connected,
+    )
+
+    session = SailboxSandboxSession.from_state(_state(_FakeSailbox("sb-connect-paused")))
+    asyncio.run(session._ensure_backend_started())
+
+    assert session.sailbox is connected
+    assert connected.status == "running"
+    assert session.state.status == "running"
+    assert session._workspace_state_preserved_on_start() is True
+
+
 def test_ensure_backend_started_connect_failure_maps_start_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
