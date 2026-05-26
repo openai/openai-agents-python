@@ -94,6 +94,30 @@ class _BufferedToolCall:
     extra_content: dict[str, Any] | None = None
 
 
+def _merge_buffered_metadata(
+    current: dict[str, Any] | None,
+    incoming: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Merge provider metadata without letting empty chunks erase earlier fields."""
+    if not incoming:
+        return current
+
+    if current is None:
+        return incoming.copy()
+
+    merged = current.copy()
+    for key, value in incoming.items():
+        current_value = merged.get(key)
+        if isinstance(current_value, dict) and isinstance(value, dict):
+            merged[key] = _merge_buffered_metadata(current_value, value) or {}
+        elif isinstance(value, dict) and not value and key in merged:
+            continue
+        else:
+            merged[key] = value
+
+    return merged
+
+
 class SequenceNumber:
     def __init__(self):
         self._sequence_number = 0
@@ -233,11 +257,17 @@ class ChatCmplStreamHandler:
 
         provider_specific_fields = getattr(tool_call_delta, "provider_specific_fields", None)
         if isinstance(provider_specific_fields, dict):
-            buffered_call.provider_specific_fields = provider_specific_fields
+            buffered_call.provider_specific_fields = _merge_buffered_metadata(
+                buffered_call.provider_specific_fields,
+                provider_specific_fields,
+            )
 
         extra_content = getattr(tool_call_delta, "extra_content", None)
         if isinstance(extra_content, dict):
-            buffered_call.extra_content = extra_content
+            buffered_call.extra_content = _merge_buffered_metadata(
+                buffered_call.extra_content,
+                extra_content,
+            )
 
     @staticmethod
     def _buffered_tool_call_delta(
@@ -296,6 +326,7 @@ class ChatCmplStreamHandler:
         """Buffer streamed function tool-call deltas until they are complete."""
         buffered_calls: dict[int, _BufferedToolCall] = {}
         passthrough_tool_call_indexes: set[int] = set()
+        saw_passthrough_tool_call = False
         last_chunk: ChatCompletionChunk | None = None
 
         async for chunk in stream:
@@ -308,6 +339,8 @@ class ChatCmplStreamHandler:
             passthrough_choices: list[Choice] = []
             for choice in chunk.choices:
                 if choice.index != 0:
+                    if choice.delta and choice.delta.tool_calls:
+                        saw_passthrough_tool_call = True
                     passthrough_choices.append(choice)
                     continue
 
@@ -317,11 +350,13 @@ class ChatCmplStreamHandler:
                     remaining_tool_calls: list[ChoiceDeltaToolCall] = []
                     for tool_call_delta in tool_call_deltas:
                         if tool_call_delta.index in passthrough_tool_call_indexes:
+                            saw_passthrough_tool_call = True
                             remaining_tool_calls.append(tool_call_delta)
                         elif cls._should_buffer_tool_call_delta(tool_call_delta):
                             cls._accumulate_tool_call_delta(buffered_calls, tool_call_delta)
                         else:
                             passthrough_tool_call_indexes.add(tool_call_delta.index)
+                            saw_passthrough_tool_call = True
                             remaining_tool_calls.append(tool_call_delta)
 
                     delta = delta.model_copy(update={"tool_calls": remaining_tool_calls or None})
@@ -331,6 +366,7 @@ class ChatCmplStreamHandler:
                 if (
                     cls._choice_finished_tool_calls(choice)
                     and not buffered_calls
+                    and not saw_passthrough_tool_call
                     and not has_passthrough_output
                 ):
                     raise ModelBehaviorError(
