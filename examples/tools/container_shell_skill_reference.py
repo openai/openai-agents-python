@@ -105,7 +105,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model",
-        default="gpt-5.4",
+        default="gpt-5.5",
         help="Model name to use.",
     )
     args = parser.parse_args()

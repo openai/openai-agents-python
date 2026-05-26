@@ -1322,17 +1322,15 @@ class AdvancedSQLiteSession(SQLiteSession):
                         self._logger.warning(f"Failed to serialize input tokens details: {e}")
                         input_details_json = None
 
-                    if (
-                        hasattr(usage_data, "output_tokens_details")
-                        and usage_data.output_tokens_details
-                    ):
-                        try:
-                            output_details_json = json.dumps(
-                                usage_data.output_tokens_details.__dict__
-                            )
-                        except (TypeError, ValueError) as e:
-                            self._logger.warning(f"Failed to serialize output tokens details: {e}")
-                            output_details_json = None
+                if (
+                    hasattr(usage_data, "output_tokens_details")
+                    and usage_data.output_tokens_details
+                ):
+                    try:
+                        output_details_json = json.dumps(usage_data.output_tokens_details.__dict__)
+                    except (TypeError, ValueError) as e:
+                        self._logger.warning(f"Failed to serialize output tokens details: {e}")
+                        output_details_json = None
 
                 with closing(conn.cursor()) as cursor:
                     cursor.execute(

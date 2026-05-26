@@ -31,7 +31,7 @@ if __package__ is None or __package__ == "":
 from examples.sandbox.basic import _import_docker_from_env
 from examples.sandbox.docker.mounts.mount_smoke import IMAGE as MOUNT_IMAGE, ensure_mount_image
 
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_MOUNT_DIR = "persistent"
 FIRST_PROMPT = "Inspect workspace and fix invoice total bug in src/acme_metrics/report.py."
 SECOND_PROMPT = (

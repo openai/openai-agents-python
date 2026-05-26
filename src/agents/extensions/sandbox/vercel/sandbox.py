@@ -79,6 +79,12 @@ _VERCEL_TRANSIENT_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
     httpx.ProtocolError,
 )
 
+# Sandbox status values from which the sandbox can still transition to RUNNING.
+# Only "pending" qualifies: a freshly created sandbox transitions PENDING -> RUNNING.
+# Other non-RUNNING states ("stopping", "stopped", "failed", "aborted",
+# "snapshotting") cannot reach RUNNING, so waiting is futile.
+_VERCEL_TRANSIENT_SANDBOX_STATUSES: frozenset[str] = frozenset({"pending"})
+
 
 def _is_transient_create_error(exc: BaseException) -> bool:
     if exception_chain_has_status_code(exc, {408, 425, 429, 500, 502, 503, 504}):
@@ -285,10 +291,18 @@ class VercelSandboxSession(BaseSandboxSession):
     def _runtime_helpers(self) -> tuple[RuntimeHelperScript, ...]:
         return (RESOLVE_WORKSPACE_PATH_HELPER,)
 
-    def _validate_tar_bytes(self, raw: bytes) -> None:
+    def _validate_tar_bytes(
+        self,
+        raw: bytes,
+        *,
+        allow_external_symlink_targets: bool = True,
+    ) -> None:
         try:
             with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tar:
-                validate_tarfile(tar)
+                validate_tarfile(
+                    tar,
+                    allow_external_symlink_targets=allow_external_symlink_targets,
+                )
         except UnsafeTarMemberError as exc:
             raise ValueError(str(exc)) from exc
         except (tarfile.TarError, OSError) as exc:
@@ -608,7 +622,7 @@ class VercelSandboxSession(BaseSandboxSession):
         )
         tar_command = ("tar", "xf", archive_path.as_posix(), "-C", root.as_posix())
         try:
-            self._validate_tar_bytes(raw)
+            self._validate_tar_bytes(raw, allow_external_symlink_targets=False)
             await self.mkdir(root, parents=True)
             await self._write_files_with_retry([{"path": archive_path.as_posix(), "content": raw}])
             result = await self.exec(*tar_command, shell=False)
@@ -746,15 +760,22 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
                     project_id=resolved_project_id,
                     team_id=resolved_team_id,
                 )
-                # XXX(scotttrinh): This will wait even if in a terminal state.
-                # We should make wait_for_status smarter about the possible
-                # transitions to avoid waiting for a status if it's impossible
-                # to transition to it from the current status.
-                await sandbox.wait_for_status(
-                    SandboxStatus.RUNNING,
-                    timeout=DEFAULT_VERCEL_WAIT_FOR_RUNNING_TIMEOUT_S,
-                )
-                reconnected = True
+                current_status = str(sandbox.status)
+                if current_status == str(SandboxStatus.RUNNING):
+                    # Already running; skip the wait entirely.
+                    reconnected = True
+                elif current_status in _VERCEL_TRANSIENT_SANDBOX_STATUSES:
+                    # Still transitioning toward RUNNING (e.g. PENDING); wait normally.
+                    await sandbox.wait_for_status(
+                        SandboxStatus.RUNNING,
+                        timeout=DEFAULT_VERCEL_WAIT_FOR_RUNNING_TIMEOUT_S,
+                    )
+                    reconnected = True
+                else:
+                    # Cannot reach RUNNING from here (STOPPING, STOPPED, FAILED,
+                    # ABORTED, SNAPSHOTTING). Drop the handle and recreate below.
+                    await sandbox.client.aclose()
+                    sandbox = None
             except TimeoutError:
                 if sandbox is not None:
                     await sandbox.client.aclose()

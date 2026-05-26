@@ -69,6 +69,31 @@ def test_convert_user_input_to_conversation_item_dict_and_str():
     assert item2.content[0].type == "input_text"
 
 
+def test_convert_user_input_dict_skips_invalid_input_text_parts():
+    """input_text parts with missing/non-string text must be skipped, not
+    forwarded as Content(text=None) which the realtime API rejects."""
+    dict_input_any = {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {"type": "input_text"},  # missing text
+            {"type": "input_text", "text": 123},  # non-string text
+            {"type": "input_text", "text": "ok"},  # valid
+        ],
+    }
+    event = RealtimeModelSendUserInput(
+        user_input=cast(RealtimeModelUserInputMessage, dict_input_any)
+    )
+    item = cast(
+        RealtimeConversationItemUserMessage,
+        _ConversionHelper.convert_user_input_to_conversation_item(event),
+    )
+    assert item.content is not None
+    assert len(item.content) == 1
+    assert item.content[0].type == "input_text"
+    assert item.content[0].text == "ok"
+
+
 def test_convert_tracing_config_variants():
     from agents.realtime.openai_realtime import _ConversionHelper as CH
 

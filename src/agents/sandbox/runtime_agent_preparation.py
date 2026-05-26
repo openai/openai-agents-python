@@ -58,6 +58,10 @@ def _filesystem_instructions(manifest: Manifest) -> str:
     return f"{header}\n\n{tree}"
 
 
+def _instruction_section(title: str, body: str) -> str:
+    return f"# {title}\n\n{body}"
+
+
 def prepare_sandbox_agent(
     *,
     agent: SandboxAgent[TContext],
@@ -178,15 +182,24 @@ def build_sandbox_instructions(
                 agent=public_agent,
             )
             if additional:
-                parts.append(additional)
+                parts.append(_instruction_section("Agent instructions", additional))
 
+        capability_fragments: list[str] = []
         for capability in capabilities:
             fragment = await capability.instructions(manifest)
             if fragment:
-                parts.append(fragment)
+                capability_fragments.append(fragment)
+
+        if capability_fragments:
+            parts.append(
+                _instruction_section(
+                    "Sandbox capability instructions",
+                    "\n\n".join(capability_fragments),
+                )
+            )
 
         if remote_mount_policy := build_remote_mount_policy_instructions(manifest):
-            parts.append(remote_mount_policy)
+            parts.append(_instruction_section("Sandbox remote mount policy", remote_mount_policy))
 
         parts.append(_filesystem_instructions(manifest))
 

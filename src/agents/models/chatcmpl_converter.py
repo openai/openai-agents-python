@@ -47,6 +47,7 @@ from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import AgentsException, UserError
 from ..handoffs import Handoff
 from ..items import TResponseInputItem, TResponseOutputItem
+from ..logger import logger
 from ..model_settings import MCPToolChoice
 from ..tool import (
     FunctionTool,
@@ -65,6 +66,8 @@ from .reasoning_content_replay import (
 ResponseInputContentWithAudioParam = (
     ResponseInputContentParam | ResponseInputAudioParam | dict[str, Any]
 )
+
+_OMITTED_TOOL_OUTPUT_PLACEHOLDER = "[tool output omitted]"
 
 
 class Converter:
@@ -115,6 +118,7 @@ class Converter:
         cls,
         message: ChatCompletionMessage,
         provider_data: dict[str, Any] | None = None,
+        strict_feature_validation: bool = False,
     ) -> list[TResponseOutputItem]:
         """
         Convert a ChatCompletionMessage to a list of response output items.
@@ -227,7 +231,10 @@ class Converter:
 
                     items.append(ResponseFunctionToolCall(**func_call_kwargs))
                 elif tool_call.type == "custom":
-                    pass
+                    if strict_feature_validation:
+                        raise UserError(
+                            "Custom tool calls are not supported by the Chat Completions converter"
+                        )
 
         return items
 
@@ -464,6 +471,7 @@ class Converter:
         preserve_tool_output_all_content: bool = False,
         base_url: str | None = None,
         should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
+        strict_feature_validation: bool = False,
     ) -> list[ChatCompletionMessageParam]:
         """
         Convert a sequence of 'Item' objects into a list of ChatCompletionMessageParam.
@@ -489,6 +497,8 @@ class Converter:
             should_replay_reasoning_content: Optional hook that decides whether a
                 reasoning item should be replayed into the next assistant message as
                 `reasoning_content`.
+            strict_feature_validation: Whether to raise a UserError for Responses-only
+                features that Chat Completions cannot faithfully represent.
 
         Rules:
         - EasyInputMessage or InputMessage (role=user) => ChatCompletionUserMessageParam
@@ -744,6 +754,19 @@ class Converter:
                             for c in all_output_content
                             if c.get("type") == "text"
                         ]
+                        if not tool_result_content:
+                            message = (
+                                "Chat Completions tool outputs cannot be empty or contain only "
+                                "non-text content unless preserve_tool_output_all_content=True."
+                            )
+                            if strict_feature_validation:
+                                raise UserError(message)
+                            logger.warning(
+                                "%s Replacing the tool output with a placeholder; enable strict "
+                                "feature validation to raise an error instead.",
+                                message,
+                            )
+                            tool_result_content = _OMITTED_TOOL_OUTPUT_PLACEHOLDER
                 msg: ChatCompletionToolMessageParam = {
                     "role": "tool",
                     "tool_call_id": func_output["call_id"],

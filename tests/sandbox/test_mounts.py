@@ -29,8 +29,12 @@ from agents.sandbox.entries.mounts.patterns import (
     RcloneMountConfig,
     S3FilesMountConfig,
 )
-from agents.sandbox.errors import MountConfigError
+from agents.sandbox.errors import MountCommandError, MountConfigError
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.events import SandboxSessionEvent
+from agents.sandbox.session.manager import Instrumentation
+from agents.sandbox.session.sandbox_session import SandboxSession
+from agents.sandbox.session.sinks import CallbackSink
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult
 from tests.utils.factories import TestSessionState
@@ -76,13 +80,16 @@ class _MountConfigSession(BaseSandboxSession):
 
 
 class _MountpointApplySession(BaseSandboxSession):
-    def __init__(self) -> None:
+    def __init__(self, *, mount_exit_code: int = 0, mount_stderr: bytes = b"") -> None:
         self.state = TestSessionState(
             session_id=uuid.uuid4(),
             manifest=Manifest(root="/workspace"),
             snapshot=NoopSnapshot(id=str(uuid.uuid4())),
         )
+        self._mount_exit_code = mount_exit_code
+        self._mount_stderr = mount_stderr
         self.exec_calls: list[list[str]] = []
+        self.write_calls: list[tuple[Path, bytes]] = []
 
     async def read(self, path: Path, *, user: object = None) -> io.BytesIO:
         _ = (path, user)
@@ -92,11 +99,14 @@ class _MountpointApplySession(BaseSandboxSession):
         return None
 
     async def write(self, path: Path, data: io.IOBase, *, user: object = None) -> None:
-        _ = (path, data, user)
-        raise AssertionError("write() should not be called in these tests")
+        _ = user
+        self.write_calls.append((path, data.read()))
 
     async def running(self) -> bool:
         return True
+
+    def persist_workspace_skip_paths(self) -> set[Path]:
+        return self._persist_workspace_skip_relpaths()
 
     async def _exec_internal(
         self,
@@ -106,6 +116,15 @@ class _MountpointApplySession(BaseSandboxSession):
         _ = timeout
         command_strs = [str(part) for part in command]
         self.exec_calls.append(command_strs)
+        if (
+            len(command_strs) >= 3
+            and command_strs[:2] == ["sh", "-lc"]
+            and "mount-s3 " in command_strs[2]
+            and "command -v " not in command_strs[2]
+        ):
+            return ExecResult(
+                exit_code=self._mount_exit_code, stdout=b"", stderr=self._mount_stderr
+            )
         return ExecResult(exit_code=0, stdout=b"", stderr=b"")
 
     async def persist_workspace(self) -> io.IOBase:
@@ -380,15 +399,23 @@ async def test_gcs_mount_uses_runtime_endpoint_override_without_mutating_pattern
         ["sh", "-lc", "command -v mount-s3 >/dev/null 2>&1"],
         ["mkdir", "-p", "/workspace/remote"],
     ]
-    assert len(session.exec_calls) == 3
+    assert len(session.exec_calls) == 5
+    assert len(session.write_calls) == 1
+    env_path, env_payload = session.write_calls[0]
+    assert env_path.as_posix().startswith(".sandbox-mountpoint-env/")
+    assert env_path.name.endswith(".env")
+    assert env_payload == b"export AWS_ACCESS_KEY_ID=access\nexport AWS_SECRET_ACCESS_KEY=secret\n"
 
-    mount_command = session.exec_calls[2]
+    mount_command = session.exec_calls[-1]
     assert mount_command[:2] == ["sh", "-lc"]
     assert "mount-s3" in mount_command[2]
+    assert "AWS_ACCESS_KEY_ID=access" not in mount_command[2]
+    assert "AWS_SECRET_ACCESS_KEY=secret" not in mount_command[2]
+    assert ".sandbox-mountpoint-env" in mount_command[2]
     assert "--region us-east1" in mount_command[2]
     assert "--endpoint-url https://storage.googleapis.com" in mount_command[2]
     assert "--upload-checksums off" in mount_command[2]
-    assert mount_command[2].endswith("bucket /workspace/remote")
+    assert "bucket /workspace/remote" in mount_command[2]
 
 
 @pytest.mark.asyncio
@@ -416,19 +443,29 @@ async def test_s3_mountpoint_writable_mode_enables_overwrite_and_delete() -> Non
         ["sh", "-lc", "command -v mount-s3 >/dev/null 2>&1"],
         ["mkdir", "-p", "/workspace/remote"],
     ]
-    assert len(session.exec_calls) == 3
+    assert len(session.exec_calls) == 5
+    assert len(session.write_calls) == 1
+    env_path, env_payload = session.write_calls[0]
+    assert env_path.as_posix().startswith(".sandbox-mountpoint-env/")
+    assert env_path.name.endswith(".env")
+    assert env_payload == (
+        b"export AWS_ACCESS_KEY_ID=access\n"
+        b"export AWS_SECRET_ACCESS_KEY=secret\n"
+        b"export AWS_SESSION_TOKEN=token\n"
+    )
 
-    mount_command = session.exec_calls[2]
+    mount_command = session.exec_calls[-1]
     assert mount_command[:2] == ["sh", "-lc"]
     assert "mount-s3" in mount_command[2]
     assert "--read-only" not in mount_command[2]
     assert "--allow-overwrite" in mount_command[2]
     assert "--allow-delete" in mount_command[2]
     assert "--region us-east-1" in mount_command[2]
-    assert "AWS_ACCESS_KEY_ID=access" in mount_command[2]
-    assert "AWS_SECRET_ACCESS_KEY=secret" in mount_command[2]
-    assert "AWS_SESSION_TOKEN=token" in mount_command[2]
-    assert mount_command[2].endswith("bucket /workspace/remote")
+    assert "AWS_ACCESS_KEY_ID=access" not in mount_command[2]
+    assert "AWS_SECRET_ACCESS_KEY=secret" not in mount_command[2]
+    assert "AWS_SESSION_TOKEN=token" not in mount_command[2]
+    assert ".sandbox-mountpoint-env" in mount_command[2]
+    assert "bucket /workspace/remote" in mount_command[2]
 
 
 @pytest.mark.asyncio
@@ -456,9 +493,14 @@ async def test_gcs_mountpoint_writable_mode_enables_overwrite_and_delete() -> No
         ["sh", "-lc", "command -v mount-s3 >/dev/null 2>&1"],
         ["mkdir", "-p", "/workspace/remote"],
     ]
-    assert len(session.exec_calls) == 3
+    assert len(session.exec_calls) == 5
+    assert len(session.write_calls) == 1
+    env_path, env_payload = session.write_calls[0]
+    assert env_path.as_posix().startswith(".sandbox-mountpoint-env/")
+    assert env_path.name.endswith(".env")
+    assert env_payload == b"export AWS_ACCESS_KEY_ID=access\nexport AWS_SECRET_ACCESS_KEY=secret\n"
 
-    mount_command = session.exec_calls[2]
+    mount_command = session.exec_calls[-1]
     assert mount_command[:2] == ["sh", "-lc"]
     assert "mount-s3" in mount_command[2]
     assert "--read-only" not in mount_command[2]
@@ -467,9 +509,58 @@ async def test_gcs_mountpoint_writable_mode_enables_overwrite_and_delete() -> No
     assert "--region us-east1" in mount_command[2]
     assert "--endpoint-url https://storage.googleapis.com" in mount_command[2]
     assert "--upload-checksums off" in mount_command[2]
-    assert "AWS_ACCESS_KEY_ID=access" in mount_command[2]
-    assert "AWS_SECRET_ACCESS_KEY=secret" in mount_command[2]
-    assert mount_command[2].endswith("bucket /workspace/remote")
+    assert "AWS_ACCESS_KEY_ID=access" not in mount_command[2]
+    assert "AWS_SECRET_ACCESS_KEY=secret" not in mount_command[2]
+    assert ".sandbox-mountpoint-env" in mount_command[2]
+    assert "bucket /workspace/remote" in mount_command[2]
+
+
+@pytest.mark.asyncio
+async def test_s3_mountpoint_failure_redacts_credentials_from_errors_and_events() -> None:
+    events: list[SandboxSessionEvent] = []
+    inner = _MountpointApplySession(
+        mount_exit_code=1,
+        mount_stderr=b"bad credentials: access secret token",
+    )
+    session = SandboxSession(
+        inner,
+        instrumentation=Instrumentation(
+            sinks=[CallbackSink(lambda event, _session: events.append(event))]
+        ),
+    )
+    pattern = MountpointMountPattern()
+
+    with pytest.raises(MountCommandError) as exc_info:
+        await pattern.apply(
+            session,
+            Path("/workspace/remote"),
+            MountpointMountConfig(
+                bucket="bucket",
+                access_key_id="access",
+                secret_access_key="secret",
+                session_token="token",
+                prefix=None,
+                region="us-east-1",
+                endpoint_url=None,
+                mount_type="s3_mount",
+                read_only=False,
+            ),
+        )
+
+    context = exc_info.value.context
+    command = str(context["command"])
+    stderr = str(context["stderr"])
+    assert "REDACTED" in stderr
+    assert ".sandbox-mountpoint-env" in command
+    assert any(
+        path.as_posix().startswith(".sandbox-mountpoint-env/")
+        for path in inner.persist_workspace_skip_paths()
+    )
+    serialized_events = "\n".join(event.model_dump_json() for event in events)
+    for sensitive_value in ("access", "secret", "token"):
+        assert sensitive_value not in command
+        assert sensitive_value not in stderr
+        assert sensitive_value not in serialized_events
 
 
 @pytest.mark.asyncio

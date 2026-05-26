@@ -1,6 +1,11 @@
+import logging
 import os
+import subprocess
+import sys
+import textwrap
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -172,6 +177,99 @@ def test_batch_trace_processor_shutdown_flushes(mocked_exporter):
     assert total_exported == 2, "All items in the queue should be exported upon shutdown"
 
 
+def test_batch_trace_processor_shutdown_timeout_returns_when_exporter_blocks(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    export_started = threading.Event()
+    release_export = threading.Event()
+
+    class BlockingExporter(TracingExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            export_started.set()
+            release_export.wait(timeout=5.0)
+
+    processor = BatchTraceProcessor(
+        exporter=BlockingExporter(),
+        max_queue_size=1,
+        schedule_delay=60.0,
+        export_trigger_ratio=1.0,
+    )
+    processor.on_span_end(get_span(processor))
+
+    assert export_started.wait(timeout=2.0)
+
+    start = time.monotonic()
+    with caplog.at_level(logging.WARNING):
+        processor.shutdown(timeout=0.05)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.5
+    assert "shutdown timeout reached" in caplog.text
+
+    release_export.set()
+    if processor._worker_thread:
+        processor._worker_thread.join(timeout=2.0)
+
+
+def test_batch_trace_processor_shutdown_passes_deadline_to_exporter() -> None:
+    seen_deadlines: list[float | None] = []
+
+    class DeadlineExporter(TracingExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            raise AssertionError("shutdown should use the deadline-aware exporter path")
+
+        def _export_with_deadline(
+            self, items: list[Trace | Span[Any]], deadline: float | None
+        ) -> None:
+            seen_deadlines.append(deadline)
+
+    processor = BatchTraceProcessor(exporter=DeadlineExporter())
+    processor._queue.put_nowait(get_span(processor))
+
+    processor.shutdown(timeout=1.0)
+
+    assert len(seen_deadlines) == 1
+    assert seen_deadlines[0] is not None
+
+
+def test_batch_trace_processor_survives_exporter_exception():
+    """A failing exporter must not kill the background worker thread.
+
+    Previously, an exception raised inside ``exporter.export`` propagated out of
+    ``_export_batches`` and killed the ``_run`` thread, causing all subsequent
+    spans to silently accumulate in the queue until it filled up.
+    """
+
+    class FlakyExporter(TracingExporter):
+        def __init__(self) -> None:
+            self.call_count = 0
+            self.exported: list[Trace | Span[Any]] = []
+
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            self.call_count += 1
+            if self.call_count == 1:
+                raise RuntimeError("simulated exporter failure")
+            self.exported.extend(items)
+
+    exporter = FlakyExporter()
+    processor = BatchTraceProcessor(exporter, schedule_delay=0.05, max_batch_size=1)
+    processor.on_span_end(get_span(processor))
+    processor.on_span_end(get_span(processor))
+    processor.on_span_end(get_span(processor))
+
+    # Give the worker time to encounter the failure and continue processing.
+    time.sleep(0.3)
+
+    assert processor._worker_thread is not None
+    assert processor._worker_thread.is_alive(), "Worker thread must survive an exporter exception"
+
+    processor.shutdown(timeout=2.0)
+
+    # First batch raised; the remaining two items must still have been exported.
+    assert len(exporter.exported) == 2
+    assert exporter.call_count >= 3
+
+
 def test_batch_trace_processor_scheduled_export(mocked_exporter):
     """
     Tests that items are automatically exported when the schedule_delay expires.
@@ -296,16 +394,6 @@ def test_get_trace_provider_force_flush_flushes_default_processor(mocked_exporte
     processor.shutdown()
 
 
-@pytest.fixture
-def patched_time_sleep():
-    """
-    Fixture to replace time.sleep with a no-op to speed up tests
-    that rely on retry/backoff logic.
-    """
-    with patch("time.sleep") as mock_sleep:
-        yield mock_sleep
-
-
 def mock_processor():
     processor = MagicMock()
     processor.on_trace_start = MagicMock()
@@ -365,7 +453,7 @@ def test_backend_span_exporter_4xx_client_error(mock_client):
 
 
 @patch("httpx.Client")
-def test_backend_span_exporter_5xx_retry(mock_client, patched_time_sleep):
+def test_backend_span_exporter_5xx_retry(mock_client):
     mock_response = MagicMock()
     mock_response.status_code = 500
 
@@ -373,24 +461,204 @@ def test_backend_span_exporter_5xx_retry(mock_client, patched_time_sleep):
     mock_client.return_value.post.return_value = mock_response
 
     exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=0.1, max_delay=0.2)
-    exporter.export([get_span(mock_processor())])
+    with patch.object(exporter._shutdown_event, "wait", return_value=False) as wait_for_retry:
+        exporter.export([get_span(mock_processor())])
 
     # Should retry up to max_retries times
     assert mock_client.return_value.post.call_count == 3
+    assert wait_for_retry.call_count == 2
 
     exporter.close()
 
 
 @patch("httpx.Client")
-def test_backend_span_exporter_request_error(mock_client, patched_time_sleep):
+def test_backend_span_exporter_deadline_stops_during_5xx_retry_backoff(mock_client):
+    mock_response = MagicMock()
+    mock_response.status_code = 504
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=1.0)
+    with patch("time.sleep") as sleep_for_retry:
+        exporter._export_with_deadline(
+            [get_span(mock_processor())], deadline=time.monotonic() + 0.01
+        )
+
+    assert mock_client.return_value.post.call_count == 1
+    sleep_for_retry.assert_called_once()
+    assert sleep_for_retry.call_args.args[0] <= 0.1
+
+    exporter.close()
+
+
+@patch("httpx.Client")
+def test_batch_trace_processor_shutdown_interrupts_exporter_retry_backoff(mock_client):
+    post_called = threading.Event()
+    mock_response = MagicMock()
+    mock_response.status_code = 504
+
+    def post(**kwargs: Any) -> Any:
+        post_called.set()
+        return mock_response
+
+    mock_client.return_value.post.side_effect = post
+
+    exporter = BackendSpanExporter(
+        api_key="test_key",
+        max_retries=100,
+        base_delay=10.0,
+        max_delay=10.0,
+    )
+    processor = BatchTraceProcessor(
+        exporter=exporter,
+        max_queue_size=1,
+        max_batch_size=1,
+        schedule_delay=60.0,
+        export_trigger_ratio=1.0,
+    )
+
+    processor.on_span_end(get_span(processor))
+    assert post_called.wait(timeout=2.0)
+
+    start = time.monotonic()
+    processor.shutdown(timeout=1.0)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.5
+    assert processor._worker_thread is not None
+    assert not processor._worker_thread.is_alive()
+    assert mock_client.return_value.post.call_count == 1
+
+    exporter.close()
+
+
+@patch("httpx.Client")
+def test_batch_trace_processor_shutdown_without_timeout_preserves_export_retries(mock_client):
+    mock_response = MagicMock()
+    mock_response.status_code = 504
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(
+        api_key="test_key",
+        max_retries=3,
+        base_delay=0.1,
+        max_delay=0.2,
+    )
+    processor = BatchTraceProcessor(exporter=exporter)
+    processor._queue.put_nowait(get_span(processor))
+
+    with patch.object(exporter._shutdown_event, "wait", return_value=False) as wait_for_retry:
+        processor.shutdown(timeout=None)
+
+    assert mock_client.return_value.post.call_count == 3
+    assert wait_for_retry.call_count == 2
+
+    exporter.close()
+
+
+@pytest.mark.serial
+def test_tracing_atexit_cleanup_timeout_preserves_process_exit_code_on_504() -> None:
+    request_seen = threading.Event()
+
+    class Always504Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            request_seen.set()
+            self.send_response(504)
+            self.end_headers()
+            self.wfile.write(b"gateway timeout")
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Always504Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    script = textwrap.dedent(
+        f"""
+        import sys
+        import time
+
+        from agents.tracing import custom_span, trace
+        from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor
+        from agents.tracing.provider import DefaultTraceProvider
+        from agents.tracing import setup as tracing_setup
+
+        tracing_setup._DEFAULT_SHUTDOWN_TIMEOUT = 0.2
+
+        exporter = BackendSpanExporter(
+            api_key="test_key",
+            endpoint="http://127.0.0.1:{server.server_port}/traces/ingest",
+            max_retries=100,
+            base_delay=10.0,
+            max_delay=10.0,
+        )
+        processor = BatchTraceProcessor(
+            exporter=exporter,
+            max_queue_size=1,
+            max_batch_size=1,
+            schedule_delay=60.0,
+            export_trigger_ratio=1.0,
+        )
+        provider = DefaultTraceProvider()
+        provider.register_processor(processor)
+        original_shutdown = provider.shutdown
+
+        def timed_shutdown(*args, **kwargs):
+            shutdown_started = time.monotonic()
+            try:
+                return original_shutdown(*args, **kwargs)
+            finally:
+                print(
+                    f"shutdown_elapsed={{time.monotonic() - shutdown_started:.6f}}",
+                    flush=True,
+                )
+
+        provider.shutdown = timed_shutdown
+        tracing_setup.set_trace_provider(provider)
+
+        with trace("probe"):
+            with custom_span("probe-span"):
+                pass
+
+        time.sleep(0.3)
+        sys.exit(7)
+        """
+    )
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert request_seen.is_set()
+    assert result.returncode == 7
+    shutdown_elapsed_prefix = "shutdown_elapsed="
+    shutdown_elapsed_lines = [
+        line for line in result.stdout.splitlines() if line.startswith(shutdown_elapsed_prefix)
+    ]
+    assert len(shutdown_elapsed_lines) == 1
+    assert float(shutdown_elapsed_lines[0][len(shutdown_elapsed_prefix) :]) < 0.5
+
+
+@patch("httpx.Client")
+def test_backend_span_exporter_request_error(mock_client):
     # Make post() raise a RequestError each time
     mock_client.return_value.post.side_effect = httpx.RequestError("Network error")
 
     exporter = BackendSpanExporter(api_key="test_key", max_retries=2, base_delay=0.1, max_delay=0.2)
-    exporter.export([get_span(mock_processor())])
+    with patch.object(exporter._shutdown_event, "wait", return_value=False) as wait_for_retry:
+        exporter.export([get_span(mock_processor())])
 
     # Should retry up to max_retries times
     assert mock_client.return_value.post.call_count == 2
+    wait_for_retry.assert_called_once()
 
     exporter.close()
 

@@ -29,7 +29,7 @@ from openai.types.responses.response_output_item import LocalShellCall, McpAppro
 from openai.types.responses.tool_param import Mcp
 from pydantic import BaseModel
 
-from agents import Agent, Model, ModelSettings, Runner, handoff, trace
+from agents import Agent, Model, ModelSettings, RunConfig, Runner, handoff, trace
 from agents.computer import Computer
 from agents.exceptions import UserError
 from agents.guardrail import (
@@ -56,6 +56,7 @@ from agents.items import (
     TResponseStreamEvent,
 )
 from agents.run_context import RunContextWrapper
+from agents.run_internal.agent_runner_helpers import resolve_trace_settings
 from agents.run_internal.items import run_items_to_input_items
 from agents.run_internal.run_loop import (
     NextStepInterruption,
@@ -222,7 +223,7 @@ def make_state(
     *,
     context: RunContextWrapper[TContext],
     original_input: str | list[Any] = "input",
-    max_turns: int = 3,
+    max_turns: int | None = 3,
 ) -> RunState[TContext, Agent[Any]]:
     """Create a RunState with common defaults used across tests."""
 
@@ -308,6 +309,19 @@ class TestRunState:
         str_data = state.to_string()
         assert isinstance(str_data, str)
         assert json.loads(str_data) == json_data
+
+    @pytest.mark.asyncio
+    async def test_max_turns_none_round_trips(self):
+        """RunState should preserve disabled max_turns across serialization."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="Agent1")
+        state = make_state(agent, context=context, original_input="input1", max_turns=None)
+
+        json_data = state.to_json()
+        assert json_data["max_turns"] is None
+
+        restored = await RunState.from_json(agent, json_data)
+        assert restored._max_turns is None
 
     @pytest.mark.asyncio
     async def test_from_json_restores_duplicate_name_current_agent_by_identity(self):
@@ -710,6 +724,18 @@ class TestRunState:
             == default_json["trace"]["tracing_api_key_hash"]
         )
 
+        *_, restored_config = resolve_trace_settings(
+            run_state=restored_with_key,
+            run_config=RunConfig(),
+        )
+        assert restored_config is None
+
+        *_, explicit_config = resolve_trace_settings(
+            run_state=restored_with_key,
+            run_config=RunConfig(tracing={"api_key": "explicit-trace-key"}),
+        )
+        assert explicit_config == {"api_key": "explicit-trace-key"}
+
     async def test_throws_error_if_schema_version_is_missing_or_invalid(self):
         """Test that deserialization fails with missing or invalid schema version."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
@@ -1009,6 +1035,59 @@ class TestRunState:
         assert restored_output.agent_output == "final"
         assert restored_output.agent.name == agent.name
 
+    def test_guardrail_results_to_string_normalizes_non_json_payloads(self):
+        """Guardrail result payloads are JSON-compatible in RunState strings."""
+        context: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+        agent = Agent(name="GuardrailPayloadAgent")
+        state = make_state(agent, context=context, original_input="input", max_turns=1)
+        observed_at = datetime(2026, 5, 8, 12, 0, 0)
+
+        input_guardrail = InputGuardrail(
+            guardrail_function=lambda ctx, ag, inp: GuardrailFunctionOutput(
+                output_info={"observed_at": observed_at},
+                tripwire_triggered=False,
+            ),
+            name="input_guardrail",
+        )
+        output_guardrail = OutputGuardrail(
+            guardrail_function=lambda ctx, ag, out: GuardrailFunctionOutput(
+                output_info={"observed_at": observed_at},
+                tripwire_triggered=False,
+            ),
+            name="output_guardrail",
+        )
+
+        state._input_guardrail_results = [
+            InputGuardrailResult(
+                guardrail=input_guardrail,
+                output=GuardrailFunctionOutput(
+                    output_info={"observed_at": observed_at},
+                    tripwire_triggered=False,
+                ),
+            )
+        ]
+        state._output_guardrail_results = [
+            OutputGuardrailResult(
+                guardrail=output_guardrail,
+                agent_output={"observed_at": observed_at},
+                agent=agent,
+                output=GuardrailFunctionOutput(
+                    output_info={"observed_at": observed_at},
+                    tripwire_triggered=False,
+                ),
+            )
+        ]
+
+        state_string = state.to_string()
+        serialized = json.loads(state_string)
+
+        assert serialized["input_guardrail_results"][0]["output"]["outputInfo"] == {
+            "observed_at": str(observed_at)
+        }
+        output_result = serialized["output_guardrail_results"][0]
+        assert output_result["output"]["outputInfo"] == {"observed_at": str(observed_at)}
+        assert output_result["agentOutput"] == {"observed_at": str(observed_at)}
+
     @pytest.mark.asyncio
     async def test_tool_guardrail_results_round_trip(self):
         """Tool guardrail results survive RunState round-trip."""
@@ -1063,6 +1142,57 @@ class TestRunState:
         assert restored_tool_output.guardrail.get_name() == "tool_output_guardrail"
         assert restored_tool_output.output.behavior["type"] == "allow"
         assert restored_tool_output.output.output_info == {"output": "info"}
+
+    def test_tool_guardrail_results_to_string_normalizes_non_json_output_info(self):
+        """Tool guardrail output_info is JSON-compatible in RunState strings."""
+        context: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+        agent = Agent(name="ToolGuardrailPayloadAgent")
+        state = make_state(agent, context=context, original_input="input", max_turns=1)
+        observed_at = datetime(2026, 5, 8, 12, 0, 0)
+
+        tool_input_guardrail: ToolInputGuardrail[Any] = ToolInputGuardrail(
+            guardrail_function=lambda data: ToolGuardrailFunctionOutput(
+                output_info={"observed_at": observed_at},
+                behavior=AllowBehavior(type="allow"),
+            ),
+            name="tool_input_guardrail",
+        )
+        tool_output_guardrail: ToolOutputGuardrail[Any] = ToolOutputGuardrail(
+            guardrail_function=lambda data: ToolGuardrailFunctionOutput(
+                output_info={"observed_at": observed_at},
+                behavior=AllowBehavior(type="allow"),
+            ),
+            name="tool_output_guardrail",
+        )
+
+        state._tool_input_guardrail_results = [
+            ToolInputGuardrailResult(
+                guardrail=tool_input_guardrail,
+                output=ToolGuardrailFunctionOutput(
+                    output_info={"observed_at": observed_at},
+                    behavior=AllowBehavior(type="allow"),
+                ),
+            )
+        ]
+        state._tool_output_guardrail_results = [
+            ToolOutputGuardrailResult(
+                guardrail=tool_output_guardrail,
+                output=ToolGuardrailFunctionOutput(
+                    output_info={"observed_at": observed_at},
+                    behavior=AllowBehavior(type="allow"),
+                ),
+            )
+        ]
+
+        state_string = state.to_string()
+        serialized = json.loads(state_string)
+
+        assert serialized["tool_input_guardrail_results"][0]["output"]["outputInfo"] == {
+            "observed_at": str(observed_at)
+        }
+        assert serialized["tool_output_guardrail_results"][0]["output"]["outputInfo"] == {
+            "observed_at": str(observed_at)
+        }
 
     def test_reject_permanently_when_always_reject_option_is_passed(self):
         """Test that reject with always_reject=True sets permanent rejection."""
@@ -4505,6 +4635,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.6",
                 "1.7",
                 "1.8",
+                "1.9",
                 CURRENT_SCHEMA_VERSION,
             }
         )

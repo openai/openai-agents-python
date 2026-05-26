@@ -96,7 +96,7 @@ billing_tools = tool_namespace(
 
 namespaced_agent = Agent(
     name="Operations assistant",
-    model="gpt-5.4",
+    model="gpt-5.5",
     instructions=(
         "For customer questions in this example, load the full `crm` namespace with no query "
         "filter before calling tools. "
@@ -108,7 +108,7 @@ namespaced_agent = Agent(
 
 top_level_agent = Agent(
     name="Shipping assistant",
-    model="gpt-5.4",
+    model="gpt-5.5",
     instructions=(
         "For ETA questions in this example, search `get_shipping_eta` before calling tools. "
         "Do not search `get_shipping_credit_balance` unless the user asks about shipping credits."

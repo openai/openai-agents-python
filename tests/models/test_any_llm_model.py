@@ -17,6 +17,9 @@ from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_chunk import ChoiceDelta
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 from openai.types.responses import Response, ResponseCompletedEvent, ResponseOutputMessage
+from openai.types.responses.response_error_event import ResponseErrorEvent
+from openai.types.responses.response_failed_event import ResponseFailedEvent
+from openai.types.responses.response_incomplete_event import ResponseIncompleteEvent
 from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.response_usage import (
     InputTokensDetails,
@@ -28,6 +31,7 @@ from pydantic import BaseModel
 from agents import (
     Agent,
     Handoff,
+    ModelBehaviorError,
     ModelSettings,
     ModelTracing,
     Tool,
@@ -536,6 +540,91 @@ async def test_any_llm_stream_passthrough_uses_responses_when_supported(monkeypa
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terminal_event_type", "terminal_event_cls"),
+    [
+        ("response.incomplete", ResponseIncompleteEvent),
+        ("response.failed", ResponseFailedEvent),
+    ],
+)
+async def test_any_llm_responses_stream_rejects_failed_terminal_events(
+    monkeypatch,
+    terminal_event_type: str,
+    terminal_event_cls: type[Any],
+) -> None:
+    async def response_stream() -> AsyncIterator[Any]:
+        yield terminal_event_cls(
+            type=terminal_event_type,
+            response=_response("partial", response_id="resp-terminal"),
+            sequence_number=1,
+        )
+
+    provider = FakeAnyLLMProvider(supports_responses=True, responses_response=response_stream())
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    model = AnyLLMModel(model="openai/gpt-5.4-mini")
+    events = []
+    with pytest.raises(ModelBehaviorError, match=terminal_event_type):
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            events.append(event)
+
+    assert len(events) == 1
+    assert events[0].type == terminal_event_type
+    assert events[0].response.id == "resp-terminal"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_rejects_error_event(monkeypatch) -> None:
+    async def response_stream() -> AsyncIterator[ResponseErrorEvent]:
+        yield ResponseErrorEvent(
+            type="error",
+            code="invalid_request_error",
+            message="bad request",
+            param=None,
+            sequence_number=1,
+        )
+
+    provider = FakeAnyLLMProvider(supports_responses=True, responses_response=response_stream())
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    model = AnyLLMModel(model="openai/gpt-5.4-mini")
+    events = []
+    with pytest.raises(ModelBehaviorError, match="invalid_request_error"):
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            events.append(event)
+
+    assert len(events) == 1
+    assert events[0].type == "error"
+    assert events[0].code == "invalid_request_error"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_any_llm_responses_path_passes_transport_kwargs_via_private_provider_api(
     monkeypatch,
 ) -> None:
@@ -753,3 +842,57 @@ def test_any_llm_reasoning_objects_prefer_content_attributes_over_iterable_pairs
     delta = pytypes.SimpleNamespace(reasoning=Reasoning(content="用户"))
 
     assert _extract_any_llm_reasoning_text(delta) == "用户"
+
+
+def test_any_llm_split_does_not_duplicate_content_or_thinking(monkeypatch) -> None:
+    """Splitting multi-tool assistant messages must not duplicate text/thinking blocks.
+
+    Anthropic's extended thinking API rejects requests that include the same signed
+    thinking block more than once, and duplicated assistant text corrupts conversation
+    history. Only the first split should retain content, thinking_blocks, and
+    reasoning_content; subsequent splits should carry the tool_call alone.
+    """
+    provider = FakeAnyLLMProvider(supports_responses=False)
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    model = AnyLLMModel(model="anthropic/claude-3-5-sonnet")
+    messages: list[Any] = [
+        {"role": "user", "content": "Search both"},
+        {
+            "role": "assistant",
+            "content": "Looking up both queries.",
+            "thinking_blocks": [{"type": "thinking", "thinking": "plan", "signature": "sig_abc"}],
+            "reasoning_content": "internal plan",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "s", "arguments": "{}"},
+                },
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "s", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "ok1"},
+        {"role": "tool", "tool_call_id": "call_2", "content": "ok2"},
+    ]
+
+    result = model._fix_tool_message_ordering(messages)
+
+    assistants = [m for m in result if m.get("role") == "assistant"]
+    assert len(assistants) == 2
+    # First split keeps the shared fields.
+    assert assistants[0].get("content") == "Looking up both queries."
+    assert "thinking_blocks" in assistants[0]
+    assert "reasoning_content" in assistants[0]
+    # Second split must NOT duplicate them.
+    assert "content" not in assistants[1]
+    assert "thinking_blocks" not in assistants[1]
+    assert "reasoning_content" not in assistants[1]
+    # Tool calls are still split one-per-message.
+    assert assistants[0]["tool_calls"][0]["id"] == "call_1"
+    assert assistants[1]["tool_calls"][0]["id"] == "call_2"

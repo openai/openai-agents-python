@@ -189,8 +189,14 @@ class OpenAIServerConversationTracker:
         self.sent_initial_input = True
         self.remaining_initial_input = None
 
-        latest_response = model_responses[-1] if model_responses else None
+        # Pick the most recent response that actually carries an id; live runs preserve the
+        # last-known id via track_server_items, so resume must mirror that behavior instead of
+        # blindly using model_responses[-1] (which may have response_id=None for non-Responses
+        # providers and would silently break the chain).
+        latest_response_id: str | None = None
         for response in model_responses:
+            if response.response_id is not None:
+                latest_response_id = response.response_id
             for output_item in response.output:
                 if output_item is None:
                     continue
@@ -207,8 +213,8 @@ class OpenAIServerConversationTracker:
                 if isinstance(call_id, str) and has_output_payload:
                     self.server_tool_call_ids.add(call_id)
 
-        if self.conversation_id is None and latest_response and latest_response.response_id:
-            self.previous_response_id = latest_response.response_id
+        if self.conversation_id is None and latest_response_id is not None:
+            self.previous_response_id = latest_response_id
 
         if session_items:
             for item in session_items:

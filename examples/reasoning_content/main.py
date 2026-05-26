@@ -1,13 +1,13 @@
 """
 Example demonstrating how to access reasoning summaries when a model returns them.
 
-Some models, like gpt-5.4, provide a reasoning_content field in addition to the regular content.
+Some models, like gpt-5.5, provide a reasoning_content field in addition to the regular content.
 This example shows how to access that content from both streaming and non-streaming responses,
 and how to handle responses that do not include a reasoning summary.
 
 To run this example, you need to:
 1. Set your OPENAI_API_KEY environment variable
-2. Use a model that supports reasoning content (e.g., gpt-5.4)
+2. Use a model that supports reasoning content (e.g., gpt-5.5)
 """
 
 import asyncio
@@ -21,7 +21,7 @@ from agents import ModelSettings
 from agents.models.interface import ModelTracing
 from agents.models.openai_provider import OpenAIProvider
 
-MODEL_NAME = os.getenv("REASONING_MODEL_NAME") or "gpt-5.4"
+MODEL_NAME = os.getenv("REASONING_MODEL_NAME") or "gpt-5.5"
 
 
 async def stream_with_reasoning_content():
@@ -121,7 +121,7 @@ async def main():
     except Exception as e:
         print(f"Error: {e}")
         print("\nNote: This example requires a model that supports reasoning content.")
-        print("You may need to use a specific model like gpt-5.4 or similar.")
+        print("You may need to use a specific model like gpt-5.5 or similar.")
 
 
 if __name__ == "__main__":

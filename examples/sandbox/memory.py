@@ -17,7 +17,7 @@ from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5.5"
 FIRST_PROMPT = "Inspect workspace and fix invoice total bug in src/acme_metrics/report.py."
 SECOND_PROMPT = "Add a regression test for the previous bug you fixed."
 
@@ -74,7 +74,10 @@ def _build_agent(*, model: str, manifest: Manifest) -> SandboxAgent:
             "Answer questions about the sandbox workspace. Inspect files before answering, make "
             "minimal edits, and keep the response concise. "
             "Use the shell tool to inspect and validate the workspace. Use apply_patch for text "
-            "edits when it is the clearest option. Do not invent files you did not read."
+            "edits when it is the clearest option. Use a non-login POSIX shell for commands. "
+            "Make one focused pytest attempt; if the local sandbox blocks Python or toolchain "
+            "access, report that validation was blocked and finish instead of retrying repeatedly. "
+            "Do not invent files you did not read."
         ),
         default_manifest=manifest,
         capabilities=[
@@ -189,6 +192,7 @@ async def main(*, model: str) -> None:
                         sandbox=sandbox,
                         workflow_name="Sandbox memory example: initial fix",
                     ),
+                    max_turns=20,
                 )
                 print("\n[first run]")
                 print(first.final_output)
@@ -204,6 +208,7 @@ async def main(*, model: str) -> None:
                         sandbox=resumed_sandbox,
                         workflow_name="Sandbox memory example: follow-up",
                     ),
+                    max_turns=20,
                 )
                 print("\n[second run]")
                 print(second.final_output)

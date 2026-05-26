@@ -93,7 +93,7 @@ crm_tools = tool_namespace(
 
 agent = Agent(
     name="Operations assistant",
-    model="gpt-5.4",
+    model="gpt-5.5",
     instructions="Load the crm namespace before using CRM tools.",
     tools=[*crm_tools, ToolSearchTool()],
 )
@@ -134,7 +134,7 @@ csv_skill: ShellToolSkillReference = {
 
 agent = Agent(
     name="Container shell agent",
-    model="gpt-5.4",
+    model="gpt-5.5",
     instructions="Use the mounted skill when helpful.",
     tools=[
         ShellTool(
@@ -186,20 +186,20 @@ Local runtime tools require you to supply implementations:
 
 `ComputerTool` is still a local harness: you provide a [`Computer`][agents.computer.Computer] or [`AsyncComputer`][agents.computer.AsyncComputer] implementation, and the SDK maps that harness onto the OpenAI Responses API computer surface.
 
-For explicit [`gpt-5.4`](https://developers.openai.com/api/docs/models/gpt-5.4) requests, the SDK sends the GA built-in tool payload `{"type": "computer"}`. The older `computer-use-preview` model keeps the preview payload `{"type": "computer_use_preview", "environment": ..., "display_width": ..., "display_height": ...}`. This mirrors the platform migration described in OpenAI's [Computer use guide](https://developers.openai.com/api/docs/guides/tools-computer-use/):
+For explicit [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) requests, the SDK sends the GA built-in tool payload `{"type": "computer"}`. The older `computer-use-preview` model keeps the preview payload `{"type": "computer_use_preview", "environment": ..., "display_width": ..., "display_height": ...}`. This mirrors the platform migration described in OpenAI's [Computer use guide](https://developers.openai.com/api/docs/guides/tools-computer-use/):
 
--   Model: `computer-use-preview` -> `gpt-5.4`
+-   Model: `computer-use-preview` -> `gpt-5.5`
 -   Tool selector: `computer_use_preview` -> `computer`
 -   Computer call shape: one `action` per `computer_call` -> batched `actions[]` on `computer_call`
 -   Truncation: `ModelSettings(truncation="auto")` required on the preview path -> not required on the GA path
 
-The SDK chooses that wire shape from the effective model on the actual Responses request. If you use a prompt template and the request omits `model` because the prompt owns it, the SDK keeps the preview-compatible computer payload unless you either keep `model="gpt-5.4"` explicit or force the GA selector with `ModelSettings(tool_choice="computer")` or `ModelSettings(tool_choice="computer_use")`.
+The SDK chooses that wire shape from the effective model on the actual Responses request. If you use a prompt template and the request omits `model` because the prompt owns it, the SDK keeps the preview-compatible computer payload unless you either keep `model="gpt-5.5"` explicit or force the GA selector with `ModelSettings(tool_choice="computer")` or `ModelSettings(tool_choice="computer_use")`.
 
 When a [`ComputerTool`][agents.tool.ComputerTool] is present, `tool_choice="computer"`, `"computer_use"`, and `"computer_use_preview"` are all accepted and normalized to the built-in selector that matches the effective request model. Without a `ComputerTool`, those strings still behave like ordinary function names.
 
 This distinction matters when `ComputerTool` is backed by a [`ComputerProvider`][agents.tool.ComputerProvider] factory. The GA `computer` payload does not need `environment` or dimensions at serialization time, so unresolved factories are fine. Preview-compatible serialization still needs a resolved `Computer` or `AsyncComputer` instance so the SDK can send `environment`, `display_width`, and `display_height`.
 
-At runtime, both paths still use the same local harness. Preview responses emit `computer_call` items with a single `action`; `gpt-5.4` can emit batched `actions[]`, and the SDK executes them in order before producing a `computer_call_output` screenshot item. See `examples/tools/computer_use.py` for a runnable Playwright-based harness.
+At runtime, both paths still use the same local harness. Preview responses emit `computer_call` items with a single `action`; `gpt-5.5` can emit batched `actions[]`, and the SDK executes them in order before producing a `computer_call_output` screenshot item. See `examples/tools/computer_use.py` for a runnable Playwright-based harness.
 
 ```python
 from agents import Agent, ApplyPatchTool, ShellTool
@@ -784,7 +784,7 @@ agent = Agent(
             sandbox_mode="workspace-write",
             working_directory="/path/to/repo",
             default_thread_options=ThreadOptions(
-                model="gpt-5.4",
+                model="gpt-5.5",
                 model_reasoning_effort="low",
                 network_access_enabled=True,
                 web_search_mode="disabled",

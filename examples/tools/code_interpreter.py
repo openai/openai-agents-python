@@ -16,7 +16,7 @@ async def main():
         name="Code interpreter",
         # Note: using gpt-5-class models with streaming for this tool may require org verification.
         # Code interpreter does not support gpt-5 minimal reasoning effort; use default effort.
-        model="gpt-5.4",
+        model="gpt-5.5",
         instructions=(
             "Always use the code interpreter tool to solve numeric problems, and show the code "
             "you ran when possible."

@@ -76,7 +76,7 @@ def build_agent(model: str) -> SandboxAgent[None]:
 
 async def main() -> None:
     result = await Runner.run(
-        build_agent("gpt-5.4"),
+        build_agent("gpt-5.5"),
         "Open `repo/task.md`, fix the issue, run the targeted test, and summarize the change.",
         run_config=RunConfig(
             sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()),

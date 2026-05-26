@@ -13,7 +13,7 @@ import agents.sandbox.capabilities as capabilities_package
 import agents.sandbox.entries as entries_package
 import agents.sandbox.session as session_package
 from agents import Agent
-from agents.run_config import SandboxConcurrencyLimits, SandboxRunConfig
+from agents.run_config import SandboxArchiveLimits, SandboxConcurrencyLimits, SandboxRunConfig
 from agents.run_context import RunContextWrapper
 from agents.run_state import RunState
 from agents.sandbox import Manifest
@@ -112,6 +112,7 @@ def test_core_sandbox_public_export_surface_is_stable() -> None:
             "RemoteSnapshotSpec",
             "Permissions",
             "SandboxAgent",
+            "SandboxArchiveLimits",
             "SandboxPathGrant",
             "SandboxConcurrencyLimits",
             "SandboxError",
@@ -350,6 +351,11 @@ def test_sandbox_dataclass_constructor_field_order_is_stable() -> None:
         "manifest_entries",
         "local_dir_files",
     )
+    assert _dataclass_field_names(SandboxArchiveLimits) == (
+        "max_input_bytes",
+        "max_extracted_bytes",
+        "max_members",
+    )
     assert _dataclass_field_names(SandboxRunConfig) == (
         "client",
         "options",
@@ -358,6 +364,7 @@ def test_sandbox_dataclass_constructor_field_order_is_stable() -> None:
         "manifest",
         "snapshot",
         "concurrency_limits",
+        "archive_limits",
     )
 
 

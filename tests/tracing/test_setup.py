@@ -20,6 +20,15 @@ class _DummyProvider:
         self.shutdown_calls += 1
 
 
+class _DefaultProviderWithTimeout(tracing_provider.DefaultTraceProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.shutdown_timeout: float | None = None
+
+    def shutdown(self, timeout: float | None = None) -> None:
+        self.shutdown_timeout = timeout
+
+
 class _BootstrapProvider:
     def __init__(self) -> None:
         self.processors: list[Any] = []
@@ -39,6 +48,17 @@ def test_shutdown_global_trace_provider_calls_shutdown(monkeypatch: pytest.Monke
     tracing_setup._shutdown_global_trace_provider()
 
     assert provider.shutdown_calls == 1
+
+
+def test_shutdown_global_trace_provider_passes_timeout_to_default_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _DefaultProviderWithTimeout()
+    monkeypatch.setattr(tracing_setup, "GLOBAL_TRACE_PROVIDER", provider)
+
+    tracing_setup._shutdown_global_trace_provider()
+
+    assert provider.shutdown_timeout == tracing_setup._DEFAULT_SHUTDOWN_TIMEOUT
 
 
 def test_set_trace_provider_registers_shutdown_once(monkeypatch: pytest.MonkeyPatch) -> None:

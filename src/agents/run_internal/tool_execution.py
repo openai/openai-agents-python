@@ -87,6 +87,7 @@ from ..tool_guardrails import (
 from ..tracing import Span, SpanError, function_span, get_current_trace
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
+from ..util._tool_errors import get_trace_tool_error
 from ..util._types import MaybeAwaitable
 from ._asyncio_progress import get_function_tool_task_progress_deadline
 from .agent_bindings import AgentBindings, bind_public_agent
@@ -152,7 +153,6 @@ __all__ = [
     "execute_approved_tools",
 ]
 
-REDACTED_TOOL_ERROR_MESSAGE = "Tool execution failed. Error details are redacted."
 TToolSpanResult = TypeVar("TToolSpanResult")
 _FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS = 0.25
 _FUNCTION_TOOL_CANCELLED_IMMEDIATE_STEP_LIMIT = 64
@@ -619,8 +619,12 @@ def coerce_shell_call(tool_call: Any) -> ShellCallData:
         raise ModelBehaviorError("Shell call is missing an action payload.")
 
     commands_value = get_mapping_or_attr(action_payload, "commands")
-    if not isinstance(commands_value, Sequence):
-        raise ModelBehaviorError("Shell call action is missing commands.")
+    if isinstance(commands_value, str | bytes | bytearray) or not isinstance(
+        commands_value, Sequence
+    ):
+        raise ModelBehaviorError(
+            "Shell call action commands must be a sequence of command strings."
+        )
     commands: list[str] = []
     for entry in commands_value:
         if entry is None:
@@ -1009,11 +1013,6 @@ def format_shell_error(error: Exception | BaseException | Any) -> str:
         return repr(error)
 
 
-def get_trace_tool_error(*, trace_include_sensitive_data: bool, error_message: str) -> str:
-    """Return a trace-safe tool error string based on the sensitive-data setting."""
-    return error_message if trace_include_sensitive_data else REDACTED_TOOL_ERROR_MESSAGE
-
-
 async def with_tool_function_span(
     *,
     config: RunConfig,
@@ -1092,7 +1091,12 @@ async def resolve_approval_status(
             if decision_result.get("approve") is True:
                 context_wrapper.approve_tool(approval_item)
             elif decision_result.get("approve") is False:
-                context_wrapper.reject_tool(approval_item)
+                reason = decision_result.get("reason")
+                rejection_message = reason if isinstance(reason, str) and reason else None
+                context_wrapper.reject_tool(
+                    approval_item,
+                    rejection_message=rejection_message,
+                )
         approval_status = context_wrapper.get_approval_status(
             tool_name,
             call_id,
@@ -1379,6 +1383,9 @@ class _FunctionToolBatchExecutor:
         self.pending_tasks: set[asyncio.Task[Any]] = set()
         self.propagating_failure: BaseException | None = None
         self.available_function_tools: list[FunctionTool] = []
+        self.max_function_tool_concurrency = (
+            config.tool_execution.max_function_tool_concurrency if config.tool_execution else None
+        )
 
     async def execute(
         self,
@@ -1389,14 +1396,29 @@ class _FunctionToolBatchExecutor:
             self.execution_agent,
             self.context_wrapper,
         )
+        enabled_function_tool_ids = {id(tool) for tool in self.available_function_tools}
+        configured_function_tool_ids = {
+            id(tool) for tool in self.execution_agent.tools if isinstance(tool, FunctionTool)
+        }
         for tool_run in self.tool_runs:
-            if tool_run.function_tool not in self.available_function_tools:
+            function_tool = tool_run.function_tool
+            function_tool_id = id(function_tool)
+            if (
+                function_tool_id in configured_function_tool_ids
+                and function_tool_id not in enabled_function_tool_ids
+            ):
+                raise ModelBehaviorError(
+                    f"Tool {function_tool.name} is currently disabled for agent "
+                    f"{self.public_agent.name}."
+                )
+            if function_tool_id not in enabled_function_tool_ids:
                 self.available_function_tools.append(tool_run.function_tool)
-        for order, tool_run in enumerate(self.tool_runs):
-            self._create_tool_task(tool_run, order)
+                enabled_function_tool_ids.add(function_tool_id)
+        pending_tool_runs = list(enumerate(self.tool_runs))
+        self._fill_tool_task_slots(pending_tool_runs)
 
         try:
-            await self._drain_pending_tasks()
+            await self._drain_pending_tasks(pending_tool_runs)
         except asyncio.CancelledError as exc:
             if self.propagating_failure is exc:
                 raise
@@ -1408,6 +1430,18 @@ class _FunctionToolBatchExecutor:
             self.tool_input_guardrail_results,
             self.tool_output_guardrail_results,
         )
+
+    def _fill_tool_task_slots(self, pending_tool_runs: list[tuple[int, ToolRunFunction]]) -> None:
+        max_concurrency = self.max_function_tool_concurrency
+        available_slots = (
+            len(pending_tool_runs)
+            if max_concurrency is None
+            else max_concurrency - len(self.pending_tasks)
+        )
+        while available_slots > 0 and pending_tool_runs:
+            order, tool_run = pending_tool_runs.pop(0)
+            self._create_tool_task(tool_run, order)
+            available_slots -= 1
 
     def _create_tool_task(self, tool_run: ToolRunFunction, order: int) -> None:
         task_state = _FunctionToolTaskState(tool_run=tool_run, order=order)
@@ -1421,7 +1455,10 @@ class _FunctionToolBatchExecutor:
         self.task_states[task] = task_state
         self.pending_tasks.add(task)
 
-    async def _drain_pending_tasks(self) -> None:
+    async def _drain_pending_tasks(
+        self,
+        pending_tool_runs: list[tuple[int, ToolRunFunction]],
+    ) -> None:
         while self.pending_tasks:
             done_tasks, self.pending_tasks = await asyncio.wait(
                 self.pending_tasks,
@@ -1434,6 +1471,7 @@ class _FunctionToolBatchExecutor:
             )
             if failure is not None:
                 await self._raise_failure_after_draining_siblings(failure)
+            self._fill_tool_task_slots(pending_tool_runs)
 
     async def _raise_failure_after_draining_siblings(
         self,
@@ -1566,10 +1604,14 @@ class _FunctionToolBatchExecutor:
                         agent_hooks=agent_hooks,
                     )
             except Exception as e:
+                trace_error = get_trace_tool_error(
+                    trace_include_sensitive_data=self.config.trace_include_sensitive_data,
+                    error_message=str(e),
+                )
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Error running tool",
-                        data={"tool_name": func_tool.name, "error": str(e)},
+                        data={"tool_name": func_tool.name, "error": trace_error},
                     )
                 )
                 if isinstance(e, AgentsException):
@@ -1728,10 +1770,14 @@ class _FunctionToolBatchExecutor:
             if result is None:
                 raise
 
+            trace_error = get_trace_tool_error(
+                trace_include_sensitive_data=self.config.trace_include_sensitive_data,
+                error_message=str(e),
+            )
             _error_tracing.attach_error_to_current_span(
                 SpanError(
                     message="Tool execution cancelled",
-                    data={"tool_name": func_tool.name, "error": str(e)},
+                    data={"tool_name": func_tool.name, "error": trace_error},
                 )
             )
             real_result = result

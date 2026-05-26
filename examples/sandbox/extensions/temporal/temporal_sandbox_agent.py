@@ -537,7 +537,7 @@ class AgentWorkflow:
 
         return AgentResponse()
 
-    def _build_agent(self, manifest: Manifest, model: str = "gpt-5.4") -> SandboxAgent:
+    def _build_agent(self, manifest: Manifest, model: str = "gpt-5.5") -> SandboxAgent:
         """Construct the SandboxAgent used by the workflow."""
         return SandboxAgent(
             name="Temporal Sandbox Agent",

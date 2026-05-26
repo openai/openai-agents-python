@@ -362,6 +362,20 @@ class ToolCallItem(RunItemBase[Any]):
     tool_origin: ToolOrigin | None = None
     """Optional metadata describing the source of a function-tool-backed item."""
 
+    @property
+    def tool_name(self) -> str | None:
+        """Return the tool name from the raw item, if available."""
+        if isinstance(self.raw_item, dict):
+            return self.raw_item.get("name")
+        return getattr(self.raw_item, "name", None)
+
+    @property
+    def call_id(self) -> str | None:
+        """Return the call identifier from the raw item, if available."""
+        if isinstance(self.raw_item, dict):
+            return self.raw_item.get("call_id") or self.raw_item.get("id")
+        return getattr(self.raw_item, "call_id", None) or getattr(self.raw_item, "id", None)
+
 
 ToolCallOutputTypes: TypeAlias = (
     FunctionCallOutput
@@ -388,6 +402,14 @@ class ToolCallOutputItem(RunItemBase[Any]):
 
     tool_origin: ToolOrigin | None = None
     """Optional metadata describing the source of a function-tool-backed item."""
+
+    @property
+    def call_id(self) -> str | None:
+        """Return the call identifier from the raw item, if available."""
+        if isinstance(self.raw_item, dict):
+            cid = self.raw_item.get("call_id") or self.raw_item.get("id")
+            return str(cid) if cid is not None else None
+        return getattr(self.raw_item, "call_id", None) or getattr(self.raw_item, "id", None)
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts the tool output into an input item for the next model turn.
@@ -662,7 +684,12 @@ class ItemHelpers:
             return ""
         last_content = message.content[-1]
         if isinstance(last_content, ResponseOutputText):
-            return last_content.text
+            # ``last_content.text`` is typed as ``str`` per the Responses API schema,
+            # but provider gateways (e.g. LiteLLM) and ``model_construct`` paths during
+            # streaming have been observed surfacing ``None``. Coerce so callers relying
+            # on the ``-> str`` return type don't see a ``None``. Same rationale as
+            # ``extract_text`` below.
+            return last_content.text or ""
         elif isinstance(last_content, ResponseOutputRefusal):
             return last_content.refusal
         else:
@@ -701,6 +728,19 @@ class ItemHelpers:
         return text or None
 
     @classmethod
+    def extract_refusal(cls, message: TResponseOutputItem) -> str | None:
+        """Extracts refusal content from a message, if any."""
+        if not isinstance(message, ResponseOutputMessage):
+            return None
+
+        refusal = ""
+        for content_item in message.content:
+            if isinstance(content_item, ResponseOutputRefusal):
+                refusal += content_item.refusal or ""
+
+        return refusal or None
+
+    @classmethod
     def input_to_new_input_list(
         cls, input: str | list[TResponseInputItem]
     ) -> list[TResponseInputItem]:
@@ -729,7 +769,7 @@ class ItemHelpers:
         text = ""
         for item in message.raw_item.content:
             if isinstance(item, ResponseOutputText):
-                text += item.text
+                text += item.text or ""
         return text
 
     @classmethod

@@ -190,6 +190,7 @@ plugins:
                     - SQLAlchemySession: ref/extensions/memory/sqlalchemy_session.md
                     - Async SQLite session: ref/extensions/memory/async_sqlite_session.md
                     - RedisSession: ref/extensions/memory/redis_session.md
+                    - MongoDBSession: ref/extensions/memory/mongodb_session.md
                     - DaprSession: ref/extensions/memory/dapr_session.md
                     - EncryptedSession: ref/extensions/memory/encrypt_session.md
                     - AdvancedSQLiteSession: ref/extensions/memory/advanced_sqlite_session.md

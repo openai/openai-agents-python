@@ -43,6 +43,7 @@ from ...logger import logger
 from ...model_settings import ModelSettings
 from ...models._openai_retry import get_openai_retry_advice
 from ...models._retry_runtime import should_disable_provider_managed_retries
+from ...models._trace import model_config_for_trace
 from ...models.chatcmpl_converter import Converter
 from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
@@ -213,8 +214,11 @@ class LitellmModel(Model):
     ) -> ModelResponse:
         with generation_span(
             model=str(self.model),
-            model_config=model_settings.to_json_dict()
-            | {"base_url": str(self.base_url or ""), "model_impl": "litellm"},
+            model_config=model_config_for_trace(
+                model_settings,
+                base_url=self.base_url or "",
+                extra_config={"model_impl": "litellm"},
+            ),
             disabled=tracing.is_disabled(),
         ) as span_generation:
             response = await self._fetch_response(
@@ -327,8 +331,11 @@ class LitellmModel(Model):
     ) -> AsyncIterator[TResponseStreamEvent]:
         with generation_span(
             model=str(self.model),
-            model_config=model_settings.to_json_dict()
-            | {"base_url": str(self.base_url or ""), "model_impl": "litellm"},
+            model_config=model_config_for_trace(
+                model_settings,
+                base_url=self.base_url or "",
+                extra_config={"model_impl": "litellm"},
+            ),
             disabled=tracing.is_disabled(),
         ) as span_generation:
             response, stream = await self._fetch_response(
@@ -661,13 +668,24 @@ class LitellmModel(Model):
                 # Extract tool calls from this assistant message
                 tool_calls = message.get("tool_calls", [])
                 if isinstance(tool_calls, list):
-                    for tool_call in tool_calls:
+                    for split_idx, tool_call in enumerate(tool_calls):
                         if isinstance(tool_call, dict):
                             tool_id = tool_call.get("id")
                             if tool_id:
-                                # Create a separate assistant message for each tool call
+                                # Create a separate assistant message for each tool call.
+                                # Only the first split keeps the assistant text/thinking
+                                # blocks/reasoning content; the rest carry tool_calls only,
+                                # to avoid duplicating signed thinking blocks (which
+                                # Anthropic rejects) and assistant text in history.
                                 single_tool_msg = cast(dict[str, Any], message.copy())
                                 single_tool_msg["tool_calls"] = [tool_call]
+                                if split_idx > 0:
+                                    for shared_field in (
+                                        "content",
+                                        "thinking_blocks",
+                                        "reasoning_content",
+                                    ):
+                                        single_tool_msg.pop(shared_field, None)
                                 tool_call_messages[tool_id] = (
                                     i,
                                     cast(ChatCompletionMessageParam, single_tool_msg),

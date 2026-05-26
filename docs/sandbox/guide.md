@@ -236,11 +236,15 @@ Use manifest entries for the material the agent needs before work begins:
 
 </div>
 
+`Dir` creates a directory inside the sandbox workspace from synthetic children or as an output location; it does not read from the host filesystem. Use `LocalDir` when an existing host directory should be copied into the sandbox workspace.
+
+`LocalFile.src` and `LocalDir.src` are resolved against the SDK process working directory by default. The source must stay under that base directory unless it is covered by `extra_path_grants`. This keeps local source materialization inside the same host-path trust boundary as the rest of the sandbox manifest.
+
 Mount entries describe what storage to expose; mount strategies describe how a sandbox backend attaches that storage. See [Sandbox clients](clients.md#mounts-and-remote-storage) for mount options and provider support.
 
 Good manifest design usually means keeping the workspace contract narrow, putting long task recipes in workspace files such as `repo/task.md`, and using relative workspace paths in instructions, for example `repo/task.md` or `output/report.md`. If the agent edits files with the `Filesystem` capability's `apply_patch` tool, remember that patch paths are relative to the sandbox workspace root, not the shell `workdir`.
 
-Use `extra_path_grants` only when the agent needs a concrete absolute path outside the workspace, such as `/tmp` for temporary tool output or `/opt/toolchain` for a read-only runtime. A grant applies to both SDK file APIs and shell execution where the backend can enforce filesystem policy:
+Use `extra_path_grants` only when the agent needs a concrete absolute path outside the workspace or the manifest needs to copy a trusted local source outside the SDK process working directory. Examples include `/tmp` for temporary tool output, `/opt/toolchain` for a read-only runtime, or a generated skills directory that should be materialized into the sandbox. A grant applies to local source materialization, SDK file APIs, and shell execution where the backend can enforce filesystem policy:
 
 ```python
 from agents.sandbox import Manifest, SandboxPathGrant
@@ -252,6 +256,8 @@ manifest = Manifest(
     ),
 )
 ```
+
+Treat manifests that contain `extra_path_grants` as trusted configuration. Do not load grants from model output or other untrusted payloads unless your application has already approved those host paths.
 
 Snapshots and `persist_workspace()` still include only the workspace root. Extra granted paths are runtime access, not durable workspace state.
 
@@ -475,6 +481,8 @@ These options only matter when the runner is creating a fresh sandbox session:
 
 `concurrency_limits` controls how much sandbox materialization work can run in parallel. Use `SandboxConcurrencyLimits(manifest_entries=..., local_dir_files=...)` when large manifests or local directory copies need tighter resource control. Set either value to `None` to disable that specific limit.
 
+`archive_limits` controls SDK-side resource checks for archive extraction. Set `archive_limits=SandboxArchiveLimits()` to enable the SDK default thresholds, or pass explicit values such as `SandboxArchiveLimits(max_input_bytes=..., max_extracted_bytes=..., max_members=...)` when archives need tighter resource control. Leave `archive_limits=None` to keep the default behavior with no SDK archive resource limits, or set an individual field to `None` to disable only that limit.
+
 A few implications are worth keeping in mind:
 
 - Fresh sessions: `manifest=` and `snapshot=` only apply when the runner is creating a fresh sandbox session.
@@ -555,7 +563,7 @@ async def main(model: str, prompt: str) -> None:
 if __name__ == "__main__":
     asyncio.run(
         main(
-            model="gpt-5.4",
+            model="gpt-5.5",
             prompt=(
                 "Open `repo/task.md`, use the `$credit-note-fixer` skill, fix the bug, "
                 f"run `{TARGET_TEST_CMD}`, and summarize the change."

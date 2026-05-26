@@ -4,6 +4,7 @@ import pytest
 from mcp.types import Tool as MCPTool
 
 from agents import Agent, RunContextWrapper, Runner
+from agents.exceptions import UserError
 
 from ..fake_model import FakeModel
 from ..test_responses import get_function_tool_call, get_text_message
@@ -125,6 +126,27 @@ async def test_mcp_require_approval_mapping_allows_policy_keyword_tool_names():
 
     second = await Runner.run(agent, "call never")
     assert not second.interruptions, "tool named 'never' should not require approval"
+
+
+@pytest.mark.parametrize(
+    ("require_approval", "message"),
+    [
+        ("alwyas", "expected 'always' or 'never'"),
+        ({"delete": "alwyas"}, "delete"),
+        (
+            {
+                "always": {"tool_names": ["delete"]},
+                "never": {"tool_names": ["delete"]},
+            },
+            "both always and never",
+        ),
+    ],
+)
+def test_mcp_require_approval_rejects_invalid_fail_open_policies(require_approval, message):
+    """Invalid MCP approval policies should not silently disable approvals."""
+
+    with pytest.raises(UserError, match=message):
+        FakeMCPServer(require_approval=require_approval)
 
 
 @pytest.mark.asyncio

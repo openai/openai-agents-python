@@ -514,8 +514,6 @@ async def _select_function_tool_runs_for_resume(
             existing_pending=approval_items_by_call_id.get(call_id),
         )
 
-        requires_approval = await needs_approval_checker(run)
-
         if approval_status is False:
             await record_rejection(call_id, run.tool_call, run.function_tool)
             continue
@@ -524,16 +522,19 @@ async def _select_function_tool_runs_for_resume(
             selected.append(run)
             continue
 
+        # Only invoke needs_approval_checker when the approval state is unresolved;
+        # for explicit approve/reject decisions the checker's result is unused, and
+        # invoking it eagerly risks user-side effects (or exceptions that swallow
+        # rejections) on calls whose outcome is already determined.
+        requires_approval = await needs_approval_checker(run)
+
         if not requires_approval:
             selected.append(run)
             continue
 
-        if approval_status is None:
-            pending_interruption_adder(
-                approval_items_by_call_id.get(run.tool_call.call_id) or pending_item_builder(run)
-            )
-            continue
-        selected.append(run)
+        pending_interruption_adder(
+            approval_items_by_call_id.get(run.tool_call.call_id) or pending_item_builder(run)
+        )
 
     return selected
 

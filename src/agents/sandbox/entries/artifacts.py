@@ -8,7 +8,7 @@ import re
 import stat
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field, field_serializer, field_validator
@@ -17,13 +17,14 @@ from ..errors import (
     GitCloneError,
     GitCopyError,
     GitMissingInImageError,
+    GitSubpathError,
     LocalChecksumError,
     LocalDirReadError,
     LocalFileReadError,
 )
 from ..materialization import MaterializedFile, gather_in_order
 from ..types import ExecResult, User
-from ..util.checksums import sha256_file
+from ..workspace_paths import SandboxPathGrant
 from .base import BaseEntry
 
 if TYPE_CHECKING:
@@ -32,6 +33,10 @@ if TYPE_CHECKING:
 _COMMIT_REF_RE = re.compile(r"[0-9a-fA-F]{7,40}")
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _HAS_O_DIRECTORY = hasattr(os, "O_DIRECTORY")
+
+
+def _absolute_without_symlink_resolution(path: Path) -> Path:
+    return Path(os.path.abspath(path))
 
 
 def _sha256_handle(handle: io.BufferedReader) -> str:
@@ -109,17 +114,40 @@ class LocalFile(BaseEntry):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
-        src = (base_dir / self.src).resolve()
+        src = _absolute_without_symlink_resolution(base_dir / self.src)
+        local_dir = LocalDir(src=self.src.parent)
+        rel_child = Path(self.src.name)
+        fd: int | None = None
         try:
-            checksum = sha256_file(src)
-        except OSError as e:
-            raise LocalChecksumError(src=src, cause=e) from e
-        await session.mkdir(Path(dest).parent, parents=True)
-        try:
-            with src.open("rb") as f:
+            source_grants = session.state.manifest.extra_path_grants
+            src_root = local_dir._resolve_local_dir_src_root(
+                base_dir,
+                source_grants=source_grants,
+            )
+            fd = local_dir._open_local_dir_file_for_copy(
+                base_dir=base_dir,
+                src_root=src_root,
+                rel_child=rel_child,
+                source_grants=source_grants,
+            )
+            with os.fdopen(fd, "rb") as f:
+                fd = None
+                try:
+                    checksum = _sha256_handle(f)
+                    f.seek(0)
+                except OSError as e:
+                    raise LocalChecksumError(src=src, cause=e) from e
+                await session.mkdir(Path(dest).parent, parents=True)
                 await session.write(dest, f)
+        except LocalDirReadError as e:
+            context = dict(e.context)
+            context.pop("src", None)
+            raise LocalFileReadError(src=src, context=context, cause=e.cause) from e
         except OSError as e:
             raise LocalFileReadError(src=src, cause=e) from e
+        finally:
+            if fd is not None:
+                os.close(fd)
         await self._apply_metadata(session, dest)
         return [MaterializedFile(path=dest, sha256=checksum)]
 
@@ -143,12 +171,20 @@ class LocalDir(BaseEntry):
     ) -> list[MaterializedFile]:
         files: list[MaterializedFile] = []
         if self.src:
-            src_root = self._resolve_local_dir_src_root(base_dir)
+            source_grants = session.state.manifest.extra_path_grants
+            src_root = self._resolve_local_dir_src_root(
+                base_dir,
+                source_grants=source_grants,
+            )
             # Minimal v1: copy all files recursively.
             try:
                 await session.mkdir(dest, parents=True, user=user)
                 files = []
-                local_files = self._list_local_dir_files(base_dir=base_dir, src_root=src_root)
+                local_files = self._list_local_dir_files(
+                    base_dir=base_dir,
+                    src_root=src_root,
+                    source_grants=source_grants,
+                )
 
                 def _make_copy_task(child: Path) -> Callable[[], Awaitable[MaterializedFile]]:
                     async def _copy() -> MaterializedFile:
@@ -159,6 +195,7 @@ class LocalDir(BaseEntry):
                             src=src_root / child,
                             dest_root=dest,
                             user=user,
+                            source_grants=source_grants,
                         )
 
                     return _copy
@@ -178,15 +215,20 @@ class LocalDir(BaseEntry):
                 await self._apply_metadata(session, dest)
         return files
 
-    def _resolve_local_dir_src_root(self, base_dir: Path) -> Path:
+    def _resolve_local_dir_src_root(
+        self,
+        base_dir: Path,
+        *,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
+    ) -> Path:
         assert self.src is not None
-        src_input = base_dir / self.src
+        src_input = self._resolved_src_input(base_dir, source_grants=source_grants)
         for current in self._iter_local_dir_source_paths(base_dir):
             try:
                 current_stat = current.lstat()
             except FileNotFoundError:
                 raise LocalDirReadError(
-                    src=src_input if src_input.is_absolute() else src_input.absolute(),
+                    src=src_input,
                     context={"reason": "path_not_found"},
                 ) from None
             except OSError as e:
@@ -199,7 +241,48 @@ class LocalDir(BaseEntry):
                         "child": self._local_dir_source_child_label(base_dir, current),
                     },
                 )
-        return src_input if src_input.is_absolute() else src_input.absolute()
+        return src_input
+
+    def _resolved_src_input(
+        self,
+        base_dir: Path,
+        *,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
+    ) -> Path:
+        assert self.src is not None
+        src_input = _absolute_without_symlink_resolution(base_dir / self.src)
+
+        base = _absolute_without_symlink_resolution(base_dir)
+        try:
+            src_input.relative_to(base)
+            return src_input
+        except ValueError as base_error:
+            matching_grant = self._matching_source_grant(src_input, source_grants)
+            if matching_grant is not None:
+                return src_input
+            grant_paths = [grant.path for grant in source_grants]
+            context: dict[str, object] = {"reason": "outside_base_dir", "base_dir": str(base)}
+            if grant_paths:
+                context["extra_path_grants"] = grant_paths
+            raise LocalDirReadError(
+                src=src_input,
+                context=context,
+                cause=base_error,
+            ) from base_error
+
+    @staticmethod
+    def _matching_source_grant(
+        src_input: Path,
+        source_grants: tuple[SandboxPathGrant, ...],
+    ) -> SandboxPathGrant | None:
+        for grant in source_grants:
+            grant_root = _absolute_without_symlink_resolution(Path(grant.path))
+            try:
+                src_input.relative_to(grant_root)
+                return grant
+            except ValueError:
+                continue
+        return None
 
     def _iter_local_dir_source_paths(self, base_dir: Path) -> list[Path]:
         assert self.src is not None
@@ -226,9 +309,19 @@ class LocalDir(BaseEntry):
         except ValueError:
             return current.as_posix()
 
-    def _list_local_dir_files(self, *, base_dir: Path, src_root: Path) -> list[Path]:
+    def _list_local_dir_files(
+        self,
+        *,
+        base_dir: Path,
+        src_root: Path,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
+    ) -> list[Path]:
         if _OPEN_SUPPORTS_DIR_FD and _HAS_O_DIRECTORY:
-            return self._list_local_dir_files_pinned(base_dir=base_dir, src_root=src_root)
+            return self._list_local_dir_files_pinned(
+                base_dir=base_dir,
+                src_root=src_root,
+                source_grants=source_grants,
+            )
 
         local_files: list[Path] = []
         for child in src_root.rglob("*"):
@@ -245,10 +338,20 @@ class LocalDir(BaseEntry):
                 local_files.append(child.relative_to(src_root))
         return local_files
 
-    def _list_local_dir_files_pinned(self, *, base_dir: Path, src_root: Path) -> list[Path]:
+    def _list_local_dir_files_pinned(
+        self,
+        *,
+        base_dir: Path,
+        src_root: Path,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
+    ) -> list[Path]:
         root_fd: int | None = None
         try:
-            root_fd = self._open_local_dir_src_root_fd(base_dir=base_dir, src_root=src_root)
+            root_fd = self._open_local_dir_src_root_fd(
+                base_dir=base_dir,
+                src_root=src_root,
+                source_grants=source_grants,
+            )
             return self._list_local_dir_files_from_dir_fd(src_root=src_root, dir_fd=root_fd)
         finally:
             if root_fd is not None:
@@ -337,6 +440,7 @@ class LocalDir(BaseEntry):
         src: Path,
         dest_root: Path,
         user: str | User | None = None,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
     ) -> MaterializedFile:
         rel_child = src.relative_to(src_root)
         child_dest = dest_root / rel_child
@@ -346,6 +450,7 @@ class LocalDir(BaseEntry):
                 base_dir=base_dir,
                 src_root=src_root,
                 rel_child=rel_child,
+                source_grants=source_grants,
             )
             with os.fdopen(fd, "rb") as f:
                 fd = None
@@ -361,13 +466,19 @@ class LocalDir(BaseEntry):
         return MaterializedFile(path=child_dest, sha256=checksum)
 
     def _open_local_dir_file_for_copy(
-        self, *, base_dir: Path, src_root: Path, rel_child: Path
+        self,
+        *,
+        base_dir: Path,
+        src_root: Path,
+        rel_child: Path,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
     ) -> int:
         if not _OPEN_SUPPORTS_DIR_FD or not _HAS_O_DIRECTORY:
             return self._open_local_dir_file_for_copy_fallback(
                 base_dir=base_dir,
                 src_root=src_root,
                 rel_child=rel_child,
+                source_grants=source_grants,
             )
 
         dir_flags = (
@@ -380,7 +491,11 @@ class LocalDir(BaseEntry):
         dir_fds: list[int] = []
         current_rel = Path()
         try:
-            current_fd = self._open_local_dir_src_root_fd(base_dir=base_dir, src_root=src_root)
+            current_fd = self._open_local_dir_src_root_fd(
+                base_dir=base_dir,
+                src_root=src_root,
+                source_grants=source_grants,
+            )
             dir_fds.append(current_fd)
             for part in rel_child.parts[:-1]:
                 current_rel = current_rel / part if current_rel.parts else Path(part)
@@ -442,8 +557,15 @@ class LocalDir(BaseEntry):
             for dir_fd in reversed(dir_fds):
                 os.close(dir_fd)
 
-    def _open_local_dir_src_root_fd(self, *, base_dir: Path, src_root: Path) -> int:
+    def _open_local_dir_src_root_fd(
+        self,
+        *,
+        base_dir: Path,
+        src_root: Path,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
+    ) -> int:
         assert self.src is not None
+        self._resolved_src_input(base_dir, source_grants=source_grants)
 
         dir_flags = (
             os.O_RDONLY
@@ -541,9 +663,16 @@ class LocalDir(BaseEntry):
         return LocalDirReadError(src=src_root, cause=error)
 
     def _open_local_dir_file_for_copy_fallback(
-        self, *, base_dir: Path, src_root: Path, rel_child: Path
+        self,
+        *,
+        base_dir: Path,
+        src_root: Path,
+        rel_child: Path,
+        source_grants: tuple[SandboxPathGrant, ...] = (),
     ) -> int:
+        assert self.src is not None
         src = src_root / rel_child
+        validation_dir = LocalDir(src=self.src / rel_child.parent)
         try:
             src_stat = src.lstat()
         except FileNotFoundError:
@@ -568,7 +697,10 @@ class LocalDir(BaseEntry):
         try:
             leaf_fd = os.open(src, file_flags)
             try:
-                self._resolve_local_dir_src_root(base_dir)
+                validation_dir._resolve_local_dir_src_root(
+                    base_dir,
+                    source_grants=source_grants,
+                )
                 leaf_stat = os.fstat(leaf_fd)
                 if not stat.S_ISREG(leaf_stat.st_mode) or not os.path.samestat(src_stat, leaf_stat):
                     raise LocalDirReadError(
@@ -583,14 +715,17 @@ class LocalDir(BaseEntry):
                 os.close(leaf_fd)
                 raise
         except FileNotFoundError:
-            self._resolve_local_dir_src_root(base_dir)
+            validation_dir._resolve_local_dir_src_root(base_dir, source_grants=source_grants)
             raise LocalDirReadError(
                 src=src_root,
                 context={"reason": "path_changed_during_copy", "child": rel_child.as_posix()},
             ) from None
         except OSError as e:
             try:
-                self._resolve_local_dir_src_root(base_dir)
+                validation_dir._resolve_local_dir_src_root(
+                    base_dir,
+                    source_grants=source_grants,
+                )
             except LocalDirReadError as root_error:
                 raise root_error from e
             if e.errno == errno.ELOOP:
@@ -619,6 +754,8 @@ class GitRepo(BaseEntry):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
+        git_subpath = self._validate_subpath()
+
         # Ensure git exists in the container.
         git_check = await session.exec("command -v git >/dev/null 2>&1")
         if not git_check.ok():
@@ -632,41 +769,42 @@ class GitRepo(BaseEntry):
         url = f"https://{self.host}/{self.repo}.git"
 
         _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
-        clone_error: ExecResult | None = None
-        if self._looks_like_commit_ref(self.ref):
-            clone = await self._fetch_commit_ref(session=session, url=url, tmp_dir=tmp_dir)
-            if not clone.ok():
-                clone_error = clone
-                _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
+        try:
+            clone_error: ExecResult | None = None
+            if self._looks_like_commit_ref(self.ref):
+                clone = await self._fetch_commit_ref(session=session, url=url, tmp_dir=tmp_dir)
+                if not clone.ok():
+                    clone_error = clone
+                    _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
+                    clone = await self._clone_named_ref(session=session, url=url, tmp_dir=tmp_dir)
+            else:
                 clone = await self._clone_named_ref(session=session, url=url, tmp_dir=tmp_dir)
-        else:
-            clone = await self._clone_named_ref(session=session, url=url, tmp_dir=tmp_dir)
-        if not clone.ok():
-            if clone_error is not None:
-                clone = clone_error
-            raise GitCloneError(
-                url=url,
-                ref=self.ref,
-                stderr=clone.stderr.decode("utf-8", errors="replace"),
-                context={"repo": self.repo, "subpath": self.subpath},
+            if not clone.ok():
+                if clone_error is not None:
+                    clone = clone_error
+                raise GitCloneError(
+                    url=url,
+                    ref=self.ref,
+                    stderr=clone.stderr.decode("utf-8", errors="replace"),
+                    context={"repo": self.repo, "subpath": self.subpath},
+                )
+
+            git_src_root = self._git_src_root(tmp_dir, git_subpath)
+
+            # Copy into destination in the container.
+            await session.mkdir(dest, parents=True)
+            copy = await session.exec(
+                "cp", "-R", "--", f"{git_src_root}/.", f"{dest}/", shell=False
             )
-
-        git_src_root: str = tmp_dir
-        if self.subpath is not None:
-            git_src_root = f"{tmp_dir}/{self.subpath.lstrip('/')}"
-
-        # Copy into destination in the container.
-        await session.mkdir(dest, parents=True)
-        copy = await session.exec("cp", "-R", "--", f"{git_src_root}/.", f"{dest}/", shell=False)
-        if not copy.ok():
-            raise GitCopyError(
-                src_root=git_src_root,
-                dest=dest,
-                stderr=copy.stderr.decode("utf-8", errors="replace"),
-                context={"repo": self.repo, "ref": self.ref, "subpath": self.subpath},
-            )
-
-        _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
+            if not copy.ok():
+                raise GitCopyError(
+                    src_root=git_src_root,
+                    dest=dest,
+                    stderr=copy.stderr.decode("utf-8", errors="replace"),
+                    context={"repo": self.repo, "ref": self.ref, "subpath": self.subpath},
+                )
+        finally:
+            _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
         await self._apply_metadata(session, dest)
 
         # Receipt: leave checksums empty for now. (Computing them would
@@ -676,6 +814,38 @@ class GitRepo(BaseEntry):
     @staticmethod
     def _looks_like_commit_ref(ref: str) -> bool:
         return _COMMIT_REF_RE.fullmatch(ref) is not None
+
+    def _validate_subpath(self) -> PurePosixPath | None:
+        if self.subpath is None:
+            return None
+
+        original_subpath = self.subpath
+        if original_subpath == "":
+            return None
+
+        subpath = original_subpath.strip()
+        if not subpath:
+            raise GitSubpathError(repo=self.repo, subpath=original_subpath, reason="empty")
+
+        posix_subpath = PurePosixPath(subpath)
+        windows_subpath = PureWindowsPath(subpath)
+        if posix_subpath.as_posix() == ".":
+            return None
+        if posix_subpath.is_absolute():
+            raise GitSubpathError(repo=self.repo, subpath=original_subpath, reason="absolute")
+        if "\\" in original_subpath or windows_subpath.drive:
+            raise GitSubpathError(repo=self.repo, subpath=original_subpath, reason="windows_path")
+        if ".." in posix_subpath.parts:
+            raise GitSubpathError(
+                repo=self.repo, subpath=original_subpath, reason="parent_traversal"
+            )
+
+        return posix_subpath
+
+    def _git_src_root(self, tmp_dir: str, subpath: PurePosixPath | None) -> str:
+        if subpath is None:
+            return tmp_dir
+        return f"{tmp_dir}/{subpath.as_posix()}"
 
     async def _clone_named_ref(
         self,

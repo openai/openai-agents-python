@@ -124,6 +124,9 @@ class Permissions(BaseModel):
             return NotImplemented
         return self.to_mode() == other.to_mode()
 
+    def __hash__(self) -> int:
+        return hash(self.to_mode())
+
 
 class FileMode(IntEnum):
     ALL = 0o7
@@ -178,5 +181,8 @@ class ExposedPortEndpoint:
             base = f"{prefix}://{host}:{self.port}/"
 
         if self.query:
-            return f"{base}?{self.query}"
+            query = self.query[1:] if self.query.startswith("?") else self.query
+            if query:
+                return f"{base}?{query}"
+
         return base

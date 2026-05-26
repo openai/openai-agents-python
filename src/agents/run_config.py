@@ -33,6 +33,9 @@ if TYPE_CHECKING:
 DEFAULT_MAX_TURNS = 10
 DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY = 4
 DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY = 4
+DEFAULT_MAX_ARCHIVE_INPUT_BYTES = 1024 * 1024 * 1024
+DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
+DEFAULT_MAX_ARCHIVE_MEMBERS = 100_000
 
 
 def _default_trace_include_sensitive_data() -> bool:
@@ -60,13 +63,14 @@ class CallModelData(Generic[TContext]):
 
 CallModelInputFilter = Callable[[CallModelData[Any]], MaybeAwaitable[ModelInputData]]
 ReasoningItemIdPolicy = Literal["preserve", "omit"]
+ToolNotFoundBehavior = Literal["raise_error", "return_error_to_model"]
 
 
 @dataclass
 class ToolErrorFormatterArgs(Generic[TContext]):
     """Data passed to ``RunConfig.tool_error_formatter`` callbacks."""
 
-    kind: Literal["approval_rejected"]
+    kind: Literal["approval_rejected", "tool_not_found"]
     """The category of tool error being formatted."""
 
     tool_type: Literal["function", "computer", "shell", "apply_patch", "custom"]
@@ -86,6 +90,24 @@ class ToolErrorFormatterArgs(Generic[TContext]):
 
 
 ToolErrorFormatter = Callable[[ToolErrorFormatterArgs[Any]], MaybeAwaitable[str | None]]
+
+
+@dataclass
+class ToolExecutionConfig:
+    """Grouped SDK-side execution settings for local tool calls."""
+
+    max_function_tool_concurrency: int | None = None
+    """Maximum number of local function tool calls to execute concurrently.
+
+    Set to `None` to preserve the default behavior, which starts all function tool calls
+    emitted in a turn. This does not change provider-side `parallel_tool_calls` behavior.
+    """
+
+    def __post_init__(self) -> None:
+        if self.max_function_tool_concurrency is not None and (
+            self.max_function_tool_concurrency < 1
+        ):
+            raise ValueError("tool_execution.max_function_tool_concurrency must be at least 1")
 
 
 @dataclass
@@ -112,6 +134,40 @@ class SandboxConcurrencyLimits:
 
 
 @dataclass
+class SandboxArchiveLimits:
+    """Resource limits for sandbox archive extraction."""
+
+    max_input_bytes: int | None = DEFAULT_MAX_ARCHIVE_INPUT_BYTES
+    """Maximum archive input bytes accepted by `BaseSandboxSession.extract()`.
+
+    Set to `None` to disable this input-size limit.
+    """
+
+    max_extracted_bytes: int | None = DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES
+    """Maximum declared bytes that an archive may extract.
+
+    Set to `None` to disable this extracted-size limit.
+    """
+
+    max_members: int | None = DEFAULT_MAX_ARCHIVE_MEMBERS
+    """Maximum number of extractable archive members.
+
+    Set to `None` to disable this member-count limit.
+    """
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if self.max_input_bytes is not None and self.max_input_bytes < 1:
+            raise ValueError("archive_limits.max_input_bytes must be at least 1")
+        if self.max_extracted_bytes is not None and self.max_extracted_bytes < 1:
+            raise ValueError("archive_limits.max_extracted_bytes must be at least 1")
+        if self.max_members is not None and self.max_members < 1:
+            raise ValueError("archive_limits.max_members must be at least 1")
+
+
+@dataclass
 class SandboxRunConfig:
     """Grouped sandbox runtime configuration for `Runner`."""
 
@@ -135,6 +191,13 @@ class SandboxRunConfig:
 
     concurrency_limits: SandboxConcurrencyLimits = field(default_factory=SandboxConcurrencyLimits)
     """Concurrency limits for sandbox materialization work."""
+
+    archive_limits: SandboxArchiveLimits | None = None
+    """Resource limits for sandbox archive extraction.
+
+    Set to `None` to preserve the default behavior with no SDK archive resource limits.
+    Use `SandboxArchiveLimits()` to enable SDK defaults.
+    """
 
 
 @dataclass
@@ -255,6 +318,17 @@ class RunConfig:
     sandbox: SandboxRunConfig | None = None
     """Optional sandbox runtime configuration for `SandboxAgent` execution."""
 
+    tool_execution: ToolExecutionConfig | None = None
+    """Optional SDK-side execution settings for local tool calls."""
+
+    tool_not_found_behavior: ToolNotFoundBehavior = "raise_error"
+    """Controls unresolved function tool calls emitted by the model.
+
+    - ``"raise_error"`` preserves the default behavior and raises ``ModelBehaviorError``.
+    - ``"return_error_to_model"`` returns a model-visible ``function_call_output`` error and lets
+      the run continue.
+    """
+
 
 class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
@@ -262,8 +336,8 @@ class RunOptions(TypedDict, Generic[TContext]):
     context: NotRequired[TContext | None]
     """The context for the run."""
 
-    max_turns: NotRequired[int]
-    """The maximum number of turns to run for."""
+    max_turns: NotRequired[int | None]
+    """The maximum number of turns to run for. Set to ``None`` to disable the limit."""
 
     hooks: NotRequired[RunHooks[TContext] | None]
     """Lifecycle hooks for the run."""
@@ -284,7 +358,7 @@ class RunOptions(TypedDict, Generic[TContext]):
     """The session for the run."""
 
     error_handlers: NotRequired[RunErrorHandlers[TContext] | None]
-    """Error handlers keyed by error kind. Currently supports max_turns."""
+    """Error handlers keyed by error kind."""
 
 
 __all__ = [
@@ -295,8 +369,10 @@ __all__ = [
     "ReasoningItemIdPolicy",
     "RunConfig",
     "RunOptions",
+    "SandboxArchiveLimits",
     "SandboxConcurrencyLimits",
     "SandboxRunConfig",
+    "ToolExecutionConfig",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "_default_trace_include_sensitive_data",

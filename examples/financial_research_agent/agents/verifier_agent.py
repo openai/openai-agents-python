@@ -6,8 +6,10 @@ from agents import Agent
 # This can be used to flag potential gaps or obvious mistakes.
 VERIFIER_PROMPT = (
     "You are a meticulous auditor. You have been handed a financial analysis report. "
-    "Your job is to verify the report is internally consistent, clearly sourced, and makes "
-    "no unsupported claims. Point out any issues or uncertainties."
+    "Your job is to verify the report is internally consistent, appropriately caveated, and "
+    "does not rely on obviously unreleased or impossible facts. You are not performing a full "
+    "citation audit because the demo passes synthesized search summaries, not source documents. "
+    "Point out any issues or uncertainties."
 )
 
 
@@ -22,6 +24,6 @@ class VerificationResult(BaseModel):
 verifier_agent = Agent(
     name="VerificationAgent",
     instructions=VERIFIER_PROMPT,
-    model="gpt-5.4",
+    model="gpt-5.5",
     output_type=VerificationResult,
 )

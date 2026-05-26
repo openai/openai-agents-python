@@ -289,7 +289,7 @@ async def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="gpt-5.4", help="Model name to use.")
+    parser.add_argument("--model", default="gpt-5.5", help="Model name to use.")
     parser.add_argument("--question", default=DEFAULT_QUESTION, help="Prompt to send to the agent.")
     parser.add_argument(
         "--app-name",

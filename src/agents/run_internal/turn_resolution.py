@@ -42,7 +42,7 @@ from .._tool_identity import (
 from ..agent import Agent, ToolsToFinalOutputResult
 from ..agent_output import AgentOutputSchemaBase
 from ..agent_tool_state import get_agent_tool_state_scope, peek_agent_tool_run_result
-from ..exceptions import ModelBehaviorError, UserError
+from ..exceptions import ModelBehaviorError, ModelRefusalError, UserError
 from ..handoffs import Handoff, HandoffInputData, HandoffInputFilter, nest_handoff_history
 from ..items import (
     CompactionItem,
@@ -66,8 +66,9 @@ from ..items import (
 )
 from ..lifecycle import RunHooks
 from ..logger import logger
-from ..run_config import RunConfig
+from ..run_config import RunConfig, ToolErrorFormatterArgs
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
+from ..run_error_handlers import RunErrorHandlers
 from ..run_state import RunState
 from ..stream_events import StreamEvent
 from ..tool import (
@@ -89,6 +90,13 @@ from ..tracing import SpanError, handoff_span
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
 from .agent_bindings import AgentBindings
+from .error_handlers import (
+    build_run_error_data,
+    create_message_output_item,
+    format_final_output_text,
+    resolve_run_error_handler_result,
+    validate_handler_final_output,
+)
 from .items import (
     REJECTION_MESSAGE,
     apply_patch_rejection_item,
@@ -108,6 +116,7 @@ from .run_steps import (
     ToolRunComputerAction,
     ToolRunCustom,
     ToolRunFunction,
+    ToolRunFunctionNotFound,
     ToolRunHandoff,
     ToolRunLocalShellCall,
     ToolRunMCPApprovalRequest,
@@ -199,6 +208,77 @@ async def _maybe_finalize_from_tool_results(
         tool_input_guardrail_results=tool_input_guardrail_results,
         tool_output_guardrail_results=tool_output_guardrail_results,
     )
+
+
+def _default_tool_not_found_message(tool_name: str) -> str:
+    return f"Tool '{tool_name}' not found."
+
+
+async def _resolve_tool_not_found_message(
+    *,
+    context_wrapper: RunContextWrapper[Any],
+    run_config: RunConfig,
+    tool_name: str,
+    call_id: str,
+) -> str:
+    default_message = _default_tool_not_found_message(tool_name)
+    formatter = run_config.tool_error_formatter
+    if formatter is None:
+        return default_message
+
+    try:
+        maybe_message = formatter(
+            ToolErrorFormatterArgs(
+                kind="tool_not_found",
+                tool_type="function",
+                tool_name=tool_name,
+                call_id=call_id,
+                default_message=default_message,
+                run_context=context_wrapper,
+            )
+        )
+        message = await maybe_message if inspect.isawaitable(maybe_message) else maybe_message
+    except Exception as exc:
+        logger.error("Tool error formatter failed for missing tool %s: %s", tool_name, exc)
+        return default_message
+
+    if message is None:
+        return default_message
+
+    if not isinstance(message, str):
+        logger.error(
+            "Tool error formatter returned non-string for missing tool %s: %s",
+            tool_name,
+            type(message).__name__,
+        )
+        return default_message
+
+    return message
+
+
+async def _build_tool_not_found_output_items(
+    *,
+    agent: Agent[Any],
+    calls: Sequence[ToolRunFunctionNotFound],
+    context_wrapper: RunContextWrapper[Any],
+    run_config: RunConfig,
+) -> list[RunItem]:
+    items: list[RunItem] = []
+    for call in calls:
+        message = await _resolve_tool_not_found_message(
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+            tool_name=call.tool_name,
+            call_id=call.tool_call.call_id,
+        )
+        items.append(
+            ToolCallOutputItem(
+                output=message,
+                raw_item=ItemHelpers.tool_call_output_item(call.tool_call, message),
+                agent=agent,
+            )
+        )
+    return items
 
 
 async def run_final_output_hooks(
@@ -333,6 +413,8 @@ async def execute_handoffs(
     run_config: RunConfig,
     server_manages_conversation: bool = False,
     nest_handoff_history_fn: Callable[..., HandoffInputData] | None = None,
+    tool_input_guardrail_results: list[ToolInputGuardrailResult] | None = None,
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult] | None = None,
 ) -> SingleStepResult:
     """Execute a handoff and prepare the next turn for the new agent."""
 
@@ -503,8 +585,8 @@ async def execute_handoffs(
         pre_step_items=pre_step_items,
         new_step_items=new_step_items,
         next_step=NextStepHandoff(new_agent),
-        tool_input_guardrail_results=[],
-        tool_output_guardrail_results=[],
+        tool_input_guardrail_results=list(tool_input_guardrail_results or []),
+        tool_output_guardrail_results=list(tool_output_guardrail_results or []),
         session_step_items=session_step_items,
     )
 
@@ -555,6 +637,7 @@ async def execute_tools_and_side_effects(
     hooks: RunHooks[TContext],
     context_wrapper: RunContextWrapper[TContext],
     run_config: RunConfig,
+    error_handlers: RunErrorHandlers[TContext] | None = None,
     server_manages_conversation: bool = False,
 ) -> SingleStepResult:
     """Run one turn of the loop, coordinating tools, approvals, guardrails, and handoffs."""
@@ -604,6 +687,14 @@ async def execute_tools_and_side_effects(
             local_shell_results=local_shell_results,
         )
     )
+    new_step_items.extend(
+        await _build_tool_not_found_output_items(
+            agent=public_agent,
+            calls=processed_response.function_tools_not_found,
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+        )
+    )
 
     interruptions = _collect_tool_interruptions(
         function_results=function_results,
@@ -650,6 +741,8 @@ async def execute_tools_and_side_effects(
             context_wrapper=context_wrapper,
             run_config=run_config,
             server_manages_conversation=server_manages_conversation,
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
         )
 
     tool_final_output = await _maybe_finalize_from_tool_results(
@@ -668,6 +761,7 @@ async def execute_tools_and_side_effects(
         return tool_final_output
 
     message_items = [item for item in new_step_items if isinstance(item, MessageOutputItem)]
+    refusal = ItemHelpers.extract_refusal(message_items[-1].raw_item) if message_items else None
     potential_final_output_text = (
         ItemHelpers.extract_text(message_items[-1].raw_item) if message_items else None
     )
@@ -677,6 +771,41 @@ async def execute_tools_and_side_effects(
             processed_response.tools_used
         )
         if not has_tool_activity_without_message:
+            if refusal:
+                refusal_error = ModelRefusalError(refusal)
+                run_error_data = build_run_error_data(
+                    input=original_input,
+                    new_items=pre_step_items + new_step_items,
+                    raw_responses=[new_response],
+                    last_agent=public_agent,
+                )
+                handler_result = await resolve_run_error_handler_result(
+                    error_handlers=error_handlers,
+                    error=refusal_error,
+                    context_wrapper=context_wrapper,
+                    run_data=run_error_data,
+                )
+                if handler_result is None:
+                    raise refusal_error
+
+                final_output = validate_handler_final_output(
+                    public_agent, handler_result.final_output
+                )
+                if handler_result.include_in_history:
+                    output_text = format_final_output_text(public_agent, final_output)
+                    new_step_items.append(create_message_output_item(public_agent, output_text))
+                return await execute_final_output_call(
+                    public_agent=public_agent,
+                    original_input=original_input,
+                    new_response=new_response,
+                    pre_step_items=pre_step_items,
+                    new_step_items=new_step_items,
+                    final_output=final_output,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    tool_input_guardrail_results=tool_input_guardrail_results,
+                    tool_output_guardrail_results=tool_output_guardrail_results,
+                )
             if output_schema and not output_schema.is_plain_text() and potential_final_output_text:
                 final_output = output_schema.validate_json(potential_final_output_text)
                 return await execute_final_output_call(
@@ -1389,6 +1518,8 @@ async def resolve_interrupted_turn(
             run_config=run_config,
             server_manages_conversation=server_manages_conversation,
             nest_handoff_history_fn=nest_history,
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
         )
 
     tool_final_output = await _maybe_finalize_from_tool_results(
@@ -1425,6 +1556,7 @@ def process_model_response(
     output_schema: AgentOutputSchemaBase | None,
     handoffs: list[Handoff],
     existing_items: Sequence[RunItem] | None = None,
+    run_config: RunConfig | None = None,
 ) -> ProcessedResponse:
     items: list[RunItem] = []
 
@@ -1436,6 +1568,7 @@ def process_model_response(
     shell_calls = []
     apply_patch_calls = []
     mcp_approval_requests = []
+    function_tools_not_found = []
     tools_used: list[str] = []
     handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
     function_map = build_function_tool_lookup_map(
@@ -1822,6 +1955,15 @@ def process_model_response(
                         data={"tool_name": qualified_output_name or output.name},
                     )
                 )
+                if run_config is not None and (
+                    run_config.tool_not_found_behavior == "return_error_to_model"
+                ):
+                    tool_name = qualified_output_name or output.name
+                    items.append(ToolCallItem(raw_item=output, agent=agent))
+                    function_tools_not_found.append(
+                        ToolRunFunctionNotFound(tool_call=output, tool_name=tool_name)
+                    )
+                    continue
                 error = (
                     f"Tool {qualified_output_name or output.name} not found in agent {agent.name}"
                 )
@@ -1855,6 +1997,7 @@ def process_model_response(
         tools_used=tools_used,
         mcp_approval_requests=mcp_approval_requests,
         interruptions=[],
+        function_tools_not_found=function_tools_not_found,
     )
 
 
@@ -1871,6 +2014,7 @@ async def get_single_step_result_from_response(
     context_wrapper: RunContextWrapper[TContext],
     run_config: RunConfig,
     tool_use_tracker,
+    error_handlers: RunErrorHandlers[TContext] | None = None,
     server_manages_conversation: bool = False,
     event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] | None = None,
     before_side_effects: Callable[[], Awaitable[None]] | None = None,
@@ -1883,6 +2027,7 @@ async def get_single_step_result_from_response(
         output_schema=output_schema,
         handoffs=handoffs,
         existing_items=pre_step_items,
+        run_config=run_config,
     )
 
     if before_side_effects is not None:
@@ -1907,5 +2052,6 @@ async def get_single_step_result_from_response(
         hooks=hooks,
         context_wrapper=context_wrapper,
         run_config=run_config,
+        error_handlers=error_handlers,
         server_manages_conversation=server_manages_conversation,
     )

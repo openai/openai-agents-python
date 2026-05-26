@@ -75,6 +75,7 @@ def test_all_fields_serialization() -> None:
                 jitter=False,
             ),
         ),
+        context_management=[{"type": "compaction", "compact_threshold": 200000}],
     )
 
     # Verify that every single field is set to a non-None value
@@ -103,6 +104,29 @@ def test_extra_args_serialization() -> None:
 
     # Verify serialization works
     verify_serialization(model_settings)
+
+
+def test_traceable_serialization_omits_request_extras() -> None:
+    model_settings = ModelSettings(
+        temperature=0.5,
+        extra_headers={"Authorization": "Bearer provider-token"},
+        extra_query={"api-key": "query-token"},
+        extra_body={"secret": "body-token"},
+        extra_args={"api_key": "arg-token"},
+    )
+
+    json_dict = model_settings.to_json_dict()
+    assert json_dict["extra_headers"] == {"Authorization": "Bearer provider-token"}
+    assert json_dict["extra_query"] == {"api-key": "query-token"}
+    assert json_dict["extra_body"] == {"secret": "body-token"}
+    assert json_dict["extra_args"] == {"api_key": "arg-token"}
+
+    traceable = model_settings.to_traceable_dict()
+    assert traceable["temperature"] == 0.5
+    assert "extra_headers" not in traceable
+    assert "extra_query" not in traceable
+    assert "extra_body" not in traceable
+    assert "extra_args" not in traceable
 
 
 def test_extra_args_resolve() -> None:

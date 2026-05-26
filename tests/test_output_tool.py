@@ -1,5 +1,5 @@
 import json
-from typing import Any
+from typing import Any, Literal, cast
 
 import pytest
 from pydantic import BaseModel
@@ -75,6 +75,35 @@ def test_structured_output_list():
     json_str = json.dumps({_WRAPPER_DICT_KEY: ["foo", "bar"]})
     validated = output_schema.validate_json(json_str)
     assert validated == ["foo", "bar"]
+
+
+def test_structured_output_literal_name_handles_literal_values():
+    output_schema = AgentOutputSchema(output_type=cast(type[Any], Literal["ok"]))
+
+    assert output_schema.name() == "Literal['ok']"
+
+
+def test_structured_output_nested_literal_name_handles_literal_values():
+    output_schema = AgentOutputSchema(output_type=list[Literal["ok", "done"]])
+
+    assert output_schema.name() == "list[Literal['ok', 'done']]"
+
+
+def test_structured_output_generic_dict_is_not_wrapped():
+    output_schema = AgentOutputSchema(output_type=dict[str, int], strict_json_schema=False)
+    assert output_schema.output_type == dict[str, int]
+    assert not output_schema._is_wrapped, "Generic dict output should not be wrapped"
+    assert "response" not in output_schema.json_schema().get("properties", {})
+
+    validated = output_schema.validate_json(json.dumps({"foo": 1}))
+    assert validated == {"foo": 1}
+
+
+def test_structured_output_generic_dict_rejects_wrapper_shape():
+    output_schema = AgentOutputSchema(output_type=dict[str, int], strict_json_schema=False)
+
+    with pytest.raises(ModelBehaviorError):
+        output_schema.validate_json(json.dumps({"response": {"foo": 1}}))
 
 
 def test_bad_json_raises_error(mocker):

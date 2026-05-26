@@ -102,6 +102,20 @@ class TestAudioInput:
             assert wav_file.getframerate() == DEFAULT_SAMPLE_RATE
             assert wav_file.getnframes() == len(buffer)
 
+    def test_audio_input_to_base64_does_not_mutate_float32_buffer(self):
+        # Regression: to_base64() previously rebound self.buffer to int16,
+        # silently corrupting any caller-held reference to the original float32 array.
+        buffer = np.sin(2 * np.pi * 440 * np.linspace(0, 1, 100)).astype(np.float32)
+        original = buffer.copy()
+
+        audio_input = AudioInput(buffer=buffer)
+        audio_input.to_base64()
+
+        assert audio_input.buffer.dtype == np.float32
+        assert np.array_equal(audio_input.buffer, original)
+        # Calling it twice should still work and return the same encoding.
+        assert audio_input.to_base64() == audio_input.to_base64()
+
 
 class TestStreamedAudioInput:
     @pytest.mark.asyncio

@@ -69,6 +69,7 @@ from ..workspace_paths import _raise_if_filesystem_root
 _DEFAULT_WORKSPACE_PREFIX = "sandbox-local-"
 _DEFAULT_MANIFEST_ROOT = cast(str, Manifest.model_fields["root"].default)
 _PTY_READ_CHUNK_BYTES = 16_384
+_PTY_CHILD_SIGNAL_DEFAULTS = (signal.SIGINT, signal.SIGQUIT)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,11 @@ logger = logging.getLogger(__name__)
 def _close_fd_quietly(fd: int) -> None:
     with suppress(OSError):
         os.close(fd)
+
+
+def _restore_pty_child_signal_defaults() -> None:
+    for signum in _PTY_CHILD_SIGNAL_DEFAULTS:
+        signal.signal(signum, signal.SIG_DFL)
 
 
 class UnixLocalSandboxSessionState(SandboxSessionState):
@@ -283,6 +289,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             def _preexec() -> None:
                 os.setsid()
                 fcntl.ioctl(secondary_fd, termios.TIOCSCTTY, 0)
+                # PTY children should use default terminal signal behavior even if the parent
+                # process temporarily ignores signals under the test runner.
+                _restore_pty_child_signal_defaults()
 
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -1028,7 +1037,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         try:
             root.mkdir(parents=True, exist_ok=True)
             with tarfile.open(fileobj=data, mode="r:*") as tar:
-                safe_extract_tarfile(tar, root=root)
+                safe_extract_tarfile(
+                    tar,
+                    root=root,
+                    allow_external_symlink_targets=False,
+                )
         except UnsafeTarMemberError as e:
             raise WorkspaceArchiveWriteError(
                 path=root, context={"reason": e.reason, "member": e.member}, cause=e

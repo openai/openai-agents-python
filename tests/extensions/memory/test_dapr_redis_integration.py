@@ -10,6 +10,7 @@ Run with: pytest tests/extensions/memory/test_dapr_redis_integration.py -v
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -91,6 +92,29 @@ def wait_for_dapr_health(host: str, port: int, timeout: int = 60) -> bool:
     return False
 
 
+def wait_for_dapr_component(host: str, port: int, component_name: str, timeout: int = 60) -> bool:
+    """Wait for a named component to appear in the Dapr metadata endpoint."""
+    metadata_url = f"http://{host}:{port}/v1.0/metadata"
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        try:
+            with urllib.request.urlopen(metadata_url, timeout=5) as response:
+                if 200 <= response.status < 300:
+                    payload = json.load(response)
+                    components = payload.get("components", [])
+                    if any(component.get("name") == component_name for component in components):
+                        print(f"✓ Dapr component {component_name} loaded via {metadata_url}")
+                        return True
+        except Exception:
+            pass
+
+        time.sleep(1)
+
+    print(f"✗ Dapr component {component_name} did not load after {timeout}s")
+    return False
+
+
 @pytest.fixture(scope="module")
 def docker_network():
     """Create a Docker network for container-to-container communication."""
@@ -120,8 +144,10 @@ def dapr_container(redis_container, docker_network):
     """Start Dapr sidecar container with Redis state store configuration."""
     # Create temporary components directory
     temp_dir = tempfile.mkdtemp()
+    os.chmod(temp_dir, 0o755)
     components_path = os.path.join(temp_dir, "components")
     os.makedirs(components_path, exist_ok=True)
+    os.chmod(components_path, 0o755)
 
     # Write Redis state store component configuration
     # KEY: Use 'redis:6379' (network alias), NOT localhost!
@@ -141,8 +167,10 @@ spec:
   - name: actorStateStore
     value: "false"
 """
-    with open(os.path.join(components_path, "statestore.yaml"), "w") as f:
+    state_store_path = os.path.join(components_path, "statestore.yaml")
+    with open(state_store_path, "w") as f:
         f.write(state_store_config)
+    os.chmod(state_store_path, 0o644)
 
     # Create Dapr container
     container = DockerContainer("daprio/daprd:latest")
@@ -157,7 +185,7 @@ spec:
             "3500",  # HTTP API port for health checks
             "-dapr-grpc-port",
             "50001",
-            "-components-path",
+            "-resources-path",
             "/components",
             "-log-level",
             "info",
@@ -175,6 +203,11 @@ spec:
     if not wait_for_dapr_health(http_host, http_port, timeout=60):
         container.stop()
         pytest.fail("Dapr container failed to become healthy")
+
+    if not wait_for_dapr_component(http_host, http_port, "statestore", timeout=60):
+        logs = container.get_wrapped_container().logs().decode("utf-8", errors="replace")
+        container.stop()
+        pytest.fail(f"Dapr state store component failed to load.\nContainer logs:\n{logs}")
 
     # Set environment variables for Dapr SDK health checks
     # The Dapr SDK checks these when creating a client

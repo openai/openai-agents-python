@@ -40,6 +40,8 @@ from .run_config import (
     RunOptions,
     ToolErrorFormatter,
     ToolErrorFormatterArgs,
+    ToolExecutionConfig,
+    ToolNotFoundBehavior,
 )
 from .run_context import RunContextWrapper, TContext
 from .run_error_handlers import RunErrorHandlers
@@ -136,8 +138,10 @@ __all__ = [
     "CallModelData",
     "CallModelInputFilter",
     "ReasoningItemIdPolicy",
+    "ToolExecutionConfig",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
+    "ToolNotFoundBehavior",
     "DEFAULT_MAX_TURNS",
     "set_default_agent_runner",
     "get_default_agent_runner",
@@ -198,7 +202,7 @@ class Runner:
         input: str | list[TResponseInputItem] | RunState[TContext],
         *,
         context: TContext | None = None,
-        max_turns: int = DEFAULT_MAX_TURNS,
+        max_turns: int | None = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         error_handlers: RunErrorHandlers[TContext] | None = None,
@@ -234,12 +238,16 @@ class Runner:
             context: The context to run the agent with.
             max_turns: The maximum number of turns to run the agent for. A turn is
                 defined as one AI invocation (including any tool calls that might occur).
+                Pass ``None`` to disable the turn limit.
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
-            error_handlers: Error handlers keyed by error kind. Currently supports max_turns.
+            error_handlers: Error handlers keyed by error kind.
             previous_response_id: The ID of the previous response. If using OpenAI
                 models via the Responses API, this allows you to skip passing in input
                 from the previous turn.
+            auto_previous_response_id: If True, enable Responses API response chaining
+                automatically for the first turn even when no
+                ``previous_response_id`` is supplied yet.
             conversation_id: The conversation ID
                 (https://platform.openai.com/docs/guides/conversation-state?api-mode=responses).
                 If provided, the conversation will be used to read and write items.
@@ -278,7 +286,7 @@ class Runner:
         input: str | list[TResponseInputItem] | RunState[TContext],
         *,
         context: TContext | None = None,
-        max_turns: int = DEFAULT_MAX_TURNS,
+        max_turns: int | None = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         error_handlers: RunErrorHandlers[TContext] | None = None,
@@ -319,12 +327,16 @@ class Runner:
             context: The context to run the agent with.
             max_turns: The maximum number of turns to run the agent for. A turn is
                 defined as one AI invocation (including any tool calls that might occur).
+                Pass ``None`` to disable the turn limit.
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
-            error_handlers: Error handlers keyed by error kind. Currently supports max_turns.
+            error_handlers: Error handlers keyed by error kind.
             previous_response_id: The ID of the previous response, if using OpenAI
                 models via the Responses API, this allows you to skip passing in input
                 from the previous turn.
+            auto_previous_response_id: If True, enable Responses API response chaining
+                automatically for the first turn even when no
+                ``previous_response_id`` is supplied yet.
             conversation_id: The ID of the stored conversation, if any.
             session: A session for automatic conversation history management.
 
@@ -355,7 +367,7 @@ class Runner:
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem] | RunState[TContext],
         context: TContext | None = None,
-        max_turns: int = DEFAULT_MAX_TURNS,
+        max_turns: int | None = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
@@ -395,12 +407,16 @@ class Runner:
             context: The context to run the agent with.
             max_turns: The maximum number of turns to run the agent for. A turn is
                 defined as one AI invocation (including any tool calls that might occur).
+                Pass ``None`` to disable the turn limit.
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
-            error_handlers: Error handlers keyed by error kind. Currently supports max_turns.
+            error_handlers: Error handlers keyed by error kind.
             previous_response_id: The ID of the previous response, if using OpenAI
                 models via the Responses API, this allows you to skip passing in input
                 from the previous turn.
+            auto_previous_response_id: If True, enable Responses API response chaining
+                automatically for the first turn even when no
+                ``previous_response_id`` is supplied yet.
             conversation_id: The ID of the stored conversation, if any.
             session: A session for automatic conversation history management.
 
@@ -1039,7 +1055,7 @@ class AgentRunner:
                         ]
 
                     current_turn += 1
-                    if current_turn > max_turns:
+                    if max_turns is not None and current_turn > max_turns:
                         _error_tracing.attach_error_to_span(
                             current_span,
                             SpanError(
@@ -1196,6 +1212,7 @@ class AgentRunner:
                                     ),
                                     reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                                     prompt_cache_key_resolver=prompt_cache_key_resolver,
+                                    error_handlers=error_handlers,
                                 )
                             )
 
@@ -1251,6 +1268,7 @@ class AgentRunner:
                                 ),
                                 reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                                 prompt_cache_key_resolver=prompt_cache_key_resolver,
+                                error_handlers=error_handlers,
                             )
                     finally:
                         attach_usage_to_span(

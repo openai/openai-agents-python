@@ -38,7 +38,7 @@ from agents.items import (
     TResponseStreamEvent,
 )
 from agents.run import RunConfig
-from agents.sandbox import LocalFile, Manifest, SandboxAgent, SandboxRunConfig
+from agents.sandbox import LocalFile, Manifest, SandboxAgent, SandboxPathGrant, SandboxRunConfig
 from agents.sandbox.capabilities import (
     Filesystem,
     FilesystemToolSet,
@@ -55,7 +55,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5.5"
 COMPACTION_THRESHOLD = 1_000
 VERIFICATION_FILE = Path("verification/capabilities.txt")
 DELETE_FILE = Path("verification/delete-me.txt")
@@ -131,8 +131,9 @@ class RecordingModel(Model):
         await self._model.close()
 
 
-def _build_manifest() -> Manifest:
+def _build_manifest(skills_root: Path) -> Manifest:
     return Manifest(
+        extra_path_grants=(SandboxPathGrant(path=str(skills_root)),),
         entries={
             "README.md": File(
                 content=(
@@ -145,7 +146,7 @@ def _build_manifest() -> Manifest:
             "examples/image.png": LocalFile(
                 src=Path(__file__).parent.parent.parent / "docs/assets/images/graph.png"
             ),
-        }
+        },
     )
 
 
@@ -211,7 +212,7 @@ def _build_agent(model: RecordingModel, skills_root: Path) -> SandboxAgent:
             f"5. Create `{VERIFICATION_FILE.as_posix()}` with exactly these two lines:\n"
             "   skill_loaded=true\n"
             "   codename=atlas\n"
-            "6. Update that file so it has exactly these four lines:\n"
+            "6. Use the apply_patch tool to update that file so it has exactly these four lines:\n"
             "   skill_loaded=true\n"
             "   codename=atlas\n"
             "   note_source=filesystem\n"
@@ -222,7 +223,7 @@ def _build_agent(model: RecordingModel, skills_root: Path) -> SandboxAgent:
             "use an empty string for a path.\n"
             "Keep the final answer to one line: `capability smoke complete`."
         ),
-        default_manifest=_build_manifest(),
+        default_manifest=_build_manifest(skills_root),
         capabilities=capabilities,
         model_settings=ModelSettings(tool_choice="required"),
     )
@@ -358,7 +359,7 @@ async def _print_stream_details(result: RunResultStreaming) -> None:
 async def main(model_name: str) -> None:
     model = RecordingModel(model_name)
     with tempfile.TemporaryDirectory(prefix="agents-skills-") as temp_dir:
-        skills_root = Path(temp_dir) / "skills"
+        skills_root = Path(temp_dir).resolve() / "skills"
         _write_local_skill(skills_root)
 
         agent = _build_agent(model, skills_root)
