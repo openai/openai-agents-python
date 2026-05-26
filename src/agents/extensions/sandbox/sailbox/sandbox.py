@@ -112,6 +112,10 @@ def _sailbox_exec_output_bytes(value: object) -> bytes:
     return str(value).encode("utf-8", errors="replace")
 
 
+def _sailbox_exec_output_text(value: object) -> str:
+    return _sailbox_exec_output_bytes(value).decode("utf-8", errors="replace")
+
+
 def _serialize_sail_image(image: ImageDefinition | None) -> dict[str, str | None] | None:
     if image is None:
         return None
@@ -363,22 +367,12 @@ class SailboxSandboxSession(BaseSandboxSession):
                 message=_sailbox_error_message("Sailbox workspace root preparation failed", exc),
             ) from exc
         if result.returncode != 0:
-            stdout = (
-                result.stdout
-                if isinstance(result.stdout, str)
-                else result.stdout.decode("utf-8", errors="replace")
-            )
-            stderr = (
-                result.stderr
-                if isinstance(result.stderr, str)
-                else result.stderr.decode("utf-8", errors="replace")
-            )
             raise WorkspaceStartError(
                 path=self._workspace_root_path(),
                 context={
                     "exit_code": result.returncode,
-                    "stdout": stdout,
-                    "stderr": stderr,
+                    "stdout": _sailbox_exec_output_text(result.stdout),
+                    "stderr": _sailbox_exec_output_text(result.stderr),
                 },
             )
 
@@ -538,22 +532,12 @@ class SailboxSandboxSession(BaseSandboxSession):
         except Exception as exc:
             raise WorkspaceArchiveReadError(path=error_path, cause=exc) from exc
         if result.returncode != 0:
-            stdout = (
-                result.stdout
-                if isinstance(result.stdout, str)
-                else result.stdout.decode("utf-8", errors="replace")
-            )
-            stderr = (
-                result.stderr
-                if isinstance(result.stderr, str)
-                else result.stderr.decode("utf-8", errors="replace")
-            )
             raise WorkspaceReadNotFoundError(
                 path=error_path,
                 context={
                     "command": ["runuser", "-u", user_name, "--", "sh", "-lc", "<read_check>"],
-                    "stdout": stdout,
-                    "stderr": stderr,
+                    "stdout": _sailbox_exec_output_text(result.stdout),
+                    "stderr": _sailbox_exec_output_text(result.stderr),
                 },
             )
         return workspace_path
@@ -638,23 +622,13 @@ class SailboxSandboxSession(BaseSandboxSession):
             )
             result = await _call_sailbox(request.wait)
             if result.returncode != 0:
-                stdout = (
-                    result.stdout
-                    if isinstance(result.stdout, str)
-                    else result.stdout.decode("utf-8", errors="replace")
-                )
-                stderr = (
-                    result.stderr
-                    if isinstance(result.stderr, str)
-                    else result.stderr.decode("utf-8", errors="replace")
-                )
                 raise WorkspaceArchiveWriteError(
                     path=workspace_path,
                     context={
                         "reason": "write_as_user_nonzero_exit",
                         "exit_code": result.returncode,
-                        "stdout": stdout,
-                        "stderr": stderr,
+                        "stdout": _sailbox_exec_output_text(result.stdout),
+                        "stderr": _sailbox_exec_output_text(result.stderr),
                     },
                 )
         except WorkspaceArchiveWriteError:
@@ -703,8 +677,8 @@ class SailboxSandboxSession(BaseSandboxSession):
                     path=self._workspace_root_path(),
                     context={
                         "exit_code": result.exit_code,
-                        "stdout": result.stdout.decode("utf-8", errors="replace"),
-                        "stderr": result.stderr.decode("utf-8", errors="replace"),
+                        "stdout": _sailbox_exec_output_text(result.stdout),
+                        "stderr": _sailbox_exec_output_text(result.stderr),
                     },
                 )
             data = await _call_sailbox(self.sailbox.read, archive_path)
@@ -753,8 +727,8 @@ class SailboxSandboxSession(BaseSandboxSession):
                     path=self._workspace_root_path(),
                     context={
                         "exit_code": mkdir.exit_code,
-                        "stdout": mkdir.stdout.decode("utf-8", errors="replace"),
-                        "stderr": mkdir.stderr.decode("utf-8", errors="replace"),
+                        "stdout": _sailbox_exec_output_text(mkdir.stdout),
+                        "stderr": _sailbox_exec_output_text(mkdir.stderr),
                     },
                 )
             result = await self.exec(
@@ -770,8 +744,8 @@ class SailboxSandboxSession(BaseSandboxSession):
                     path=self._workspace_root_path(),
                     context={
                         "exit_code": result.exit_code,
-                        "stdout": result.stdout.decode("utf-8", errors="replace"),
-                        "stderr": result.stderr.decode("utf-8", errors="replace"),
+                        "stdout": _sailbox_exec_output_text(result.stdout),
+                        "stderr": _sailbox_exec_output_text(result.stderr),
                     },
                 )
         except WorkspaceArchiveWriteError:

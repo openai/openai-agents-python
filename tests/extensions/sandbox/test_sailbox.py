@@ -141,6 +141,11 @@ class _FakeExecResult:
     returncode: int = 0
 
 
+class _OpaqueOutput:
+    def __str__(self) -> str:
+        return "opaque-output"
+
+
 class _FakeExecRequest:
     def __init__(self, result: _FakeExecResult) -> None:
         self._result = result
@@ -1250,6 +1255,20 @@ def test_prepare_backend_workspace_nonzero_raises_start_error() -> None:
     assert exc_info.value.context["stderr"] == "err"
 
 
+def test_prepare_backend_workspace_normalizes_non_string_output() -> None:
+    sailbox = _ScriptedExecSailbox(
+        [_FakeExecResult(stdout=None, stderr=_OpaqueOutput(), returncode=7)]
+    )
+    session = _session(sailbox)
+
+    with pytest.raises(WorkspaceStartError) as exc_info:
+        asyncio.run(session._prepare_backend_workspace())
+
+    assert exc_info.value.context["exit_code"] == 7
+    assert exc_info.value.context["stdout"] == ""
+    assert exc_info.value.context["stderr"] == "opaque-output"
+
+
 def test_prepare_backend_workspace_wait_failure_maps_start_error() -> None:
     session = _session(_WaitFailingSailbox())
 
@@ -1417,6 +1436,22 @@ def test_read_with_user_denied_maps_not_found(monkeypatch: pytest.MonkeyPatch) -
     assert exc_info.value.context["stderr"] == "err"
 
 
+def test_read_with_user_denied_normalizes_non_string_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
+    sailbox = _ScriptedExecSailbox(
+        [_FakeExecResult(stdout=None, stderr=_OpaqueOutput(), returncode=1)]
+    )
+    session = _session(sailbox)
+
+    with pytest.raises(WorkspaceReadNotFoundError) as exc_info:
+        asyncio.run(session.read(Path("notes.txt"), user="app"))
+
+    assert exc_info.value.context["stdout"] == ""
+    assert exc_info.value.context["stderr"] == "opaque-output"
+
+
 def test_write_accepts_text_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
     sailbox = _FakeSailbox()
@@ -1491,6 +1526,26 @@ def test_write_with_user_nonzero_exec_maps_archive_error(
     assert exc_info.value.context["exit_code"] == 23
     assert exc_info.value.context["stdout"] == "out"
     assert exc_info.value.context["stderr"] == "err"
+
+
+def test_write_with_user_nonzero_exec_normalizes_non_string_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
+    sailbox = _ScriptedExecSailbox(
+        [
+            _FakeExecResult(stdout=None, stderr=_OpaqueOutput(), returncode=23),
+            _FakeExecResult(returncode=0),
+        ]
+    )
+    session = _session(sailbox)
+
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+        asyncio.run(session.write(Path("notes.txt"), io.BytesIO(b"hello"), user="app"))
+
+    assert exc_info.value.context["reason"] == "write_as_user_nonzero_exit"
+    assert exc_info.value.context["stdout"] == ""
+    assert exc_info.value.context["stderr"] == "opaque-output"
 
 
 def test_write_rejects_invalid_payload_type(monkeypatch: pytest.MonkeyPatch) -> None:
