@@ -491,10 +491,10 @@ class SailboxSandboxSession(BaseSandboxSession):
         *,
         user: str | User | None = None,
     ) -> io.IOBase:
-        if user is not None:
-            await self._check_read_with_exec(path, user=user)
-
         error_path = Path(path)
+        if user is not None:
+            await self._check_read_as_user(path, error_path=error_path, user=user)
+
         workspace_path = await self._validate_path_access(path)
         try:
             data = await _call_sailbox(
@@ -506,6 +506,57 @@ class SailboxSandboxSession(BaseSandboxSession):
         except Exception as exc:
             raise WorkspaceArchiveReadError(path=error_path, cause=exc) from exc
         return io.BytesIO(data)
+
+    async def _check_read_as_user(
+        self,
+        path: Path | str,
+        *,
+        error_path: Path,
+        user: str | User,
+    ) -> Path:
+        workspace_path = await self._validate_path_access(path)
+        user_name = user.name if isinstance(user, User) else user
+        path_arg = sandbox_path_str(workspace_path)
+        try:
+            request = await _call_sailbox(
+                self.sailbox.exec,
+                " ".join(
+                    [
+                        "runuser",
+                        "-u",
+                        shlex.quote(user_name),
+                        "--",
+                        "sh",
+                        "-lc",
+                        shlex.quote('[ -r "$1" ]'),
+                        "sh",
+                        shlex.quote(path_arg),
+                    ]
+                ),
+            )
+            result = await _call_sailbox(request.wait)
+        except Exception as exc:
+            raise WorkspaceArchiveReadError(path=error_path, cause=exc) from exc
+        if result.returncode != 0:
+            stdout = (
+                result.stdout
+                if isinstance(result.stdout, str)
+                else result.stdout.decode("utf-8", errors="replace")
+            )
+            stderr = (
+                result.stderr
+                if isinstance(result.stderr, str)
+                else result.stderr.decode("utf-8", errors="replace")
+            )
+            raise WorkspaceReadNotFoundError(
+                path=error_path,
+                context={
+                    "command": ["runuser", "-u", user_name, "--", "sh", "-lc", "<read_check>"],
+                    "stdout": stdout,
+                    "stderr": stderr,
+                },
+            )
+        return workspace_path
 
     async def write(
         self,
