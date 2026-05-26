@@ -9,7 +9,8 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-05-09T02:05:26Z"
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer-span = "P7D"
 
 [[package]]
 name = "aiofiles"
@@ -2431,7 +2432,7 @@ wheels = [
 
 [[package]]
 name = "openai-agents"
-version = "0.17.3"
+version = "0.17.4"
 source = { editable = "." }
 dependencies = [
     { name = "griffelib" },
