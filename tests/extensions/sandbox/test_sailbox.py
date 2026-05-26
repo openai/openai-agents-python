@@ -1648,6 +1648,63 @@ def test_shutdown_terminate_failure_propagates() -> None:
         asyncio.run(session.shutdown())
 
 
+def test_client_delete_terminates_live_sailbox() -> None:
+    sailbox = _FakeSailbox("sb-delete")
+    state = _state(sailbox)
+    state.pause_on_exit = True
+    inner = SailboxSandboxSession.from_state(state, sailbox=sailbox)
+    session = SandboxSession(inner)
+
+    asyncio.run(SailboxSandboxClient().delete(session))
+
+    assert sailbox.terminated is True
+    assert sailbox.paused is False
+    assert inner.state.status == "terminated"
+    assert inner.state.worker_address == ""
+
+
+def test_client_delete_terminates_after_pause_on_exit_shutdown() -> None:
+    sailbox = _FakeSailbox("sb-delete-paused")
+    state = _state(sailbox)
+    state.pause_on_exit = True
+    inner = SailboxSandboxSession.from_state(state, sailbox=sailbox)
+    session = SandboxSession(inner)
+
+    asyncio.run(inner.shutdown())
+    assert sailbox.paused is True
+    assert inner.state.status == "paused"
+
+    asyncio.run(SailboxSandboxClient().delete(session))
+
+    assert sailbox.terminated is True
+    assert inner.state.status == "terminated"
+
+
+def test_client_delete_reconnects_and_terminates_without_live_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sailbox = _FakeSailbox("sb-delete-reconnect")
+    state = _state(sailbox)
+    inner = SailboxSandboxSession.from_state(state, sailbox=None)
+    session = SandboxSession(inner)
+    reconnected: list[str] = []
+
+    def fake_connect(sailbox_id: str) -> _FakeSailbox:
+        reconnected.append(sailbox_id)
+        return sailbox
+
+    monkeypatch.setattr(
+        "agents.extensions.sandbox.sailbox.sandbox._connect_sailbox",
+        fake_connect,
+    )
+
+    asyncio.run(SailboxSandboxClient().delete(session))
+
+    assert reconnected == ["sb-delete-reconnect"]
+    assert sailbox.terminated is True
+    assert inner.state.status == "terminated"
+
+
 def test_client_delete_rejects_non_sailbox_session() -> None:
     class _OtherInner(BaseSandboxSession):
         state: SandboxSessionState
