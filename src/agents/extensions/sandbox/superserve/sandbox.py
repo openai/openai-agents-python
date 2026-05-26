@@ -266,8 +266,6 @@ class SuperserveSandboxSessionState(SandboxSessionState):
     base_network: dict[str, object] | None = None
     timeout_seconds: int | None = None
     pause_on_exit: bool = False
-    base_url: str | None = None
-    api_key: str | None = None
     timeouts: SuperserveSandboxTimeouts = Field(default_factory=SuperserveSandboxTimeouts)
 
 
@@ -276,15 +274,21 @@ class SuperserveSandboxSession(BaseSandboxSession):
 
     state: SuperserveSandboxSessionState
     _sandbox: Any | None
+    _api_key: str | None
+    _base_url: str | None
 
     def __init__(
         self,
         *,
         state: SuperserveSandboxSessionState,
         sandbox: Any | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
     ) -> None:
         self.state = state
         self._sandbox = sandbox
+        self._api_key = api_key
+        self._base_url = base_url
 
     @classmethod
     def from_state(
@@ -292,8 +296,10 @@ class SuperserveSandboxSession(BaseSandboxSession):
         state: SuperserveSandboxSessionState,
         *,
         sandbox: Any | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
     ) -> SuperserveSandboxSession:
-        return cls(state=state, sandbox=sandbox)
+        return cls(state=state, sandbox=sandbox, api_key=api_key, base_url=base_url)
 
     @property
     def sandbox_id(self) -> str:
@@ -366,8 +372,8 @@ class SuperserveSandboxSession(BaseSandboxSession):
                 metadata=dict(self.state.base_metadata) or None,
                 env_vars=env_vars or None,
                 network=network,
-                api_key=self.state.api_key,
-                base_url=self.state.base_url,
+                api_key=self._api_key,
+                base_url=self._base_url,
             )
         except Exception as exc:
             reason = (
@@ -537,8 +543,12 @@ class SuperserveSandboxSession(BaseSandboxSession):
         command_str = shlex.join(normalized)
         envs = await self._resolved_envs()
         cwd = sandbox_path_str(self.state.manifest.root)
-        # Superserve accepts only int seconds; round up so we never undershoot the caller.
-        timeout_seconds = None if timeout is None else max(1, math.ceil(timeout))
+        effective_timeout = (
+            float(self.state.timeouts.exec_timeout_unbounded_s)
+            if timeout is None
+            else float(timeout)
+        )
+        timeout_seconds = max(1, math.ceil(effective_timeout))
 
         try:
             result = await sandbox.commands.run(
@@ -843,12 +853,10 @@ class SuperserveSandboxClient(BaseSandboxClient[SuperserveSandboxClientOptions])
             base_network=dict(options.network) if options.network is not None else None,
             timeout_seconds=options.timeout_seconds,
             pause_on_exit=options.pause_on_exit,
-            base_url=base_url,
-            api_key=api_key,
             timeouts=timeouts,
             exposed_ports=options.exposed_ports,
         )
-        inner = SuperserveSandboxSession.from_state(state)
+        inner = SuperserveSandboxSession.from_state(state, api_key=api_key, base_url=base_url)
         await inner._ensure_sandbox()
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
@@ -874,12 +882,8 @@ class SuperserveSandboxClient(BaseSandboxClient[SuperserveSandboxClientOptions])
         sup_errors = _import_superserve_errors()
         not_found_exc = sup_errors.get("not_found")
 
-        api_key = state.api_key or self._api_key
-        base_url = state.base_url or self._base_url
-        if state.api_key is None and api_key is not None:
-            state.api_key = api_key
-        if state.base_url is None and base_url is not None:
-            state.base_url = base_url
+        api_key = self._api_key
+        base_url = self._base_url
 
         sandbox: Any | None = None
         reconnected = False
@@ -897,7 +901,9 @@ class SuperserveSandboxClient(BaseSandboxClient[SuperserveSandboxClientOptions])
             state.sandbox_id = ""
             state.workspace_root_ready = False
 
-        inner = SuperserveSandboxSession.from_state(state, sandbox=sandbox)
+        inner = SuperserveSandboxSession.from_state(
+            state, sandbox=sandbox, api_key=api_key, base_url=base_url
+        )
         if sandbox is None:
             await inner._ensure_sandbox()
         inner._set_start_state_preserved(reconnected, system=reconnected)
@@ -961,7 +967,9 @@ class SuperserveSandboxClient(BaseSandboxClient[SuperserveSandboxClientOptions])
                     )
                     return None, False
 
-            probe = SuperserveSandboxSession.from_state(state, sandbox=sandbox)
+            probe = SuperserveSandboxSession.from_state(
+                state, sandbox=sandbox, api_key=api_key, base_url=base_url
+            )
             try:
                 await probe._wait_until_active()
             except WorkspaceStartError as exc:
