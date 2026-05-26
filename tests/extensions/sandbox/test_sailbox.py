@@ -1315,6 +1315,40 @@ def test_read_generic_failure_maps_archive_error(monkeypatch: pytest.MonkeyPatch
         asyncio.run(session.read(Path("notes.txt")))
 
 
+def test_read_with_user_checks_access_without_sudo(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
+    sailbox = _NoSudoSailbox()
+    sailbox.files["/workspace/notes.txt"] = b"hello"
+    session = _session(sailbox)
+
+    result = asyncio.run(session.read(Path("notes.txt"), user="app"))
+
+    assert result.read() == b"hello"
+    assert all("sudo" not in command for command, _ in sailbox.exec_commands)
+    assert sailbox.exec_commands[0][0].startswith("runuser -u app --")
+
+
+def test_read_with_user_denied_maps_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
+    sailbox = _ScriptedExecSailbox([_FakeExecResult(stdout="out", stderr="err", returncode=1)])
+    session = _session(sailbox)
+
+    with pytest.raises(WorkspaceReadNotFoundError) as exc_info:
+        asyncio.run(session.read(Path("notes.txt"), user="app"))
+
+    assert exc_info.value.context["command"] == [
+        "runuser",
+        "-u",
+        "app",
+        "--",
+        "sh",
+        "-lc",
+        "<read_check>",
+    ]
+    assert exc_info.value.context["stdout"] == "out"
+    assert exc_info.value.context["stderr"] == "err"
+
+
 def test_write_accepts_text_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(SailboxSandboxSession, "_validate_path_access", _validate_direct_path)
     sailbox = _FakeSailbox()
