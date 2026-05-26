@@ -153,6 +153,10 @@ class AdvancedSQLiteSession(SQLiteSession):
                     except Exception as cleanup_error:
                         conn.rollback()
                         self._logger.error(f"Failed to cleanup orphaned messages: {cleanup_error}")
+                    # Re-raise so callers see the failure. Without this, add_items returns
+                    # successfully even though the message_structure rows that get_items joins
+                    # through are missing, and the new items become invisible to later reads.
+                    raise
 
         await asyncio.to_thread(_add_items_sync)
 
