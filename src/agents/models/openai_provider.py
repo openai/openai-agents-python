@@ -55,6 +55,7 @@ class OpenAIProvider(ModelProvider):
         strict_feature_validation: bool = False,
         agent_registration: OpenAIAgentRegistrationConfig | None = None,
         responses_websocket_options: OpenAIResponsesWebSocketOptions | None = None,
+        buffer_streamed_tool_calls: bool = False,
     ) -> None:
         """Create a new OpenAI provider.
 
@@ -79,6 +80,10 @@ class OpenAIProvider(ModelProvider):
             agent_registration: Optional agent registration configuration.
             responses_websocket_options: Optional low-level websocket keepalive options for the
                 OpenAI Responses websocket transport.
+            buffer_streamed_tool_calls: Whether Chat Completions models should buffer streamed
+                function tool-call deltas and emit them to the SDK only after the provider stream
+                finishes. This is useful for OpenAI-compatible providers whose streamed tool-call
+                chunk semantics are not reliable enough for incremental processing.
         """
         if openai_client is not None:
             assert api_key is None and base_url is None and websocket_base_url is None, (
@@ -109,6 +114,7 @@ class OpenAIProvider(ModelProvider):
         self._use_responses_websocket = self._responses_transport == "websocket"
         self._strict_feature_validation = strict_feature_validation
         self._responses_websocket_options = responses_websocket_options
+        self._buffer_streamed_tool_calls = buffer_streamed_tool_calls
 
         # Reuse websocket model wrappers so websocket transport can keep a persistent connection
         # when callers pass model names as strings through a shared provider.
@@ -230,6 +236,7 @@ class OpenAIProvider(ModelProvider):
                 model=resolved_model_name,
                 openai_client=client,
                 strict_feature_validation=self._strict_feature_validation,
+                buffer_streamed_tool_calls=self._buffer_streamed_tool_calls,
             )
 
         if use_websocket_transport:
