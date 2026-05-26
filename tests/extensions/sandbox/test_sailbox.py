@@ -82,6 +82,11 @@ class _SdkSailbox:
         _ = sailbox_id
         raise NotImplementedError
 
+    @staticmethod
+    def get(sailbox_id: str) -> object:
+        _ = sailbox_id
+        raise NotImplementedError
+
 
 def _install_fake_sail_sdk() -> None:
     sail_module = types.ModuleType("sail")
@@ -1072,15 +1077,78 @@ def test_session_state_defaults_are_serializable() -> None:
     assert payload["disk_gib"] == 8
 
 
-def test_running_false_without_backend_or_when_paused() -> None:
+def test_running_false_without_backend() -> None:
     state = _state(_FakeSailbox())
     state.status = "paused"
     without_backend = SailboxSandboxSession.from_state(state, sailbox=None)
-    paused = SailboxSandboxSession.from_state(state, sailbox=_FakeSailbox())
-    paused.state.status = "paused"
 
     assert asyncio.run(without_backend.running()) is False
-    assert asyncio.run(paused.running()) is False
+
+
+def test_running_rechecks_backend_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_get(sailbox_id: str) -> object:
+        calls.append(sailbox_id)
+        return types.SimpleNamespace(status="running")
+
+    monkeypatch.setattr(
+        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.get",
+        staticmethod(fake_get),
+    )
+    sailbox = _FakeSailbox("sb-running")
+    session = SailboxSandboxSession.from_state(_state(sailbox), sailbox=sailbox)
+
+    assert asyncio.run(session.running()) is True
+    assert calls == ["sb-running"]
+    assert session.state.status == "running"
+    assert sailbox.status == "running"
+
+
+def test_running_returns_false_when_backend_is_paused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.get",
+        staticmethod(lambda sailbox_id: types.SimpleNamespace(status="paused")),
+    )
+    sailbox = _FakeSailbox("sb-paused")
+    session = SailboxSandboxSession.from_state(_state(sailbox), sailbox=sailbox)
+    session.state.status = "running"
+    sailbox.status = "running"
+
+    assert asyncio.run(session.running()) is False
+    assert session.state.status == "paused"
+    assert sailbox.status == "paused"
+
+
+def test_running_returns_false_when_backend_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get(_sailbox_id: str) -> object:
+        raise LookupError("missing")
+
+    monkeypatch.setattr(
+        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.get",
+        staticmethod(fake_get),
+    )
+    sailbox = _FakeSailbox("sb-missing")
+    session = SailboxSandboxSession.from_state(_state(sailbox), sailbox=sailbox)
+
+    assert asyncio.run(session.running()) is False
+    assert session.state.status == "terminated"
+    assert sailbox.status == "terminated"
+
+
+def test_running_returns_false_on_status_lookup_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get(_sailbox_id: str) -> object:
+        raise RuntimeError("status unavailable")
+
+    monkeypatch.setattr(
+        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.get",
+        staticmethod(fake_get),
+    )
+    sailbox = _FakeSailbox("sb-unavailable")
+    session = SailboxSandboxSession.from_state(_state(sailbox), sailbox=sailbox)
+
+    assert asyncio.run(session.running()) is False
+    assert session.state.status == "running"
 
 
 def test_set_sailbox_updates_state_fields() -> None:

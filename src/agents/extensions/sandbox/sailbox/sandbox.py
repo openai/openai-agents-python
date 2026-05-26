@@ -668,7 +668,22 @@ class SailboxSandboxSession(BaseSandboxSession):
                 pass
 
     async def running(self) -> bool:
-        return self._sailbox is not None and self.state.status == "running"
+        if self._sailbox is None:
+            return False
+        sailbox_id = self.state.sailbox_id or self._sailbox.sailbox_id
+        if not sailbox_id:
+            return False
+        try:
+            info = await _call_sailbox(Sailbox.get, sailbox_id)
+        except LookupError:
+            self.state.status = "terminated"
+            object.__setattr__(self._sailbox, "status", "terminated")
+            return False
+        except Exception:
+            return False
+        self.state.status = info.status
+        object.__setattr__(self._sailbox, "status", info.status)
+        return info.status == "running"
 
     async def persist_workspace(self) -> io.IOBase:
         root = self.state.manifest.root
