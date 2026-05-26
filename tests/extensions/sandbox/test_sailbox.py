@@ -1176,11 +1176,13 @@ def test_ensure_backend_started_resumes_paused_sailbox() -> None:
     sailbox = _FakeSailbox("sb-paused")
     sailbox.status = "paused"
     session = SailboxSandboxSession.from_state(_state(sailbox), sailbox=sailbox)
+    assert session._workspace_state_preserved_on_start() is False
 
     asyncio.run(session._ensure_backend_started())
 
     assert sailbox.status == "running"
     assert session.state.status == "running"
+    assert session._workspace_state_preserved_on_start() is True
 
 
 def test_ensure_backend_started_resume_failure_maps_start_error() -> None:

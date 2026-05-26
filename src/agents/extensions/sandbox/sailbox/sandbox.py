@@ -327,6 +327,7 @@ class SailboxSandboxSession(BaseSandboxSession):
         if self._sailbox is not None:
             if self._sailbox.status != "running":
                 await self._resume_sailbox(self._sailbox)
+                self._set_start_state_preserved(True)
             return
 
         if not self.state.sailbox_id:
