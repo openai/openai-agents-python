@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 
@@ -56,7 +56,7 @@ class AgentHooksForTests(AgentHooks):
         self,
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
-        system_prompt: Optional[str],
+        system_prompt: str | None,
         input_items: list[TResponseInputItem],
     ) -> None:
         self.events["on_llm_start"] += 1

@@ -6,6 +6,7 @@ from openai._models import construct_type
 from openai.types.responses import (
     ResponseApplyPatchToolCall,
     ResponseCompactionItem,
+    ResponseCustomToolCall,
     ResponseFunctionShellToolCall,
     ResponseFunctionShellToolCallOutput,
     ResponseFunctionToolCall,
@@ -19,8 +20,10 @@ from agents import (
     Agent,
     ApplyPatchTool,
     CompactionItem,
+    CustomTool,
     Handoff,
     HostedMCPTool,
+    RunConfig,
     ShellTool,
     Tool,
     function_tool,
@@ -45,7 +48,6 @@ from tests.mcp.helpers import FakeMCPServer
 from tests.test_responses import get_function_tool_call
 from tests.utils.hitl import (
     RecordingEditor,
-    make_apply_patch_call,
     make_apply_patch_dict,
     make_shell_call,
 )
@@ -354,11 +356,36 @@ def test_process_model_response_sanitizes_apply_patch_call_model_object() -> Non
     assert processed.tools_used == [apply_patch_tool.name]
 
 
-def test_process_model_response_converts_custom_apply_patch_call() -> None:
+def test_process_model_response_queues_apply_patch_call() -> None:
     editor = RecordingEditor()
     apply_patch_tool = ApplyPatchTool(editor=editor)
     agent = Agent(name="apply-agent", model=FakeModel(), tools=[apply_patch_tool])
-    custom_call = make_apply_patch_call("custom-apply-1")
+    apply_patch_call = make_apply_patch_dict("apply-1")
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=[apply_patch_tool],
+        response=_response([apply_patch_call]),
+        output_schema=None,
+        handoffs=[],
+    )
+
+    assert processed.apply_patch_calls, "apply_patch call should be queued"
+    converted_call = processed.apply_patch_calls[0].tool_call
+    assert isinstance(converted_call, dict)
+    assert converted_call.get("type") == "apply_patch_call"
+
+
+def test_process_model_response_queues_hosted_apply_patch_from_custom_tool_call() -> None:
+    editor = RecordingEditor()
+    apply_patch_tool = ApplyPatchTool(editor=editor)
+    agent = Agent(name="apply-agent-custom", model=FakeModel(), tools=[apply_patch_tool])
+    custom_call = ResponseCustomToolCall(
+        type="custom_tool_call",
+        name="apply_patch",
+        call_id="custom-apply-1",
+        input='{"type":"update_file","path":"test.md","diff":"-old\\n+new\\n"}',
+    )
 
     processed = run_loop.process_model_response(
         agent=agent,
@@ -368,10 +395,48 @@ def test_process_model_response_converts_custom_apply_patch_call() -> None:
         handoffs=[],
     )
 
-    assert processed.apply_patch_calls, "Custom apply_patch call should be converted"
+    assert len(processed.new_items) == 1
+    item = processed.new_items[0]
+    assert isinstance(item, ToolCallItem)
+    assert isinstance(item.raw_item, dict)
+    assert item.raw_item["type"] == "apply_patch_call"
+    assert processed.apply_patch_calls, "apply_patch call should be queued"
     converted_call = processed.apply_patch_calls[0].tool_call
     assert isinstance(converted_call, dict)
-    assert converted_call.get("type") == "apply_patch_call"
+    assert converted_call["type"] == "apply_patch_call"
+    assert converted_call["operation"]["type"] == "update_file"
+    assert processed.tools_used == [apply_patch_tool.name]
+
+
+def test_process_model_response_queues_custom_tool_call_for_custom_tool() -> None:
+    custom_tool = CustomTool(
+        name="raw_editor",
+        description="Edit raw text.",
+        on_invoke_tool=lambda _ctx, raw_input: raw_input,
+        format={"type": "text"},
+    )
+    agent = Agent(name="custom-agent", model=FakeModel(), tools=[custom_tool])
+    custom_call = ResponseCustomToolCall(
+        type="custom_tool_call",
+        name="raw_editor",
+        call_id="custom-apply-1",
+        input="-old\n+new\n",
+    )
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=[custom_tool],
+        response=_response([custom_call]),
+        output_schema=None,
+        handoffs=[],
+    )
+
+    item = processed.new_items[0]
+    assert isinstance(item, ToolCallItem)
+    assert cast(object, item.raw_item) is custom_call
+    assert processed.apply_patch_calls == []
+    assert processed.custom_tool_calls[0].tool_call is custom_call
+    assert processed.custom_tool_calls[0].custom_tool is custom_tool
 
 
 def test_process_model_response_prefers_namespaced_function_over_apply_patch_fallback() -> None:
@@ -802,3 +867,25 @@ def test_process_model_response_rejects_mismatched_function_namespace() -> None:
             output_schema=None,
             handoffs=[],
         )
+
+
+def test_process_model_response_collects_missing_function_tool_when_opted_in() -> None:
+    agent = Agent(name="test", model=FakeModel(), tools=[function_tool(lambda: "ok")])
+    missing_call = get_function_tool_call("missing_tool", "{}", call_id="call_missing")
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=agent.tools,
+        response=_response([missing_call]),
+        output_schema=None,
+        handoffs=[],
+        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
+    )
+
+    assert len(processed.new_items) == 1
+    assert isinstance(processed.new_items[0], ToolCallItem)
+    assert processed.functions == []
+    assert len(processed.function_tools_not_found) == 1
+    assert processed.function_tools_not_found[0].tool_call is missing_call
+    assert processed.function_tools_not_found[0].tool_name == "missing_tool"
+    assert processed.has_tools_or_approvals_to_run()

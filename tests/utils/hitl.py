@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
-from collections.abc import Awaitable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, cast
+from typing import Any, cast
 
-from openai.types.responses import ResponseCustomToolCall, ResponseFunctionToolCall
+from openai.types.responses import ResponseFunctionToolCall
 
 from agents import Agent, Runner, RunResult, RunResultStreaming
 from agents.items import ToolApprovalItem, ToolCallOutputItem, TResponseOutputItem
@@ -280,17 +279,6 @@ def make_shell_call(
             "status": status,
             "action": {"type": "exec", "commands": commands or ["echo test"], "timeout_ms": 1000},
         },
-    )
-
-
-def make_apply_patch_call(call_id: str, diff: str = "-a\n+b\n") -> ResponseCustomToolCall:
-    """Create a ResponseCustomToolCall for apply_patch."""
-    operation_json = json.dumps({"type": "update_file", "path": "test.md", "diff": diff})
-    return ResponseCustomToolCall(
-        type="custom_tool_call",
-        name="apply_patch",
-        call_id=call_id,
-        input=operation_json,
     )
 
 

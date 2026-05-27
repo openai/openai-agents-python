@@ -1,0 +1,3 @@
+# `Errors`
+
+::: agents.sandbox.errors

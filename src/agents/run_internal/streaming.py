@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from ..items import (
+    CompactionItem,
     HandoffCallItem,
     HandoffOutputItem,
     MCPApprovalRequestItem,
@@ -54,6 +55,8 @@ def stream_step_items_to_queue(
             event = RunItemStreamEvent(item=item, name="mcp_list_tools")
         elif isinstance(item, ToolApprovalItem):
             event = None  # approvals represent interruptions, not streamed items
+        elif isinstance(item, CompactionItem):
+            event = None  # compaction items are session bookkeeping, not streamed items
         else:
             logger.warning("Unexpected item type: %s", type(item))
             event = None

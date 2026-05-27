@@ -4,8 +4,9 @@ import asyncio
 import json
 import tempfile
 import warnings
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, cast
 from unittest.mock import patch
 
 import httpx
@@ -55,6 +56,7 @@ from agents.items import (
 from agents.lifecycle import RunHooks
 from agents.run import AgentRunner, get_default_agent_runner, set_default_agent_runner
 from agents.run_config import _default_trace_include_sensitive_data
+from agents.run_internal.agent_bindings import bind_public_agent
 from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
@@ -68,6 +70,7 @@ from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
 from agents.run_internal.run_loop import get_new_response
 from agents.run_internal.run_steps import NextStepFinalOutput, SingleStepResult
 from agents.run_internal.session_persistence import (
+    _collect_retry_owned_tail_serializations,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     rewind_session_items,
@@ -143,6 +146,21 @@ async def run_execute_approved_tools(
     )
 
     return generated_items
+
+
+async def _run_agent_with_optional_streaming(
+    agent: Agent[Any],
+    *,
+    input: str | list[TResponseInputItem],
+    streamed: bool,
+    **kwargs: Any,
+):
+    if streamed:
+        result = Runner.run_streamed(agent, input=input, **kwargs)
+        async for _ in result.stream_events():
+            pass
+        return result
+    return await Runner.run(agent, input=input, **kwargs)
 
 
 def test_set_default_agent_runner_roundtrip():
@@ -1344,6 +1362,101 @@ async def test_opt_in_handoff_history_accumulates_across_multiple_handoffs():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize("nest_source", ["run_config", "handoff"], ids=["run_config", "handoff"])
+async def test_server_managed_handoff_history_auto_disables_with_warning(
+    streamed: bool,
+    nest_source: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+    delegate = Agent(name="delegate", model=delegate_model)
+
+    run_config = RunConfig()
+    triage_handoffs: list[Agent[Any] | Handoff[Any, Any]]
+    if nest_source == "handoff":
+        triage_handoffs = [handoff(delegate, nest_handoff_history=True)]
+    else:
+        triage_handoffs = [delegate]
+        run_config = RunConfig(nest_handoff_history=True)
+
+    triage = Agent(name="triage", model=triage_model, handoffs=triage_handoffs)
+    triage_model.add_multiple_turn_outputs(
+        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
+    )
+    delegate_model.add_multiple_turn_outputs([[get_text_message("done")]])
+
+    with caplog.at_level("WARNING", logger="openai.agents"):
+        result = await _run_agent_with_optional_streaming(
+            triage,
+            input="user_message",
+            streamed=streamed,
+            run_config=run_config,
+            auto_previous_response_id=True,
+        )
+
+    assert result.final_output == "done"
+    assert "do not support nest_handoff_history" in caplog.text
+    assert delegate_model.first_turn_args is not None
+    delegate_input = delegate_model.first_turn_args["input"]
+    assert isinstance(delegate_input, list)
+    assert len(delegate_input) == 1
+    handoff_output = delegate_input[0]
+    assert handoff_output.get("type") == "function_call_output"
+    assert "delegate" in str(handoff_output.get("output"))
+    assert not any(
+        isinstance(item, dict)
+        and item.get("role") == "assistant"
+        and "<CONVERSATION HISTORY>" in str(item.get("content"))
+        for item in delegate_input
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize("filter_source", ["run_config", "handoff"], ids=["run_config", "handoff"])
+async def test_server_managed_handoff_input_filters_still_raise(
+    streamed: bool,
+    filter_source: str,
+) -> None:
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+    delegate = Agent(name="delegate", model=delegate_model)
+
+    def passthrough_filter(data: HandoffInputData) -> HandoffInputData:
+        return data
+
+    run_config = RunConfig()
+    triage_handoffs: list[Agent[Any] | Handoff[Any, Any]]
+    if filter_source == "handoff":
+        triage_handoffs = [handoff(delegate, input_filter=passthrough_filter)]
+    else:
+        triage_handoffs = [delegate]
+        run_config = RunConfig(handoff_input_filter=passthrough_filter)
+
+    triage = Agent(name="triage", model=triage_model, handoffs=triage_handoffs)
+    triage_model.add_multiple_turn_outputs(
+        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
+    )
+    delegate_model.add_multiple_turn_outputs([[get_text_message("done")]])
+
+    with pytest.raises(
+        UserError,
+        match="Server-managed conversations do not support handoff input filters",
+    ):
+        await _run_agent_with_optional_streaming(
+            triage,
+            input="user_message",
+            streamed=streamed,
+            run_config=run_config,
+            auto_previous_response_id=True,
+        )
+
+    assert delegate_model.first_turn_args is None
+
+
+@pytest.mark.asyncio
 async def test_async_input_filter_supported():
     # DO NOT rename this without updating pyproject.toml
 
@@ -2005,6 +2118,219 @@ async def test_prepare_input_with_session_matches_copied_items_by_content() -> N
 
 
 @pytest.mark.asyncio
+async def test_prepare_input_with_openai_conversation_strips_assistant_history_ids() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self, history: list[TResponseInputItem]) -> None:
+            self.history = history
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            if limit is None:
+                return list(self.history)
+            return self.history[-limit:]
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.history.extend(items)
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return self.history.pop() if self.history else None
+
+        async def clear_session(self) -> None:
+            self.history.clear()
+
+    history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_assistant",
+            "type": "message",
+            "role": "assistant",
+            "content": "history",
+            "provider_data": {"server": "metadata"},
+        },
+    )
+    user_history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_user",
+            "type": "message",
+            "role": "user",
+            "content": "user history",
+            "provider_data": {"server": "metadata"},
+        },
+    )
+    function_call_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_call",
+            "type": "function_call",
+            "call_id": "call_history",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+    )
+    function_call_output_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_output",
+            "type": "function_call_output",
+            "call_id": "call_history",
+            "output": "ok",
+        },
+    )
+    session = DummyOpenAIConversationsSession(
+        history=[user_history_item, history_item, function_call_item, function_call_output_item]
+    )
+
+    prepared, session_items = await prepare_input_with_session("new", session, None)
+
+    assert isinstance(prepared, list)
+    user_payload = cast(dict[str, Any], prepared[0])
+    history_payload = cast(dict[str, Any], prepared[1])
+    call_payload = cast(dict[str, Any], prepared[2])
+    output_payload = cast(dict[str, Any], prepared[3])
+    new_payload = cast(dict[str, Any], prepared[4])
+    assert user_payload["role"] == "user"
+    assert user_payload["id"] == "conv_item_user"
+    assert "provider_data" in user_payload
+    assert history_payload["role"] == "assistant"
+    assert "id" not in history_payload
+    assert "provider_data" not in history_payload
+    assert call_payload["id"] == "conv_item_call"
+    assert output_payload["id"] == "conv_item_output"
+    assert new_payload["role"] == "user"
+    assert new_payload["content"] == "new"
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_regular_session_preserves_history_ids() -> None:
+    history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "message_id",
+            "type": "message",
+            "role": "assistant",
+            "content": "history",
+        },
+    )
+    session = SimpleListSession(history=[history_item])
+
+    prepared, _ = await prepare_input_with_session("new", session, None)
+
+    assert isinstance(prepared, list)
+    history_payload = cast(dict[str, Any], prepared[0])
+    assert history_payload["id"] == "message_id"
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_openai_conversation_callback_matches_assistant_no_ids() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self, history: list[TResponseInputItem]) -> None:
+            self.history = history
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            if limit is None:
+                return list(self.history)
+            return self.history[-limit:]
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.history.extend(items)
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return self.history.pop() if self.history else None
+
+        async def clear_session(self) -> None:
+            self.history.clear()
+
+    history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_assistant",
+            "type": "message",
+            "role": "assistant",
+            "content": "history",
+            "provider_data": {"server": "metadata"},
+        },
+    )
+    session = DummyOpenAIConversationsSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        history_copy = dict(cast(dict[str, Any], history[0]))
+        history_copy.pop("id", None)
+        history_copy.pop("provider_data", None)
+        return [
+            cast(TResponseInputItem, history_copy),
+            cast(TResponseInputItem, dict(cast(dict[str, Any], new_input[0]))),
+        ]
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+
+    assert isinstance(prepared, list)
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "history",
+        "new",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_openai_conversation_callback_keeps_user_ids_distinct() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self, history: list[TResponseInputItem]) -> None:
+            self.history = history
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            if limit is None:
+                return list(self.history)
+            return self.history[-limit:]
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.history.extend(items)
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return self.history.pop() if self.history else None
+
+        async def clear_session(self) -> None:
+            self.history.clear()
+
+    history_item = cast(
+        TResponseInputItem,
+        {
+            "id": "conv_item_user",
+            "type": "message",
+            "role": "user",
+            "content": "history",
+            "provider_data": {"server": "metadata"},
+        },
+    )
+    session = DummyOpenAIConversationsSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        history_copy = dict(cast(dict[str, Any], history[0]))
+        history_copy.pop("id", None)
+        history_copy.pop("provider_data", None)
+        return [
+            cast(TResponseInputItem, history_copy),
+            cast(TResponseInputItem, dict(cast(dict[str, Any], new_input[0]))),
+        ]
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+
+    assert isinstance(prepared, list)
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "history",
+        "new",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == [
+        "history",
+        "new",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_persist_session_items_for_guardrail_trip_uses_original_input_when_missing() -> None:
     session = SimpleListSession()
     agent = Agent(name="agent", model=FakeModel())
@@ -2107,7 +2433,7 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
     agent = Agent(name="test", model=model)
 
     result = await get_new_response(
-        agent=agent,
+        bindings=bind_public_agent(agent),
         system_prompt=None,
         input=[history_item, new_item],
         output_schema=None,
@@ -2152,7 +2478,7 @@ async def test_get_new_response_uses_agent_retry_settings() -> None:
     )
 
     result = await get_new_response(
-        agent=agent,
+        bindings=bind_public_agent(agent),
         system_prompt=None,
         input=[get_text_input_item("hello")],
         output_schema=None,
@@ -2250,6 +2576,79 @@ async def test_rewind_handles_id_stripped_sessions() -> None:
 
     assert session.pop_calls == 1
     assert session.saved_items == []
+
+
+@pytest.mark.asyncio
+async def test_rewind_skips_mismatched_tail_suffix() -> None:
+    target = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "target"})
+    unrelated = cast(
+        TResponseInputItem,
+        {"type": "message", "role": "user", "content": "unrelated tail item"},
+    )
+    session = CountingSession(history=[target, unrelated])
+
+    await rewind_session_items(session, [target])
+
+    assert session.pop_calls == 0
+    assert session.saved_items == [target, unrelated]
+
+
+@pytest.mark.asyncio
+async def test_rewind_preserves_unrelated_tail_items_when_server_tracker_cleanup_runs() -> None:
+    known_server_item = cast(
+        TResponseInputItem,
+        {"id": "msg_server_1", "type": "message", "role": "assistant", "content": "server item"},
+    )
+    unrelated = cast(
+        TResponseInputItem,
+        {"type": "message", "role": "user", "content": "unrelated tail item"},
+    )
+    target = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "target"})
+    session = CountingSession(history=[known_server_item, unrelated, target])
+    tracker = OpenAIServerConversationTracker()
+    tracker.server_item_ids.add("msg_server_1")
+
+    await rewind_session_items(session, [target], tracker)
+
+    assert session.pop_calls == 1
+    assert session.saved_items == [known_server_item, unrelated]
+
+
+@pytest.mark.asyncio
+async def test_rewind_strips_only_retry_owned_tail_items_before_known_server_item() -> None:
+    known_server_item = cast(
+        TResponseInputItem,
+        {"id": "msg_server_1", "type": "message", "role": "assistant", "content": "server item"},
+    )
+    retry_owned_tail = cast(
+        TResponseInputItem,
+        {"type": "message", "role": "user", "content": "retry-owned local item"},
+    )
+    target = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "target"})
+    session = CountingSession(history=[known_server_item, retry_owned_tail, target])
+    tracker = OpenAIServerConversationTracker()
+    tracker.server_item_ids.add("msg_server_1")
+    retry_owned_fingerprint = fingerprint_input_item(retry_owned_tail)
+    assert retry_owned_fingerprint is not None
+    tracker.sent_item_fingerprints.add(retry_owned_fingerprint)
+
+    await rewind_session_items(session, [target], tracker)
+
+    assert session.pop_calls == 2
+    assert session.saved_items == [known_server_item]
+
+
+def test_collect_retry_owned_tail_serializations_returns_empty_for_empty_session() -> None:
+    tracker = OpenAIServerConversationTracker()
+
+    assert (
+        _collect_retry_owned_tail_serializations(
+            [],
+            server_tracker=tracker,
+            ignore_ids_for_matching=False,
+        )
+        == []
+    )
 
 
 @pytest.mark.asyncio
@@ -2395,6 +2794,154 @@ async def test_save_result_to_session_omits_reasoning_ids_when_policy_is_omit() 
     saved_reasoning = cast(dict[str, Any], session.saved_items[0])
     assert saved_reasoning.get("type") == "reasoning"
     assert "id" not in saved_reasoning
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_openai_conversation_preserves_reasoning_id_when_policy_is_omit() -> (
+    None
+):
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    agent = Agent(name="agent", model=FakeModel())
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    run_state.set_reasoning_item_id_policy("omit")
+
+    reasoning_item = ReasoningItem(
+        agent=agent,
+        raw_item=ResponseReasoningItem(
+            type="reasoning",
+            id="rs_openai_conversation",
+            summary=[Summary(text="thinking", type="summary_text")],
+        ),
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [reasoning_item]),
+        run_state,
+    )
+
+    assert saved_count == 1
+    assert run_state._current_turn_persisted_item_count == 1
+    assert len(session.saved_items) == 1
+    saved_reasoning = cast(dict[str, Any], session.saved_items[0])
+    assert saved_reasoning.get("type") == "reasoning"
+    assert saved_reasoning.get("id") == "rs_openai_conversation"
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_openai_conversation_drops_unpersistable_reasoning_item() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    agent = Agent(name="agent", model=FakeModel())
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    malformed_reasoning = _DummyRunItem(
+        {"type": "reasoning", "summary": [], "content": []},
+        "reasoning_item",
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [malformed_reasoning]),
+        run_state,
+    )
+
+    assert saved_count == 1
+    assert run_state._current_turn_persisted_item_count == 1
+    assert session.saved_items == []
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_openai_conversation_keeps_reasoning_encrypted_content() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    encrypted_reasoning = _DummyRunItem(
+        {
+            "type": "reasoning",
+            "summary": [],
+            "content": [],
+            "encrypted_content": "encrypted",
+        },
+        "reasoning_item",
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [encrypted_reasoning]),
+        None,
+    )
+
+    assert saved_count == 1
+    assert len(session.saved_items) == 1
+    saved_reasoning = cast(dict[str, Any], session.saved_items[0])
+    assert saved_reasoning["encrypted_content"] == "encrypted"
 
 
 @pytest.mark.asyncio
@@ -3777,6 +4324,132 @@ async def test_dynamic_tool_addition_run() -> None:
 
     assert executed["called"] is True
     assert result.final_output == "done"
+
+
+@pytest.mark.asyncio
+async def test_tool_not_found_behavior_returns_error_to_model() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("missing_tool", "{}", call_id="call_missing")],
+            [get_text_message("recovered")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
+    )
+
+    assert result.final_output == "recovered"
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    tool_outputs = [
+        item
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ]
+    assert tool_outputs == [
+        {
+            "call_id": "call_missing",
+            "output": "Tool 'missing_tool' not found.",
+            "type": "function_call_output",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_not_found_behavior_uses_tool_error_formatter() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("missing_tool", "{}", call_id="call_missing")],
+            [get_text_message("recovered")],
+        ]
+    )
+    seen_kinds: list[str] = []
+
+    async def formatter(args: Any) -> str | None:
+        seen_kinds.append(args.kind)
+        if args.kind != "tool_not_found":
+            return None
+        return f"{args.tool_name} unavailable for {args.call_id}"
+
+    result = await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(
+            tool_not_found_behavior="return_error_to_model",
+            tool_error_formatter=formatter,
+        ),
+    )
+
+    assert result.final_output == "recovered"
+    assert seen_kinds == ["tool_not_found"]
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    tool_outputs = [
+        item
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ]
+    assert tool_outputs == [
+        {
+            "call_id": "call_missing",
+            "output": "missing_tool unavailable for call_missing",
+            "type": "function_call_output",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_not_found_behavior_handles_mixed_function_tool_calls() -> None:
+    model = FakeModel()
+    calls: list[str] = []
+
+    @function_tool(name_override="known_tool")
+    async def known_tool() -> str:
+        calls.append("known_tool")
+        return "known result"
+
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[known_tool],
+        tool_use_behavior="run_llm_again",
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call("missing_tool", "{}", call_id="call_missing"),
+                get_function_tool_call("known_tool", "{}", call_id="call_known"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
+    )
+
+    assert calls == ["known_tool"]
+    assert result.final_output == "done"
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    tool_outputs = {
+        item.get("call_id"): item.get("output")
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    }
+    assert tool_outputs == {
+        "call_known": "known result",
+        "call_missing": "Tool 'missing_tool' not found.",
+    }
 
 
 @pytest.mark.asyncio

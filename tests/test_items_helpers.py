@@ -128,6 +128,27 @@ def test_extract_text_concatenates_all_text_segments() -> None:
     )
 
 
+def test_extract_text_tolerates_none_text_content() -> None:
+    """Regression: ``content_item.text`` can be ``None`` when output items
+    are assembled via ``model_construct`` (e.g. partial streaming responses)
+    or surfaced through provider gateways like LiteLLM. Without the ``or ""``
+    guard, ``extract_text`` raised
+    ``TypeError: can only concatenate str (not "NoneType") to str`` deep
+    inside ``execute_tools_and_side_effects`` and aborted the agent turn.
+    """
+    none_text = ResponseOutputText.model_construct(
+        annotations=[], text=None, type="output_text", logprobs=[]
+    )
+    real_text = ResponseOutputText(annotations=[], text="hello", type="output_text", logprobs=[])
+
+    # Single None-text item: result is None (since concatenated text is "").
+    assert ItemHelpers.extract_text(make_message([none_text])) is None
+
+    # Mixed content: real text is preserved, None is skipped.
+    assert ItemHelpers.extract_text(make_message([real_text, none_text])) == "hello"
+    assert ItemHelpers.extract_text(make_message([none_text, real_text])) == "hello"
+
+
 def test_input_to_new_input_list_from_string() -> None:
     result = ItemHelpers.input_to_new_input_list("hi")
     # Should wrap the string into a list with a single dict containing content and user role.
@@ -594,3 +615,106 @@ def test_tool_call_item_to_input_item_keeps_payload_api_safe() -> None:
     assert result_dict["type"] == "function_call"
     assert "title" not in result_dict
     assert "description" not in result_dict
+
+
+def test_tool_call_item_tool_name_from_function_call() -> None:
+    """ToolCallItem.tool_name should return the name attribute from a typed raw item."""
+    agent = Agent(name="test")
+    raw = ResponseFunctionToolCall(
+        id="fc1",
+        call_id="call_1",
+        name="my_tool",
+        arguments="{}",
+        type="function_call",
+    )
+    item = ToolCallItem(agent=agent, raw_item=raw)
+    assert item.tool_name == "my_tool"
+
+
+def test_tool_call_item_tool_name_from_dict() -> None:
+    """ToolCallItem.tool_name should return the 'name' key from a dict raw item."""
+    agent = Agent(name="test")
+    raw: dict[str, Any] = {
+        "type": "function_call",
+        "name": "dict_tool",
+        "call_id": "call_1",
+        "arguments": "{}",
+    }
+    item = ToolCallItem(agent=agent, raw_item=raw)
+    assert item.tool_name == "dict_tool"
+
+
+def test_tool_call_item_tool_name_returns_none_when_missing() -> None:
+    """ToolCallItem.tool_name should be None when the raw item has no name attribute."""
+    agent = Agent(name="test")
+    raw = ResponseFileSearchToolCall(
+        id="fs1",
+        queries=["q"],
+        status="completed",
+        type="file_search_call",
+    )
+    item = ToolCallItem(agent=agent, raw_item=raw)
+    assert item.tool_name is None
+
+
+def test_tool_call_item_call_id_from_function_call() -> None:
+    """ToolCallItem.call_id should return the call_id attribute from a typed raw item."""
+    agent = Agent(name="test")
+    raw = ResponseFunctionToolCall(
+        id="fc1",
+        call_id="call_abc",
+        name="t",
+        arguments="{}",
+        type="function_call",
+    )
+    item = ToolCallItem(agent=agent, raw_item=raw)
+    assert item.call_id == "call_abc"
+
+
+def test_tool_call_item_call_id_falls_back_to_id() -> None:
+    """ToolCallItem.call_id should fall back to id when call_id is absent."""
+    agent = Agent(name="test")
+    raw = ResponseFileSearchToolCall(
+        id="fs_xyz",
+        queries=["q"],
+        status="completed",
+        type="file_search_call",
+    )
+    item = ToolCallItem(agent=agent, raw_item=raw)
+    assert item.call_id == "fs_xyz"
+
+
+def test_tool_call_item_call_id_from_dict() -> None:
+    """ToolCallItem.call_id should return the 'call_id' key from a dict raw item."""
+    agent = Agent(name="test")
+    raw: dict[str, Any] = {
+        "type": "function_call",
+        "name": "t",
+        "call_id": "call_dict_id",
+        "arguments": "{}",
+    }
+    item = ToolCallItem(agent=agent, raw_item=raw)
+    assert item.call_id == "call_dict_id"
+
+
+def test_tool_call_output_item_call_id_from_function_call_output() -> None:
+    """ToolCallOutputItem.call_id should return call_id from the FunctionCallOutput dict."""
+    agent = Agent(name="test")
+    raw = {
+        "type": "function_call_output",
+        "call_id": "call_out_1",
+        "output": "ok",
+    }
+    item = ToolCallOutputItem(agent=agent, raw_item=raw, output="ok")
+    assert item.call_id == "call_out_1"
+
+
+def test_tool_call_output_item_call_id_returns_none_when_missing() -> None:
+    """ToolCallOutputItem.call_id should be None when neither call_id nor id are present."""
+    agent = Agent(name="test")
+    raw = {
+        "type": "function_call_output",
+        "output": "ok",
+    }
+    item = ToolCallOutputItem(agent=agent, raw_item=raw, output="ok")
+    assert item.call_id is None

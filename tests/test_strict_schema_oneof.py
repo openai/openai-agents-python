@@ -1,4 +1,4 @@
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -120,7 +120,7 @@ def test_discriminated_union_with_pydantic():
         args: FoodArgs
 
     class Actions(BaseModel):
-        steps: list[Annotated[Union[BuyFruitStep, BuyFoodStep], Field(discriminator="action")]]
+        steps: list[Annotated[BuyFruitStep | BuyFoodStep, Field(discriminator="action")]]
 
     output_schema = AgentOutputSchema(Actions)
     schema = output_schema.json_schema()

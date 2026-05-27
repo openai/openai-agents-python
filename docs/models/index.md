@@ -22,16 +22,16 @@ Start with the simplest path that fits your setup:
 
 For most OpenAI-only apps, the recommended path is to use string model names with the default OpenAI provider and stay on the Responses model path.
 
-When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-4.1`](https://developers.openai.com/api/docs/models/gpt-4.1) for compatibility and low latency. If you have access, we recommend setting your agents to [`gpt-5.4`](https://developers.openai.com/api/docs/models/gpt-5.4) for higher quality while keeping explicit `model_settings`.
+When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-5.4-mini`](https://developers.openai.com/api/docs/models/gpt-5.4-mini) with `reasoning.effort="none"` and `verbosity="low"` for low-latency agent workflows. If you have access, we recommend setting your agents to [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) for higher quality while keeping explicit `model_settings`.
 
-If you want to switch to other models like [`gpt-5.4`](https://developers.openai.com/api/docs/models/gpt-5.4), there are two ways to configure your agents.
+If you want to switch to other models like [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5), there are two ways to configure your agents.
 
 ### Default model
 
 First, if you want to consistently use a specific model for all agents that do not set a custom model, set the `OPENAI_DEFAULT_MODEL` environment variable before running your agents.
 
 ```bash
-export OPENAI_DEFAULT_MODEL=gpt-5.4
+export OPENAI_DEFAULT_MODEL=gpt-5.5
 python3 my_awesome_agent.py
 ```
 
@@ -48,13 +48,13 @@ agent = Agent(
 result = await Runner.run(
     agent,
     "Hello",
-    run_config=RunConfig(model="gpt-5.4"),
+    run_config=RunConfig(model="gpt-5.5"),
 )
 ```
 
 #### GPT-5 models
 
-When you use any GPT-5 model such as [`gpt-5.4`](https://developers.openai.com/api/docs/models/gpt-5.4) in this way, the SDK applies default `ModelSettings`. It sets the ones that work the best for most use cases. To adjust the reasoning effort for the default model, pass your own `ModelSettings`:
+When you use any GPT-5 model such as [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) in this way, the SDK applies default `ModelSettings`. It sets the ones that work the best for most use cases. To adjust the reasoning effort for the default model, pass your own `ModelSettings`:
 
 ```python
 from openai.types.shared import Reasoning
@@ -63,20 +63,20 @@ from agents import Agent, ModelSettings
 my_agent = Agent(
     name="My Agent",
     instructions="You're a helpful agent.",
-    # If OPENAI_DEFAULT_MODEL=gpt-5.4 is set, passing only model_settings works.
+    # If OPENAI_DEFAULT_MODEL=gpt-5.5 is set, passing only model_settings works.
     # It's also fine to pass a GPT-5 model name explicitly:
-    model="gpt-5.4",
+    model="gpt-5.5",
     model_settings=ModelSettings(reasoning=Reasoning(effort="high"), verbosity="low")
 )
 ```
 
-For lower latency, using `reasoning.effort="none"` with `gpt-5.4` is recommended. The gpt-4.1 family (including mini and nano variants) also remains a solid choice for building interactive agent apps.
+For lower latency, using `reasoning.effort="none"` with GPT-5 models is recommended.
 
 #### ComputerTool model selection
 
-If an agent includes [`ComputerTool`][agents.tool.ComputerTool], the effective model on the actual Responses request determines which computer-tool payload the SDK sends. Explicit `gpt-5.4` requests use the GA built-in `computer` tool, while explicit `computer-use-preview` requests keep the older `computer_use_preview` payload.
+If an agent includes [`ComputerTool`][agents.tool.ComputerTool], the effective model on the actual Responses request determines which computer-tool payload the SDK sends. Explicit `gpt-5.5` requests use the GA built-in `computer` tool, while explicit `computer-use-preview` requests keep the older `computer_use_preview` payload.
 
-Prompt-managed calls are the main exception. If a prompt template owns the model and the SDK omits `model` from the request, the SDK defaults to the preview-compatible computer payload so it does not guess which model the prompt pins. To keep the GA path in that flow, either make `model="gpt-5.4"` explicit on the request or force the GA selector with `ModelSettings(tool_choice="computer")` or `ModelSettings(tool_choice="computer_use")`.
+Prompt-managed calls are the main exception. If a prompt template owns the model and the SDK omits `model` from the request, the SDK defaults to the preview-compatible computer payload so it does not guess which model the prompt pins. To keep the GA path in that flow, either make `model="gpt-5.5"` explicit on the request or force the GA selector with `ModelSettings(tool_choice="computer")` or `ModelSettings(tool_choice="computer_use")`.
 
 With a registered [`ComputerTool`][agents.tool.ComputerTool], `tool_choice="computer"`, `"computer_use"`, and `"computer_use_preview"` are normalized to the built-in selector that matches the effective request model. If no `ComputerTool` is registered, those strings continue to behave like ordinary function names.
 
@@ -108,7 +108,7 @@ from agents import set_default_openai_responses_transport
 set_default_openai_responses_transport("websocket")
 ```
 
-This affects OpenAI Responses models resolved by the default OpenAI provider (including string model names such as `"gpt-5.4"`).
+This affects OpenAI Responses models resolved by the default OpenAI provider (including string model names such as `"gpt-5.5"`).
 
 Transport selection happens when the SDK resolves a model name into a model instance. If you pass a concrete [`Model`][agents.models.interface.Model] object, its transport is already fixed: [`OpenAIResponsesWSModel`][agents.models.openai_responses.OpenAIResponsesWSModel] uses websocket, [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] uses HTTP, and [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] stays on Chat Completions. If you pass `RunConfig(model_provider=...)`, that provider controls transport selection instead of the global default.
 
@@ -123,6 +123,32 @@ provider = OpenAIProvider(
     use_responses_websocket=True,
     # Optional; if omitted, OPENAI_WEBSOCKET_BASE_URL is used when set.
     websocket_base_url="wss://your-proxy.example/v1",
+    # Optional low-level websocket keepalive settings.
+    responses_websocket_options={"ping_interval": 20.0, "ping_timeout": 60.0},
+)
+
+agent = Agent(name="Assistant")
+result = await Runner.run(
+    agent,
+    "Hello",
+    run_config=RunConfig(model_provider=provider),
+)
+```
+
+OpenAI-backed providers also accept optional agent registration config. This is an advanced option for cases where your OpenAI setup expects provider-level registration metadata such as a harness ID.
+
+```python
+from agents import (
+    Agent,
+    OpenAIAgentRegistrationConfig,
+    OpenAIProvider,
+    RunConfig,
+    Runner,
+)
+
+provider = OpenAIProvider(
+    use_responses_websocket=True,
+    agent_registration=OpenAIAgentRegistrationConfig(harness_id="your-harness-id"),
 )
 
 agent = Agent(name="Assistant")
@@ -170,6 +196,8 @@ result = await Runner.run(
 
 Use `openai_prefix_mode="model_id"` when a backend expects the literal `openai/...` string. Use `unknown_prefix_mode="model_id"` when the backend expects other namespaced model IDs such as `openrouter/openai/gpt-4.1-mini`. These options also work on `MultiProvider` outside websocket transport; this example keeps websocket enabled because it is part of the transport setup described in this section. The same options are also available on [`responses_websocket_session()`][agents.responses_websocket_session].
 
+If you need the same provider-level registration metadata while routing through `MultiProvider`, pass `openai_agent_registration=OpenAIAgentRegistrationConfig(...)` and it will be forwarded to the underlying OpenAI provider.
+
 If you use a custom OpenAI-compatible endpoint or proxy, websocket transport also requires a compatible websocket `/responses` endpoint. In those setups you may need to set `websocket_base_url` explicitly.
 
 #### Notes
@@ -177,6 +205,7 @@ If you use a custom OpenAI-compatible endpoint or proxy, websocket transport als
 -   This is the Responses API over websocket transport, not the [Realtime API](../realtime/guide.md). It does not apply to Chat Completions or non-OpenAI providers unless they support the Responses websocket `/responses` endpoint.
 -   Install the `websockets` package if it is not already available in your environment.
 -   You can use [`Runner.run_streamed()`][agents.run.Runner.run_streamed] directly after enabling websocket transport. For multi-turn workflows where you want to reuse the same websocket connection across turns (and nested agent-as-tool calls), the [`responses_websocket_session()`][agents.responses_websocket_session] helper is recommended. See the [Running agents](../running_agents.md) guide and [`examples/basic/stream_ws.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/stream_ws.py).
+-   For long reasoning turns or networks with latency spikes, customize websocket keepalive behavior with `responses_websocket_options`. Increase `ping_timeout` to tolerate delayed pong frames, or set `ping_timeout=None` to disable heartbeat timeouts while keeping pings enabled. Prefer HTTP/SSE transport when reliability is more important than websocket latency.
 
 ## Non-OpenAI models
 
@@ -249,7 +278,7 @@ triage_agent = Agent(
     name="Triage agent",
     instructions="Handoff to the appropriate agent based on the language of the request.",
     handoffs=[spanish_agent, english_agent],
-    model="gpt-5.4",
+    model="gpt-5.5",
 )
 
 async def main():
@@ -284,6 +313,7 @@ When you are using the OpenAI Responses API, several request fields already have
 - `parallel_tool_calls`: Allow or forbid multiple tool calls in the same turn.
 - `truncation`: Set `"auto"` to let the Responses API drop the oldest conversation items instead of failing when context would overflow.
 - `store`: Control whether the generated response is stored server-side for later retrieval. This matters for follow-up workflows that rely on response IDs, and for session compaction flows that may need to fall back to local input when `store=False`.
+- `context_management`: Configure server-side context handling such as Responses compaction with `compact_threshold`.
 - `prompt_cache_retention`: Keep cached prompt prefixes around longer, for example with `"24h"`.
 - `response_include`: Request richer response payloads such as `web_search_call.action.sources`, `file_search_call.results`, or `reasoning.encrypted_content`.
 - `top_logprobs`: Request top-token logprobs for output text. The SDK also adds `message.output_text.logprobs` automatically.
@@ -294,11 +324,12 @@ from agents import Agent, ModelSettings
 
 research_agent = Agent(
     name="Research agent",
-    model="gpt-5.4",
+    model="gpt-5.5",
     model_settings=ModelSettings(
         parallel_tool_calls=False,
         truncation="auto",
         store=True,
+        context_management=[{"type": "compaction", "compact_threshold": 200000}],
         prompt_cache_retention="24h",
         response_include=["web_search_call.action.sources"],
         top_logprobs=5,
@@ -308,11 +339,13 @@ research_agent = Agent(
 
 When you set `store=False`, the Responses API does not keep that response available for later server-side retrieval. This is useful for stateless or zero-data-retention style flows, but it also means features that would otherwise reuse response IDs need to rely on locally managed state instead. For example, [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession] switches its default `"auto"` compaction path to input-based compaction when the last response was not stored. See the [Sessions guide](../sessions/index.md#openai-responses-compaction-sessions).
 
+Server-side compaction is different from [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession]. `context_management=[{"type": "compaction", "compact_threshold": ...}]` is sent with each Responses API request, and the API can emit compaction items as part of the response when the rendered context crosses the threshold. `OpenAIResponsesCompactionSession` calls the standalone `responses.compact` endpoint between turns and rewrites the local session history.
+
 ### Passing `extra_args`
 
 Use `extra_args` when you need provider-specific or newer request fields that the SDK does not expose directly at the top level yet.
 
-Also, when you use OpenAI's Responses API, [there are a few other optional parameters](https://platform.openai.com/docs/api-reference/responses/create) (e.g., `user`, `service_tier`, and so on). If they are not available at the top level, you can use `extra_args` to pass them as well.
+Also, when you use OpenAI's Responses API, [there are a few other optional parameters](https://platform.openai.com/docs/api-reference/responses/create) (e.g., `user`, `service_tier`, and so on). If they are not available at the top level, you can use `extra_args` to pass them as well. Do not also set the same request field through a direct `ModelSettings` field.
 
 ```python
 from agents import Agent, ModelSettings
@@ -337,7 +370,7 @@ from agents import Agent, ModelRetrySettings, ModelSettings, retry_policies
 
 agent = Agent(
     name="Assistant",
-    model="gpt-5.4",
+    model="gpt-5.5",
     model_settings=ModelSettings(
         retry=ModelRetrySettings(
             max_retries=4,
@@ -365,7 +398,7 @@ agent = Agent(
 | Field | Type | Notes |
 | --- | --- | --- |
 | `max_retries` | `int | None` | Number of retry attempts allowed after the initial request. |
-| `backoff` | `ModelRetryBackoffSettings | dict | None` | Default delay strategy when the policy retries without returning an explicit delay. |
+| `backoff` | `ModelRetryBackoffSettings | dict | None` | Default delay strategy when the policy retries without returning an explicit delay. `backoff.max_delay` caps this computed backoff delay only. It does not cap explicit delays returned by a policy or retry-after hints. |
 | `policy` | `RetryPolicy | None` | Callback that decides whether to retry. This field is runtime-only and is not serialized. |
 
 </div>
@@ -391,7 +424,7 @@ The SDK exports ready-made helpers on `retry_policies`:
 | `retry_policies.provider_suggested()` | Follows provider retry advice when available. |
 | `retry_policies.network_error()` | Matches transient transport and timeout failures. |
 | `retry_policies.http_status([...])` | Matches selected HTTP status codes. |
-| `retry_policies.retry_after()` | Retries only when a retry-after hint is available, using that delay. |
+| `retry_policies.retry_after()` | Retries only when a retry-after hint is available, using that delay. This helper treats the retry-after value as an explicit policy delay, so `backoff.max_delay` does not cap it. |
 | `retry_policies.any(...)` | Retries when any nested policy opts in. |
 | `retry_policies.all(...)` | Retries only when every nested policy opts in. |
 

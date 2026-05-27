@@ -80,7 +80,7 @@ def _extract_headers(error: Exception) -> httpx.Headers | Mapping[str, str] | No
 
         for attr_name in ("headers", "response_headers"):
             headers = getattr(candidate, attr_name, None)
-            if isinstance(headers, (httpx.Headers, Mapping)):
+            if isinstance(headers, httpx.Headers | Mapping):
                 return headers
 
     return None
@@ -172,7 +172,7 @@ def _is_abort_like_error(error: Exception) -> bool:
 
 
 def _is_network_like_error(error: Exception) -> bool:
-    if isinstance(error, (APIConnectionError, APITimeoutError, TimeoutError)):
+    if isinstance(error, APIConnectionError | APITimeoutError | TimeoutError):
         return True
 
     network_error_types = (
@@ -215,7 +215,7 @@ def _normalize_retry_error(
         is_abort=_is_abort_like_error(error),
         is_network_error=_is_network_like_error(error),
         is_timeout=any(
-            isinstance(candidate, (APITimeoutError, TimeoutError))
+            isinstance(candidate, APITimeoutError | TimeoutError)
             for candidate in _iter_error_chain(error)
         ),
     )
@@ -663,7 +663,7 @@ async def stream_response_with_retry(
             return
         except BaseException as error:
             await _close_async_iterator_quietly(stream)
-            if isinstance(error, (asyncio.CancelledError, GeneratorExit)):
+            if isinstance(error, asyncio.CancelledError | GeneratorExit):
                 raise
             if not isinstance(error, Exception):
                 raise

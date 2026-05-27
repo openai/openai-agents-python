@@ -4,6 +4,11 @@ import httpx
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
 from ...models import _openai_shared
+from ...models.openai_agent_registration import (
+    OpenAIAgentRegistrationConfig,
+    ResolvedOpenAIAgentRegistrationConfig,
+    resolve_openai_agent_registration_config,
+)
 from ..model import STTModel, TTSModel, VoiceModelProvider
 from .openai_stt import OpenAISTTModel
 from .openai_tts import OpenAITTSModel
@@ -35,6 +40,7 @@ class OpenAIVoiceModelProvider(VoiceModelProvider):
         openai_client: AsyncOpenAI | None = None,
         organization: str | None = None,
         project: str | None = None,
+        agent_registration: OpenAIAgentRegistrationConfig | None = None,
     ) -> None:
         """Create a new OpenAI voice model provider.
 
@@ -47,6 +53,7 @@ class OpenAIVoiceModelProvider(VoiceModelProvider):
                 OpenAI client using the api_key and base_url.
             organization: The organization to use for the OpenAI client.
             project: The project to use for the OpenAI client.
+            agent_registration: Optional agent registration configuration.
         """
         if openai_client is not None:
             assert api_key is None and base_url is None, (
@@ -59,6 +66,11 @@ class OpenAIVoiceModelProvider(VoiceModelProvider):
             self._stored_base_url = base_url
             self._stored_organization = organization
             self._stored_project = project
+        self._agent_registration = resolve_openai_agent_registration_config(agent_registration)
+
+    @property
+    def agent_registration(self) -> ResolvedOpenAIAgentRegistrationConfig | None:
+        return self._agent_registration
 
     # We lazy load the client in case you never actually use OpenAIProvider(). Otherwise
     # AsyncOpenAI() raises an error if you don't have an API key set.

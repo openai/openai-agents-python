@@ -1,6 +1,10 @@
 """Tests for AdvancedSQLiteSession functionality."""
 
-from typing import Any, Optional, cast
+import asyncio
+import json
+import tempfile
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -44,9 +48,7 @@ def usage_data() -> Usage:
     )
 
 
-def create_mock_run_result(
-    usage: Optional[Usage] = None, agent: Optional[Agent] = None
-) -> RunResult:
+def create_mock_run_result(usage: Usage | None = None, agent: Agent | None = None) -> RunResult:
     """Helper function to create a mock RunResult for testing."""
     if agent is None:
         agent = Agent(name="test", model=FakeModel())
@@ -1342,4 +1344,81 @@ async def test_runner_with_session_settings_override(agent: Agent):
     # Should have 2 history items (last two from the 10 we added)
     assert len(history_items) == 2
 
+    session.close()
+
+
+async def test_concurrent_add_items_preserves_message_structure_for_file_db():
+    """Concurrent add_items calls should keep agent_messages and message_structure aligned."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "advanced_concurrent.db"
+        session = AdvancedSQLiteSession(
+            session_id="advanced_concurrent",
+            db_path=db_path,
+            create_tables=True,
+        )
+
+        async def add_batch(worker_id: int) -> list[str]:
+            contents = [f"worker-{worker_id}-message-{index}" for index in range(10)]
+            await session.add_items([{"role": "user", "content": content} for content in contents])
+            return contents
+
+        expected_batches = await asyncio.gather(*(add_batch(worker_id) for worker_id in range(8)))
+        expected_contents = {content for batch in expected_batches for content in batch}
+
+        retrieved_items = await session.get_items()
+        retrieved_contents = {
+            content
+            for item in retrieved_items
+            for content in [item.get("content")]
+            if isinstance(content, str)
+        }
+
+        assert retrieved_contents == expected_contents
+        assert len(retrieved_items) == len(expected_contents)
+
+        with session._locked_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT m.message_data
+                FROM {session.messages_table} m
+                JOIN message_structure s ON s.message_id = m.id
+                WHERE m.session_id = ?
+                ORDER BY s.sequence_number ASC
+                """,
+                (session.session_id,),
+            ).fetchall()
+
+        structured_contents = {json.loads(message_data).get("content") for (message_data,) in rows}
+
+        assert structured_contents == expected_contents
+        assert len(rows) == len(expected_contents)
+
+        session.close()
+
+
+async def test_output_tokens_details_persisted_when_input_details_missing():
+    """Regression: output_tokens_details must persist even if input_tokens_details is None.
+
+    Previously the output serialization branch was nested inside the input branch,
+    silently dropping output_tokens_details whenever input_tokens_details was falsy
+    (e.g., when a provider populated only output details).
+    """
+    session = AdvancedSQLiteSession(session_id="output_only_usage", create_tables=True)
+    usage = Usage(
+        requests=1,
+        input_tokens=10,
+        output_tokens=5,
+        total_tokens=15,
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=42),
+    )
+    # Mimic providers that bypass validation and leave input_tokens_details unset.
+    object.__setattr__(usage, "input_tokens_details", None)
+
+    await session.add_items([{"role": "user", "content": "hi"}])
+    await session.store_run_usage(create_mock_run_result(usage))
+
+    turn_usage = await session.get_turn_usage(1)
+    assert isinstance(turn_usage, dict)
+    assert turn_usage["output_tokens_details"] == {"reasoning_tokens": 42}
+    assert turn_usage["input_tokens_details"] is None
     session.close()

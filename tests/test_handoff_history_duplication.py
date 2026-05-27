@@ -365,7 +365,7 @@ class TestHandoffHistoryDuplicationFix:
         function_call_outputs = [
             item
             for item in all_input_items
-            if isinstance(item, (ToolCallOutputItem, HandoffOutputItem))
+            if isinstance(item, ToolCallOutputItem | HandoffOutputItem)
         ]
         assert len(function_call_outputs) == 0, (
             "No function_call_output items should be in model input"

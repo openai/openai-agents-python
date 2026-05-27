@@ -16,6 +16,16 @@ if TYPE_CHECKING:
 
 from .util._pretty_print import pretty_print_run_error_details
 
+_DRAIN_STREAM_EVENTS_ATTR = "_agents_drain_queued_stream_events"
+
+
+def _mark_error_to_drain_stream_events(error: Exception) -> None:
+    setattr(error, _DRAIN_STREAM_EVENTS_ATTR, True)
+
+
+def _should_drain_stream_events_before_raising(error: Exception) -> bool:
+    return bool(getattr(error, _DRAIN_STREAM_EVENTS_ATTR, False))
+
 
 @dataclass
 class RunErrorDetails:
@@ -63,6 +73,17 @@ class ModelBehaviorError(AgentsException):
     def __init__(self, message: str):
         self.message = message
         super().__init__(message)
+
+
+class ModelRefusalError(AgentsException):
+    """Exception raised when the model refuses to produce the requested output."""
+
+    refusal: str
+    """The refusal text returned by the model."""
+
+    def __init__(self, refusal: str):
+        self.refusal = refusal
+        super().__init__(f"Model refused to produce output: {refusal}")
 
 
 class UserError(AgentsException):

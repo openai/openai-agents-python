@@ -40,6 +40,8 @@ agent = Agent(
         # If None, MCP tool failures are raised as exceptions instead of
         # returning model-visible error text.
         "failure_error_function": None,
+        # Prefix local MCP tool names with their server name.
+        "include_server_in_tool_names": True,
     },
 )
 ```
@@ -50,6 +52,7 @@ Notes:
 - `failure_error_function` controls how MCP tool call failures are surfaced to the model.
 - When `failure_error_function` is unset, the SDK uses the default tool error formatter.
 - Server-level `failure_error_function` overrides `Agent.mcp_config["failure_error_function"]` for that server.
+- `include_server_in_tool_names` is opt-in. When enabled, each local MCP tool is exposed to the model with a deterministic server-prefixed name, which helps avoid collisions when multiple MCP servers publish tools with the same name. Generated names are ASCII-safe, stay within the function-tool name length limit, and avoid existing local function tool and enabled handoff names on the same agent. The SDK still invokes the original MCP tool name on the original server.
 
 ## Shared patterns across transports
 
@@ -82,19 +85,23 @@ from agents import Agent, HostedMCPTool, Runner
 async def main() -> None:
     agent = Agent(
         name="Assistant",
+        instructions="Use the DeepWiki hosted MCP server to inspect openai/openai-agents-python.",
         tools=[
             HostedMCPTool(
                 tool_config={
                     "type": "mcp",
-                    "server_label": "gitmcp",
-                    "server_url": "https://gitmcp.io/openai/codex",
+                    "server_label": "deepwiki",
+                    "server_url": "https://mcp.deepwiki.com/mcp",
                     "require_approval": "never",
                 }
             )
         ],
     )
 
-    result = await Runner.run(agent, "Which language is this repository written in?")
+    result = await Runner.run(
+        agent,
+        "Which language is the repository openai/openai-agents-python written in?",
+    )
     print(result.final_output)
 
 asyncio.run(main())
@@ -126,7 +133,7 @@ policies. To make the decision inside Python, provide an `on_approval_request` c
 ```python
 from agents import MCPToolApprovalFunctionResult, MCPToolApprovalRequest
 
-SAFE_TOOLS = {"read_project_metadata"}
+SAFE_TOOLS = {"read_wiki_structure", "read_wiki_contents", "ask_question"}
 
 def approve_tool(request: MCPToolApprovalRequest) -> MCPToolApprovalFunctionResult:
     if request.data.name in SAFE_TOOLS:
@@ -139,8 +146,8 @@ agent = Agent(
         HostedMCPTool(
             tool_config={
                 "type": "mcp",
-                "server_label": "gitmcp",
-                "server_url": "https://gitmcp.io/openai/codex",
+                "server_label": "deepwiki",
+                "server_url": "https://mcp.deepwiki.com/mcp",
                 "require_approval": "always",
             },
             on_approval_request=approve_tool,

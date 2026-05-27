@@ -1,7 +1,7 @@
 import copy
 import os
 import re
-from typing import Literal, Optional
+from typing import Literal
 
 from openai.types.shared.reasoning import Reasoning
 
@@ -61,6 +61,7 @@ _GPT_5_DEFAULT_REASONING_EFFORT_PATTERNS: tuple[
     (re.compile(r"^gpt-5\.4-pro(?:-\d{4}-\d{2}-\d{2})?$"), "medium"),
     (re.compile(r"^gpt-5\.4-mini(?:-\d{4}-\d{2}-\d{2})?$"), "none"),
     (re.compile(r"^gpt-5\.4-nano(?:-\d{4}-\d{2}-\d{2})?$"), "none"),
+    (re.compile(r"^gpt-5\.5(?:-\d{4}-\d{2}-\d{2})?$"), "none"),
 )
 
 
@@ -95,10 +96,10 @@ def get_default_model() -> str:
     """
     Returns the default model name.
     """
-    return os.getenv(OPENAI_DEFAULT_MODEL_ENV_VARIABLE_NAME, "gpt-4.1").lower()
+    return os.getenv(OPENAI_DEFAULT_MODEL_ENV_VARIABLE_NAME, "gpt-5.4-mini").lower()
 
 
-def get_default_model_settings(model: Optional[str] = None) -> ModelSettings:
+def get_default_model_settings(model: str | None = None) -> ModelSettings:
     """
     Returns the default model settings.
     If the default model is a GPT-5 model, returns the GPT-5 default model settings.

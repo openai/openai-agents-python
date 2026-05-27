@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, Union, cast
+from typing import Any, cast
 
 import pytest
 
@@ -55,7 +55,7 @@ def test_exporter_uses_item_api_keys(monkeypatch):
 
     exporter.export(
         cast(
-            list[Union[Trace, Span[Any]]],
+            list[Trace | Span[Any]],
             [
                 DummyItem("key-a", {"id": "a"}),
                 DummyItem(None, {"id": "b"}),

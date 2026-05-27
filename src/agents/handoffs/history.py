@@ -161,6 +161,28 @@ def _build_summary_message(transcript: list[TResponseInputItem]) -> TResponseInp
 def _format_transcript_item(item: TResponseInputItem) -> str:
     role = item.get("role")
     if isinstance(role, str):
+        content = item.get("content")
+        if content is None or (isinstance(content, str) and not _contains_newline(content)):
+            return _format_transcript_item_legacy(item)
+    return _format_transcript_item_json(item)
+
+
+def _contains_newline(value: str) -> bool:
+    return "\n" in value or "\r" in value
+
+
+def _format_transcript_item_json(item: TResponseInputItem) -> str:
+    payload = cast(dict[str, Any], deepcopy(item))
+    payload.pop("provider_data", None)
+    try:
+        return json.dumps(payload, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return _format_transcript_item_legacy(item)
+
+
+def _format_transcript_item_legacy(item: TResponseInputItem) -> str:
+    role = item.get("role")
+    if isinstance(role, str):
         prefix = role
         name = item.get("name")
         if isinstance(name, str) and name:
@@ -209,27 +231,63 @@ def _extract_nested_history_transcript(
         return None
     start_marker, end_marker = get_conversation_history_wrappers()
     start_idx = content.find(start_marker)
-    end_idx = content.find(end_marker)
+    end_idx = content.rfind(end_marker)
     if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
         return None
     start_idx += len(start_marker)
     body = content[start_idx:end_idx]
-    lines = [line.strip() for line in body.splitlines() if line.strip()]
     parsed: list[TResponseInputItem] = []
-    for line in lines:
+    for line in _split_summary_records(body):
         parsed_item = _parse_summary_line(line)
         if parsed_item is not None:
             parsed.append(parsed_item)
     return parsed
 
 
+def _split_summary_records(body: str) -> list[str]:
+    records: list[str] = []
+    current: list[str] = []
+    current_is_numbered = False
+
+    for raw_line in body.splitlines():
+        if not raw_line.strip():
+            continue
+
+        starts_numbered_record = _starts_numbered_summary_record(raw_line)
+        if not current:
+            current = [raw_line.strip()]
+            current_is_numbered = starts_numbered_record
+            continue
+
+        if starts_numbered_record or not current_is_numbered:
+            records.append("\n".join(current))
+            current = [raw_line.strip()]
+            current_is_numbered = starts_numbered_record
+            continue
+
+        current.append(raw_line.rstrip())
+
+    if current:
+        records.append("\n".join(current))
+
+    return records
+
+
+def _starts_numbered_summary_record(line: str) -> bool:
+    stripped = line.lstrip()
+    dot_index = stripped.find(".")
+    return dot_index != -1 and stripped[:dot_index].isdigit()
+
+
 def _parse_summary_line(line: str) -> TResponseInputItem | None:
     stripped = line.strip()
     if not stripped:
         return None
-    dot_index = stripped.find(".")
-    if dot_index != -1 and stripped[:dot_index].isdigit():
-        stripped = stripped[dot_index + 1 :].lstrip()
+    stripped = _strip_summary_line_number(stripped)
+    parsed_json = _parse_summary_json_item(stripped)
+    if parsed_json is not None:
+        return parsed_json
+
     role_part, sep, remainder = stripped.partition(":")
     if not sep:
         return None
@@ -242,8 +300,43 @@ def _parse_summary_line(line: str) -> TResponseInputItem | None:
         reconstructed["name"] = name
     content = remainder.strip()
     if content:
+        legacy_typed_item = _parse_legacy_typed_item(role, content)
+        if legacy_typed_item is not None:
+            return legacy_typed_item
         reconstructed["content"] = content
     return cast(TResponseInputItem, reconstructed)
+
+
+def _strip_summary_line_number(stripped: str) -> str:
+    dot_index = stripped.find(".")
+    if dot_index != -1 and stripped[:dot_index].isdigit():
+        return stripped[dot_index + 1 :].lstrip()
+    return stripped
+
+
+def _parse_summary_json_item(value: str) -> TResponseInputItem | None:
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    parsed.pop("provider_data", None)
+    return cast(TResponseInputItem, parsed)
+
+
+def _parse_legacy_typed_item(item_type: str, content: str) -> TResponseInputItem | None:
+    if item_type in {"assistant", "user", "system", "developer"}:
+        return None
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    parsed.pop("provider_data", None)
+    parsed["type"] = item_type
+    return cast(TResponseInputItem, parsed)
 
 
 def _split_role_and_name(role_text: str) -> tuple[str, str | None]:

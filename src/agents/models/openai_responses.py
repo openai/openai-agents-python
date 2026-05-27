@@ -16,6 +16,7 @@ from openai import AsyncOpenAI, NotGiven, Omit, omit
 from openai.types import ChatModel
 from openai.types.responses import (
     ApplyPatchToolParam,
+    CustomToolParam,
     FileSearchToolParam,
     FunctionToolParam,
     Response,
@@ -29,6 +30,7 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.tool_param import LocalShell
+from typing_extensions import NotRequired
 
 from .. import _debug
 from .._tool_identity import (
@@ -37,7 +39,7 @@ from .._tool_identity import (
 )
 from ..agent_output import AgentOutputSchemaBase
 from ..computer import AsyncComputer, Computer
-from ..exceptions import UserError
+from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import logger
@@ -47,6 +49,7 @@ from ..tool import (
     ApplyPatchTool,
     CodeInterpreterTool,
     ComputerTool,
+    CustomTool,
     FileSearchTool,
     FunctionTool,
     HostedMCPTool,
@@ -61,16 +64,18 @@ from ..tool import (
     validate_responses_tool_search_configuration,
 )
 from ..tracing import SpanError, response_span
-from ..usage import Usage
+from ..usage import Usage, model_usage_to_span_usage
 from ..util._json import _to_dump_compatible
 from ..version import __version__
 from ._openai_retry import get_openai_retry_advice
+from ._response_terminal import response_error_event_failure_error, response_terminal_failure_error
 from ._retry_runtime import (
     should_disable_provider_managed_retries,
     should_disable_websocket_pre_event_retries,
 )
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
+from .openai_client_utils import is_official_openai_base_url, is_official_openai_client
 
 if TYPE_CHECKING:
     from ..model_settings import ModelSettings
@@ -113,7 +118,7 @@ def _json_dumps_default(value: Any) -> Any:
 
 
 def _is_openai_omitted_value(value: Any) -> bool:
-    return isinstance(value, (Omit, NotGiven))
+    return isinstance(value, Omit | NotGiven)
 
 
 def _require_responses_tool_param(value: object) -> ResponsesToolParam:
@@ -186,6 +191,24 @@ class _WebsocketRequestTimeouts:
     connect: float | None
     send: float | None
     recv: float | None
+
+
+class OpenAIResponsesWebSocketOptions(TypedDict):
+    """Low-level OpenAI Responses websocket connection options."""
+
+    ping_interval: NotRequired[float | None]
+    """Time in seconds between keepalive pings sent by the client.
+
+    The underlying ``websockets`` library usually defaults to 20.0. Set to ``None`` to
+    disable keepalive pings.
+    """
+
+    ping_timeout: NotRequired[float | None]
+    """Time in seconds to wait for a pong response before disconnecting.
+
+    Set to ``None`` to keep pings enabled but disable heartbeat timeouts during large latency
+    spikes.
+    """
 
 
 class _ResponseStreamWithRequestId:
@@ -390,6 +413,9 @@ class OpenAIResponsesModel(Model):
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
 
+    def _supports_default_prompt_cache_key(self) -> bool:
+        return is_official_openai_client(self._get_client())
+
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)
 
@@ -472,6 +498,8 @@ class OpenAIResponsesModel(Model):
                     if response.usage
                     else Usage()
                 )
+                if response.usage:
+                    span_response.span_data.usage = model_usage_to_span_usage(usage)
 
                 if tracing.include_data():
                     span_response.span_data.response = response
@@ -528,6 +556,7 @@ class OpenAIResponsesModel(Model):
                 )
 
                 final_response: Response | None = None
+                terminal_failure_error: ModelBehaviorError | None = None
                 yielded_terminal_event = False
                 close_stream_in_background = False
                 try:
@@ -540,12 +569,22 @@ class OpenAIResponsesModel(Model):
                             "response.incomplete",
                         }:
                             terminal_response = getattr(chunk, "response", None)
-                            if isinstance(terminal_response, Response):
-                                final_response = terminal_response
+                            terminal_failure_error = response_terminal_failure_error(
+                                cast(str, chunk_type),
+                                terminal_response
+                                if isinstance(terminal_response, Response)
+                                else None,
+                            )
+                        elif chunk_type in {"error", "response.error"}:
+                            terminal_failure_error = response_error_event_failure_error(
+                                cast(str, chunk_type),
+                                chunk,
+                            )
                         if chunk_type in {
                             "response.completed",
                             "response.failed",
                             "response.incomplete",
+                            "error",
                             "response.error",
                         }:
                             yielded_terminal_event = True
@@ -565,10 +604,23 @@ class OpenAIResponsesModel(Model):
                                 )
                             else:
                                 raise
+                if terminal_failure_error is not None:
+                    raise terminal_failure_error
 
                 if final_response and tracing.include_data():
                     span_response.span_data.response = final_response
                     span_response.span_data.input = input
+                if final_response and final_response.usage:
+                    span_response.span_data.usage = model_usage_to_span_usage(
+                        Usage(
+                            requests=1,
+                            input_tokens=final_response.usage.input_tokens,
+                            output_tokens=final_response.usage.output_tokens,
+                            total_tokens=final_response.usage.total_tokens,
+                            input_tokens_details=final_response.usage.input_tokens_details,
+                            output_tokens_details=final_response.usage.output_tokens_details,
+                        )
+                    )
 
             except Exception as e:
                 span_response.set_error(
@@ -800,8 +852,13 @@ class OpenAIResponsesModel(Model):
             "prompt_cache_retention": self._non_null_or_omit(model_settings.prompt_cache_retention),
             "reasoning": self._non_null_or_omit(model_settings.reasoning),
             "metadata": self._non_null_or_omit(model_settings.metadata),
+            "context_management": self._non_null_or_omit(model_settings.context_management),
         }
-        duplicate_extra_arg_keys = sorted(set(create_kwargs).intersection(extra_args))
+        duplicate_extra_arg_keys = sorted(
+            k
+            for k in extra_args
+            if k in create_kwargs and not _is_openai_omitted_value(create_kwargs[k])
+        )
         if duplicate_extra_arg_keys:
             if len(duplicate_extra_arg_keys) == 1:
                 key = duplicate_extra_arg_keys[0]
@@ -892,9 +949,13 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
         openai_client: AsyncOpenAI,
         *,
         model_is_explicit: bool = True,
+        websocket_options: OpenAIResponsesWebSocketOptions | None = None,
     ) -> None:
         super().__init__(
             model=model, openai_client=openai_client, model_is_explicit=model_is_explicit
+        )
+        self._websocket_options = cast(
+            OpenAIResponsesWebSocketOptions, dict(websocket_options or {})
         )
         self._ws_connection: Any | None = None
         self._ws_connection_identity: tuple[str, tuple[tuple[str, str], ...]] | None = None
@@ -904,6 +965,11 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
             None
         )
         self._ws_client_close_generation = 0
+
+    def _supports_default_prompt_cache_key(self) -> bool:
+        if self._client.websocket_base_url is not None:
+            return is_official_openai_base_url(self._client.websocket_base_url, websocket=True)
+        return super()._supports_default_prompt_cache_key()
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         stateful_request = bool(request.previous_response_id or request.conversation_id)
@@ -1042,8 +1108,10 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
             elif event_type in {"response.incomplete", "response.failed"}:
                 terminal_event_type = cast(str, event_type)
                 terminal_response = getattr(event, "response", None)
-                if isinstance(terminal_response, Response):
-                    final_response = terminal_response
+                raise response_terminal_failure_error(
+                    terminal_event_type,
+                    terminal_response if isinstance(terminal_response, Response) else None,
+                )
 
         if final_response is None:
             terminal_event_hint = (
@@ -1223,7 +1291,7 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                 recv=None if timeout.read is None else float(timeout.read),
             )
 
-        if isinstance(timeout, (int, float)):
+        if isinstance(timeout, int | float):
             timeout_seconds = float(timeout)
             return _WebsocketRequestTimeouts(
                 lock=timeout_seconds,
@@ -1507,12 +1575,20 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                 "Install `websockets` or `openai[realtime]`."
             ) from exc
 
+        connect_kwargs: dict[str, Any] = {
+            "user_agent_header": None,
+            "additional_headers": dict(headers),
+            "max_size": None,
+            "open_timeout": connect_timeout,
+        }
+        if "ping_interval" in self._websocket_options:
+            connect_kwargs["ping_interval"] = self._websocket_options["ping_interval"]
+        if "ping_timeout" in self._websocket_options:
+            connect_kwargs["ping_timeout"] = self._websocket_options["ping_timeout"]
+
         return await connect(
             ws_url,
-            user_agent_header=None,
-            additional_headers=dict(headers),
-            max_size=None,
-            open_timeout=connect_timeout,
+            **connect_kwargs,
         )
 
 
@@ -1714,7 +1790,7 @@ class Converter:
     def _has_unresolved_computer_tool(cls, tools: Sequence[Tool] | None) -> bool:
         return any(
             isinstance(tool, ComputerTool)
-            and not isinstance(tool.computer, (Computer, AsyncComputer))
+            and not isinstance(tool.computer, Computer | AsyncComputer)
             for tool in tools or ()
         )
 
@@ -1724,7 +1800,9 @@ class Converter:
 
     @classmethod
     def _is_ga_computer_model(cls, model: str | ChatModel | None) -> bool:
-        return isinstance(model, str) and model.startswith("gpt-5.4")
+        return isinstance(model, str) and (
+            model.startswith("gpt-5.4") or model.startswith("gpt-5.5")
+        )
 
     @classmethod
     def resolve_computer_tool_model(
@@ -1901,7 +1979,7 @@ class Converter:
     @classmethod
     def _convert_preview_computer_tool(cls, tool: ComputerTool[Any]) -> ResponsesToolParam:
         computer = tool.computer
-        if not isinstance(computer, (Computer, AsyncComputer)):
+        if not isinstance(computer, Computer | AsyncComputer):
             raise UserError(
                 "Computer tool is not initialized for serialization. Call "
                 "resolve_computer({ tool, run_context }) with a run context first "
@@ -1970,9 +2048,15 @@ class Converter:
                 else _require_responses_tool_param({"type": "computer"}),
                 None,
             )
+        elif isinstance(tool, CustomTool):
+            custom_tool_param: CustomToolParam = tool.tool_config
+            return custom_tool_param, None
         elif isinstance(tool, HostedMCPTool):
             return tool.tool_config, None
         elif isinstance(tool, ApplyPatchTool):
+            tool_config = getattr(tool, "tool_config", None)
+            if tool_config is not None:
+                return _require_responses_tool_param(tool_config), None
             return ApplyPatchToolParam(type="apply_patch"), None
         elif isinstance(tool, ShellTool):
             return (

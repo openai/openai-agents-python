@@ -20,7 +20,7 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from .. import _debug
 from ..agent_output import AgentOutputSchemaBase
-from ..exceptions import UserError
+from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..logger import logger
@@ -33,6 +33,7 @@ from ..usage import Usage
 from ..util._json import _to_dump_compatible
 from ._openai_retry import get_openai_retry_advice
 from ._retry_runtime import should_disable_provider_managed_retries
+from ._trace import model_config_for_trace
 from .chatcmpl_converter import Converter
 from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
@@ -55,13 +56,39 @@ class OpenAIChatCompletionsModel(Model):
         model: str | ChatModel,
         openai_client: AsyncOpenAI,
         should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
+        strict_feature_validation: bool = False,
     ) -> None:
         self.model = model
         self._client = openai_client
         self.should_replay_reasoning_content = should_replay_reasoning_content
+        self._strict_feature_validation = strict_feature_validation
+        self._has_warned_unsupported_prompt = False
+        self._has_warned_unsupported_conversation_state = False
 
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
+
+    def _supports_default_prompt_cache_key(self) -> bool:
+        return ChatCmplHelpers.is_openai(self._get_client())
+
+    def _handle_unsupported_prompt(self, prompt: ResponsePromptParam | None) -> None:
+        if prompt is None:
+            return
+
+        message = (
+            "Reusable prompts are only supported by the Responses API. "
+            "OpenAIChatCompletionsModel does not support `prompt`; use a Responses model "
+            "instead."
+        )
+        if self._strict_feature_validation:
+            raise UserError(message)
+
+        if not self._has_warned_unsupported_prompt:
+            logger.warning(
+                "%s Ignoring `prompt`; enable strict feature validation to raise an error instead.",
+                message,
+            )
+            self._has_warned_unsupported_prompt = True
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)
@@ -109,13 +136,19 @@ class OpenAIChatCompletionsModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None = None,  # unused
-        conversation_id: str | None = None,  # unused
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
+        self._handle_unsupported_server_managed_conversation_state(
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+        )
+        self._handle_unsupported_prompt(prompt)
+
         with generation_span(
             model=str(self.model),
-            model_config=model_settings.to_json_dict() | {"base_url": str(self._client.base_url)},
+            model_config=model_config_for_trace(model_settings, base_url=self._client.base_url),
             disabled=tracing.is_disabled(),
         ) as span_generation:
             response = await self._fetch_response(
@@ -128,8 +161,16 @@ class OpenAIChatCompletionsModel(Model):
                 span_generation,
                 tracing,
                 stream=False,
-                prompt=prompt,
+                prompt=None,
             )
+
+            if not response.choices:
+                provider_error = getattr(response, "error", None)
+                error_details = f": {provider_error}" if provider_error is not None else ""
+                raise ModelBehaviorError(
+                    f"ChatCompletion response has no choices (possible provider error payload)"
+                    f"{error_details}"
+                )
 
             message: ChatCompletionMessage | None = None
             first_choice: Choice | None = None
@@ -181,7 +222,11 @@ class OpenAIChatCompletionsModel(Model):
                 provider_data["response_id"] = response.id
 
             items = (
-                Converter.message_to_output_items(message, provider_data=provider_data)
+                Converter.message_to_output_items(
+                    message,
+                    provider_data=provider_data,
+                    strict_feature_validation=self._strict_feature_validation,
+                )
                 if message is not None
                 else []
             )
@@ -222,16 +267,22 @@ class OpenAIChatCompletionsModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None = None,  # unused
-        conversation_id: str | None = None,  # unused
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """
         Yields a partial message as it is generated, as well as the usage information.
         """
+        self._handle_unsupported_server_managed_conversation_state(
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+        )
+        self._handle_unsupported_prompt(prompt)
+
         with generation_span(
             model=str(self.model),
-            model_config=model_settings.to_json_dict() | {"base_url": str(self._client.base_url)},
+            model_config=model_config_for_trace(model_settings, base_url=self._client.base_url),
             disabled=tracing.is_disabled(),
         ) as span_generation:
             response, stream = await self._fetch_response(
@@ -244,12 +295,15 @@ class OpenAIChatCompletionsModel(Model):
                 span_generation,
                 tracing,
                 stream=True,
-                prompt=prompt,
+                prompt=None,
             )
 
             final_response: Response | None = None
             async for chunk in ChatCmplStreamHandler.handle_stream(
-                response, stream, model=self.model
+                response,
+                stream,
+                model=self.model,
+                strict_feature_validation=self._strict_feature_validation,
             ):
                 yield chunk
 
@@ -276,6 +330,38 @@ class OpenAIChatCompletionsModel(Model):
                         else {"reasoning_tokens": 0}
                     ),
                 }
+
+    def _handle_unsupported_server_managed_conversation_state(
+        self,
+        *,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+    ) -> None:
+        unsupported: list[str] = []
+        if previous_response_id is not None:
+            unsupported.append("previous_response_id")
+        if conversation_id is not None:
+            unsupported.append("conversation_id")
+        if not unsupported:
+            return
+
+        unsupported_params = ", ".join(unsupported)
+        message = (
+            "OpenAIChatCompletionsModel does not support server-managed conversation state "
+            f"({unsupported_params}). Chat Completions requires callers to pass the full "
+            "conversation history; use a Responses API model for previous_response_id or a "
+            "conversation-capable model for conversation_id."
+        )
+        if self._strict_feature_validation:
+            raise UserError(message)
+
+        if not self._has_warned_unsupported_conversation_state:
+            logger.warning(
+                "%s Ignoring unsupported server-managed conversation state; enable strict feature "
+                "validation to raise an error instead.",
+                message,
+            )
+            self._has_warned_unsupported_conversation_state = True
 
     @overload
     async def _fetch_response(
@@ -320,12 +406,14 @@ class OpenAIChatCompletionsModel(Model):
         stream: bool = False,
         prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
+        self._handle_unsupported_prompt(prompt)
         self._validate_official_openai_input_content_types(input)
         converted_messages = Converter.items_to_messages(
             input,
             model=self.model,
             base_url=str(self._client.base_url),
             should_replay_reasoning_content=self.should_replay_reasoning_content,
+            strict_feature_validation=self._strict_feature_validation,
         )
 
         if system_instructions:
@@ -388,31 +476,46 @@ class OpenAIChatCompletionsModel(Model):
 
         stream_param: Literal[True] | Omit = True if stream else omit
 
-        ret = await self._get_client().chat.completions.create(
-            model=self.model,
-            messages=converted_messages,
-            tools=tools_param,
-            temperature=self._non_null_or_omit(model_settings.temperature),
-            top_p=self._non_null_or_omit(model_settings.top_p),
-            frequency_penalty=self._non_null_or_omit(model_settings.frequency_penalty),
-            presence_penalty=self._non_null_or_omit(model_settings.presence_penalty),
-            max_tokens=self._non_null_or_omit(model_settings.max_tokens),
-            tool_choice=tool_choice,
-            response_format=response_format,
-            parallel_tool_calls=parallel_tool_calls,
-            stream=cast(Any, stream_param),
-            stream_options=self._non_null_or_omit(stream_options),
-            store=self._non_null_or_omit(store),
-            reasoning_effort=self._non_null_or_omit(reasoning_effort),
-            verbosity=self._non_null_or_omit(model_settings.verbosity),
-            top_logprobs=self._non_null_or_omit(model_settings.top_logprobs),
-            prompt_cache_retention=self._non_null_or_omit(model_settings.prompt_cache_retention),
-            extra_headers=self._merge_headers(model_settings),
-            extra_query=model_settings.extra_query,
-            extra_body=model_settings.extra_body,
-            metadata=self._non_null_or_omit(model_settings.metadata),
-            **(model_settings.extra_args or {}),
+        create_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": converted_messages,
+            "tools": tools_param,
+            "temperature": self._non_null_or_omit(model_settings.temperature),
+            "top_p": self._non_null_or_omit(model_settings.top_p),
+            "frequency_penalty": self._non_null_or_omit(model_settings.frequency_penalty),
+            "presence_penalty": self._non_null_or_omit(model_settings.presence_penalty),
+            "max_tokens": self._non_null_or_omit(model_settings.max_tokens),
+            "tool_choice": tool_choice,
+            "response_format": response_format,
+            "parallel_tool_calls": parallel_tool_calls,
+            "stream": cast(Any, stream_param),
+            "stream_options": self._non_null_or_omit(stream_options),
+            "store": self._non_null_or_omit(store),
+            "reasoning_effort": self._non_null_or_omit(reasoning_effort),
+            "verbosity": self._non_null_or_omit(model_settings.verbosity),
+            "top_logprobs": self._non_null_or_omit(model_settings.top_logprobs),
+            "prompt_cache_retention": self._non_null_or_omit(model_settings.prompt_cache_retention),
+            "extra_headers": self._merge_headers(model_settings),
+            "extra_query": model_settings.extra_query,
+            "extra_body": model_settings.extra_body,
+            "metadata": self._non_null_or_omit(model_settings.metadata),
+        }
+        duplicate_extra_arg_keys = sorted(
+            set(create_kwargs).intersection(model_settings.extra_args or {})
         )
+        if duplicate_extra_arg_keys:
+            if len(duplicate_extra_arg_keys) == 1:
+                key = duplicate_extra_arg_keys[0]
+                raise TypeError(
+                    f"chat.completions.create() got multiple values for keyword argument '{key}'"
+                )
+            keys = ", ".join(repr(key) for key in duplicate_extra_arg_keys)
+            raise TypeError(
+                f"chat.completions.create() got multiple values for keyword arguments {keys}"
+            )
+        create_kwargs.update(model_settings.extra_args or {})
+
+        ret = await self._get_client().chat.completions.create(**create_kwargs)
 
         if isinstance(ret, ChatCompletion):
             return ret

@@ -59,7 +59,7 @@ In practice:
 
 Unlike the JavaScript SDK, Python does not expose a separate `output` property for the model-shaped delta only. Use `new_items` when you need SDK metadata, or inspect `raw_responses` when you need the raw model payloads.
 
-Computer-tool replay follows the raw Responses payload shape. Preview-model `computer_call` items preserve a single `action`, while `gpt-5.4` computer calls can preserve batched `actions[]`. [`to_input_list()`][agents.result.RunResultBase.to_input_list] and [`RunState`][agents.run_state.RunState] keep whichever shape the model produced, so manual replay, pause/resume flows, and stored transcripts continue to work across both preview and GA computer-tool calls. Local execution results still appear as `computer_call_output` items in `new_items`.
+Computer-tool replay follows the raw Responses payload shape. Preview-model `computer_call` items preserve a single `action`, while `gpt-5.5` computer calls can preserve batched `actions[]`. [`to_input_list()`][agents.result.RunResultBase.to_input_list] and [`RunState`][agents.run_state.RunState] keep whichever shape the model produced, so manual replay, pause/resume flows, and stored transcripts continue to work across both preview and GA computer-tool calls. Local execution results still appear as `computer_call_output` items in `new_items`.
 
 ### New items
 

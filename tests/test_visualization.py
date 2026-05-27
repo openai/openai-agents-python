@@ -1,10 +1,9 @@
-import sys
 from unittest.mock import Mock
 
 import graphviz  # type: ignore
 import pytest
 
-from agents import Agent
+from agents import Agent, handoff
 from agents.extensions.visualization import (
     draw_graph,
     get_all_edges,
@@ -13,8 +12,7 @@ from agents.extensions.visualization import (
 )
 from agents.handoffs import Handoff
 
-if sys.version_info >= (3, 10):
-    from .mcp.helpers import FakeMCPServer
+from .mcp.helpers import FakeMCPServer
 
 
 @pytest.fixture
@@ -33,8 +31,7 @@ def mock_agent():
     agent.handoffs = [handoff1]
     agent.mcp_servers = []
 
-    if sys.version_info >= (3, 10):
-        agent.mcp_servers = [FakeMCPServer(server_name="MCPServer1")]
+    agent.mcp_servers = [FakeMCPServer(server_name="MCPServer1")]
 
     return agent
 
@@ -149,9 +146,6 @@ def test_draw_graph(mock_agent):
 
 
 def _assert_mcp_nodes(source: str):
-    if sys.version_info < (3, 10):
-        assert "MCPServer1" not in source
-        return
     assert (
         '"MCPServer1" [label="MCPServer1", shape=box, style=filled, '
         "fillcolor=lightgrey, width=1, height=0.5];" in source
@@ -159,9 +153,6 @@ def _assert_mcp_nodes(source: str):
 
 
 def _assert_mcp_edges(source: str):
-    if sys.version_info < (3, 10):
-        assert "MCPServer1" not in source
-        return
     assert '"Agent1" -> "MCPServer1" [style=dashed, penwidth=1.5];' in source
     assert '"MCPServer1" -> "Agent1" [style=dashed, penwidth=1.5];' in source
 
@@ -219,3 +210,35 @@ def test_draw_graph_with_real_agent_with_handoffs():
     assert '"ParentAgent" -> "__end__"' not in graph.source
     # Child has no handoffs, so should connect to __end__
     assert '"ChildAgent" -> "__end__"' in graph.source
+
+
+def test_draw_graph_with_real_handoff_object():
+    """Test draw_graph with a real Handoff object (not just Agent) in handoffs.
+
+    Exercises the ``isinstance(handoff, Handoff)`` branches in get_all_nodes /
+    get_all_edges (rather than the ``isinstance(handoff, Agent)`` branches),
+    using the public ``handoff()`` factory rather than ``Mock(spec=Handoff)``.
+    """
+    child_agent = Agent(name="ChildAgent", instructions="Child instructions")
+    real_handoff = handoff(child_agent)
+    assert isinstance(real_handoff, Handoff)
+
+    parent_agent = Agent(
+        name="ParentAgent",
+        instructions="Parent instructions",
+        handoffs=[real_handoff],
+    )
+
+    graph = draw_graph(parent_agent)
+
+    assert isinstance(graph, graphviz.Source)
+    assert '"ParentAgent"' in graph.source
+    # Node uses agent_name from the Handoff object
+    assert (
+        '"ChildAgent" [label="ChildAgent", shape=box, style=filled, style=rounded, '
+        "fillcolor=lightyellow, width=1.5, height=0.8];" in graph.source
+    )
+    # Edge points from parent to handoff agent_name
+    assert '"ParentAgent" -> "ChildAgent";' in graph.source
+    # Parent has handoffs, so should NOT connect directly to __end__
+    assert '"ParentAgent" -> "__end__"' not in graph.source

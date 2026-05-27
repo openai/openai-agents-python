@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Union
-
-from typing_extensions import TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from .items import RealtimeItem
 
@@ -179,21 +177,21 @@ class RealtimeModelRawServerEvent:
 # TODO (rm) Add usage events
 
 
-RealtimeModelEvent: TypeAlias = Union[
-    RealtimeModelErrorEvent,
-    RealtimeModelToolCallEvent,
-    RealtimeModelAudioEvent,
-    RealtimeModelAudioInterruptedEvent,
-    RealtimeModelAudioDoneEvent,
-    RealtimeModelInputAudioTimeoutTriggeredEvent,
-    RealtimeModelInputAudioTranscriptionCompletedEvent,
-    RealtimeModelTranscriptDeltaEvent,
-    RealtimeModelItemUpdatedEvent,
-    RealtimeModelItemDeletedEvent,
-    RealtimeModelConnectionStatusEvent,
-    RealtimeModelTurnStartedEvent,
-    RealtimeModelTurnEndedEvent,
-    RealtimeModelOtherEvent,
-    RealtimeModelExceptionEvent,
-    RealtimeModelRawServerEvent,
-]
+RealtimeModelEvent: TypeAlias = (
+    RealtimeModelErrorEvent
+    | RealtimeModelToolCallEvent
+    | RealtimeModelAudioEvent
+    | RealtimeModelAudioInterruptedEvent
+    | RealtimeModelAudioDoneEvent
+    | RealtimeModelInputAudioTimeoutTriggeredEvent
+    | RealtimeModelInputAudioTranscriptionCompletedEvent
+    | RealtimeModelTranscriptDeltaEvent
+    | RealtimeModelItemUpdatedEvent
+    | RealtimeModelItemDeletedEvent
+    | RealtimeModelConnectionStatusEvent
+    | RealtimeModelTurnStartedEvent
+    | RealtimeModelTurnEndedEvent
+    | RealtimeModelOtherEvent
+    | RealtimeModelExceptionEvent
+    | RealtimeModelRawServerEvent
+)

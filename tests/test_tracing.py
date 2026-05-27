@@ -417,10 +417,59 @@ def test_trace_metadata_propagates_to_spans():
     with trace(workflow_name="test", metadata=metadata) as current_trace:
         with custom_span(name="direct_child", parent=current_trace) as direct_child:
             assert direct_child.trace_metadata == metadata
+            direct_child_export = direct_child.export()
+            assert direct_child_export is not None
+            assert "metadata" not in direct_child_export
         with custom_span(name="parent") as parent:
             assert parent.trace_metadata == metadata
+            parent_export = parent.export()
+            assert parent_export is not None
+            assert "metadata" not in parent_export
             with custom_span(name="child", parent=parent) as child:
                 assert child.trace_metadata == metadata
+                child_export = child.export()
+                assert child_export is not None
+                assert "metadata" not in child_export
+
+
+def test_agent_span_metadata_exports_with_routing_metadata():
+    routing_metadata = {
+        "agent_harness_id": "harness_123",
+    }
+    with trace(
+        workflow_name="test",
+        metadata={
+            **routing_metadata,
+            "agent_id": "agent_123",
+            "agent_task_id": "task_123",
+            "tenant_id": "tenant_123",
+            "user_id": "user_123",
+        },
+    ):
+        with agent_span(name="agent") as span:
+            span.span_data.metadata = {
+                "usage": {
+                    "requests": 1,
+                    "input_tokens": 10,
+                    "output_tokens": 4,
+                    "total_tokens": 14,
+                    "cached_input_tokens": 3,
+                }
+            }
+
+        span_export = span.export()
+
+    assert span_export is not None
+    assert span_export["metadata"] == {
+        **routing_metadata,
+        "usage": {
+            "requests": 1,
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "total_tokens": 14,
+            "cached_input_tokens": 3,
+        },
+    }
 
 
 def test_processor_can_lookup_trace_metadata_by_span_trace_id():

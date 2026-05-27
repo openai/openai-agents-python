@@ -9,14 +9,14 @@ from agents import Agent, ModelSettings, Runner
 # from openai import AsyncOpenAI
 # client = AsyncOpenAI()
 # from agents import OpenAIChatCompletionsModel
-# chat_completions_model = OpenAIChatCompletionsModel(model="gpt-5.4", openai_client=client)
+# chat_completions_model = OpenAIChatCompletionsModel(model="gpt-5.5", openai_client=client)
 
 
 async def main():
     agent = Agent(
         name="Knowledgable GPT-5 Assistant",
         instructions="You're a knowledgable assistant. You always provide an interesting answer.",
-        model="gpt-5.4",
+        model="gpt-5.5",
         model_settings=ModelSettings(
             reasoning=Reasoning(effort="low"),  # "none", "low", "medium", "high", "xhigh"
             verbosity="low",  # "low", "medium", "high"

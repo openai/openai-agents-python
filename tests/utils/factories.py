@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Literal, TypeVar, cast
+from collections.abc import Callable
+from typing import Any, Literal, TypeVar, cast
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -13,9 +14,17 @@ from agents._tool_identity import FunctionToolLookupKey, get_function_tool_looku
 from agents.items import ToolApprovalItem
 from agents.run_context import RunContextWrapper
 from agents.run_state import RunState
+from agents.sandbox.session.sandbox_session_state import SandboxSessionState
 
 TContext = TypeVar("TContext")
 _AUTO_LOOKUP_KEY = object()
+
+
+class TestSessionState(SandboxSessionState):
+    """Concrete ``SandboxSessionState`` subclass for tests that don't need a real backend."""
+
+    __test__ = False
+    type: Literal["test"] = "test"
 
 
 def make_tool_call(
@@ -98,7 +107,7 @@ def make_run_state(
     *,
     context: RunContextWrapper[TContext] | dict[str, Any] | None = None,
     original_input: Any = "input",
-    max_turns: int = 3,
+    max_turns: int | None = 3,
 ) -> RunState[TContext, Agent[Any]]:
     """Create a RunState with sensible defaults for tests."""
 

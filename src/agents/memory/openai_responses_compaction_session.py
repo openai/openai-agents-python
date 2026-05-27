@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from openai import AsyncOpenAI
 
+from ..items import TResponseInputItem
 from ..models._openai_shared import get_default_openai_client
 from ..run_internal.items import normalize_input_items_for_api
 from .openai_conversations_session import OpenAIConversationsSession
@@ -15,12 +17,12 @@ from .session import (
 )
 
 if TYPE_CHECKING:
-    from ..items import TResponseInputItem
     from .session import Session
 
 logger = logging.getLogger("openai-agents.openai.compaction")
 
 DEFAULT_COMPACTION_THRESHOLD = 10
+_ALL_SESSION_ITEMS_LIMIT = 2_147_483_647
 
 OpenAIResponsesCompactionMode = Literal["previous_response_id", "input", "auto"]
 
@@ -212,23 +214,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         compacted = await self.client.responses.compact(**compact_kwargs)
 
-        await self.underlying_session.clear_session()
-        output_items: list[TResponseInputItem] = []
-        if compacted.output:
-            for item in compacted.output:
-                if isinstance(item, dict):
-                    output_items.append(item)
-                else:
-                    # Suppress Pydantic literal warnings: responses.compact can return
-                    # user-style input_text content inside ResponseOutputMessage.
-                    output_items.append(
-                        item.model_dump(exclude_unset=True, warnings=False)  # type: ignore
-                    )
+        output_items = _strip_orphaned_assistant_ids(
+            _normalize_compaction_output_items(compacted.output or [])
+        )
 
-        output_items = _strip_orphaned_assistant_ids(output_items)
-
-        if output_items:
-            await self.underlying_session.add_items(output_items)
+        previous_items = await self._get_all_underlying_session_items()
+        await self._replace_underlying_session_items(
+            output_items=output_items,
+            previous_items=previous_items,
+        )
 
         self._compaction_candidate_items = select_compaction_candidate_items(output_items)
         self._session_items = output_items
@@ -241,6 +235,75 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit)
+
+    async def _get_all_underlying_session_items(self) -> list[TResponseInputItem]:
+        return await self.underlying_session.get_items(limit=_ALL_SESSION_ITEMS_LIMIT)
+
+    async def _replace_underlying_session_items(
+        self,
+        *,
+        output_items: list[TResponseInputItem],
+        previous_items: list[TResponseInputItem],
+    ) -> None:
+        try:
+            await self.underlying_session.clear_session()
+        except Exception as clear_error:
+            await self._restore_underlying_session_items_after_failed_clear(
+                previous_items, clear_error
+            )
+            raise
+
+        try:
+            if output_items:
+                await self.underlying_session.add_items(output_items)
+        except Exception as replacement_error:
+            await self._restore_underlying_session_items(previous_items, replacement_error)
+            raise
+
+    async def _restore_underlying_session_items_after_failed_clear(
+        self,
+        previous_items: list[TResponseInputItem],
+        clear_error: Exception,
+    ) -> None:
+        try:
+            current_items = await self._get_all_underlying_session_items()
+        except Exception:
+            logger.warning(
+                "Failed to inspect session history after compaction replacement clear failed.",
+                exc_info=True,
+            )
+            return
+
+        if current_items == previous_items:
+            return
+
+        await self._restore_underlying_session_items(
+            previous_items, clear_error, clear_existing_items=False
+        )
+
+    async def _restore_underlying_session_items(
+        self,
+        previous_items: list[TResponseInputItem],
+        replacement_error: Exception,
+        *,
+        clear_existing_items: bool = True,
+    ) -> None:
+        try:
+            if clear_existing_items:
+                await self.underlying_session.clear_session()
+            if previous_items:
+                await self.underlying_session.add_items(list(previous_items))
+        except Exception:
+            logger.warning(
+                "Failed to restore session history after compaction replacement failed.",
+                exc_info=True,
+            )
+            return
+
+        logger.warning(
+            "Restored previous session history after compaction replacement failed: %s",
+            replacement_error,
+        )
 
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         if self._deferred_response_id is not None:
@@ -336,6 +399,101 @@ def _strip_orphaned_assistant_ids(
             item = {k: v for k, v in item.items() if k != "id"}  # type: ignore[assignment]
         cleaned.append(item)
     return cleaned
+
+
+def _normalize_compaction_output_items(items: list[Any]) -> list[TResponseInputItem]:
+    """Normalize compacted output into replay-safe Responses input items."""
+    output_items: list[TResponseInputItem] = []
+    for item in items:
+        if isinstance(item, dict):
+            output_item = item
+        else:
+            # Suppress Pydantic literal warnings: responses.compact can return
+            # user-style input_text content inside ResponseOutputMessage.
+            output_item = item.model_dump(exclude_unset=True, warnings=False)
+
+        if (
+            isinstance(output_item, dict)
+            and output_item.get("type") == "message"
+            and output_item.get("role") == "user"
+        ):
+            output_items.append(_normalize_compaction_user_message(output_item))
+            continue
+
+        output_items.append(cast(TResponseInputItem, output_item))
+    return output_items
+
+
+def _normalize_compaction_user_message(item: dict[str, Any]) -> TResponseInputItem:
+    """Normalize compacted user message content before it is reused as input."""
+    content = item.get("content")
+    if not isinstance(content, list):
+        return cast(TResponseInputItem, item)
+
+    normalized_content: list[Any] = []
+    for content_item in content:
+        if not isinstance(content_item, dict):
+            normalized_content.append(content_item)
+            continue
+
+        content_type = content_item.get("type")
+        if content_type == "input_image":
+            normalized_content.append(_normalize_compaction_input_image(content_item))
+        elif content_type == "input_file":
+            normalized_content.append(_normalize_compaction_input_file(content_item))
+        else:
+            normalized_content.append(content_item)
+
+    normalized_item = dict(item)
+    normalized_item["content"] = normalized_content
+    return cast(TResponseInputItem, normalized_item)
+
+
+def _normalize_compaction_input_image(content_item: dict[str, Any]) -> dict[str, Any]:
+    """Return a valid replay shape for a compacted Responses image input."""
+    normalized = {"type": "input_image"}
+
+    image_url = content_item.get("image_url")
+    file_id = content_item.get("file_id")
+    if isinstance(image_url, str) and image_url:
+        normalized["image_url"] = image_url
+    elif isinstance(file_id, str) and file_id:
+        normalized["file_id"] = file_id
+    else:
+        raise ValueError("Compaction input_image item missing image_url or file_id.")
+
+    detail = content_item.get("detail")
+    if isinstance(detail, str) and detail:
+        normalized["detail"] = detail
+
+    return normalized
+
+
+def _normalize_compaction_input_file(content_item: dict[str, Any]) -> dict[str, Any]:
+    """Return a valid replay shape for a compacted Responses file input."""
+    normalized = {"type": "input_file"}
+
+    file_data = content_item.get("file_data")
+    file_url = content_item.get("file_url")
+    file_id = content_item.get("file_id")
+    if isinstance(file_data, str) and file_data:
+        normalized["file_data"] = file_data
+    elif isinstance(file_url, str) and file_url:
+        normalized["file_url"] = file_url
+    elif isinstance(file_id, str) and file_id:
+        normalized["file_id"] = file_id
+    else:
+        raise ValueError("Compaction input_file item missing file_data, file_url, or file_id.")
+
+    filename = content_item.get("filename")
+    if isinstance(filename, str) and filename:
+        normalized["filename"] = filename
+
+    detail = content_item.get("detail")
+    if isinstance(detail, str) and detail:
+        normalized["detail"] = detail
+
+    return normalized
 
 
 def _normalize_compaction_session_items(

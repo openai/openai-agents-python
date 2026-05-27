@@ -13,6 +13,8 @@ This is represented via the [`RunContextWrapper`][agents.run_context.RunContextW
 2. You pass that object to the various run methods (e.g. `Runner.run(..., context=whatever)`).
 3. All your tool calls, lifecycle hooks etc will be passed a wrapper object, `RunContextWrapper[T]`, where `T` represents your context object type which you can access via `wrapper.context`.
 
+For some runtime-specific callbacks, the SDK may pass a more specialized subclass of `RunContextWrapper[T]`. For example, function-tool lifecycle hooks typically receive `ToolContext`, which also exposes tool-call metadata like `tool_call_id`, `tool_name`, and `tool_arguments`.
+
 The **most important** thing to be aware of: every agent, tool function, lifecycle etc for a given agent run must use the same _type_ of context.
 
 You can use the context for things like:

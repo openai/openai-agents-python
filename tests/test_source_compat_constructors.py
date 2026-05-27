@@ -9,12 +9,15 @@ from agents import (
     FunctionTool,
     HandoffInputData,
     ItemHelpers,
+    ModelRetrySettings,
+    ModelSettings,
     MultiProvider,
     RunConfig,
     RunContextWrapper,
     RunResult,
     RunResultStreaming,
     SessionSettings,
+    ToolExecutionConfig,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
     ToolOutputGuardrailData,
@@ -90,6 +93,108 @@ def test_run_config_reasoning_item_id_policy_positional_binding() -> None:
 
     assert config.session_settings == session_settings
     assert config.reasoning_item_id_policy == "omit"
+    assert config.sandbox is None
+    assert config.tool_execution is None
+
+
+def test_run_config_tool_execution_append_preserves_sandbox_position() -> None:
+    session_settings = SessionSettings(limit=123)
+    tool_execution = ToolExecutionConfig(max_function_tool_concurrency=2)
+    config = RunConfig(
+        None,
+        MultiProvider(),
+        None,
+        None,
+        False,
+        None,
+        None,
+        None,
+        False,
+        None,
+        True,
+        "Agent workflow",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        session_settings,
+        "omit",
+        None,
+        tool_execution,
+    )
+
+    assert config.session_settings == session_settings
+    assert config.reasoning_item_id_policy == "omit"
+    assert config.sandbox is None
+    assert config.tool_execution is tool_execution
+
+
+def test_run_config_tool_not_found_behavior_append_preserves_tool_execution_position() -> None:
+    session_settings = SessionSettings(limit=123)
+    tool_execution = ToolExecutionConfig(max_function_tool_concurrency=2)
+    config = RunConfig(
+        None,
+        MultiProvider(),
+        None,
+        None,
+        False,
+        None,
+        None,
+        None,
+        False,
+        None,
+        True,
+        "Agent workflow",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        session_settings,
+        "omit",
+        None,
+        tool_execution,
+        "return_error_to_model",
+    )
+
+    assert config.session_settings == session_settings
+    assert config.reasoning_item_id_policy == "omit"
+    assert config.sandbox is None
+    assert config.tool_execution is tool_execution
+    assert config.tool_not_found_behavior == "return_error_to_model"
+
+
+def test_model_settings_context_management_append_preserves_retry_position() -> None:
+    retry = ModelRetrySettings(max_retries=1)
+    settings = ModelSettings(
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        retry,
+    )
+
+    assert settings.retry is retry
+    assert settings.context_management is None
 
 
 def test_function_tool_positional_arguments_keep_guardrail_positions() -> None:

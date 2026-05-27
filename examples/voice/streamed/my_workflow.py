@@ -1,6 +1,5 @@
 import random
-from collections.abc import AsyncIterator
-from typing import Callable
+from collections.abc import AsyncIterator, Callable
 
 from agents import Agent, Runner, TResponseInputItem, function_tool
 from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
@@ -21,7 +20,7 @@ spanish_agent = Agent(
     instructions=prompt_with_handoff_instructions(
         "You're speaking to a human, so be polite and concise. Speak in Spanish.",
     ),
-    model="gpt-5.4",
+    model="gpt-5.5",
 )
 
 agent = Agent(
@@ -29,7 +28,7 @@ agent = Agent(
     instructions=prompt_with_handoff_instructions(
         "You're speaking to a human, so be polite and concise. If the user speaks in Spanish, handoff to the spanish agent.",
     ),
-    model="gpt-5.4",
+    model="gpt-5.5",
     handoffs=[spanish_agent],
     tools=[get_weather],
 )

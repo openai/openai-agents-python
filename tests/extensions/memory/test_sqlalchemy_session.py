@@ -15,7 +15,7 @@ from openai.types.responses.response_reasoning_item_param import (
     ResponseReasoningItemParam,
     Summary,
 )
-from sqlalchemy import select, text, update
+from sqlalchemy import insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.sql import Select
 
@@ -191,6 +191,43 @@ async def test_pop_from_empty_session():
     assert popped is None
 
 
+async def test_pop_item_skips_corrupt_most_recent():
+    """pop_item skips corrupt newest rows and returns the next valid item."""
+    session = SQLAlchemySession.from_url("pop_corrupt", url=DB_URL, create_tables=True)
+
+    valid_item: TResponseInputItem = {"role": "user", "content": "valid"}
+    await session.add_items([valid_item])
+
+    await session._ensure_tables()
+    async with session._session_factory() as sess:
+        async with sess.begin():
+            await sess.execute(
+                insert(session._messages).values(
+                    {"session_id": session.session_id, "message_data": "not valid json {{{"}
+                )
+            )
+
+    assert await session.pop_item() == valid_item
+    assert await session.get_items() == []
+
+
+async def test_pop_item_returns_none_after_dropping_only_corrupt_rows():
+    """pop_item removes corrupt rows and returns None when no valid items remain."""
+    session = SQLAlchemySession.from_url("pop_only_corrupt", url=DB_URL, create_tables=True)
+
+    await session._ensure_tables()
+    async with session._session_factory() as sess:
+        async with sess.begin():
+            await sess.execute(
+                insert(session._messages).values(
+                    {"session_id": session.session_id, "message_data": "not valid json {{{"}
+                )
+            )
+
+    assert await session.pop_item() is None
+    assert await session.get_items() == []
+
+
 async def test_add_empty_items_list():
     """Test that adding an empty list of items is a no-op."""
     session_id = "add_empty_test"
@@ -270,6 +307,31 @@ async def test_add_items_concurrent_first_write_after_tables_exist(tmp_path):
         assert isinstance(content, str)
         stored_contents.append(content)
     assert sorted(stored_contents) == sorted(submitted)
+
+
+async def test_add_items_waits_for_transient_sqlite_write_lock(tmp_path):
+    """SQLite writes should wait briefly for a transient lock instead of failing."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'sqlite_write_lock_retry.db'}"
+    session = SQLAlchemySession.from_url(
+        "sqlite_write_lock_retry",
+        url=db_url,
+        create_tables=True,
+    )
+    await session.get_items()
+
+    async with session.engine.connect() as conn:
+        await conn.execute(text("BEGIN IMMEDIATE"))
+        blocked_write = asyncio.create_task(
+            session.add_items([{"role": "user", "content": "after-lock"}])
+        )
+        await asyncio.sleep(0.1)
+        await conn.rollback()
+
+    await asyncio.wait_for(blocked_write, timeout=5)
+
+    stored = await session.get_items()
+    assert len(stored) == 1
+    assert stored[0].get("content") == "after-lock"
 
 
 async def test_add_items_concurrent_first_access_across_sessions_with_shared_engine(tmp_path):

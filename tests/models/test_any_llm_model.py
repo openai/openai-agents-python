@@ -4,7 +4,7 @@ import importlib
 import sys
 import types as pytypes
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal, cast
 
 import pytest
 from openai.types.chat import (
@@ -17,6 +17,9 @@ from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_chunk import ChoiceDelta
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 from openai.types.responses import Response, ResponseCompletedEvent, ResponseOutputMessage
+from openai.types.responses.response_error_event import ResponseErrorEvent
+from openai.types.responses.response_failed_event import ResponseFailedEvent
+from openai.types.responses.response_incomplete_event import ResponseIncompleteEvent
 from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.response_usage import (
     InputTokensDetails,
@@ -25,9 +28,19 @@ from openai.types.responses.response_usage import (
 )
 from pydantic import BaseModel
 
-from agents import ModelSettings, ModelTracing, __version__
+from agents import (
+    Agent,
+    Handoff,
+    ModelBehaviorError,
+    ModelSettings,
+    ModelTracing,
+    Tool,
+    TResponseInputItem,
+    __version__,
+)
 from agents.exceptions import UserError
 from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE
+from agents.models.fake_id import FAKE_RESPONSES_ID
 
 
 class FakeAnyLLMProvider:
@@ -527,6 +540,91 @@ async def test_any_llm_stream_passthrough_uses_responses_when_supported(monkeypa
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terminal_event_type", "terminal_event_cls"),
+    [
+        ("response.incomplete", ResponseIncompleteEvent),
+        ("response.failed", ResponseFailedEvent),
+    ],
+)
+async def test_any_llm_responses_stream_rejects_failed_terminal_events(
+    monkeypatch,
+    terminal_event_type: str,
+    terminal_event_cls: type[Any],
+) -> None:
+    async def response_stream() -> AsyncIterator[Any]:
+        yield terminal_event_cls(
+            type=terminal_event_type,
+            response=_response("partial", response_id="resp-terminal"),
+            sequence_number=1,
+        )
+
+    provider = FakeAnyLLMProvider(supports_responses=True, responses_response=response_stream())
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    model = AnyLLMModel(model="openai/gpt-5.4-mini")
+    events = []
+    with pytest.raises(ModelBehaviorError, match=terminal_event_type):
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            events.append(event)
+
+    assert len(events) == 1
+    assert events[0].type == terminal_event_type
+    assert events[0].response.id == "resp-terminal"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_stream_rejects_error_event(monkeypatch) -> None:
+    async def response_stream() -> AsyncIterator[ResponseErrorEvent]:
+        yield ResponseErrorEvent(
+            type="error",
+            code="invalid_request_error",
+            message="bad request",
+            param=None,
+            sequence_number=1,
+        )
+
+    provider = FakeAnyLLMProvider(supports_responses=True, responses_response=response_stream())
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    model = AnyLLMModel(model="openai/gpt-5.4-mini")
+    events = []
+    with pytest.raises(ModelBehaviorError, match="invalid_request_error"):
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            events.append(event)
+
+    assert len(events) == 1
+    assert events[0].type == "error"
+    assert events[0].code == "invalid_request_error"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_any_llm_responses_path_passes_transport_kwargs_via_private_provider_api(
     monkeypatch,
 ) -> None:
@@ -583,6 +681,140 @@ async def test_any_llm_prompt_requests_fail_fast(monkeypatch) -> None:
         )
 
 
+def test_any_llm_responses_input_sanitizer_strips_none_fields_from_reasoning_items() -> None:
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+    from agents.extensions.models.any_llm_model import AnyLLMModel
+
+    model = AnyLLMModel(model="openai/gpt-5.4-mini")
+    raw_input = [
+        {
+            "id": "rid1",
+            "summary": [{"text": "why", "type": "summary_text"}],
+            "type": "reasoning",
+            "content": [{"type": "reasoning_text", "text": "thinking"}],
+            "status": None,
+            "encrypted_content": None,
+        }
+    ]
+
+    cleaned = model._sanitize_any_llm_responses_input(raw_input)
+
+    assert cleaned == [
+        {
+            "id": "rid1",
+            "summary": [{"text": "why", "type": "summary_text"}],
+            "type": "reasoning",
+            "content": [{"type": "reasoning_text", "text": "thinking"}],
+        }
+    ]
+
+    ResponsesParams = importlib.import_module("any_llm.types.responses").ResponsesParams
+    params = ResponsesParams(model="dummy", input=cleaned)
+    assert isinstance(params.input, list)
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_responses_path_sanitizes_replayed_items_before_validation() -> None:
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+    from agents.extensions.models.any_llm_model import AnyLLMModel
+
+    class ValidatingProvider:
+        SUPPORTS_RESPONSES = True
+
+        def __init__(self) -> None:
+            self.private_responses_calls: list[dict[str, Any]] = []
+
+        async def aresponses(self, **kwargs: Any) -> Any:
+            raise AssertionError("public aresponses path should not be used in this test")
+
+        async def _aresponses(self, params: Any, **kwargs: Any) -> Response:
+            self.private_responses_calls.append({"params": params, "kwargs": kwargs})
+            return _response("Hello from sanitized replay")
+
+    class TestAnyLLMModel(AnyLLMModel):
+        def __init__(self, provider: ValidatingProvider) -> None:
+            super().__init__(model="openai/gpt-5.4-mini", api="responses")
+            self._provider = provider
+
+        def _get_provider(self) -> Any:
+            return self._provider
+
+    provider = ValidatingProvider()
+    model = TestAnyLLMModel(provider)
+    tools: list[Tool] = []
+    handoffs: list[Handoff[Any, Agent[Any]]] = []
+    stream_flag: Literal[False] = False
+
+    replay_input = cast(
+        list[TResponseInputItem],
+        [
+            {"role": "user", "content": "What's the weather in Tokyo?"},
+            {
+                "id": FAKE_RESPONSES_ID,
+                "summary": [
+                    {"text": "I should call the weather tool first.", "type": "summary_text"}
+                ],
+                "type": "reasoning",
+                "content": [{"type": "reasoning_text", "text": "thinking"}],
+                "status": None,
+                "provider_data": {"model": "anthropic/fake-responses-model"},
+            },
+            {
+                "id": FAKE_RESPONSES_ID,
+                "arguments": '{"city": "Tokyo"}',
+                "call_id": "call_weather_123",
+                "name": "get_weather",
+                "type": "function_call",
+                "status": None,
+                "provider_data": {"model": "anthropic/fake-responses-model"},
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_weather_123",
+                "output": "The weather in Tokyo is sunny and 22°C.",
+            },
+        ],
+    )
+
+    response = await model._fetch_responses_response(
+        system_instructions=None,
+        input=replay_input,
+        model_settings=ModelSettings(),
+        tools=tools,
+        output_schema=None,
+        handoffs=handoffs,
+        previous_response_id=None,
+        conversation_id=None,
+        stream=stream_flag,
+        prompt=None,
+    )
+
+    assert response.id == "resp_123"
+    assert len(provider.private_responses_calls) == 1
+    params = provider.private_responses_calls[0]["params"]
+    assert params.input == [
+        {"role": "user", "content": "What's the weather in Tokyo?"},
+        {
+            "arguments": '{"city": "Tokyo"}',
+            "call_id": "call_weather_123",
+            "name": "get_weather",
+            "type": "function_call",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_weather_123",
+            "output": "The weather in Tokyo is sunny and 22°C.",
+        },
+    ]
+
+
 def test_any_llm_provider_passes_api_override() -> None:
     pytest.importorskip(
         "any_llm",
@@ -596,3 +828,71 @@ def test_any_llm_provider_passes_api_override() -> None:
 
     assert isinstance(model, AnyLLMModel)
     assert model.api == "chat_completions"
+
+
+def test_any_llm_reasoning_objects_prefer_content_attributes_over_iterable_pairs() -> None:
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+    from any_llm.types.completion import Reasoning
+
+    from agents.extensions.models.any_llm_model import _extract_any_llm_reasoning_text
+
+    delta = pytypes.SimpleNamespace(reasoning=Reasoning(content="用户"))
+
+    assert _extract_any_llm_reasoning_text(delta) == "用户"
+
+
+def test_any_llm_split_does_not_duplicate_content_or_thinking(monkeypatch) -> None:
+    """Splitting multi-tool assistant messages must not duplicate text/thinking blocks.
+
+    Anthropic's extended thinking API rejects requests that include the same signed
+    thinking block more than once, and duplicated assistant text corrupts conversation
+    history. Only the first split should retain content, thinking_blocks, and
+    reasoning_content; subsequent splits should carry the tool_call alone.
+    """
+    provider = FakeAnyLLMProvider(supports_responses=False)
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    model = AnyLLMModel(model="anthropic/claude-3-5-sonnet")
+    messages: list[Any] = [
+        {"role": "user", "content": "Search both"},
+        {
+            "role": "assistant",
+            "content": "Looking up both queries.",
+            "thinking_blocks": [{"type": "thinking", "thinking": "plan", "signature": "sig_abc"}],
+            "reasoning_content": "internal plan",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "s", "arguments": "{}"},
+                },
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "s", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "ok1"},
+        {"role": "tool", "tool_call_id": "call_2", "content": "ok2"},
+    ]
+
+    result = model._fix_tool_message_ordering(messages)
+
+    assistants = [m for m in result if m.get("role") == "assistant"]
+    assert len(assistants) == 2
+    # First split keeps the shared fields.
+    assert assistants[0].get("content") == "Looking up both queries."
+    assert "thinking_blocks" in assistants[0]
+    assert "reasoning_content" in assistants[0]
+    # Second split must NOT duplicate them.
+    assert "content" not in assistants[1]
+    assert "thinking_blocks" not in assistants[1]
+    assert "reasoning_content" not in assistants[1]
+    # Tool calls are still split one-per-message.
+    assert assistants[0]["tool_calls"][0]["id"] == "call_1"
+    assert assistants[1]["tool_calls"][0]["id"] == "call_2"

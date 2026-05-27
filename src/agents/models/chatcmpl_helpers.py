@@ -12,6 +12,7 @@ from openai.types.responses.response_text_delta_event import (
 
 from ..model_settings import ModelSettings
 from ..version import __version__
+from .openai_client_utils import is_official_openai_client
 
 _USER_AGENT = f"Agents/Python {__version__}"
 HEADERS = {"User-Agent": _USER_AGENT}
@@ -23,8 +24,8 @@ HEADERS_OVERRIDE: ContextVar[dict[str, str] | None] = ContextVar(
 
 class ChatCmplHelpers:
     @classmethod
-    def is_openai(cls, client: AsyncOpenAI):
-        return str(client.base_url).startswith("https://api.openai.com")
+    def is_openai(cls, client: AsyncOpenAI) -> bool:
+        return is_official_openai_client(client)
 
     @classmethod
     def get_store_param(cls, client: AsyncOpenAI, model_settings: ModelSettings) -> bool | None:

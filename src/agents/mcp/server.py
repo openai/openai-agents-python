@@ -4,11 +4,11 @@ import abc
 import asyncio
 import inspect
 import sys
-from collections.abc import AsyncGenerator, Awaitable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar, Union, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, Union, cast
 
 import anyio
 import httpx
@@ -64,12 +64,30 @@ class RequireApprovalObject(TypedDict, total=False):
 RequireApprovalPolicy = Literal["always", "never"]
 RequireApprovalMapping = dict[str, RequireApprovalPolicy]
 if TYPE_CHECKING:
+    LocalMCPApprovalCallable = Callable[
+        [RunContextWrapper[Any], "AgentBase", MCPTool],
+        MaybeAwaitable[bool],
+    ]
+else:
+    LocalMCPApprovalCallable = Callable[..., Any]
+
+if TYPE_CHECKING:
     RequireApprovalSetting = (
-        RequireApprovalPolicy | RequireApprovalObject | RequireApprovalMapping | bool | None
+        RequireApprovalPolicy
+        | RequireApprovalObject
+        | RequireApprovalMapping
+        | LocalMCPApprovalCallable
+        | bool
+        | None
     )
 else:
     RequireApprovalSetting = Union[  # noqa: UP007
-        RequireApprovalPolicy, RequireApprovalObject, RequireApprovalMapping, bool, None
+        RequireApprovalPolicy,
+        RequireApprovalObject,
+        RequireApprovalMapping,
+        LocalMCPApprovalCallable,
+        bool,
+        None,
     ]
 
 
@@ -81,7 +99,7 @@ def _create_default_streamable_http_client(
     timeout: httpx.Timeout | None = None,
     auth: httpx.Auth | None = None,
 ) -> httpx.AsyncClient:
-    kwargs: dict[str, Any] = {"follow_redirects": True}
+    kwargs: dict[str, Any] = {"follow_redirects": False}
     if timeout is not None:
         kwargs["timeout"] = timeout
     if headers is not None:
@@ -215,13 +233,15 @@ class MCPServer(abc.ABC):
         """
         Args:
             use_structured_content: Whether to use `tool_result.structured_content` when calling an
-                MCP tool.Defaults to False for backwards compatibility - most MCP servers still
+                MCP tool. Defaults to False for backwards compatibility - most MCP servers still
                 include the structured content in the `tool_result.content`, and using it by
                 default will cause duplicate content. You can set this to True if you know the
                 server will not duplicate the structured content in the `tool_result.content`.
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
-                a dict of tool names to those values, a boolean, or an object with always/never
-                tool lists (mirroring TS requireApproval). Normalized into a needs_approval policy.
+                a dict of tool names to those values, a boolean, an object with always/never
+                tool lists (mirroring TS requireApproval), or a sync/async callable that receives
+                `(run_context, agent, tool)` and returns whether the tool call needs approval.
+                Normalized into a needs_approval policy.
             failure_error_function: Optional function used to convert MCP tool failures into
                 a model-visible error message. If explicitly set to None, tool errors will be
                 raised instead of converted. If left unset, the agent-level configuration (or
@@ -371,8 +391,43 @@ class MCPServer(abc.ABC):
         if require_approval is None:
             return False
 
-        def _to_bool(value: str) -> bool:
-            return value == "always"
+        def _to_bool(value: object, *, location: str) -> bool:
+            if value == "always":
+                return True
+            if value == "never":
+                return False
+            raise UserError(
+                f"Invalid require_approval value at {location}: "
+                f"expected 'always' or 'never', got {value!r}."
+            )
+
+        def _validate_tool_names(value: object, *, location: str) -> list[str]:
+            if not isinstance(value, list):
+                raise UserError(
+                    f"Invalid require_approval tool_names at {location}: "
+                    f"expected a list of strings, got {type(value).__name__}."
+                )
+
+            tool_names: list[str] = []
+            for index, tool_name in enumerate(value):
+                if not isinstance(tool_name, str):
+                    raise UserError(
+                        f"Invalid require_approval tool name at {location}[{index}]: "
+                        f"expected a string, got {type(tool_name).__name__}."
+                    )
+                tool_names.append(tool_name)
+            return tool_names
+
+        def _get_tool_names_entry(value: object, *, policy: str) -> list[str]:
+            if not isinstance(value, dict):
+                raise UserError(
+                    f"Invalid require_approval.{policy}: "
+                    f"expected an object with tool_names, got {type(value).__name__}."
+                )
+            return _validate_tool_names(
+                value.get("tool_names", []),
+                location=f"require_approval.{policy}.tool_names",
+            )
 
         def _is_tool_list_schema(value: object) -> bool:
             if not isinstance(value, dict):
@@ -388,15 +443,25 @@ class MCPServer(abc.ABC):
         if isinstance(require_approval, dict) and _is_tool_list_schema(require_approval):
             always_entry: RequireApprovalToolList | Any = require_approval.get("always", {})
             never_entry: RequireApprovalToolList | Any = require_approval.get("never", {})
-            always_names = (
-                always_entry.get("tool_names", []) if isinstance(always_entry, dict) else []
-            )
-            never_names = never_entry.get("tool_names", []) if isinstance(never_entry, dict) else []
+            invalid_keys = sorted(set(require_approval) - {"always", "never"})
+            if invalid_keys:
+                raise UserError(
+                    "Invalid require_approval tool list policy: "
+                    f"unexpected keys {invalid_keys!r}; expected only 'always' and 'never'."
+                )
+            always_names = _get_tool_names_entry(always_entry, policy="always")
+            never_names = _get_tool_names_entry(never_entry, policy="never")
+            overlapping_names = sorted(set(always_names) & set(never_names))
+            if overlapping_names:
+                raise UserError(
+                    "Invalid require_approval tool list policy: "
+                    f"tool names cannot appear in both always and never: {overlapping_names!r}."
+                )
             tool_list_mapping: dict[str, bool] = {}
             for name in always_names:
-                tool_list_mapping[str(name)] = True
+                tool_list_mapping[name] = True
             for name in never_names:
-                tool_list_mapping[str(name)] = False
+                tool_list_mapping[name] = False
             return tool_list_mapping
 
         if isinstance(require_approval, dict):
@@ -404,21 +469,31 @@ class MCPServer(abc.ABC):
             for name, value in require_approval.items():
                 if isinstance(value, bool):
                     tool_mapping[str(name)] = value
-                elif isinstance(value, str) and value in ("always", "never"):
-                    tool_mapping[str(name)] = _to_bool(value)
+                else:
+                    tool_mapping[str(name)] = _to_bool(
+                        value, location=f"require_approval[{name!r}]"
+                    )
             return tool_mapping
+
+        if callable(require_approval):
+            return require_approval
 
         if isinstance(require_approval, bool):
             return require_approval
 
-        return _to_bool(require_approval)
+        return _to_bool(require_approval, location="require_approval")
 
     def _get_needs_approval_for_tool(
         self,
         tool: MCPTool,
         agent: AgentBase | None,
     ) -> bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]:
-        """Return a FunctionTool.needs_approval value for a given MCP tool."""
+        """Return a FunctionTool.needs_approval value for a given MCP tool.
+
+        Legacy callers may omit ``agent`` when using ``MCPUtil.to_function_tool()`` directly.
+        When approval is configured with a callable policy and no agent is available, this method
+        returns ``True`` to preserve the historical fail-closed behavior.
+        """
 
         policy = self._needs_approval_policy
 
@@ -634,14 +709,14 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     def _extract_http_error_from_exception(self, e: BaseException) -> Exception | None:
         """Extract HTTP error from exception or ExceptionGroup."""
-        if isinstance(e, (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException)):
+        if isinstance(e, httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException):
             return e
 
         # Check if it's an ExceptionGroup containing HTTP errors
         if isinstance(e, BaseExceptionGroup):
             for exc in e.exceptions:
                 if isinstance(
-                    exc, (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException)
+                    exc, httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException
                 ):
                     return exc
 
@@ -711,7 +786,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 raise
 
             # For HTTP-related errors, wrap them
-            if isinstance(e, (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException)):
+            if isinstance(e, httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException):
                 self._raise_user_error_for_http_error(e)
 
             # For other errors, re-raise as-is (don't wrap non-HTTP errors)
@@ -1222,8 +1297,9 @@ class MCPServerSse(_MCPServerWithClientSession):
         }
         if "auth" in self.params:
             kwargs["auth"] = self.params["auth"]
-        if "httpx_client_factory" in self.params:
-            kwargs["httpx_client_factory"] = self.params["httpx_client_factory"]
+        kwargs["httpx_client_factory"] = (
+            self.params.get("httpx_client_factory") or _create_default_streamable_http_client
+        )
         return sse_client(**kwargs)
 
     @property
@@ -1366,8 +1442,9 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 auth=self.params.get("auth"),
                 transport_factory=_InitializedNotificationTolerantStreamableHTTPTransport,
             )
-        if httpx_client_factory is not None:
-            kwargs["httpx_client_factory"] = httpx_client_factory
+        kwargs["httpx_client_factory"] = (
+            httpx_client_factory or _create_default_streamable_http_client
+        )
         if "auth" in self.params:
             kwargs["auth"] = self.params["auth"]
         return streamablehttp_client(**kwargs)
@@ -1404,12 +1481,10 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
     def _should_retry_in_isolated_session(self, exc: BaseException) -> bool:
         if isinstance(
             exc,
-            (
-                asyncio.CancelledError,
-                ClosedResourceError,
-                httpx.ConnectError,
-                httpx.TimeoutException,
-            ),
+            asyncio.CancelledError
+            | ClosedResourceError
+            | httpx.ConnectError
+            | httpx.TimeoutException,
         ):
             return True
         if isinstance(exc, httpx.HTTPStatusError):

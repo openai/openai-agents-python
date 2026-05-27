@@ -5,9 +5,10 @@ import copy
 import dataclasses
 import gc
 import json
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Callable, cast
+from typing import Any, cast
 
 import pytest
 from openai.types.responses import ResponseFunctionToolCall
@@ -18,6 +19,7 @@ from pydantic import BaseModel
 
 from agents import (
     Agent,
+    AgentBase,
     ApplyPatchTool,
     FunctionTool,
     HostedMCPTool,
@@ -25,6 +27,7 @@ from agents import (
     MCPApprovalResponseItem,
     MessageOutputItem,
     ModelBehaviorError,
+    ModelRefusalError,
     ModelResponse,
     RunConfig,
     RunContextWrapper,
@@ -34,6 +37,7 @@ from agents import (
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    ToolExecutionConfig,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrail,
     ToolOutputGuardrailData,
@@ -42,11 +46,14 @@ from agents import (
     TResponseInputItem,
     Usage,
     UserError,
+    _debug,
     tool_namespace,
     tool_output_guardrail,
     trace,
 )
-from agents.run_internal import run_loop
+from agents._public_agent import set_public_agent
+from agents.run_internal import run_loop, turn_resolution
+from agents.run_internal.agent_bindings import bind_execution_agent, bind_public_agent
 from agents.run_internal.run_loop import (
     NextStepFinalOutput,
     NextStepHandoff,
@@ -89,8 +96,8 @@ from .utils.hitl import (
 )
 
 
-def _function_span_names() -> list[str]:
-    names: list[str] = []
+def _function_spans() -> list[dict[str, Any]]:
+    function_spans: list[dict[str, Any]] = []
     for span in SPAN_PROCESSOR_TESTING.get_ordered_spans(including_empty=True):
         exported = span.export()
         if not exported:
@@ -100,10 +107,27 @@ def _function_span_names() -> list[str]:
             continue
         if span_data.get("type") != "function":
             continue
+        function_spans.append(exported)
+    return function_spans
+
+
+def _function_span_names() -> list[str]:
+    names: list[str] = []
+    for exported in _function_spans():
+        span_data = exported.get("span_data")
+        if not isinstance(span_data, dict):
+            continue
         name = span_data.get("name")
         if isinstance(name, str):
             names.append(name)
     return names
+
+
+def _bind_agent(agent: Agent[Any]):
+    public_agent = getattr(agent, "_agents_public_agent", None)
+    if isinstance(public_agent, Agent):
+        return bind_execution_agent(public_agent=public_agent, execution_agent=agent)
+    return bind_public_agent(agent)
 
 
 @pytest.mark.asyncio
@@ -208,6 +232,122 @@ async def test_plaintext_agent_with_tool_call_is_run_again():
     assert_item_is_function_tool_call_output(items[2], "123")
 
     assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_function_tool_concurrency_default_starts_all_calls():
+    active_count = 0
+    max_seen_count = 0
+
+    async def tracked_tool(value: int) -> str:
+        nonlocal active_count, max_seen_count
+        active_count += 1
+        max_seen_count = max(max_seen_count, active_count)
+        try:
+            await asyncio.sleep(0.01)
+            return f"ok-{value}"
+        finally:
+            active_count -= 1
+
+    tool = function_tool(tracked_tool, name_override="tracked_tool")
+    agent = Agent(name="test", tools=[tool])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("tracked_tool", json.dumps({"value": 1}), call_id="call_1"),
+            get_function_tool_call("tracked_tool", json.dumps({"value": 2}), call_id="call_2"),
+            get_function_tool_call("tracked_tool", json.dumps({"value": 3}), call_id="call_3"),
+        ],
+        usage=Usage(),
+        response_id="resp",
+    )
+
+    result = await get_execute_result(agent, response)
+
+    assert active_count == 0
+    assert max_seen_count == 3
+    assert_item_is_function_tool_call_output(result.generated_items[3], "ok-1")
+    assert_item_is_function_tool_call_output(result.generated_items[4], "ok-2")
+    assert_item_is_function_tool_call_output(result.generated_items[5], "ok-3")
+
+
+@pytest.mark.asyncio
+async def test_function_tool_concurrency_cap_limits_calls_and_preserves_output_order():
+    active_count = 0
+    max_seen_count = 0
+
+    async def tracked_tool(value: int) -> str:
+        nonlocal active_count, max_seen_count
+        active_count += 1
+        max_seen_count = max(max_seen_count, active_count)
+        try:
+            await asyncio.sleep(0.03 if value == 1 else 0.001)
+            return f"ok-{value}"
+        finally:
+            active_count -= 1
+
+    tool = function_tool(tracked_tool, name_override="tracked_tool")
+    agent = Agent(name="test", tools=[tool])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("tracked_tool", json.dumps({"value": 1}), call_id="call_1"),
+            get_function_tool_call("tracked_tool", json.dumps({"value": 2}), call_id="call_2"),
+            get_function_tool_call("tracked_tool", json.dumps({"value": 3}), call_id="call_3"),
+        ],
+        usage=Usage(),
+        response_id="resp",
+    )
+
+    result = await get_execute_result(
+        agent,
+        response,
+        run_config=RunConfig(tool_execution=ToolExecutionConfig(max_function_tool_concurrency=2)),
+    )
+
+    assert active_count == 0
+    assert max_seen_count == 2
+    assert_item_is_function_tool_call_output(result.generated_items[3], "ok-1")
+    assert_item_is_function_tool_call_output(result.generated_items[4], "ok-2")
+    assert_item_is_function_tool_call_output(result.generated_items[5], "ok-3")
+
+
+@pytest.mark.asyncio
+async def test_function_tool_concurrency_cap_leaves_queued_calls_unstarted_after_failure():
+    started_tools: list[str] = []
+
+    async def failing_tool() -> str:
+        started_tools.append("failing_tool")
+        raise RuntimeError("boom")
+
+    async def queued_tool() -> str:
+        started_tools.append("queued_tool")
+        return "should-not-run"
+
+    failing = function_tool(
+        failing_tool,
+        name_override="failing_tool",
+        failure_error_function=None,
+    )
+    queued = function_tool(queued_tool, name_override="queued_tool")
+    agent = Agent(name="test", tools=[failing, queued])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("failing_tool", "{}", call_id="call_1"),
+            get_function_tool_call("queued_tool", "{}", call_id="call_2"),
+        ],
+        usage=Usage(),
+        response_id="resp",
+    )
+
+    with pytest.raises(UserError, match="Error running tool failing_tool: boom"):
+        await get_execute_result(
+            agent,
+            response,
+            run_config=RunConfig(
+                tool_execution=ToolExecutionConfig(max_function_tool_concurrency=1)
+            ),
+        )
+
+    assert started_tools == ["failing_tool"]
 
 
 @pytest.mark.asyncio
@@ -353,7 +493,7 @@ async def test_plaintext_agent_client_tool_search_requires_manual_handling() -> 
 
 
 @pytest.mark.asyncio
-async def test_plaintext_agent_hosted_shell_with_refusal_message_is_final_output():
+async def test_plaintext_agent_hosted_shell_with_refusal_message_raises_refusal_error():
     shell_tool = ShellTool(environment={"type": "container_auto"})
     agent = Agent(name="test", tools=[shell_tool])
     refusal_message = ResponseOutputMessage(
@@ -392,14 +532,10 @@ async def test_plaintext_agent_hosted_shell_with_refusal_message_is_final_output
         response_id=None,
     )
 
-    result = await get_execute_result(agent, response)
+    with pytest.raises(ModelRefusalError) as exc_info:
+        await get_execute_result(agent, response)
 
-    assert len(result.generated_items) == 3
-    assert isinstance(result.generated_items[0], ToolCallItem)
-    assert isinstance(result.generated_items[1], ToolCallOutputItem)
-    assert isinstance(result.generated_items[2], MessageOutputItem)
-    assert isinstance(result.next_step, NextStepFinalOutput)
-    assert result.next_step.output == ""
+    assert exc_info.value.refusal == "I cannot help with that."
 
 
 @pytest.mark.asyncio
@@ -500,6 +636,78 @@ async def test_multiple_tool_calls_still_raise_when_sibling_failure_error_functi
 
     with pytest.raises(UserError, match="Error running tool error_tool: boom"):
         await get_execute_result(agent, response)
+
+
+@pytest.mark.asyncio
+async def test_function_tool_error_trace_respects_sensitive_data_setting():
+    async def _error_tool() -> str:
+        raise ValueError("secret-token-123")
+
+    error_tool = function_tool(
+        _error_tool,
+        name_override="error_tool",
+        failure_error_function=None,
+    )
+    agent = Agent(name="test", tools=[error_tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("error_tool", "{}", call_id="1")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with trace("test"):
+        with pytest.raises(UserError, match="Error running tool error_tool: secret-token-123"):
+            await get_execute_result(
+                agent,
+                response,
+                run_config=RunConfig(trace_include_sensitive_data=False),
+            )
+
+    function_spans = _function_spans()
+
+    assert len(function_spans) == 1
+    error = function_spans[0]["error"]
+    assert error["message"] == "Error running tool"
+    assert error["data"]["tool_name"] == "error_tool"
+    assert error["data"]["error"] == "Tool execution failed. Error details are redacted."
+    assert "secret-token-123" not in str(error)
+
+
+@pytest.mark.asyncio
+async def test_default_function_tool_error_trace_respects_sensitive_data_setting():
+    async def _error_tool() -> str:
+        raise ValueError("secret-token-123")
+
+    error_tool = function_tool(_error_tool, name_override="error_tool")
+    agent = Agent(name="test", tools=[error_tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("error_tool", "{}", call_id="1")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with trace("test"):
+        result = await get_execute_result(
+            agent,
+            response,
+            run_config=RunConfig(trace_include_sensitive_data=False),
+        )
+
+    assert len(result.generated_items) == 2
+    assert isinstance(result.next_step, NextStepRunAgain)
+    assert_item_is_function_tool_call_output(
+        result.generated_items[1],
+        "An error occurred while running the tool. Please try again. Error: secret-token-123",
+    )
+
+    function_spans = _function_spans()
+
+    assert len(function_spans) == 1
+    error = function_spans[0]["error"]
+    assert error["message"] == "Error running tool (non-fatal)"
+    assert error["data"]["tool_name"] == "error_tool"
+    assert error["data"]["error"] == "Tool execution failed. Error details are redacted."
+    assert "secret-token-123" not in str(error)
 
 
 @pytest.mark.asyncio
@@ -761,6 +969,43 @@ async def test_single_tool_call_uses_default_failure_error_function_for_cancelle
         result.generated_items[1],
         "An error occurred while running the tool. Please try again. Error: tool-cancelled",
     )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_function_tool_error_trace_respects_sensitive_data_setting():
+    async def _cancel_tool() -> str:
+        raise asyncio.CancelledError("secret-token-123")
+
+    cancel_tool = function_tool(_cancel_tool, name_override="cancel_tool")
+    agent = Agent(name="test", tools=[cancel_tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("cancel_tool", "{}", call_id="1")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with trace("test"):
+        result = await get_execute_result(
+            agent,
+            response,
+            run_config=RunConfig(trace_include_sensitive_data=False),
+        )
+
+    assert len(result.generated_items) == 2
+    assert isinstance(result.next_step, NextStepRunAgain)
+    assert_item_is_function_tool_call_output(
+        result.generated_items[1],
+        "An error occurred while running the tool. Please try again. Error: secret-token-123",
+    )
+
+    function_spans = _function_spans()
+
+    assert len(function_spans) == 1
+    error = function_spans[0]["error"]
+    assert error["message"] == "Tool execution cancelled"
+    assert error["data"]["tool_name"] == "cancel_tool"
+    assert error["data"]["error"] == "Tool execution failed. Error details are redacted."
+    assert "secret-token-123" not in str(error)
 
 
 @pytest.mark.asyncio
@@ -1165,7 +1410,7 @@ async def test_execute_function_tool_calls_parent_cancellation_skips_post_invoke
 
     execution_task = asyncio.create_task(
         execute_function_tool_calls(
-            agent=agent,
+            bindings=bind_public_agent(agent),
             tool_runs=tool_runs,
             hooks=RecordingHooks(),
             context_wrapper=RunContextWrapper(None),
@@ -1227,7 +1472,7 @@ async def test_execute_function_tool_calls_eager_task_factory_tracks_state_safel
             input_guardrail_results,
             output_guardrail_results,
         ) = await execute_function_tool_calls(
-            agent=Agent(name="test", tools=[first_tool, second_tool]),
+            bindings=bind_public_agent(Agent(name="test", tools=[first_tool, second_tool])),
             tool_runs=tool_runs,
             hooks=RunHooks(),
             context_wrapper=RunContextWrapper(None),
@@ -1237,6 +1482,78 @@ async def test_execute_function_tool_calls_eager_task_factory_tracks_state_safel
         loop.set_task_factory(previous_task_factory)
 
     assert [result.output for result in function_results] == ["first", "second"]
+    assert input_guardrail_results == []
+    assert output_guardrail_results == []
+
+
+@pytest.mark.asyncio
+async def test_function_tool_disabled_before_execution_fails_before_starting_siblings() -> None:
+    enabled_checks: list[bool] = []
+    disabled_tool_invocations = 0
+    sibling_tool_invocations = 0
+
+    def _is_lookup_enabled(_ctx: RunContextWrapper[Any], _agent: AgentBase[Any]) -> bool:
+        enabled = not enabled_checks
+        enabled_checks.append(enabled)
+        return enabled
+
+    @function_tool(name_override="lookup_secret", is_enabled=_is_lookup_enabled)
+    def lookup_secret() -> str:
+        nonlocal disabled_tool_invocations
+        disabled_tool_invocations += 1
+        return "secret"
+
+    @function_tool(name_override="record_side_effect")
+    def record_side_effect() -> str:
+        nonlocal sibling_tool_invocations
+        sibling_tool_invocations += 1
+        return "recorded"
+
+    agent = Agent(name="test", tools=[lookup_secret, record_side_effect])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("lookup_secret", "{}", call_id="call-1"),
+            get_function_tool_call("record_side_effect", "{}", call_id="call-2"),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with pytest.raises(ModelBehaviorError, match="lookup_secret is currently disabled"):
+        await get_execute_result(agent, response)
+
+    assert enabled_checks == [True, False]
+    assert disabled_tool_invocations == 0
+    assert sibling_tool_invocations == 0
+
+
+@pytest.mark.asyncio
+async def test_execute_function_tool_calls_allows_non_agent_function_tool() -> None:
+    @function_tool(name_override="synthetic_tool")
+    def synthetic_tool() -> str:
+        return "synthetic-result"
+
+    tool_run = ToolRunFunction(
+        tool_call=cast(
+            ResponseFunctionToolCall,
+            get_function_tool_call("synthetic_tool", "{}", call_id="call-1"),
+        ),
+        function_tool=synthetic_tool,
+    )
+
+    (
+        function_results,
+        input_guardrail_results,
+        output_guardrail_results,
+    ) = await execute_function_tool_calls(
+        bindings=bind_public_agent(Agent(name="test", tools=[])),
+        tool_runs=[tool_run],
+        hooks=RunHooks(),
+        context_wrapper=RunContextWrapper(None),
+        config=RunConfig(),
+    )
+
+    assert [result.output for result in function_results] == ["synthetic-result"]
     assert input_guardrail_results == []
     assert output_guardrail_results == []
 
@@ -1266,7 +1583,7 @@ async def test_execute_function_tool_calls_collapse_trace_name_for_top_level_def
 
     with trace("test_execute_function_tool_calls_collapse_trace_name_for_top_level_deferred_tools"):
         await execute_function_tool_calls(
-            agent=Agent(name="test", tools=[tool]),
+            bindings=bind_public_agent(Agent(name="test", tools=[tool])),
             tool_runs=[tool_run],
             hooks=RunHooks(),
             context_wrapper=RunContextWrapper(None),
@@ -1308,7 +1625,7 @@ async def test_execute_function_tool_calls_preserve_trace_name_for_explicit_name
 
     with trace("test_execute_function_tool_calls_preserve_trace_name_for_explicit_namespace"):
         await execute_function_tool_calls(
-            agent=Agent(name="test", tools=[tool]),
+            bindings=bind_public_agent(Agent(name="test", tools=[tool])),
             tool_runs=[tool_run],
             hooks=RunHooks(),
             context_wrapper=RunContextWrapper(None),
@@ -2498,7 +2815,11 @@ async def test_multiple_final_output_leads_to_final_output_next_step():
 
 
 @pytest.mark.asyncio
-async def test_input_guardrail_runs_on_invalid_json():
+async def test_input_guardrail_runs_on_invalid_json(monkeypatch: pytest.MonkeyPatch):
+    # Opt in to payload logging so the JSON decode error chain is preserved and the
+    # default failure formatter can recover the friendly "parsing tool arguments" message.
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
     guardrail_calls: list[str] = []
 
     def guardrail(data) -> ToolGuardrailFunctionOutput:
@@ -2634,7 +2955,7 @@ async def get_execute_result(
         handoffs=handoffs,
     )
     return await run_loop.execute_tools_and_side_effects(
-        agent=agent,
+        bindings=_bind_agent(agent),
         original_input=original_input or "hello",
         new_response=response,
         pre_step_items=generated_items or [],
@@ -2652,7 +2973,7 @@ async def run_execute_with_processed_response(
     """Execute tools for a pre-constructed ProcessedResponse."""
 
     return await run_loop.execute_tools_and_side_effects(
-        agent=agent,
+        bindings=_bind_agent(agent),
         original_input="test",
         pre_step_items=[],
         new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
@@ -2838,6 +3159,58 @@ async def test_execute_tools_runs_hosted_mcp_callback_when_present():
 
 
 @pytest.mark.asyncio
+async def test_execute_tools_uses_public_agent_for_hosted_mcp_callback_results():
+    """Hosted MCP callback responses should expose the public agent when execution uses a clone."""
+
+    mcp_tool = HostedMCPTool(
+        tool_config={
+            "type": "mcp",
+            "server_label": "test_mcp_server",
+            "server_url": "https://example.com",
+            "require_approval": "always",
+        },
+        on_approval_request=lambda request: {"approve": True},
+    )
+    public_agent = make_agent(tools=[mcp_tool])
+    execution_agent = public_agent.clone()
+    set_public_agent(execution_agent, public_agent)
+    request_item = McpApprovalRequest(
+        id="mcp-approval-callback-public-agent",
+        type="mcp_approval_request",
+        server_label="test_mcp_server",
+        arguments="{}",
+        name="list_repo_languages",
+    )
+    processed_response = make_processed_response(
+        new_items=[MCPApprovalRequestItem(raw_item=request_item, agent=execution_agent)],
+        mcp_approval_requests=[
+            ToolRunMCPApprovalRequest(
+                request_item=request_item,
+                mcp_tool=mcp_tool,
+            )
+        ],
+    )
+
+    result = await run_loop.execute_tools_and_side_effects(
+        bindings=_bind_agent(execution_agent),
+        original_input="test",
+        pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        output_schema=None,
+        hooks=RunHooks(),
+        context_wrapper=make_context_wrapper(),
+        run_config=RunConfig(),
+    )
+
+    assert not isinstance(result.next_step, NextStepInterruption)
+    assert any(
+        isinstance(item, MCPApprovalResponseItem) and item.agent is public_agent
+        for item in result.new_step_items
+    )
+
+
+@pytest.mark.asyncio
 async def test_execute_tools_surfaces_hosted_mcp_interruptions_without_callback():
     """Hosted MCP approvals should surface as interruptions when no callback is provided."""
 
@@ -2881,6 +3254,190 @@ async def test_execute_tools_surfaces_hosted_mcp_interruptions_without_callback(
 
 
 @pytest.mark.asyncio
+async def test_execute_tools_uses_public_agent_for_hosted_mcp_interruptions():
+    """Hosted MCP approval items should expose the public agent when execution uses a clone."""
+
+    mcp_tool = HostedMCPTool(
+        tool_config={
+            "type": "mcp",
+            "server_label": "test_mcp_server",
+            "server_url": "https://example.com",
+            "require_approval": "always",
+        },
+        on_approval_request=None,
+    )
+    public_agent = make_agent(tools=[mcp_tool])
+    execution_agent = public_agent.clone()
+    set_public_agent(execution_agent, public_agent)
+    request_item = McpApprovalRequest(
+        id="mcp-approval-public-agent",
+        type="mcp_approval_request",
+        server_label="test_mcp_server",
+        arguments="{}",
+        name="list_repo_languages",
+    )
+    processed_response = make_processed_response(
+        new_items=[MCPApprovalRequestItem(raw_item=request_item, agent=execution_agent)],
+        mcp_approval_requests=[
+            ToolRunMCPApprovalRequest(
+                request_item=request_item,
+                mcp_tool=mcp_tool,
+            )
+        ],
+    )
+
+    result = await run_loop.execute_tools_and_side_effects(
+        bindings=_bind_agent(execution_agent),
+        original_input="test",
+        pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        output_schema=None,
+        hooks=RunHooks(),
+        context_wrapper=make_context_wrapper(),
+        run_config=RunConfig(),
+    )
+
+    assert isinstance(result.next_step, NextStepInterruption)
+    assert result.next_step.interruptions
+    assert all(item.agent is public_agent for item in result.next_step.interruptions)
+    assert any(
+        isinstance(item, ToolApprovalItem)
+        and getattr(item.raw_item, "id", None) == "mcp-approval-public-agent"
+        and item.agent is public_agent
+        for item in result.new_step_items
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_interrupted_turn_uses_public_agent_for_resumed_hosted_mcp_approvals():
+    """Resumed hosted MCP approvals should keep the public agent on approval responses."""
+
+    mcp_tool = HostedMCPTool(
+        tool_config={
+            "type": "mcp",
+            "server_label": "test_mcp_server",
+            "server_url": "https://example.com",
+            "require_approval": "always",
+        },
+        on_approval_request=None,
+    )
+    public_agent = make_agent(tools=[mcp_tool])
+    execution_agent = public_agent.clone()
+    set_public_agent(execution_agent, public_agent)
+    request_item = McpApprovalRequest(
+        id="mcp-approval-resume-public-agent",
+        type="mcp_approval_request",
+        server_label="test_mcp_server",
+        arguments="{}",
+        name="list_repo_languages",
+    )
+    approval_item = ToolApprovalItem(
+        agent=public_agent,
+        raw_item=request_item,
+        tool_name="list_repo_languages",
+    )
+    context_wrapper = make_context_wrapper()
+    context_wrapper.approve_tool(approval_item)
+    processed_response = make_processed_response(
+        new_items=[MCPApprovalRequestItem(raw_item=request_item, agent=execution_agent)],
+        mcp_approval_requests=[
+            ToolRunMCPApprovalRequest(
+                request_item=request_item,
+                mcp_tool=mcp_tool,
+            )
+        ],
+    )
+
+    result = await turn_resolution.resolve_interrupted_turn(
+        bindings=_bind_agent(execution_agent),
+        original_input="test",
+        original_pre_step_items=[approval_item],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+    )
+
+    responses = [
+        item
+        for item in result.new_step_items
+        if isinstance(item, MCPApprovalResponseItem)
+        and item.raw_item.get("approval_request_id") == "mcp-approval-resume-public-agent"
+    ]
+    assert responses
+    assert all(item.agent is public_agent for item in responses)
+
+
+@pytest.mark.asyncio
+async def test_execute_handoffs_uses_public_agent_for_ignored_extra_handoffs():
+    """Ignored extra handoff outputs should stay owned by the public agent."""
+
+    first_target = Agent(name="alpha")
+    second_target = Agent(name="beta")
+    public_agent = Agent(name="triage", handoffs=[first_target, second_target])
+    execution_agent = public_agent.clone()
+    set_public_agent(execution_agent, public_agent)
+    response = ModelResponse(
+        output=[get_handoff_tool_call(first_target), get_handoff_tool_call(second_target)],
+        usage=Usage(),
+        response_id="resp",
+    )
+
+    result = await get_execute_result(execution_agent, response)
+
+    ignored_outputs = [
+        item
+        for item in result.new_step_items
+        if isinstance(item, ToolCallOutputItem)
+        and item.output == "Multiple handoffs detected, ignoring this one."
+    ]
+    assert len(ignored_outputs) == 1
+    assert ignored_outputs[0].agent is public_agent
+
+
+@pytest.mark.asyncio
+async def test_execute_handoffs_preserves_tool_input_guardrail_results():
+    """Tool input guardrail results from concurrent function calls must survive a handoff."""
+
+    def guardrail(data) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="checked")
+
+    guardrail_obj: ToolInputGuardrail[Any] = ToolInputGuardrail(guardrail_function=guardrail)
+
+    def _echo(value: str) -> str:
+        return value
+
+    guarded_tool = function_tool(
+        _echo,
+        name_override="guarded",
+        tool_input_guardrails=[guardrail_obj],
+    )
+    target = Agent(name="target")
+    public_agent = Agent(name="triage", tools=[guarded_tool], handoffs=[target])
+    execution_agent = public_agent.clone()
+    set_public_agent(execution_agent, public_agent)
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("guarded", json.dumps({"value": "hi"}), call_id="c1"),
+            get_handoff_tool_call(target),
+        ],
+        usage=Usage(),
+        response_id="resp",
+    )
+
+    result = await get_execute_result(execution_agent, response)
+
+    assert isinstance(result.next_step, NextStepHandoff)
+    assert result.tool_input_guardrail_results, (
+        "Tool input guardrail results should not be dropped when a handoff fires alongside "
+        "a function tool call."
+    )
+    assert result.tool_input_guardrail_results[0].output.output_info == "checked"
+
+
+@pytest.mark.asyncio
 async def test_execute_tools_emits_hosted_mcp_rejection_response():
     """Hosted MCP rejections without callbacks should emit approval responses."""
 
@@ -2914,7 +3471,7 @@ async def test_execute_tools_emits_hosted_mcp_rejection_response():
     reject_tool_call(context_wrapper, agent, request_item, tool_name="list_repo_languages")
 
     result = await run_loop.execute_tools_and_side_effects(
-        agent=agent,
+        bindings=_bind_agent(agent),
         original_input="test",
         pre_step_items=[],
         new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
@@ -2975,7 +3532,7 @@ async def test_execute_tools_emits_hosted_mcp_rejection_reason_from_explicit_mes
     )
 
     result = await run_loop.execute_tools_and_side_effects(
-        agent=agent,
+        bindings=_bind_agent(agent),
         original_input="test",
         pre_step_items=[],
         new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),

@@ -1,0 +1,30 @@
+{
+  "scenario_id": "blue_cross_pt_benefits",
+  "description": "Blue Cross member asks about remaining physical therapy benefit and coverage path.",
+  "transcript": "This is Ella Brooks. I am a Blue Cross member and my ID is BCX-8822009.\nI am trying to continue physical therapy and need to know if I still have covered visits left.\nI do not have my date of birth in front of me if you need it.",
+  "patient_metadata": {
+    "patient_id": "PAT-1005"
+  },
+  "followup_qa": {
+    "date of birth": "05/12/1974",
+    "physical therapy": "physical therapy"
+  },
+  "expected": {
+    "intent": "eligibility_verification",
+    "required_entities": {
+      "payer": "Blue Cross",
+      "member_id": "BCX-8822009"
+    },
+    "required_tool_calls": [
+      "insurance_eligibility_lookup"
+    ],
+    "required_resolution_elements": [
+      "eligibility verified",
+      "recommended next step"
+    ],
+    "expected_payer": "Blue Cross"
+  },
+  "gold": {
+    "expected_next_step": "Confirm PT visit limits and advise on when additional review is needed."
+  }
+}

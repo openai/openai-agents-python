@@ -232,7 +232,7 @@ async def test_handoff_can_disable_run_level_history_nesting(monkeypatch: pytest
     monkeypatch.setattr("agents.run_internal.turn_resolution.nest_handoff_history", fake_nest)
 
     result = await run_loop.execute_handoffs(
-        agent=source_agent,
+        public_agent=source_agent,
         original_input=list(original_input),
         pre_step_items=pre_step_items,
         new_step_items=new_step_items,
@@ -280,7 +280,7 @@ async def test_handoff_can_enable_history_nesting(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr("agents.run_internal.turn_resolution.nest_handoff_history", fake_nest)
 
     result = await run_loop.execute_handoffs(
-        agent=source_agent,
+        public_agent=source_agent,
         original_input=list(original_input),
         pre_step_items=pre_step_items,
         new_step_items=new_step_items,

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Generic, Union, overload
+from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
 
@@ -189,11 +189,11 @@ TContext_co = TypeVar("TContext_co", bound=Any, covariant=True)
 
 # For InputGuardrail
 _InputGuardrailFuncSync = Callable[
-    [RunContextWrapper[TContext_co], "Agent[Any]", Union[str, list[TResponseInputItem]]],
+    [RunContextWrapper[TContext_co], "Agent[Any]", str | list[TResponseInputItem]],
     GuardrailFunctionOutput,
 ]
 _InputGuardrailFuncAsync = Callable[
-    [RunContextWrapper[TContext_co], "Agent[Any]", Union[str, list[TResponseInputItem]]],
+    [RunContextWrapper[TContext_co], "Agent[Any]", str | list[TResponseInputItem]],
     Awaitable[GuardrailFunctionOutput],
 ]
 

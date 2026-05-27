@@ -8,14 +8,15 @@ import inspect
 import json
 import math
 import weakref
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 from types import UnionType
 from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
-    Callable,
+    Concatenate,
     Generic,
     Literal,
     Protocol,
@@ -28,6 +29,7 @@ from typing import (
     overload,
 )
 
+from openai.types.responses import CustomToolParam
 from openai.types.responses.file_search_tool_param import Filters, RankingOptions
 from openai.types.responses.response_computer_tool_call import (
     PendingSafetyCheck,
@@ -38,7 +40,7 @@ from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, 
 from openai.types.responses.web_search_tool import Filters as WebSearchToolFilters
 from openai.types.responses.web_search_tool_param import UserLocation
 from pydantic import BaseModel, TypeAdapter, ValidationError, model_validator
-from typing_extensions import Concatenate, NotRequired, ParamSpec, TypedDict
+from typing_extensions import NotRequired, ParamSpec, TypedDict
 
 from . import _debug
 from ._tool_identity import (
@@ -58,6 +60,7 @@ from .tool_context import ToolContext
 from .tool_guardrails import ToolInputGuardrail, ToolOutputGuardrail
 from .tracing import SpanError
 from .util import _error_tracing
+from .util._tool_errors import get_trace_tool_error
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
@@ -71,15 +74,17 @@ ToolFunctionWithoutContext = Callable[ToolParams, Any]
 ToolFunctionWithContext = Callable[Concatenate[RunContextWrapper[Any], ToolParams], Any]
 ToolFunctionWithToolContext = Callable[Concatenate[ToolContext, ToolParams], Any]
 
-ToolFunction = Union[
-    ToolFunctionWithoutContext[ToolParams],
-    ToolFunctionWithContext[ToolParams],
-    ToolFunctionWithToolContext[ToolParams],
-]
+ToolFunction = (
+    ToolFunctionWithoutContext[ToolParams]
+    | ToolFunctionWithContext[ToolParams]
+    | ToolFunctionWithToolContext[ToolParams]
+)
 
 DEFAULT_APPROVAL_REJECTION_MESSAGE = "Tool execution was not approved."
 ToolTimeoutBehavior = Literal["error_as_result", "raise_exception"]
 ToolErrorFunction = Callable[[RunContextWrapper[Any], Exception], MaybeAwaitable[str]]
+CustomToolExecutor = Callable[[ToolContext[Any], str], MaybeAwaitable[Any]]
+CustomToolApprovalFunction = Callable[[RunContextWrapper[Any], str, str], MaybeAwaitable[bool]]
 _SYNC_FUNCTION_TOOL_MARKER = "__agents_sync_function_tool__"
 _UNSET_FAILURE_ERROR_FUNCTION = object()
 
@@ -158,12 +163,68 @@ class ToolOutputFileContentDict(TypedDict, total=False):
     filename: NotRequired[str]
 
 
-ValidToolOutputPydanticModels = Union[ToolOutputText, ToolOutputImage, ToolOutputFileContent]
+ValidToolOutputPydanticModels = ToolOutputText | ToolOutputImage | ToolOutputFileContent
 ValidToolOutputPydanticModelsTypeAdapter: TypeAdapter[ValidToolOutputPydanticModels] = TypeAdapter(
     ValidToolOutputPydanticModels
 )
 
-ComputerLike = Union[Computer, AsyncComputer]
+
+class ToolOriginType(str, Enum):
+    """Enumerates the runtime source of a function-tool-backed run item."""
+
+    FUNCTION = "function"
+    MCP = "mcp"
+    AGENT_AS_TOOL = "agent_as_tool"
+
+
+@dataclass(frozen=True)
+class ToolOrigin:
+    """Serializable metadata describing where a function-tool-backed item came from."""
+
+    type: ToolOriginType
+    mcp_server_name: str | None = None
+    agent_name: str | None = None
+    agent_tool_name: str | None = None
+
+    def to_json_dict(self) -> dict[str, str]:
+        """Convert the metadata to a JSON-compatible dict."""
+        result: dict[str, str] = {"type": self.type.value}
+        if self.mcp_server_name is not None:
+            result["mcp_server_name"] = self.mcp_server_name
+        if self.agent_name is not None:
+            result["agent_name"] = self.agent_name
+        if self.agent_tool_name is not None:
+            result["agent_tool_name"] = self.agent_tool_name
+        return result
+
+    @classmethod
+    def from_json_dict(cls, data: Any) -> ToolOrigin | None:
+        """Deserialize tool origin metadata from JSON-compatible data."""
+        if not isinstance(data, Mapping):
+            return None
+
+        raw_type = data.get("type")
+        if not isinstance(raw_type, str):
+            return None
+
+        try:
+            origin_type = ToolOriginType(raw_type)
+        except ValueError:
+            return None
+
+        def _optional_string(key: str) -> str | None:
+            value = data.get(key)
+            return value if isinstance(value, str) else None
+
+        return cls(
+            type=origin_type,
+            mcp_server_name=_optional_string("mcp_server_name"),
+            agent_name=_optional_string("agent_name"),
+            agent_tool_name=_optional_string("agent_tool_name"),
+        )
+
+
+ComputerLike = Computer | AsyncComputer
 ComputerT = TypeVar("ComputerT", bound=ComputerLike)
 ComputerT_co = TypeVar("ComputerT_co", bound=ComputerLike, covariant=True)
 ComputerT_contra = TypeVar("ComputerT_contra", bound=ComputerLike, contravariant=True)
@@ -194,11 +255,7 @@ class ComputerProvider(Generic[ComputerT]):
     dispose: ComputerDispose[ComputerT] | None = None
 
 
-ComputerConfig = Union[
-    ComputerT,
-    ComputerCreate[ComputerT],
-    ComputerProvider[ComputerT],
-]
+ComputerConfig = ComputerLike | ComputerCreate[Any] | ComputerProvider[Any]
 
 
 @dataclass
@@ -326,6 +383,12 @@ class FunctionTool:
     _mcp_title: str | None = field(default=None, kw_only=True, repr=False)
     """Internal MCP display title used for ToolCallItem metadata."""
 
+    _tool_origin: ToolOrigin | None = field(default=None, kw_only=True, repr=False)
+    """Internal scalar metadata describing the origin of function-tool-backed items."""
+
+    _emit_tool_origin: bool = field(default=True, kw_only=True, repr=False)
+    """Whether runtime item generation should emit tool origin metadata for this tool."""
+
     @property
     def qualified_name(self) -> str:
         """Return the public qualified name used to identify this function tool."""
@@ -338,7 +401,9 @@ class FunctionTool:
         if callable(bind_to_function_tool):
             self.on_invoke_tool = bind_to_function_tool(self)
         if self.strict_json_schema:
-            self.params_json_schema = ensure_strict_json_schema(self.params_json_schema)
+            self.params_json_schema = ensure_strict_json_schema(
+                copy.deepcopy(self.params_json_schema)
+            )
         _validate_function_tool_timeout_config(self)
 
     def __copy__(self) -> FunctionTool:
@@ -360,7 +425,7 @@ class _FailureHandlingFunctionToolInvoker:
     def __init__(
         self,
         invoke_tool_impl: Callable[[ToolContext[Any], str], Awaitable[Any]],
-        on_handled_error: Callable[[FunctionTool, Exception, str], None],
+        on_handled_error: Callable[[FunctionTool, Exception, str, ToolContext[Any]], None],
         *,
         function_tool: FunctionTool | None = None,
     ) -> None:
@@ -395,7 +460,7 @@ class _FailureHandlingFunctionToolInvoker:
             if result is None:
                 raise
 
-            self._on_handled_error(self._function_tool, e, input)
+            self._on_handled_error(self._function_tool, e, input, ctx)
             return result
 
 
@@ -404,6 +469,26 @@ def with_function_tool_failure_error_handler(
     on_handled_error: Callable[[FunctionTool, Exception, str], None],
 ) -> Callable[[ToolContext[Any], str], Awaitable[Any]]:
     """Wrap a tool invoker so copied FunctionTools resolve failure policy against themselves."""
+
+    def _on_handled_error_with_context(
+        function_tool: FunctionTool,
+        error: Exception,
+        input_json: str,
+        _context: ToolContext[Any],
+    ) -> None:
+        on_handled_error(function_tool, error, input_json)
+
+    return _with_context_function_tool_failure_error_handler(
+        invoke_tool_impl,
+        _on_handled_error_with_context,
+    )
+
+
+def _with_context_function_tool_failure_error_handler(
+    invoke_tool_impl: Callable[[ToolContext[Any], str], Awaitable[Any]],
+    on_handled_error: Callable[[FunctionTool, Exception, str, ToolContext[Any]], None],
+) -> Callable[[ToolContext[Any], str], Awaitable[Any]]:
+    """Wrap a tool invoker with context-aware handled-error reporting."""
     return _FailureHandlingFunctionToolInvoker(invoke_tool_impl, on_handled_error)
 
 
@@ -413,7 +498,7 @@ def _build_wrapped_function_tool(
     description: str,
     params_json_schema: dict[str, Any],
     invoke_tool_impl: Callable[[ToolContext[Any], str], Awaitable[Any]],
-    on_handled_error: Callable[[FunctionTool, Exception, str], None],
+    on_handled_error: Callable[[FunctionTool, Exception, str, ToolContext[Any]], None],
     failure_error_function: ToolErrorFunction | None | object = _UNSET_FAILURE_ERROR_FUNCTION,
     strict_json_schema: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
@@ -428,9 +513,10 @@ def _build_wrapped_function_tool(
     defer_loading: bool = False,
     sync_invoker: bool = False,
     mcp_title: str | None = None,
+    tool_origin: ToolOrigin | None = None,
 ) -> FunctionTool:
     """Create a FunctionTool with copied-tool-aware failure handling bound in one place."""
-    on_invoke_tool = with_function_tool_failure_error_handler(
+    on_invoke_tool = _with_context_function_tool_failure_error_handler(
         invoke_tool_impl,
         on_handled_error,
     )
@@ -453,9 +539,17 @@ def _build_wrapped_function_tool(
             timeout_error_function=timeout_error_function,
             defer_loading=defer_loading,
             _mcp_title=mcp_title,
+            _tool_origin=tool_origin,
         ),
         failure_error_function,
     )
+
+
+def get_function_tool_origin(function_tool: FunctionTool) -> ToolOrigin | None:
+    """Return scalar origin metadata for a function tool."""
+    if not function_tool._emit_tool_origin:
+        return None
+    return function_tool._tool_origin or ToolOrigin(type=ToolOriginType.FUNCTION)
 
 
 @dataclass
@@ -515,7 +609,7 @@ class WebSearchTool:
 class ComputerTool(Generic[ComputerT]):
     """A local computer harness exposed through the Responses API computer tool."""
 
-    computer: ComputerConfig[ComputerT]
+    computer: ComputerT | ComputerCreate[ComputerT] | ComputerProvider[ComputerT]
     """The computer implementation, or a factory that produces a computer per run."""
 
     on_safety_check: Callable[[ComputerToolSafetyCheckData], MaybeAwaitable[bool]] | None = None
@@ -547,7 +641,7 @@ _computer_cache: weakref.WeakKeyDictionary[
     ComputerTool[Any],
     weakref.WeakKeyDictionary[RunContextWrapper[Any], _ResolvedComputer],
 ] = weakref.WeakKeyDictionary()
-_computer_initializer_map: weakref.WeakKeyDictionary[ComputerTool[Any], ComputerConfig[Any]] = (
+_computer_initializer_map: weakref.WeakKeyDictionary[ComputerTool[Any], ComputerConfig] = (
     weakref.WeakKeyDictionary()
 )
 _computers_by_run_context: weakref.WeakKeyDictionary[
@@ -597,7 +691,7 @@ async def resolve_computer(
     else:
         computer = cast(ComputerLike, tool.computer)
 
-    if not isinstance(computer, (Computer, AsyncComputer)):
+    if not isinstance(computer, Computer | AsyncComputer):
         raise UserError("The computer tool did not provide a computer instance.")
 
     resolved = _ResolvedComputer(computer=computer, dispose=disposer)
@@ -732,6 +826,24 @@ Takes (run_context, approval_item) and returns approval decision.
 """
 
 
+class CustomToolOnApprovalFunctionResult(TypedDict):
+    """The result of a custom tool on_approval callback."""
+
+    approve: bool
+    """Whether to approve the tool call."""
+
+    reason: NotRequired[str]
+    """An optional reason, if rejected."""
+
+
+CustomToolOnApprovalFunction = Callable[
+    [RunContextWrapper[Any], "ToolApprovalItem"], MaybeAwaitable[CustomToolOnApprovalFunctionResult]
+]
+"""A function that auto-approves or rejects a custom tool call when approval is needed.
+Takes (run_context, approval_item) and returns approval decision.
+"""
+
+
 @dataclass
 class HostedMCPTool:
     """A tool that allows the LLM to use a remote MCP server. The LLM will automatically list and
@@ -841,7 +953,7 @@ class ShellToolInlineSkill(TypedDict):
     type: Literal["inline"]
 
 
-ShellToolContainerSkill = Union[ShellToolSkillReference, ShellToolInlineSkill]
+ShellToolContainerSkill = ShellToolSkillReference | ShellToolInlineSkill
 """Container skill configuration."""
 
 
@@ -867,10 +979,9 @@ class ShellToolContainerNetworkPolicyDisabled(TypedDict):
     type: Literal["disabled"]
 
 
-ShellToolContainerNetworkPolicy = Union[
-    ShellToolContainerNetworkPolicyAllowlist,
-    ShellToolContainerNetworkPolicyDisabled,
-]
+ShellToolContainerNetworkPolicy = (
+    ShellToolContainerNetworkPolicyAllowlist | ShellToolContainerNetworkPolicyDisabled
+)
 """Network policy configuration for hosted shell containers."""
 
 
@@ -898,13 +1009,12 @@ class ShellToolContainerReferenceEnvironment(TypedDict):
     container_id: str
 
 
-ShellToolHostedEnvironment = Union[
-    ShellToolContainerAutoEnvironment,
-    ShellToolContainerReferenceEnvironment,
-]
+ShellToolHostedEnvironment = (
+    ShellToolContainerAutoEnvironment | ShellToolContainerReferenceEnvironment
+)
 """Hosted shell environment variants."""
 
-ShellToolEnvironment = Union[ShellToolLocalEnvironment, ShellToolHostedEnvironment]
+ShellToolEnvironment = ShellToolLocalEnvironment | ShellToolHostedEnvironment
 """All supported shell environments."""
 
 
@@ -971,7 +1081,7 @@ class ShellCommandRequest:
     data: ShellCallData
 
 
-ShellExecutor = Callable[[ShellCommandRequest], MaybeAwaitable[Union[str, ShellResult]]]
+ShellExecutor = Callable[[ShellCommandRequest], MaybeAwaitable[str | ShellResult]]
 """Executes a shell command sequence and returns either text or structured output."""
 
 
@@ -1062,6 +1172,47 @@ class ApplyPatchTool:
 
 
 @dataclass
+class CustomTool:
+    """A Responses custom tool that uses one raw string input instead of JSON arguments."""
+
+    name: str
+    description: str
+    on_invoke_tool: CustomToolExecutor
+    format: object | None = None
+    needs_approval: bool | CustomToolApprovalFunction = False
+    """Whether the raw custom tool call needs approval before execution."""
+    on_approval: CustomToolOnApprovalFunction | None = None
+    """Optional handler to auto-approve or reject when approval is required."""
+    defer_loading: bool = False
+
+    tool_config: CustomToolParam = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        tool_config: CustomToolParam = {
+            "type": "custom",
+            "name": self.name,
+            "description": self.description,
+        }
+        if self.format is not None:
+            tool_config["format"] = self.format  # type: ignore[typeddict-item]
+        if self.defer_loading:
+            tool_config["defer_loading"] = True
+        self.tool_config = tool_config
+
+    def runtime_needs_approval(self) -> bool | CustomToolApprovalFunction:
+        """Return the callable/bool approval setting used by runtime execution."""
+        return self.needs_approval
+
+    def runtime_on_approval(self) -> CustomToolOnApprovalFunction | None:
+        """Return the approval callback used by runtime execution."""
+        return self.on_approval
+
+    @property
+    def type(self) -> str:
+        return "custom"
+
+
+@dataclass
 class ToolSearchTool:
     """A hosted Responses API tool that lets the model search deferred tools by namespace.
 
@@ -1078,19 +1229,20 @@ class ToolSearchTool:
         return "tool_search"
 
 
-Tool = Union[
-    FunctionTool,
-    FileSearchTool,
-    WebSearchTool,
-    ComputerTool[Any],
-    HostedMCPTool,
-    ShellTool,
-    ApplyPatchTool,
-    LocalShellTool,
-    ImageGenerationTool,
-    CodeInterpreterTool,
-    ToolSearchTool,
-]
+Tool = (
+    FunctionTool
+    | FileSearchTool
+    | WebSearchTool
+    | ComputerTool[Any]
+    | HostedMCPTool
+    | CustomTool
+    | ShellTool
+    | ApplyPatchTool
+    | LocalShellTool
+    | ImageGenerationTool
+    | CodeInterpreterTool
+    | ToolSearchTool
+)
 """A tool that can be used in an agent."""
 
 
@@ -1248,10 +1400,15 @@ def _build_handled_function_tool_error_handler(
     span_message_for_json_decode_error: str | None = None,
     include_input_json_in_logs: bool = True,
     include_tool_name_in_log_messages: bool = True,
-) -> Callable[[FunctionTool, Exception, str], None]:
+) -> Callable[[FunctionTool, Exception, str, ToolContext[Any]], None]:
     """Create a consistent handled-error reporter for wrapped FunctionTools."""
 
-    def _on_handled_error(function_tool: FunctionTool, error: Exception, input_json: str) -> None:
+    def _on_handled_error(
+        function_tool: FunctionTool,
+        error: Exception,
+        input_json: str,
+        context: ToolContext[Any],
+    ) -> None:
         json_decode_error = _extract_tool_argument_json_error(error)
         if json_decode_error is not None and span_message_for_json_decode_error is not None:
             resolved_span_message = span_message_for_json_decode_error
@@ -1259,13 +1416,20 @@ def _build_handled_function_tool_error_handler(
         else:
             resolved_span_message = span_message
             span_error_detail = str(error)
+        trace_include_sensitive_data = (
+            context.run_config is None or context.run_config.trace_include_sensitive_data
+        )
+        trace_error = get_trace_tool_error(
+            trace_include_sensitive_data=trace_include_sensitive_data,
+            error_message=span_error_detail,
+        )
 
         _error_tracing.attach_error_to_current_span(
             SpanError(
                 message=resolved_span_message,
                 data={
                     "tool_name": function_tool.name,
-                    "error": span_error_detail,
+                    "error": trace_error,
                 },
             )
         )
@@ -1287,14 +1451,28 @@ def _build_handled_function_tool_error_handler(
 
 def _parse_function_tool_json_input(*, tool_name: str, input_json: str) -> dict[str, Any]:
     """Decode raw tool arguments with consistent diagnostics."""
+    json_decode_error: Exception | None = None
     try:
-        return json.loads(input_json) if input_json else {}
+        parsed = json.loads(input_json) if input_json else {}
     except Exception as exc:
+        json_decode_error = exc
+
+    if json_decode_error is not None:
+        base_message = f"Invalid JSON input for tool {tool_name}"
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug(f"Invalid JSON input for tool {tool_name}")
-        else:
-            logger.debug(f"Invalid JSON input for tool {tool_name}: {input_json}")
-        raise ModelBehaviorError(f"Invalid JSON input for tool {tool_name}: {input_json}") from exc
+            logger.debug(base_message)
+            # Raise outside the ``except`` block so the JSONDecodeError, which
+            # carries the raw payload in ``.doc``, is not attached as the
+            # ``__context__`` of the redacted ModelBehaviorError.
+            raise ModelBehaviorError(base_message)
+        detailed_message = f"{base_message}: {input_json}"
+        logger.debug(detailed_message)
+        raise ModelBehaviorError(detailed_message) from json_decode_error
+
+    if not isinstance(parsed, dict):
+        raise ModelBehaviorError(f"Invalid JSON input for tool {tool_name}: expected a JSON object")
+
+    return parsed
 
 
 def _log_function_tool_invocation(*, tool_name: str, input_json: str) -> None:
@@ -1747,15 +1925,19 @@ def function_tool(
 
 
 def _is_computer_provider(candidate: object) -> bool:
-    return isinstance(candidate, ComputerProvider) or (
-        hasattr(candidate, "create") and callable(candidate.create)
-    )
+    if isinstance(candidate, ComputerProvider):
+        return True
+    if isinstance(candidate, Computer | AsyncComputer):
+        # A resolved computer instance is never a provider, even if a subclass
+        # happens to expose a callable `create` attribute.
+        return False
+    return hasattr(candidate, "create") and callable(candidate.create)
 
 
 def _validate_function_tool_timeout_config(tool: FunctionTool) -> None:
     timeout_seconds = tool.timeout_seconds
     if timeout_seconds is not None:
-        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int | float):
             raise TypeError(
                 "FunctionTool timeout_seconds must be a positive number in seconds or None."
             )
@@ -1786,7 +1968,7 @@ def _store_computer_initializer(tool: ComputerTool[Any]) -> None:
         _computer_initializer_map[tool] = config
 
 
-def _get_computer_initializer(tool: ComputerTool[Any]) -> ComputerConfig[Any] | None:
+def _get_computer_initializer(tool: ComputerTool[Any]) -> ComputerConfig | None:
     if tool in _computer_initializer_map:
         return _computer_initializer_map[tool]
 

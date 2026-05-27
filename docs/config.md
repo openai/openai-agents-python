@@ -2,9 +2,13 @@
 
 This page covers SDK-wide defaults that you usually set once during application startup, such as the default OpenAI key or client, the default OpenAI API shape, tracing export defaults, and logging behavior.
 
+These defaults still apply to sandbox-based workflows, but sandbox workspaces, sandbox clients, and session reuse are configured separately.
+
 If you need to configure a specific agent or run instead, start with:
 
+-   [Agents](agents.md) for instructions, tools, output types, handoffs, and guardrails on a plain `Agent`.
 -   [Running agents](running_agents.md) for `RunConfig`, sessions, and conversation-state options.
+-   [Sandbox agents](sandbox/guide.md) for `SandboxRunConfig`, manifests, capabilities, and sandbox-client-specific workspace setup.
 -   [Models](models/index.md) for model selection and provider configuration.
 -   [Tracing](tracing.md) for per-run tracing metadata and custom trace processors.
 
@@ -28,6 +32,13 @@ custom_client = AsyncOpenAI(base_url="...", api_key="...")
 set_default_openai_client(custom_client)
 ```
 
+If you prefer environment-based endpoint configuration, the default OpenAI provider also reads `OPENAI_BASE_URL`. When you enable Responses websocket transport, it also reads `OPENAI_WEBSOCKET_BASE_URL` for the websocket `/responses` endpoint.
+
+```bash
+export OPENAI_BASE_URL="https://your-openai-compatible-endpoint.example/v1"
+export OPENAI_WEBSOCKET_BASE_URL="wss://your-openai-compatible-endpoint.example/v1"
+```
+
 Finally, you can also customize the OpenAI API that is used. By default, we use the OpenAI Responses API. You can override this to use the Chat Completions API by using the [set_default_openai_api()][agents.set_default_openai_api] function.
 
 ```python
@@ -44,6 +55,21 @@ Tracing is enabled by default. By default it uses the same OpenAI API key as you
 from agents import set_tracing_export_api_key
 
 set_tracing_export_api_key("sk-...")
+```
+
+If your model traffic uses one key or client but tracing should use a different OpenAI key, pass `use_for_tracing=False` when setting the default key or client, then configure tracing separately. The same pattern works with [`set_default_openai_key()`][agents.set_default_openai_key] if you are not using a custom client.
+
+```python
+from openai import AsyncOpenAI
+from agents import (
+    set_default_openai_client,
+    set_tracing_export_api_key,
+)
+
+custom_client = AsyncOpenAI(base_url="https://your-openai-compatible-endpoint.example/v1", api_key="provider-key")
+set_default_openai_client(custom_client, use_for_tracing=False)
+
+set_tracing_export_api_key("sk-tracing")
 ```
 
 If you need to attribute traces to a specific organization or project when using the default exporter, set these environment variables before your app starts:

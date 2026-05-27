@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -56,8 +57,8 @@ class ToolOutputTrimmer:
             trimming. Defaults to 500.
         preview_chars: How many characters of the original output to preserve as a
             preview when trimming. Defaults to 200.
-        trimmable_tools: Optional set of tool names whose outputs can be trimmed. For
-            namespaced tools, both bare names and qualified ``namespace.name`` entries are
+        trimmable_tools: Optional tool name or set of tool names whose outputs can be trimmed.
+            For namespaced tools, both bare names and qualified ``namespace.name`` entries are
             supported. If ``None``, all tool outputs are eligible for trimming. Defaults
             to ``None``.
     """
@@ -65,7 +66,7 @@ class ToolOutputTrimmer:
     recent_turns: int = 2
     max_output_chars: int = 500
     preview_chars: int = 200
-    trimmable_tools: frozenset[str] | None = field(default=None)
+    trimmable_tools: str | Iterable[str] | None = field(default=None)
 
     def __post_init__(self) -> None:
         if self.recent_turns < 1:
@@ -74,9 +75,17 @@ class ToolOutputTrimmer:
             raise ValueError(f"max_output_chars must be >= 1, got {self.max_output_chars}")
         if self.preview_chars < 0:
             raise ValueError(f"preview_chars must be >= 0, got {self.preview_chars}")
-        # Coerce any iterable to frozenset for immutability
-        if self.trimmable_tools is not None and not isinstance(self.trimmable_tools, frozenset):
-            object.__setattr__(self, "trimmable_tools", frozenset(self.trimmable_tools))
+        # Coerce configured tool names to frozenset for immutability.
+        if self.trimmable_tools is not None:
+            if isinstance(self.trimmable_tools, str):
+                trimmable_tools = frozenset({self.trimmable_tools})
+            elif isinstance(self.trimmable_tools, bytes):
+                raise ValueError("trimmable_tools must be a string or iterable of strings")
+            elif isinstance(self.trimmable_tools, frozenset):
+                trimmable_tools = self.trimmable_tools
+            else:
+                trimmable_tools = frozenset(self.trimmable_tools)
+            object.__setattr__(self, "trimmable_tools", trimmable_tools)
 
     def __call__(self, data: CallModelData[Any]) -> ModelInputData:
         """Filter callback invoked before each model call.
@@ -113,8 +122,9 @@ class ToolOutputTrimmer:
                     ("tool_search",) if item_type == "tool_search_output" else (),
                 )
 
-                if self.trimmable_tools is not None and not any(
-                    candidate in self.trimmable_tools for candidate in tool_names
+                trimmable_tools = cast(frozenset[str] | None, self.trimmable_tools)
+                if trimmable_tools is not None and not any(
+                    candidate in trimmable_tools for candidate in tool_names
                 ):
                     new_items.append(item)
                     continue

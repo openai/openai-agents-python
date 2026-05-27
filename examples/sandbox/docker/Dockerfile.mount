@@ -1,0 +1,45 @@
+FROM ubuntu:22.04
+RUN set -eux \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl wget gnupg unzip \
+        fuse3 libfuse3-3 nfs-common \
+    && wget -qO- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /etc/apt/trusted.gpg.d/microsoft.gpg \
+    && set -eu; . /etc/os-release; \
+        case "$ID:$VERSION_CODENAME" in \
+            debian:trixie) ms_dist="debian/12/prod"; ms_suite="bookworm" ;; \
+            debian:*) ms_dist="debian/${VERSION_ID%%.*}/prod"; ms_suite="${VERSION_CODENAME:-stable}" ;; \
+            ubuntu:*) ms_dist="ubuntu/${VERSION_ID}/prod"; ms_suite="${VERSION_CODENAME}" ;; \
+            *) ms_dist="ubuntu/22.04/prod"; ms_suite="jammy" ;; \
+        esac; \
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/trusted.gpg.d/microsoft.gpg] " \
+        "https://packages.microsoft.com/${ms_dist} ${ms_suite} main" \
+        > /etc/apt/sources.list.d/microsoft-prod.list \
+    && apt-get update \
+    && if ! apt-get install -y --no-install-recommends blobfuse2; then \
+        echo "blobfuse2 missing in distro repo; falling back to ubuntu/22.04 repo" >&2; \
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/trusted.gpg.d/microsoft.gpg] " \
+        "https://packages.microsoft.com/ubuntu/22.04/prod jammy main" \
+        > /etc/apt/sources.list.d/microsoft-prod.list; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends blobfuse2; \
+    fi \
+    && arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+        amd64) mp_arch="x86_64" ;; \
+        arm64) mp_arch="arm64" ;; \
+        *) echo "unsupported mount-s3 arch: $arch" >&2; exit 1 ;; \
+    esac \
+    && url="https://s3.amazonaws.com/mountpoint-s3-release/latest/${mp_arch}/mount-s3.deb" \
+    && wget -O /tmp/mount-s3.deb "$url" \
+    && size="$(stat -c %s /tmp/mount-s3.deb)" \
+    && if [ "$size" -lt 100000 ]; then echo "download too small: $size bytes from $url" >&2; exit 1; fi \
+    && apt-get install -y /tmp/mount-s3.deb || (apt-get -f install -y && apt-get install -y /tmp/mount-s3.deb) \
+    && mount-s3 --version \
+    && curl -fsSL https://amazon-efs-utils.aws.com/efs-utils-installer.sh | sh -s -- --install \
+    && mount.s3files --version \
+    && curl -fsSL https://rclone.org/install.sh | bash \
+    && rclone version \
+    && touch /etc/fuse.conf \
+    && grep -qxF 'user_allow_other' /etc/fuse.conf || echo 'user_allow_other' >> /etc/fuse.conf \
+    && rm -rf /var/lib/apt/lists/* /tmp/mount-s3.deb

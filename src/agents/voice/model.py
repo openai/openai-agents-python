@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import abc
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 from .imports import np, npt
 from .input import AudioInput, StreamedAudioInput

@@ -29,7 +29,12 @@ from ...items import ItemHelpers, ModelResponse, TResponseInputItem, TResponseSt
 from ...logger import logger
 from ...model_settings import ModelSettings
 from ...models._openai_retry import get_openai_retry_advice
+from ...models._response_terminal import (
+    response_error_event_failure_error,
+    response_terminal_failure_error,
+)
 from ...models._retry_runtime import should_disable_provider_managed_retries
+from ...models._trace import model_config_for_trace
 from ...models.chatcmpl_converter import Converter
 from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
@@ -163,14 +168,15 @@ def _flatten_any_llm_reasoning_value(value: Any) -> str:
             if flattened:
                 return flattened
         return ""
-    if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-        parts = [_flatten_any_llm_reasoning_value(item) for item in value]
-        return "".join(part for part in parts if part)
 
     for attr in ("content", "text", "thinking"):
         flattened = _flatten_any_llm_reasoning_value(getattr(value, attr, None))
         if flattened:
             return flattened
+
+    if isinstance(value, Iterable) and not isinstance(value, str | bytes):
+        parts = [_flatten_any_llm_reasoning_value(item) for item in value]
+        return "".join(part for part in parts if part)
     return ""
 
 
@@ -420,17 +426,29 @@ class AnyLLMModel(Model):
             )
 
             final_response: Response | None = None
+            terminal_failure_error: ModelBehaviorError | None = None
             try:
                 async for chunk in stream:
+                    chunk_type = getattr(chunk, "type", None)
                     if isinstance(chunk, ResponseCompletedEvent):
                         final_response = chunk.response
-                    elif getattr(chunk, "type", None) in {"response.failed", "response.incomplete"}:
+                    elif chunk_type in {"response.failed", "response.incomplete"}:
                         terminal_response = getattr(chunk, "response", None)
-                        if isinstance(terminal_response, Response):
-                            final_response = terminal_response
+                        terminal_failure_error = response_terminal_failure_error(
+                            cast(str, chunk_type),
+                            terminal_response if isinstance(terminal_response, Response) else None,
+                        )
+                    elif chunk_type in {"error", "response.error"}:
+                        terminal_failure_error = response_error_event_failure_error(
+                            cast(str, chunk_type),
+                            chunk,
+                        )
                     yield chunk
             finally:
                 await self._maybe_aclose(stream)
+
+            if terminal_failure_error is not None:
+                raise terminal_failure_error
 
             if tracing.include_data() and final_response:
                 span_response.span_data.response = final_response
@@ -450,12 +468,11 @@ class AnyLLMModel(Model):
     ) -> ModelResponse:
         with generation_span(
             model=str(self.model),
-            model_config=model_settings.to_json_dict()
-            | {
-                "base_url": str(self.base_url or ""),
-                "provider": self._provider_name,
-                "model_impl": "any-llm",
-            },
+            model_config=model_config_for_trace(
+                model_settings,
+                base_url=self.base_url or "",
+                extra_config={"provider": self._provider_name, "model_impl": "any-llm"},
+            ),
             disabled=tracing.is_disabled(),
         ) as span_generation:
             response = await self._fetch_chat_response(
@@ -553,12 +570,11 @@ class AnyLLMModel(Model):
     ) -> AsyncIterator[TResponseStreamEvent]:
         with generation_span(
             model=str(self.model),
-            model_config=model_settings.to_json_dict()
-            | {
-                "base_url": str(self.base_url or ""),
-                "provider": self._provider_name,
-                "model_impl": "any-llm",
-            },
+            model_config=model_config_for_trace(
+                model_settings,
+                base_url=self.base_url or "",
+                extra_config={"provider": self._provider_name, "model_impl": "any-llm"},
+            ),
             disabled=tracing.is_disabled(),
         ) as span_generation:
             response, stream = await self._fetch_chat_response(
@@ -813,7 +829,7 @@ class AnyLLMModel(Model):
 
         list_input = ItemHelpers.input_to_new_input_list(input)
         list_input = _to_dump_compatible(list_input)
-        list_input = self._remove_openai_responses_api_incompatible_fields(list_input)
+        list_input = self._sanitize_any_llm_responses_input(list_input)
 
         parallel_tool_calls = (
             True
@@ -829,6 +845,7 @@ class AnyLLMModel(Model):
             handoffs=handoffs,
             model=self._provider_model,
         )
+
         converted_tools = OpenAIResponsesConverter.convert_tools(
             tools,
             handoffs,
@@ -1095,31 +1112,51 @@ class AnyLLMModel(Model):
         AnyLLMResponsesParams = any_llm_responses.ResponsesParams
         return AnyLLMResponsesParams(**payload)
 
-    def _remove_openai_responses_api_incompatible_fields(self, list_input: list[Any]) -> list[Any]:
-        has_provider_data = any(
-            isinstance(item, dict) and item.get("provider_data") for item in list_input
-        )
-        if not has_provider_data:
-            return list_input
+    def _sanitize_any_llm_responses_input(self, list_input: list[Any]) -> list[Any]:
+        """Normalize replayed Responses input into a shape accepted by any-llm.
 
+        any-llm validates replayed items against OpenAI-style input models before the request is
+        handed to the underlying provider. SDK-produced replay items can legitimately carry
+        adapter-only fields such as provider_data or explicit nulls like status=None, which those
+        models reject. Strip those fields here while preserving valid replay content.
+        """
         result: list[Any] = []
         for item in list_input:
-            cleaned = self._clean_item_for_openai(item)
+            cleaned = self._sanitize_any_llm_responses_value(item)
             if cleaned is not None:
                 result.append(cleaned)
         return result
 
-    def _clean_item_for_openai(self, item: Any) -> Any | None:
-        if not isinstance(item, dict):
-            return item
+    def _sanitize_any_llm_responses_value(self, value: Any) -> Any | None:
+        if isinstance(value, list):
+            sanitized_list = []
+            for item in value:
+                cleaned_item = self._sanitize_any_llm_responses_value(item)
+                if cleaned_item is not None:
+                    sanitized_list.append(cleaned_item)
+            return sanitized_list
 
-        if item.get("type") == "reasoning" and item.get("provider_data"):
+        if not isinstance(value, dict):
+            return value
+
+        # Provider-specific reasoning payloads are not replay-safe across adapter boundaries.
+        if value.get("type") == "reasoning" and value.get("provider_data"):
             return None
-        if item.get("id") == FAKE_RESPONSES_ID:
-            del item["id"]
-        if "provider_data" in item:
-            del item["provider_data"]
-        return item
+
+        cleaned: dict[str, Any] = {}
+        for key, item_value in value.items():
+            if key == "provider_data":
+                continue
+            if key == "id" and item_value == FAKE_RESPONSES_ID:
+                continue
+            if item_value is None:
+                continue
+
+            sanitized = self._sanitize_any_llm_responses_value(item_value)
+            if sanitized is not None:
+                cleaned[key] = sanitized
+
+        return cleaned
 
     def _attach_logprobs_to_output(self, output_items: list[Any], logprobs: list[Any]) -> None:
         from openai.types.responses import ResponseOutputMessage, ResponseOutputText
@@ -1165,14 +1202,28 @@ class AnyLLMModel(Model):
             if message_dict.get("role") == "assistant" and message_dict.get("tool_calls"):
                 tool_calls = message_dict.get("tool_calls", [])
                 if isinstance(tool_calls, list):
+                    split_idx = 0
                     for tool_call in tool_calls:
                         if isinstance(tool_call, dict) and tool_call.get("id"):
+                            # Create a separate assistant message for each tool call.
+                            # Only the first split keeps the assistant text/thinking
+                            # blocks/reasoning content; the rest carry tool_calls only,
+                            # to avoid duplicating signed thinking blocks (which
+                            # Anthropic rejects) and assistant text in history.
                             single_tool_msg = message_dict.copy()
                             single_tool_msg["tool_calls"] = [tool_call]
+                            if split_idx > 0:
+                                for shared_field in (
+                                    "content",
+                                    "thinking_blocks",
+                                    "reasoning_content",
+                                ):
+                                    single_tool_msg.pop(shared_field, None)
                             tool_call_messages[str(tool_call["id"])] = (
                                 index,
                                 cast(ChatCompletionMessageParam, single_tool_msg),
                             )
+                            split_idx += 1
             elif message_dict.get("role") == "tool" and message_dict.get("tool_call_id"):
                 tool_result_messages[str(message_dict["tool_call_id"])] = (
                     index,

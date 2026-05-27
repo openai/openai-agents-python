@@ -161,6 +161,29 @@ def test_deferred_top_level_legacy_permanent_approval_key_still_restores() -> No
     )
 
 
+def test_rebuild_approvals_ignores_malformed_approval_values() -> None:
+    context_wrapper = RunContextWrapper(context=None)
+
+    context_wrapper._rebuild_approvals(["not", "a", "mapping"])  # noqa: SLF001
+    assert context_wrapper._approvals == {}
+
+    context_wrapper._rebuild_approvals(  # noqa: SLF001
+        {
+            "get_weather": {
+                "approved": {"not": "valid"},
+                "rejected": ["call-denied", 123],
+                "rejection_messages": {"call-denied": "no"},
+            },
+            123: {"approved": True},
+        }
+    )
+
+    assert context_wrapper.is_tool_approved("get_weather", "any-call") is None
+    assert context_wrapper.is_tool_approved("get_weather", "call-denied") is False
+    assert context_wrapper.get_rejection_message("get_weather", "call-denied") == "no"
+    assert context_wrapper.is_tool_approved("123", "any-call") is None
+
+
 def test_deferred_top_level_approval_does_not_alias_to_visible_bare_sibling() -> None:
     agent = Agent(name="test-agent")
     context_wrapper = RunContextWrapper(context=None)

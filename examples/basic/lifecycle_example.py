@@ -1,6 +1,6 @@
 import asyncio
 import random
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 from pydantic import BaseModel
 
@@ -56,7 +56,7 @@ class ExampleHooks(RunHooks):
         self,
         context: RunContextWrapper,
         agent: Agent,
-        system_prompt: Optional[str],
+        system_prompt: str | None,
         input_items: list[TResponseInputItem],
     ) -> None:
         self.event_counter += 1

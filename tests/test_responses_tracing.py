@@ -1,12 +1,10 @@
-from typing import Optional
-
 import pytest
 from inline_snapshot import snapshot
 from openai import AsyncOpenAI
 from openai.types.responses import ResponseCompletedEvent
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
-from agents import ModelSettings, ModelTracing, OpenAIResponsesModel, trace
+from agents import ModelBehaviorError, ModelSettings, ModelTracing, OpenAIResponsesModel, trace
 from agents.tracing.span_data import ResponseSpanData
 from tests import fake_model
 
@@ -22,9 +20,9 @@ class DummyUsage:
     def __init__(
         self,
         input_tokens: int = 1,
-        input_tokens_details: Optional[InputTokensDetails] = None,
+        input_tokens_details: InputTokensDetails | None = None,
         output_tokens: int = 1,
-        output_tokens_details: Optional[OutputTokensDetails] = None,
+        output_tokens_details: OutputTokensDetails | None = None,
         total_tokens: int = 2,
     ):
         self.input_tokens = input_tokens
@@ -94,7 +92,22 @@ async def test_get_response_creates_trace(monkeypatch):
         [
             {
                 "workflow_name": "test",
-                "children": [{"type": "response", "data": {"response_id": "dummy-id"}}],
+                "children": [
+                    {
+                        "type": "response",
+                        "data": {
+                            "response_id": "dummy-id",
+                            "usage": {
+                                "requests": 1,
+                                "input_tokens": 1,
+                                "output_tokens": 1,
+                                "total_tokens": 2,
+                                "input_tokens_details": {"cached_tokens": 0},
+                                "output_tokens_details": {"reasoning_tokens": 0},
+                            },
+                        },
+                    }
+                ],
             }
         ]
     )
@@ -137,7 +150,26 @@ async def test_non_data_tracing_doesnt_set_response_id(monkeypatch):
         )
 
     assert fetch_normalized_spans() == snapshot(
-        [{"workflow_name": "test", "children": [{"type": "response"}]}]
+        [
+            {
+                "workflow_name": "test",
+                "children": [
+                    {
+                        "type": "response",
+                        "data": {
+                            "usage": {
+                                "requests": 1,
+                                "input_tokens": 1,
+                                "output_tokens": 1,
+                                "total_tokens": 2,
+                                "input_tokens_details": {"cached_tokens": 0},
+                                "output_tokens_details": {"reasoning_tokens": 0},
+                            }
+                        },
+                    }
+                ],
+            }
+        ]
     )
 
     [span] = fetch_ordered_spans()
@@ -234,7 +266,22 @@ async def test_stream_response_creates_trace(monkeypatch):
         [
             {
                 "workflow_name": "test",
-                "children": [{"type": "response", "data": {"response_id": "dummy-id-123"}}],
+                "children": [
+                    {
+                        "type": "response",
+                        "data": {
+                            "response_id": "dummy-id-123",
+                            "usage": {
+                                "requests": 1,
+                                "input_tokens": 0,
+                                "output_tokens": 0,
+                                "total_tokens": 0,
+                                "input_tokens_details": {"cached_tokens": 0},
+                                "output_tokens_details": {"reasoning_tokens": 0},
+                            },
+                        },
+                    }
+                ],
             }
         ]
     )
@@ -275,26 +322,38 @@ async def test_stream_response_failed_or_incomplete_terminal_event_creates_trace
 
         monkeypatch.setattr(model, "_fetch_response", dummy_fetch_response)
 
-        async for _ in model.stream_response(
-            "instr",
-            "input",
-            ModelSettings(),
-            [],
-            None,
-            [],
-            ModelTracing.ENABLED,
-            previous_response_id=None,
-        ):
-            pass
+        with pytest.raises(ModelBehaviorError, match=terminal_event_type):
+            async for _ in model.stream_response(
+                "instr",
+                "input",
+                ModelSettings(),
+                [],
+                None,
+                [],
+                ModelTracing.ENABLED,
+                previous_response_id=None,
+            ):
+                pass
 
-    assert fetch_normalized_spans() == snapshot(
-        [
-            {
-                "workflow_name": "test",
-                "children": [{"type": "response", "data": {"response_id": "dummy-id-terminal"}}],
-            }
-        ]
-    )
+    assert fetch_normalized_spans() == [
+        {
+            "workflow_name": "test",
+            "children": [
+                {
+                    "type": "response",
+                    "error": {
+                        "message": "Error streaming response",
+                        "data": {
+                            "error": (
+                                f"Responses stream ended with terminal event "
+                                f"`{terminal_event_type}`."
+                            )
+                        },
+                    },
+                }
+            ],
+        }
+    ]
 
 
 @pytest.mark.allow_call_model_methods
@@ -343,7 +402,26 @@ async def test_stream_non_data_tracing_doesnt_set_response_id(monkeypatch):
             pass
 
     assert fetch_normalized_spans() == snapshot(
-        [{"workflow_name": "test", "children": [{"type": "response"}]}]
+        [
+            {
+                "workflow_name": "test",
+                "children": [
+                    {
+                        "type": "response",
+                        "data": {
+                            "usage": {
+                                "requests": 1,
+                                "input_tokens": 0,
+                                "output_tokens": 0,
+                                "total_tokens": 0,
+                                "input_tokens_details": {"cached_tokens": 0},
+                                "output_tokens_details": {"reasoning_tokens": 0},
+                            }
+                        },
+                    }
+                ],
+            }
+        ]
     )
 
     [span] = fetch_ordered_spans()

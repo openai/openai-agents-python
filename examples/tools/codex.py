@@ -52,7 +52,7 @@ async def on_codex_stream(payload: CodexToolStreamEvent) -> None:
         log(f"codex stream error: {event.message}")
         return
 
-    if not isinstance(event, (ItemStartedEvent, ItemUpdatedEvent, ItemCompletedEvent)):
+    if not isinstance(event, ItemStartedEvent | ItemUpdatedEvent | ItemCompletedEvent):
         return
 
     item = event.item
@@ -118,7 +118,7 @@ async def main() -> None:
                 default_thread_options=ThreadOptions(
                     # You can pass a Codex instance to customize CLI details
                     # codex=Codex(executable_path="/path/to/codex", base_url="..."),
-                    model="gpt-5.4",
+                    model="gpt-5.5",
                     model_reasoning_effort="low",
                     network_access_enabled=True,
                     web_search_enabled=False,

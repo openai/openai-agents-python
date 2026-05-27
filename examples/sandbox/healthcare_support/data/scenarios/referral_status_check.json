@@ -1,0 +1,29 @@
+{
+  "scenario_id": "referral_status_check",
+  "description": "Patient asks for specialist referral status with known referral ID.",
+  "transcript": "Hi, this is Nora Patel. I am checking on referral number REF-88421 for cardiology with Dr. Ramos.\nCan you tell me if it has been approved and how many visits I still have?",
+  "patient_metadata": {
+    "patient_id": "PAT-1003"
+  },
+  "followup_qa": {
+    "referral number": "REF-88421",
+    "provider": "Dr. Ramos"
+  },
+  "expected": {
+    "intent": "referral_status_question",
+    "required_entities": {
+      "referral_id": "REF-88421"
+    },
+    "required_tool_calls": [
+      "appointment_referral_status_lookup"
+    ],
+    "required_resolution_elements": [
+      "referral",
+      "remaining authorized visits"
+    ],
+    "expected_payer": "Aetna"
+  },
+  "gold": {
+    "expected_next_step": "Notify patient referral is approved and proceed to specialist scheduling."
+  }
+}

@@ -39,6 +39,59 @@ def test_tool_use_tracker_from_and_serialize_snapshots() -> None:
     assert serialize_tool_use_tracker(runtime_tracker) == {"serialize-agent": ["one", "two"]}
 
 
+def test_serialize_and_hydrate_tool_use_tracker_preserves_duplicate_agent_identity() -> None:
+    second = Agent(name="duplicate")
+    first = Agent(name="duplicate", handoffs=[second])
+    second.handoffs = [first]
+
+    tracker = AgentToolUseTracker()
+    tracker.add_tool_use(second, ["approval_tool"])
+
+    snapshot = serialize_tool_use_tracker(tracker, starting_agent=first)
+    assert snapshot == {"duplicate#2": ["approval_tool"]}
+
+    class _RunState:
+        def get_tool_use_tracker_snapshot(self) -> dict[str, list[str]]:
+            return snapshot
+
+    hydrated = AgentToolUseTracker()
+    hydrate_tool_use_tracker(
+        tool_use_tracker=hydrated,
+        run_state=_RunState(),
+        starting_agent=first,
+    )
+
+    assert hydrated.agent_to_tools == [(second, ["approval_tool"])]
+
+
+def test_tool_use_tracker_handles_literal_suffix_names_without_collision() -> None:
+    literal_suffix = Agent(name="sandbox#2")
+    first = Agent(name="sandbox", handoffs=[literal_suffix])
+    second = Agent(name="sandbox")
+    literal_suffix.handoffs = [first, second]
+    first.handoffs = [literal_suffix, second]
+    second.handoffs = [first, literal_suffix]
+
+    tracker = AgentToolUseTracker()
+    tracker.add_tool_use(second, ["approval_tool"])
+
+    snapshot = serialize_tool_use_tracker(tracker, starting_agent=first)
+    assert snapshot == {"sandbox#3": ["approval_tool"]}
+
+    class _RunState:
+        def get_tool_use_tracker_snapshot(self) -> dict[str, list[str]]:
+            return snapshot
+
+    hydrated = AgentToolUseTracker()
+    hydrate_tool_use_tracker(
+        tool_use_tracker=hydrated,
+        run_state=_RunState(),
+        starting_agent=first,
+    )
+
+    assert hydrated.agent_to_tools == [(second, ["approval_tool"])]
+
+
 def test_record_used_tools_uses_trace_names_for_namespaced_and_deferred_functions() -> None:
     agent = Agent(name="tracked-agent")
     tracker = AgentToolUseTracker()

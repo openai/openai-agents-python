@@ -19,6 +19,7 @@ from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
 from ..tool import (
     ApplyPatchTool,
     ComputerTool,
+    CustomTool,
     FunctionTool,
     HostedMCPTool,
     LocalShellTool,
@@ -33,10 +34,12 @@ __all__ = [
     "ToolRunHandoff",
     "ToolRunFunction",
     "ToolRunComputerAction",
+    "ToolRunCustom",
     "ToolRunMCPApprovalRequest",
     "ToolRunLocalShellCall",
     "ToolRunShellCall",
     "ToolRunApplyPatchCall",
+    "ToolRunFunctionNotFound",
     "ProcessedResponse",
     "NextStepHandoff",
     "NextStepFinalOutput",
@@ -68,9 +71,21 @@ class ToolRunFunction:
 
 
 @dataclass
+class ToolRunFunctionNotFound:
+    tool_call: ResponseFunctionToolCall
+    tool_name: str
+
+
+@dataclass
 class ToolRunComputerAction:
     tool_call: ResponseComputerToolCall
     computer_tool: ComputerTool[Any]
+
+
+@dataclass
+class ToolRunCustom:
+    tool_call: Any
+    custom_tool: CustomTool
 
 
 @dataclass
@@ -109,6 +124,10 @@ class ProcessedResponse:
     tools_used: list[str]  # Names of all tools used, including hosted tools
     mcp_approval_requests: list[ToolRunMCPApprovalRequest]  # Only requests with callbacks
     interruptions: list[ToolApprovalItem]  # Tool approval items awaiting user decision
+    function_tools_not_found: list[ToolRunFunctionNotFound] = dataclasses.field(
+        default_factory=list
+    )
+    custom_tool_calls: list[ToolRunCustom] = dataclasses.field(default_factory=list)
 
     def has_tools_or_approvals_to_run(self) -> bool:
         # Handoffs, functions and computer actions need local processing
@@ -118,10 +137,12 @@ class ProcessedResponse:
                 self.handoffs,
                 self.functions,
                 self.computer_actions,
+                self.custom_tool_calls,
                 self.local_shell_calls,
                 self.shell_calls,
                 self.apply_patch_calls,
                 self.mcp_approval_requests,
+                self.function_tools_not_found,
             ]
         )
 

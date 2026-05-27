@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -149,7 +149,7 @@ class AssistantMessageItem(BaseModel):
 
 
 RealtimeMessageItem = Annotated[
-    Union[SystemMessageItem, UserMessageItem, AssistantMessageItem],
+    SystemMessageItem | UserMessageItem | AssistantMessageItem,
     Field(discriminator="role"),
 ]
 """A message item that can be from system, user, or assistant."""
@@ -186,7 +186,7 @@ class RealtimeToolCallItem(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-RealtimeItem = Union[RealtimeMessageItem, RealtimeToolCallItem]
+RealtimeItem = RealtimeMessageItem | RealtimeToolCallItem
 """A realtime item that can be a message or tool call."""
 
 

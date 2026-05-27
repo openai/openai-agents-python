@@ -84,6 +84,17 @@ def _is_tool_search_item(item: Any) -> bool:
     return item_type in {"tool_search_call", "tool_search_output"}
 
 
+def _extract_call_id(item: Any) -> str | None:
+    """Return a tool call id from mapping or object payloads."""
+    call_id = item.get("call_id") if isinstance(item, dict) else getattr(item, "call_id", None)
+    return call_id if isinstance(call_id, str) else None
+
+
+def _has_output_payload(item: Any) -> bool:
+    """Return True when an item carries a local tool output payload."""
+    return (isinstance(item, dict) and "output" in item) or hasattr(item, "output")
+
+
 @dataclass
 class OpenAIServerConversationTracker:
     """Track server-side conversation state for conversation-aware runs.
@@ -141,6 +152,7 @@ class OpenAIServerConversationTracker:
         generated_items: list[RunItem],
         model_responses: list[ModelResponse],
         session_items: list[TResponseInputItem] | None = None,
+        unsent_tool_call_ids: set[str] | None = None,
     ) -> None:
         """Seed tracking from prior state so resumed runs do not replay already-sent content.
 
@@ -151,6 +163,7 @@ class OpenAIServerConversationTracker:
         """
         if self.sent_initial_input:
             return
+        unsent_tool_call_ids = unsent_tool_call_ids or set()
 
         normalized_input = original_input
         if isinstance(original_input, list):
@@ -176,8 +189,14 @@ class OpenAIServerConversationTracker:
         self.sent_initial_input = True
         self.remaining_initial_input = None
 
-        latest_response = model_responses[-1] if model_responses else None
+        # Pick the most recent response that actually carries an id; live runs preserve the
+        # last-known id via track_server_items, so resume must mirror that behavior instead of
+        # blindly using model_responses[-1] (which may have response_id=None for non-Responses
+        # providers and would silently break the chain).
+        latest_response_id: str | None = None
         for response in model_responses:
+            if response.response_id is not None:
+                latest_response_id = response.response_id
             for output_item in response.output:
                 if output_item is None:
                     continue
@@ -189,18 +208,13 @@ class OpenAIServerConversationTracker:
                 )
                 if item_id is not None:
                     self.server_item_ids.add(item_id)
-                call_id = (
-                    output_item.get("call_id")
-                    if isinstance(output_item, dict)
-                    else getattr(output_item, "call_id", None)
-                )
-                has_output_payload = isinstance(output_item, dict) and "output" in output_item
-                has_output_payload = has_output_payload or hasattr(output_item, "output")
+                call_id = _extract_call_id(output_item)
+                has_output_payload = _has_output_payload(output_item)
                 if isinstance(call_id, str) and has_output_payload:
                     self.server_tool_call_ids.add(call_id)
 
-        if self.conversation_id is None and latest_response and latest_response.response_id:
-            self.previous_response_id = latest_response.response_id
+        if self.conversation_id is None and latest_response_id is not None:
+            self.previous_response_id = latest_response_id
 
         if session_items:
             for item in session_items:
@@ -209,13 +223,8 @@ class OpenAIServerConversationTracker:
                 )
                 if item_id is not None:
                     self.server_item_ids.add(item_id)
-                call_id = (
-                    item.get("call_id")
-                    if isinstance(item, dict)
-                    else getattr(item, "call_id", None)
-                )
-                has_output = isinstance(item, dict) and "output" in item
-                has_output = has_output or hasattr(item, "output")
+                call_id = _extract_call_id(item)
+                has_output = _has_output_payload(item)
                 if isinstance(call_id, str) and has_output:
                     self.server_tool_call_ids.add(call_id)
                 fp = _fingerprint_for_tracker(item)
@@ -237,10 +246,15 @@ class OpenAIServerConversationTracker:
 
             if isinstance(raw_item, dict):
                 item_id = _normalize_server_item_id(raw_item.get("id"))
-                call_id = raw_item.get("call_id")
-                has_output_payload = "output" in raw_item
-                has_output_payload = has_output_payload or hasattr(raw_item, "output")
+                call_id = _extract_call_id(raw_item)
+                has_output_payload = _has_output_payload(raw_item)
                 has_call_id = isinstance(call_id, str)
+                if (
+                    isinstance(call_id, str)
+                    and has_output_payload
+                    and call_id in unsent_tool_call_ids
+                ):
+                    continue
                 should_mark = (
                     item_id is not None
                     or (has_call_id and (has_output_payload or is_tool_call_item))
@@ -266,9 +280,15 @@ class OpenAIServerConversationTracker:
                     self.server_tool_call_ids.add(call_id)
             else:
                 item_id = _normalize_server_item_id(getattr(raw_item, "id", None))
-                call_id = getattr(raw_item, "call_id", None)
-                has_output_payload = hasattr(raw_item, "output")
+                call_id = _extract_call_id(raw_item)
+                has_output_payload = _has_output_payload(raw_item)
                 has_call_id = isinstance(call_id, str)
+                if (
+                    isinstance(call_id, str)
+                    and has_output_payload
+                    and call_id in unsent_tool_call_ids
+                ):
+                    continue
                 should_mark = (
                     item_id is not None
                     or (has_call_id and (has_output_payload or is_tool_call_item))
@@ -309,13 +329,8 @@ class OpenAIServerConversationTracker:
             )
             if item_id is not None:
                 self.server_item_ids.add(item_id)
-            call_id = (
-                output_item.get("call_id")
-                if isinstance(output_item, dict)
-                else getattr(output_item, "call_id", None)
-            )
-            has_output_payload = isinstance(output_item, dict) and "output" in output_item
-            has_output_payload = has_output_payload or hasattr(output_item, "output")
+            call_id = _extract_call_id(output_item)
+            has_output_payload = _has_output_payload(output_item)
             if isinstance(call_id, str) and has_output_payload:
                 self.server_tool_call_ids.add(call_id)
             fp = _fingerprint_for_tracker(output_item)
@@ -418,7 +433,7 @@ class OpenAIServerConversationTracker:
                 self._register_prepared_item_source(prepared_item, source_item)
             filtered_initials = []
             for item in initial_items:
-                if item is None or isinstance(item, (str, bytes)):
+                if item is None or isinstance(item, str | bytes):
                     continue
                 filtered_initials.append(item)
             self.remaining_initial_input = filtered_initials or None
@@ -445,13 +460,8 @@ class OpenAIServerConversationTracker:
             if item_id is not None and item_id in self.server_item_ids:
                 continue
 
-            call_id = (
-                raw_item.get("call_id")
-                if isinstance(raw_item, dict)
-                else getattr(raw_item, "call_id", None)
-            )
-            has_output_payload = isinstance(raw_item, dict) and "output" in raw_item
-            has_output_payload = has_output_payload or hasattr(raw_item, "output")
+            call_id = _extract_call_id(raw_item)
+            has_output_payload = _has_output_payload(raw_item)
             if (
                 isinstance(call_id, str)
                 and has_output_payload

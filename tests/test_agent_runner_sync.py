@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import Generator
-from typing import Any
+from typing import Any, Protocol
 
 import pytest
 
@@ -8,10 +8,16 @@ from agents.agent import Agent
 from agents.run import AgentRunner
 
 
+class _EventLoopPolicy(Protocol):
+    def get_event_loop(self) -> asyncio.AbstractEventLoop: ...
+
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop | None) -> None: ...
+
+
 @pytest.fixture
-def fresh_event_loop_policy() -> Generator[asyncio.AbstractEventLoopPolicy, None, None]:
+def fresh_event_loop_policy() -> Generator[_EventLoopPolicy, None, None]:
     policy_before = asyncio.get_event_loop_policy()
-    new_policy = asyncio.DefaultEventLoopPolicy()
+    new_policy = type(policy_before)()
     asyncio.set_event_loop_policy(new_policy)
     try:
         yield new_policy

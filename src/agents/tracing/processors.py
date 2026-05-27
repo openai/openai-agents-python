@@ -7,8 +7,9 @@ import queue
 import random
 import threading
 import time
+from collections.abc import Callable
 from functools import cached_property
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -39,6 +40,7 @@ class BackendSpanExporter(TracingExporter):
             "output_tokens",
         }
     )
+    _OPENAI_TRACING_USAGE_SPAN_TYPES = frozenset({"generation"})
     _UNSERIALIZABLE = object()
 
     def __init__(
@@ -71,6 +73,7 @@ class BackendSpanExporter(TracingExporter):
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.max_delay = max_delay
+        self._shutdown_event = threading.Event()
 
         # Keep a client open for connection pooling across multiple export calls
         self._client = httpx.Client(timeout=httpx.Timeout(timeout=60, connect=5.0))
@@ -102,6 +105,9 @@ class BackendSpanExporter(TracingExporter):
         return self._project or os.environ.get("OPENAI_PROJECT_ID")
 
     def export(self, items: list[Trace | Span[Any]]) -> None:
+        self._export_with_deadline(items, deadline=None)
+
+    def _export_with_deadline(self, items: list[Trace | Span[Any]], deadline: float | None) -> None:
         if not items:
             return
 
@@ -142,9 +148,23 @@ class BackendSpanExporter(TracingExporter):
             attempt = 0
             delay = self.base_delay
             while True:
+                request_timeout = self._timeout_for_deadline(deadline)
+                if deadline is not None and request_timeout is None:
+                    logger.warning(
+                        "[non-fatal] Tracing: export deadline reached, giving up on this batch."
+                    )
+                    break
+
                 attempt += 1
                 try:
-                    response = self._client.post(url=self.endpoint, headers=headers, json=payload)
+                    request_kwargs: dict[str, Any] = {
+                        "url": self.endpoint,
+                        "headers": headers,
+                        "json": payload,
+                    }
+                    if request_timeout is not None:
+                        request_kwargs["timeout"] = request_timeout
+                    response = self._client.post(**request_kwargs)
 
                     # If the response is successful, break out of the loop
                     if response.status_code < 300:
@@ -177,8 +197,44 @@ class BackendSpanExporter(TracingExporter):
 
                 # Exponential backoff + jitter
                 sleep_time = delay + random.uniform(0, 0.1 * delay)  # 10% jitter
-                time.sleep(sleep_time)
+                if not self._sleep_before_retry(sleep_time, deadline):
+                    break
                 delay = min(delay * 2, self.max_delay)
+
+    def _timeout_for_deadline(self, deadline: float | None) -> httpx.Timeout | None:
+        if deadline is None:
+            return None
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+
+        connect_timeout = min(5.0, remaining)
+        return httpx.Timeout(remaining, connect=connect_timeout)
+
+    def _sleep_before_retry(self, sleep_time: float, deadline: float | None) -> bool:
+        if deadline is None:
+            if self._shutdown_event.wait(sleep_time):
+                logger.warning(
+                    "[non-fatal] Tracing: shutdown requested during retry backoff, giving up."
+                )
+                return False
+            return not self._shutdown_event.is_set()
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning("[non-fatal] Tracing: export deadline reached before retry, giving up.")
+            return False
+
+        if sleep_time >= remaining:
+            time.sleep(remaining)
+            logger.warning(
+                "[non-fatal] Tracing: export deadline reached during retry backoff, giving up."
+            )
+            return False
+
+        time.sleep(sleep_time)
+        return True
 
     def _should_sanitize_for_openai_tracing_api(self) -> bool:
         return self.endpoint.rstrip("/") == self._OPENAI_TRACING_INGEST_ENDPOINT.rstrip("/")
@@ -203,7 +259,12 @@ class BackendSpanExporter(TracingExporter):
                 did_mutate = True
             sanitized_span_data[field_name] = sanitized_field
 
-        if span_data.get("type") != "generation":
+        if span_data.get("type") not in self._OPENAI_TRACING_USAGE_SPAN_TYPES:
+            if "usage" in span_data:
+                if not did_mutate:
+                    sanitized_span_data = dict(span_data)
+                    did_mutate = True
+                sanitized_span_data.pop("usage", None)
             if not did_mutate:
                 return payload_item
             sanitized_payload_item = dict(payload_item)
@@ -296,7 +357,11 @@ class BackendSpanExporter(TracingExporter):
         if isinstance(value, list):
             return self._truncate_list_for_json_limit(value, max_bytes)
 
-        return self._truncated_preview(value)
+        preview = self._truncated_preview(value)
+        if self._value_json_size_bytes(preview) <= max_bytes:
+            return preview
+
+        return value
 
     def _truncate_mapping_for_json_limit(
         self, value: dict[str, Any], max_bytes: int
@@ -350,9 +415,9 @@ class BackendSpanExporter(TracingExporter):
         preview = f"<{type_name} truncated>"
         if isinstance(value, dict):
             preview = f"<{type_name} len={len(value)} truncated>"
-        elif isinstance(value, (list, tuple, set, frozenset)):
+        elif isinstance(value, list | tuple | set | frozenset):
             preview = f"<{type_name} len={len(value)} truncated>"
-        elif isinstance(value, (bytes, bytearray, memoryview)):
+        elif isinstance(value, bytes | bytearray | memoryview):
             preview = f"<{type_name} bytes={len(value)} truncated>"
 
         return {
@@ -450,6 +515,9 @@ class BackendSpanExporter(TracingExporter):
         """Close the underlying HTTP client."""
         self._client.close()
 
+    def _request_shutdown(self) -> None:
+        self._shutdown_event.set()
+
 
 class BatchTraceProcessor(TracingProcessor):
     """Some implementation notes:
@@ -491,6 +559,8 @@ class BatchTraceProcessor(TracingProcessor):
         # We lazily start the background worker thread the first time a span/trace is queued.
         self._worker_thread: threading.Thread | None = None
         self._thread_start_lock = threading.Lock()
+        self._export_lock = threading.Lock()
+        self._shutdown_deadline: float | None = None
 
     def _ensure_thread_started(self) -> None:
         # Fast path without holding the lock
@@ -536,13 +606,24 @@ class BatchTraceProcessor(TracingProcessor):
         Called when the application stops. We signal our thread to stop, then join it.
         """
         self._shutdown_event.set()
+        if timeout is not None:
+            request_exporter_shutdown = getattr(self._exporter, "_request_shutdown", None)
+            if callable(request_exporter_shutdown):
+                request_exporter_shutdown()
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+        self._shutdown_deadline = deadline
 
         # Only join if we ever started the background thread; otherwise flush synchronously.
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=timeout)
+            if self._worker_thread.is_alive():
+                logger.warning(
+                    "[non-fatal] Tracing: shutdown timeout reached; dropping queued traces."
+                )
         else:
             # No background thread: process any remaining items synchronously.
-            self._export_batches(force=True)
+            self._export_batches(force=True, deadline=deadline)
 
     def force_flush(self):
         """
@@ -565,31 +646,55 @@ class BatchTraceProcessor(TracingProcessor):
                 time.sleep(0.2)
 
         # Final drain after shutdown
-        self._export_batches(force=True)
+        self._export_batches(force=True, deadline=self._shutdown_deadline)
 
-    def _export_batches(self, force: bool = False):
+    def _export_batches(self, force: bool = False, deadline: float | None = None):
         """Drains the queue and exports in batches. If force=True, export everything.
         Otherwise, export up to `max_batch_size` repeatedly until the queue is completely empty.
         """
-        while True:
-            items_to_export: list[Span[Any] | Trace] = []
-
-            # Gather a batch of spans up to max_batch_size
-            while not self._queue.empty() and (
-                force or len(items_to_export) < self._max_batch_size
-            ):
-                try:
-                    items_to_export.append(self._queue.get_nowait())
-                except queue.Empty:
-                    # Another thread might have emptied the queue between checks
+        with self._export_lock:
+            while True:
+                if deadline is not None and time.monotonic() >= deadline:
+                    logger.warning(
+                        "[non-fatal] Tracing: export deadline reached; dropping queued traces."
+                    )
                     break
 
-            # If we collected nothing, we're done
-            if not items_to_export:
-                break
+                items_to_export: list[Span[Any] | Trace] = []
 
-            # Export the batch
-            self._exporter.export(items_to_export)
+                # Gather a batch of spans up to max_batch_size
+                while not self._queue.empty() and (
+                    force or len(items_to_export) < self._max_batch_size
+                ):
+                    try:
+                        items_to_export.append(self._queue.get_nowait())
+                    except queue.Empty:
+                        # Another thread might have emptied the queue between checks
+                        break
+
+                # If we collected nothing, we're done
+                if not items_to_export:
+                    break
+
+                # Export the batch. Catch any exception so a misbehaving exporter
+                # cannot kill the background worker thread and silently strand all
+                # subsequent spans in the queue.
+                try:
+                    export_with_deadline = getattr(self._exporter, "_export_with_deadline", None)
+                    if deadline is not None and callable(export_with_deadline):
+                        export_fn = cast(
+                            Callable[[list[Trace | Span[Any]], float | None], None],
+                            export_with_deadline,
+                        )
+                        export_fn(items_to_export, deadline)
+                    else:
+                        self._exporter.export(items_to_export)
+                except Exception as exc:
+                    logger.error(
+                        "[non-fatal] Tracing: exporter raised %s; dropping batch of %d items",
+                        exc,
+                        len(items_to_export),
+                    )
 
 
 # Lazily initialized defaults to avoid creating network clients or threading

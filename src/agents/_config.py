@@ -1,7 +1,12 @@
+from typing import Literal
+
 from openai import AsyncOpenAI
-from typing_extensions import Literal
 
 from .models import _openai_shared
+from .models.openai_agent_registration import (
+    OpenAIAgentRegistrationConfig,
+    set_default_openai_agent_registration_config,
+)
 from .tracing import set_tracing_export_api_key
 
 
@@ -32,3 +37,19 @@ def set_default_openai_responses_transport(transport: Literal["http", "websocket
             "Invalid OpenAI Responses transport. Expected one of: 'http', 'websocket'."
         )
     _openai_shared.set_default_openai_responses_transport(transport)
+
+
+def set_default_openai_agent_registration(
+    config: OpenAIAgentRegistrationConfig | None,
+) -> None:
+    set_default_openai_agent_registration_config(config)
+
+
+def set_default_openai_harness(harness_id: str | None) -> None:
+    if harness_id is None:
+        set_default_openai_agent_registration_config(None)
+        return
+
+    set_default_openai_agent_registration_config(
+        OpenAIAgentRegistrationConfig(harness_id=harness_id)
+    )

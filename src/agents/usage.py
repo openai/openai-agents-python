@@ -196,8 +196,13 @@ class Usage:
         )
 
         # Automatically preserve request_usage_entries.
-        # If the other Usage represents a single request with tokens, record it.
-        if other.requests == 1 and other.total_tokens > 0:
+        # If the other Usage already has individual request breakdowns, merge them
+        # (this preserves nested token details that would otherwise be discarded
+        # when synthesizing an entry from only the top-level fields).
+        if other.request_usage_entries:
+            self.request_usage_entries.extend(other.request_usage_entries)
+        elif other.requests == 1 and other.total_tokens > 0:
+            # Otherwise, if the other Usage represents a single request with tokens, record it.
             input_details = other.input_tokens_details or InputTokensDetails(cached_tokens=0)
             output_details = other.output_tokens_details or OutputTokensDetails(reasoning_tokens=0)
             request_usage = RequestUsage(
@@ -208,9 +213,6 @@ class Usage:
                 output_tokens_details=output_details,
             )
             self.request_usage_entries.append(request_usage)
-        elif other.request_usage_entries:
-            # If the other Usage already has individual request breakdowns, merge them.
-            self.request_usage_entries.extend(other.request_usage_entries)
 
 
 def _serialize_usage_details(details: Any, default: dict[str, int]) -> dict[str, Any]:
@@ -250,6 +252,61 @@ def serialize_usage(usage: Usage) -> dict[str, Any]:
         "request_usage_entries": [
             _serialize_request_entry(entry) for entry in usage.request_usage_entries
         ],
+    }
+
+
+def model_usage_to_span_usage(usage: Usage) -> dict[str, Any]:
+    """Serialize full per-model-call usage for tracing span data."""
+    return {
+        "requests": usage.requests,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "total_tokens": usage.total_tokens,
+        "input_tokens_details": _serialize_usage_details(
+            usage.input_tokens_details,
+            {"cached_tokens": 0},
+        ),
+        "output_tokens_details": _serialize_usage_details(
+            usage.output_tokens_details,
+            {"reasoning_tokens": 0},
+        ),
+    }
+
+
+def total_usage_to_span_metadata(usage: Usage) -> dict[str, int]:
+    """Serialize aggregate task/run usage for tracing span metadata."""
+    return {
+        "requests": usage.requests,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "total_tokens": usage.total_tokens,
+        "cached_input_tokens": _cached_input_tokens(usage),
+    }
+
+
+def _cached_input_tokens(usage: Usage) -> int:
+    return (
+        usage.input_tokens_details.cached_tokens
+        if usage.input_tokens_details and usage.input_tokens_details.cached_tokens
+        else 0
+    )
+
+
+def turn_usage_to_span_data(usage: Usage) -> dict[str, int]:
+    """Serialize aggregate per-turn usage for custom turn span data."""
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cached_input_tokens": _cached_input_tokens(usage),
+    }
+
+
+def task_usage_to_span_data(usage: Usage) -> dict[str, int]:
+    """Serialize aggregate per-task usage for custom task span data."""
+    return {
+        **turn_usage_to_span_data(usage),
+        "requests": usage.requests,
+        "total_tokens": usage.total_tokens,
     }
 
 

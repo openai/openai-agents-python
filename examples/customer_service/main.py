@@ -128,13 +128,21 @@ triage_agent = Agent[AirlineAgentContext](
         "You are a helpful triaging agent. You can use your tools to delegate questions to other appropriate agents."
     ),
     handoffs=[
-        faq_agent,
-        handoff(agent=seat_booking_agent, on_handoff=on_seat_booking_handoff),
+        handoff(agent=faq_agent, tool_name_override="transfer_to_faq_agent"),
+        handoff(
+            agent=seat_booking_agent,
+            on_handoff=on_seat_booking_handoff,
+            tool_name_override="transfer_to_seat_booking_agent",
+        ),
     ],
 )
 
-faq_agent.handoffs.append(triage_agent)
-seat_booking_agent.handoffs.append(triage_agent)
+faq_agent.handoffs.append(
+    handoff(agent=triage_agent, tool_name_override="transfer_to_triage_agent")
+)
+seat_booking_agent.handoffs.append(
+    handoff(agent=triage_agent, tool_name_override="transfer_to_triage_agent")
+)
 
 
 ### RUN

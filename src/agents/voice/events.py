@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Union
-
-from typing_extensions import TypeAlias
+from typing import Literal, TypeAlias
 
 from .imports import np, npt
 
@@ -41,7 +39,7 @@ class VoiceStreamEventError:
     """The type of event."""
 
 
-VoiceStreamEvent: TypeAlias = Union[
-    VoiceStreamEventAudio, VoiceStreamEventLifecycle, VoiceStreamEventError
-]
+VoiceStreamEvent: TypeAlias = (
+    VoiceStreamEventAudio | VoiceStreamEventLifecycle | VoiceStreamEventError
+)
 """An event from the `VoicePipeline`, streamed via `StreamedAudioResult.stream()`."""
