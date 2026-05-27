@@ -1825,6 +1825,33 @@ async def test_prepare_input_with_session_prefers_latest_function_call_output():
 
 
 @pytest.mark.asyncio
+async def test_prepare_input_with_session_strips_reasoning_item_ids_from_history():
+    reasoning_item = cast(
+        TResponseInputItem,
+        {
+            "type": "reasoning",
+            "id": "rs_test",
+            "summary": [],
+        },
+    )
+    session = SimpleListSession(history=[reasoning_item])
+
+    prepared_input, session_items = await prepare_input_with_session("hello", session, None)
+
+    assert isinstance(prepared_input, list)
+    assert len(session_items) == 1
+    assert cast(dict[str, Any], session_items[0]).get("role") == "user"
+    prepared_reasoning = [
+        cast(dict[str, Any], item)
+        for item in prepared_input
+        if isinstance(item, dict) and item.get("type") == "reasoning"
+    ]
+    assert len(prepared_reasoning) == 1
+    assert prepared_reasoning[0].get("summary") == []
+    assert "id" not in prepared_reasoning[0]
+
+
+@pytest.mark.asyncio
 async def test_prepare_input_with_session_drops_orphan_function_calls():
     orphan_call = cast(
         TResponseInputItem,
