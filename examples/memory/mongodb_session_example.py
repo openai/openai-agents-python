@@ -6,6 +6,7 @@ so they share the same connection pool.
 """
 
 import asyncio
+from typing import Any
 
 from pymongo.asynchronous.mongo_client import AsyncMongoClient
 
@@ -23,7 +24,7 @@ async def main():
     )
 
     # One client shared across all sessions (production pattern).
-    client: AsyncMongoClient = AsyncMongoClient(MONGO_URI)
+    client: AsyncMongoClient[Any] = AsyncMongoClient(MONGO_URI)
 
     try:
         await client.admin.command("ping")
