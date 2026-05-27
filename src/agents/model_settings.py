@@ -60,6 +60,27 @@ Omit = Annotated[_Omit, _OmitTypeAnnotation]
 Headers: TypeAlias = Mapping[str, str | Omit]
 ToolChoice: TypeAlias = Literal["auto", "required", "none"] | str | MCPToolChoice | None
 
+_TRACEABLE_MODEL_SETTING_FIELDS = (
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "tool_choice",
+    "parallel_tool_calls",
+    "truncation",
+    "max_tokens",
+    "reasoning",
+    "verbosity",
+    "metadata",
+    "store",
+    "prompt_cache_retention",
+    "include_usage",
+    "response_include",
+    "top_logprobs",
+    "retry",
+    "context_management",
+)
+
 
 @dataclass
 class ModelSettings:
@@ -198,6 +219,11 @@ class ModelSettings:
 
     def to_json_dict(self) -> dict[str, Any]:
         return cast(dict[str, Any], TypeAdapter(ModelSettings).dump_python(self, mode="json"))
+
+    def to_traceable_dict(self) -> dict[str, Any]:
+        """Serialize settings for tracing without provider-specific request extras."""
+        payload = self.to_json_dict()
+        return {key: payload[key] for key in _TRACEABLE_MODEL_SETTING_FIELDS if key in payload}
 
 
 def _merge_retry_settings(

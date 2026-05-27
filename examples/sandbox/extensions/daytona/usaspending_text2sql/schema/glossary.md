@@ -831,7 +831,7 @@ A prime award is an agreement that the government makes with a non-federal entit
 
 The term “prime award” can be used as a generic term to describe either  transactions or prime award summaries.
 
-**Official definition:** A Prime Award is a a federal award that is either:
+**Official definition:** A Prime Award is a federal award that is either:
 (1) Federal financial assistance that a non-Federal entity receives directly from a Federal awarding agency; or
 (2) The cost-reimbursement contract under the Federal Acquisition Regulations that a non-Federal entity receives directly from a Federal awarding agency.
 (Adapted from 2 CFR §200.38)

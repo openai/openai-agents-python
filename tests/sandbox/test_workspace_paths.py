@@ -34,6 +34,11 @@ def _policy(root: Path | str = "/workspace") -> WorkspacePathPolicy:
     return WorkspacePathPolicy(root=root)
 
 
+def test_workspace_path_policy_rejects_relative_root() -> None:
+    with pytest.raises(ValueError, match="sandbox workspace root must be absolute"):
+        WorkspacePathPolicy(root="workspace")
+
+
 def _assert_workspace_path_case(
     *,
     method: PathPolicyMethod,

@@ -33,6 +33,7 @@ from ..usage import Usage
 from ..util._json import _to_dump_compatible
 from ._openai_retry import get_openai_retry_advice
 from ._retry_runtime import should_disable_provider_managed_retries
+from ._trace import model_config_for_trace
 from .chatcmpl_converter import Converter
 from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
@@ -147,7 +148,7 @@ class OpenAIChatCompletionsModel(Model):
 
         with generation_span(
             model=str(self.model),
-            model_config=model_settings.to_json_dict() | {"base_url": str(self._client.base_url)},
+            model_config=model_config_for_trace(model_settings, base_url=self._client.base_url),
             disabled=tracing.is_disabled(),
         ) as span_generation:
             response = await self._fetch_response(
@@ -281,7 +282,7 @@ class OpenAIChatCompletionsModel(Model):
 
         with generation_span(
             model=str(self.model),
-            model_config=model_settings.to_json_dict() | {"base_url": str(self._client.base_url)},
+            model_config=model_config_for_trace(model_settings, base_url=self._client.base_url),
             disabled=tracing.is_disabled(),
         ) as span_generation:
             response, stream = await self._fetch_response(
