@@ -4,6 +4,7 @@ These confirm that LocalShellAction.execute forwards the command to the executor
 and that Runner.run executes local shell calls and records their outputs.
 """
 
+import json
 from typing import Any, cast
 
 import pytest
@@ -21,6 +22,7 @@ from agents import (
 )
 from agents.items import ToolCallOutputItem
 from agents.run_internal.run_loop import LocalShellAction, ToolRunLocalShellCall
+from agents.tool_context import ToolContext
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
@@ -36,6 +38,25 @@ class RecordingLocalShellExecutor:
     def __call__(self, request: LocalShellCommandRequest) -> str:
         self.calls.append(request)
         return self.output
+
+
+class RecordingRunHooks(RunHooks[Any]):
+    """Capture local shell hook contexts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_contexts: list[RunContextWrapper[Any]] = []
+        self.end_contexts: list[RunContextWrapper[Any]] = []
+
+    async def on_tool_start(
+        self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
+    ) -> None:
+        self.start_contexts.append(context)
+
+    async def on_tool_end(
+        self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any, result: str
+    ) -> None:
+        self.end_contexts.append(context)
 
 
 @pytest.mark.asyncio
@@ -61,13 +82,15 @@ async def test_local_shell_action_execute_invokes_executor() -> None:
     tool_run = ToolRunLocalShellCall(tool_call=tool_call, local_shell_tool=tool)
     agent = Agent(name="test_agent", tools=[tool])
     context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+    hooks = RecordingRunHooks()
 
+    config = RunConfig()
     output_item = await LocalShellAction.execute(
         agent=agent,
         call=tool_run,
-        hooks=RunHooks[Any](),
+        hooks=hooks,
         context_wrapper=context_wrapper,
-        config=RunConfig(),
+        config=config,
     )
 
     assert len(executor.calls) == 1
@@ -79,6 +102,16 @@ async def test_local_shell_action_execute_invokes_executor() -> None:
     assert request.data.action.env == {"TEST": "value"}
     assert request.data.action.timeout_ms == 5000
     assert request.data.action.working_directory == "/tmp"
+    assert len(hooks.start_contexts) == 1
+    assert hooks.start_contexts == hooks.end_contexts
+    hook_context = hooks.start_contexts[0]
+    assert isinstance(hook_context, ToolContext)
+    assert hook_context.context is context_wrapper.context
+    assert hook_context.tool_name == tool.name
+    assert hook_context.tool_call_id == "call_456"
+    assert hook_context.agent is agent
+    assert hook_context.run_config is config
+    assert json.loads(hook_context.tool_arguments)["command"] == ["bash", "-c", "ls"]
 
     assert isinstance(output_item, ToolCallOutputItem)
     assert output_item.agent is agent

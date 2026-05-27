@@ -75,10 +75,9 @@ class RunHooksBase(Generic[TContext, TAgent]):
     ) -> None:
         """Called immediately before a local tool is invoked.
 
-        For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
+        Local tool invocations with a concrete tool call receive a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
-        and ``tool_arguments``. Other local tool families may provide a plain
-        ``RunContextWrapper`` instead.
+        and ``tool_arguments``.
         """
         pass
 
@@ -91,10 +90,9 @@ class RunHooksBase(Generic[TContext, TAgent]):
     ) -> None:
         """Called immediately after a local tool is invoked.
 
-        For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
+        Local tool invocations with a concrete tool call receive a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
-        and ``tool_arguments``. Other local tool families may provide a plain
-        ``RunContextWrapper`` instead.
+        and ``tool_arguments``.
         """
         pass
 
@@ -149,10 +147,9 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     ) -> None:
         """Called immediately before a local tool is invoked.
 
-        For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
+        Local tool invocations with a concrete tool call receive a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
-        and ``tool_arguments``. Other local tool families may provide a plain
-        ``RunContextWrapper`` instead.
+        and ``tool_arguments``.
         """
         pass
 
@@ -165,10 +162,9 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     ) -> None:
         """Called immediately after a local tool is invoked.
 
-        For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
+        Local tool invocations with a concrete tool call receive a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
-        and ``tool_arguments``. Other local tool families may provide a plain
-        ``RunContextWrapper`` instead.
+        and ``tool_arguments``.
         """
         pass
 
