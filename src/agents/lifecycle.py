@@ -87,7 +87,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         agent: TAgent,
         tool: Tool,
-        result: str,
+        result: Any,
     ) -> None:
         """Called immediately after a local tool is invoked.
 
@@ -161,7 +161,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         agent: TAgent,
         tool: Tool,
-        result: str,
+        result: Any,
     ) -> None:
         """Called immediately after a local tool is invoked.
 

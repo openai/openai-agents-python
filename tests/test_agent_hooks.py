@@ -67,7 +67,7 @@ class AgentHooksForTests(AgentHooks):
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
         tool: Tool,
-        result: str,
+        result: Any,
     ) -> None:
         self.events["on_tool_end"] += 1
         if isinstance(context, ToolContext):
