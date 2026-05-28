@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from threading import RLock
-from typing import TYPE_CHECKING, Any, Generic
+from typing import TYPE_CHECKING, Any, Generic, SupportsIndex
 
 from typing_extensions import TypeVar
 
@@ -48,6 +48,9 @@ class _ApprovalRecords(dict[str, _ApprovalRecord]):
         super().__init__(*args, **kwargs)
         self.lock = RLock() if lock is None else lock
 
+    def __reduce_ex__(self, protocol: SupportsIndex) -> tuple[Any, ...]:
+        return (self.__class__, (dict(self),))
+
 
 @dataclass(eq=False)
 class RunContextWrapper(Generic[TContext]):
@@ -77,6 +80,15 @@ class RunContextWrapper(Generic[TContext]):
         else:
             self._approvals = _ApprovalRecords(self._approvals)
             self._approvals_lock = self._approvals.lock
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        state.pop("_approvals_lock", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self.__post_init__()
 
     @staticmethod
     def _to_str_or_none(value: Any) -> str | None:

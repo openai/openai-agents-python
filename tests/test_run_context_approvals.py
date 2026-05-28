@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import copy
+import pickle
+from typing import Any
+
 from agents import Agent, RunContextWrapper
 from agents.run_context import AgentHookContext
 from agents.tool_context import ToolContext
@@ -262,3 +266,31 @@ def test_contexts_constructed_with_shared_approvals_reuse_approval_lock() -> Non
     assert tool_context._approvals_lock is context_wrapper._approvals_lock
     assert hook_context._approvals is context_wrapper._approvals
     assert hook_context._approvals_lock is context_wrapper._approvals_lock
+
+
+def test_context_approval_lock_is_recreated_after_deepcopy() -> None:
+    agent = Agent(name="test-agent")
+    context_wrapper = RunContextWrapper(context=None)
+    approval_item = make_tool_approval_item(agent, call_id="call-1", name="lookup")
+
+    context_wrapper.approve_tool(approval_item)
+    copied_context = copy.deepcopy(context_wrapper)
+
+    assert copied_context.is_tool_approved("lookup", "call-1") is True
+    assert copied_context._approvals is not context_wrapper._approvals
+    copied_approvals: Any = copied_context._approvals
+    assert copied_context._approvals_lock is copied_approvals.lock
+
+
+def test_context_approval_lock_is_recreated_after_pickle_roundtrip() -> None:
+    agent = Agent(name="test-agent")
+    context_wrapper = RunContextWrapper(context=None)
+    approval_item = make_tool_approval_item(agent, call_id="call-1", name="lookup")
+
+    context_wrapper.approve_tool(approval_item)
+    restored_context = pickle.loads(pickle.dumps(context_wrapper))
+
+    assert restored_context.is_tool_approved("lookup", "call-1") is True
+    assert restored_context._approvals is not context_wrapper._approvals
+    restored_approvals: Any = restored_context._approvals
+    assert restored_context._approvals_lock is restored_approvals.lock

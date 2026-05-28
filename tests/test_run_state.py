@@ -6,6 +6,7 @@ import gc
 import io
 import json
 import logging
+import pickle
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -1619,6 +1620,20 @@ class TestRunState:
         assert iteration_started.is_set()
         assert "tool-new" not in serialized
         assert context.is_tool_approved("tool-new", "cid-new") is True
+
+    def test_approval_lock_is_recreated_after_run_state_pickle_roundtrip(self):
+        """Test that pickling RunState does not serialize the approval lock."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ApprovalAgent")
+        state = make_state(agent, context=context, original_input="test")
+        state.approve(make_tool_approval_item(agent, call_id="cid1", name="tool1"))
+
+        restored_state = pickle.loads(pickle.dumps(state))
+
+        assert restored_state._context is not None
+        assert restored_state._context.is_tool_approved("tool1", "cid1") is True
+        restored_approvals: Any = restored_state._context._approvals
+        assert restored_state._context._approvals_lock is restored_approvals.lock
 
     async def test_serializes_and_restores_rejection_messages(self):
         """Test that rejection messages are preserved through serialization."""
