@@ -11,13 +11,13 @@ from agents import (
     ShellCallOutcome,
     ShellCommandOutput,
     ShellCommandRequest,
+    ShellOnApprovalFunctionResult,
     ShellResult,
     ShellTool,
     trace,
 )
 from agents.items import ToolApprovalItem
 from agents.run_context import RunContextWrapper
-from agents.tool import ShellOnApprovalFunctionResult
 
 SHELL_AUTO_APPROVE = os.environ.get("SHELL_AUTO_APPROVE") == "1"
 
