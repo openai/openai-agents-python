@@ -109,6 +109,26 @@ try:
 except Exception:  # pragma: no cover
     _HAS_VERCEL = False
 
+try:
+    from .sprites import (
+        DEFAULT_SPRITES_API_URL as DEFAULT_SPRITES_API_URL,
+        DEFAULT_SPRITES_CONTEXT_PATH as DEFAULT_SPRITES_CONTEXT_PATH,
+        DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S as DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S,  # noqa: E501
+        DEFAULT_SPRITES_WORKSPACE_ROOT as DEFAULT_SPRITES_WORKSPACE_ROOT,
+        SpritesCheckpoints as SpritesCheckpoints,
+        SpritesCloudBucketMountStrategy as SpritesCloudBucketMountStrategy,
+        SpritesPlatformContext as SpritesPlatformContext,
+        SpritesSandboxClient as SpritesSandboxClient,
+        SpritesSandboxClientOptions as SpritesSandboxClientOptions,
+        SpritesSandboxSession as SpritesSandboxSession,
+        SpritesSandboxSessionState as SpritesSandboxSessionState,
+        SpritesUrlAccess as SpritesUrlAccess,
+    )
+
+    _HAS_SPRITES = True
+except Exception:  # pragma: no cover
+    _HAS_SPRITES = False
+
 __all__: list[str] = []
 
 if _HAS_E2B:
@@ -205,5 +225,23 @@ if _HAS_RUNLOOP:
             "RunloopTimeouts",
             "RunloopTunnelConfig",
             "RunloopUserParameters",
+        ]
+    )
+
+if _HAS_SPRITES:
+    __all__.extend(
+        [
+            "DEFAULT_SPRITES_API_URL",
+            "DEFAULT_SPRITES_CONTEXT_PATH",
+            "DEFAULT_SPRITES_WAIT_FOR_RUNNING_TIMEOUT_S",
+            "DEFAULT_SPRITES_WORKSPACE_ROOT",
+            "SpritesCheckpoints",
+            "SpritesCloudBucketMountStrategy",
+            "SpritesPlatformContext",
+            "SpritesSandboxClient",
+            "SpritesSandboxClientOptions",
+            "SpritesSandboxSession",
+            "SpritesSandboxSessionState",
+            "SpritesUrlAccess",
         ]
     )
