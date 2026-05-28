@@ -1036,6 +1036,7 @@ async def start_streaming(
                         reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                         prompt_cache_key_resolver=prompt_cache_key_resolver,
                         error_handlers=error_handlers,
+                        sandbox_runtime=sandbox_runtime,
                     )
                 finally:
                     attach_usage_to_span(
@@ -1255,6 +1256,7 @@ async def run_single_turn_streamed(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
     error_handlers: RunErrorHandlers[TContext] | None = None,
+    sandbox_runtime: SandboxRuntime[TContext] | None = None,
 ) -> SingleStepResult:
     """Run a single streamed turn and emit events as results arrive."""
     public_agent = bindings.public_agent
@@ -1448,6 +1450,12 @@ async def run_single_turn_streamed(
         else None
     )
     model_settings = model_settings_with_prompt_cache_key(model_settings, prompt_cache_key)
+    if sandbox_runtime is not None:
+        model_settings = await sandbox_runtime.prepare_model_settings(
+            public_agent=public_agent,
+            model=model,
+            model_settings=model_settings,
+        )
 
     async def rewind_model_request() -> None:
         items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
@@ -1722,6 +1730,7 @@ async def run_single_turn(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
     error_handlers: RunErrorHandlers[TContext] | None = None,
+    sandbox_runtime: SandboxRuntime[TContext] | None = None,
 ) -> SingleStepResult:
     """Run a single non-streaming turn of the agent loop."""
     public_agent = bindings.public_agent
@@ -1776,6 +1785,7 @@ async def run_single_turn(
         session=session,
         session_items_to_rewind=session_items_to_rewind,
         prompt_cache_key_resolver=prompt_cache_key_resolver,
+        sandbox_runtime=sandbox_runtime,
     )
 
     return await get_single_step_result_from_response(
@@ -1811,6 +1821,7 @@ async def get_new_response(
     session: Session | None = None,
     session_items_to_rewind: list[TResponseInputItem] | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
+    sandbox_runtime: SandboxRuntime[TContext] | None = None,
 ) -> ModelResponse:
     """Call the model and return the raw response, handling retries and hooks."""
     public_agent = bindings.public_agent
@@ -1872,6 +1883,12 @@ async def get_new_response(
         else None
     )
     model_settings = model_settings_with_prompt_cache_key(model_settings, prompt_cache_key)
+    if sandbox_runtime is not None:
+        model_settings = await sandbox_runtime.prepare_model_settings(
+            public_agent=public_agent,
+            model=model,
+            model_settings=model_settings,
+        )
 
     async def rewind_model_request() -> None:
         items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []

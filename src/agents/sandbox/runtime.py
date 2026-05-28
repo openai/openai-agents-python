@@ -9,6 +9,12 @@ from typing import Any, Generic, cast
 from ..agent import Agent
 from ..exceptions import UserError
 from ..items import TResponseInputItem
+from ..model_settings import ModelSettings
+from ..models.openai_agent_runtime_auth import (
+    OpenAIAgentRuntimeAuthManager,
+    add_agent_assertion_header,
+    resolve_openai_agent_runtime_auth_config,
+)
 from ..result import RunResult, RunResultStreaming
 from ..run_config import RunConfig
 from ..run_context import RunContextWrapper, TContext
@@ -73,6 +79,16 @@ class SandboxRuntime(Generic[TContext]):
     ) -> None:
         self._sandbox_config = run_config.sandbox if run_config is not None else None
         self._run_config_model = run_config.model if run_config is not None else None
+        self._agent_runtime_auth_manager: OpenAIAgentRuntimeAuthManager | None = None
+        if run_config is not None and self._sandbox_config is not None:
+            runtime_auth_config = resolve_openai_agent_runtime_auth_config(
+                self._sandbox_config.agent_runtime_auth,
+                model_provider=run_config.model_provider,
+            )
+            if runtime_auth_config is not None:
+                self._agent_runtime_auth_manager = OpenAIAgentRuntimeAuthManager(
+                    runtime_auth_config
+                )
         # The runner resolves this before constructing the runtime. It can be None only when
         # sandbox is disabled or tests instantiate the runtime directly.
         self._rollout_id = rollout_id
@@ -119,6 +135,34 @@ class SandboxRuntime(Generic[TContext]):
     def assert_agent_supported(self, agent: Agent[TContext]) -> None:
         if isinstance(agent, SandboxAgent) and self._sandbox_config is None:
             raise UserError("SandboxAgent execution requires `RunConfig(sandbox=...)`")
+
+    async def prepare_model_settings(
+        self,
+        *,
+        public_agent: Agent[TContext],
+        model: object,
+        model_settings: ModelSettings,
+    ) -> ModelSettings:
+        if self._agent_runtime_auth_manager is None or not isinstance(public_agent, SandboxAgent):
+            return model_settings
+
+        # AgentAssertion is only supported for OpenAI Responses requests.
+        from ..models.openai_responses import OpenAIResponsesModel
+
+        if not isinstance(model, OpenAIResponsesModel):
+            return model_settings
+
+        get_client = getattr(model, "_get_client", None)
+        if not callable(get_client):
+            return model_settings
+
+        authorization_header = await self._agent_runtime_auth_manager.authorization_header(
+            get_client()
+        )
+        return add_agent_assertion_header(
+            model_settings,
+            authorization_header=authorization_header,
+        )
 
     async def enqueue_memory_result(
         self,
