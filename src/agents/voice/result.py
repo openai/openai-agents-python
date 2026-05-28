@@ -68,6 +68,12 @@ class StreamedAudioResult:
         self._completed_session = False
         self._stored_exception: BaseException | None = None
         self._tracing_span: Span[SpeechGroupSpanData] | None = None
+        # Count of synthetic turn_ended events whose lifecycle was already
+        # finalized synchronously (see `_turn_done`). The dispatcher should not
+        # call `_finish_turn` again for these, because doing so could
+        # prematurely finish a later turn's tracing span that started after
+        # them.
+        self._pending_synthetic_turn_ends: int = 0
 
     async def _start_turn(self):
         if self._started_processing_turn:
@@ -221,9 +227,29 @@ class StreamedAudioResult:
             )
             self._text_buffer = ""
         elif self._started_processing_turn:
+            # Turn was started (turn_started emitted) but produced no
+            # synthesizable text. Finish turn state synchronously so a
+            # follow-up `_add_text` for the next turn does not race the
+            # dispatcher and skip its `turn_started`. The synthesized
+            # `turn_ended` flows through the dispatcher to stay ordered with
+            # any in-flight audio segments; a counter tells the dispatcher
+            # this event's `_finish_turn` already ran so it doesn't clobber
+            # a span that belongs to a later turn started in the meantime.
+            self._finish_turn()
+            self._pending_synthetic_turn_ends += 1
             local_queue = asyncio.Queue()
             self._ordered_tasks.append(local_queue)
             await local_queue.put(VoiceStreamEventLifecycle(event="turn_ended"))
+            self._done_processing = True
+            if self._dispatcher_task is None:
+                self._dispatcher_task = asyncio.create_task(self._dispatch_audio())
+            # Wait for the dispatcher to drain this synthesized `turn_ended`
+            # so the next turn's `turn_started` cannot precede it on
+            # `self._queue`.
+            await asyncio.gather(*self._tasks)
+            while self._pending_synthetic_turn_ends > 0:
+                await asyncio.sleep(0)
+            return
         self._done_processing = True
         if self._dispatcher_task is None:
             self._dispatcher_task = asyncio.create_task(self._dispatch_audio())
@@ -262,7 +288,13 @@ class StreamedAudioResult:
                 if isinstance(chunk, VoiceStreamEventLifecycle):
                     local_queue.task_done()
                     if chunk.event == "turn_ended":
-                        self._finish_turn()
+                        if self._pending_synthetic_turn_ends > 0:
+                            # `_turn_done` already ran `_finish_turn` synchronously
+                            # for this event; skip to avoid finishing a span that
+                            # belongs to a later turn started in the meantime.
+                            self._pending_synthetic_turn_ends -= 1
+                        else:
+                            self._finish_turn()
                         break
         await self._queue.put(VoiceStreamEventLifecycle(event="session_ended"))
 
