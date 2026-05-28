@@ -1,0 +1,968 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal, cast
+
+from openai.types.responses.tool_param import Mcp
+
+from .exceptions import UserError
+from .mcp import MCPServer, MCPServerSse, MCPServerStdio, MCPServerStreamableHttp
+from .mcp.server import RequireApprovalSetting
+from .tool import HostedMCPTool, MCPToolApprovalFunction, Tool
+
+ConnectorPolicyLabel = Literal[
+    "read_only",
+    "write",
+    "destructive",
+    "external_send",
+    "network",
+    "secret_access",
+    "local_execution",
+    "sandbox_required",
+]
+"""Coarse policy labels callers can use to route connector approval and sandbox decisions."""
+
+_CONNECTOR_POLICY_LABELS: set[str] = {
+    "read_only",
+    "write",
+    "destructive",
+    "external_send",
+    "network",
+    "secret_access",
+    "local_execution",
+    "sandbox_required",
+}
+
+
+HostedConnectorAuthorization = (
+    str | Mapping[str, str] | Callable[[str, str, Mapping[str, Any]], str | None]
+)
+"""Authorization source for hosted connectors loaded from a package app manifest."""
+
+
+@dataclass(frozen=True)
+class ConnectorPlugin:
+    """Installed plugin record that can be loaded as an Agents SDK connector.
+
+    This is intentionally a small adapter surface for Unified Plugins-style directory records. The
+    SDK does not fetch from a specific cloud API here; callers pass the records they got from Codex,
+    ChatGPT, or another plugin registry.
+    """
+
+    id: str
+    name: str
+    description: str | None = None
+    package_path: Path | None = None
+    hosted_connectors: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    policy_labels: tuple[ConnectorPolicyLabel, ...] = ()
+
+    @classmethod
+    def from_record(
+        cls,
+        record: Mapping[str, Any],
+        *,
+        package_root: str | Path | None = None,
+    ) -> ConnectorPlugin:
+        """Create a plugin descriptor from a Unified Plugins-style directory record."""
+        plugin_id = _optional_record_str(record, ("id", "plugin_id", "pluginId"), "Plugin id")
+        name = _optional_record_str(record, ("name", "slug"), "Plugin name")
+        if plugin_id is None and name is None:
+            raise UserError("Plugin record must include a non-empty 'id' or 'name'")
+        plugin_id = plugin_id or cast(str, name)
+        name = name or plugin_id
+
+        description = _optional_record_str(record, ("description",), "Plugin description")
+        package_path = _plugin_package_path(record, package_root=package_root)
+        hosted_connectors = _plugin_hosted_connector_configs(record)
+        policy_labels = _plugin_policy_labels(record)
+        metadata = {
+            key: value
+            for key, value in record.items()
+            if key
+            not in {
+                "apps",
+                "connectors",
+                "description",
+                "hostedConnectors",
+                "hosted_connectors",
+                "id",
+                "localPath",
+                "local_path",
+                "name",
+                "packagePath",
+                "package_path",
+                "path",
+                "policy",
+                "policyLabels",
+                "policy_labels",
+                "pluginId",
+                "plugin_id",
+                "slug",
+            }
+        }
+
+        return cls(
+            id=plugin_id,
+            name=name,
+            description=description,
+            package_path=package_path,
+            hosted_connectors=hosted_connectors,
+            metadata=metadata,
+            policy_labels=policy_labels,
+        )
+
+
+@dataclass(frozen=True)
+class ConnectorComponents:
+    """Resolved runtime surfaces exposed by a connector package."""
+
+    tools: tuple[Tool, ...] = ()
+    mcp_servers: tuple[MCPServer, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    policy_labels: tuple[ConnectorPolicyLabel, ...] = ()
+
+
+@dataclass
+class Connector:
+    """A package-level connector surface for Agents SDK.
+
+    Connectors intentionally compose existing SDK primitives instead of introducing a new runtime:
+    local and hosted tools continue to flow through `Tool`, while local MCP servers continue to flow
+    through `MCPServer`.
+    """
+
+    name: str
+    description: str | None = None
+    tools: list[Tool] = field(default_factory=list)
+    mcp_servers: list[MCPServer] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    policy_labels: set[ConnectorPolicyLabel] = field(default_factory=set)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str):
+            raise TypeError(f"Connector name must be a string, got {type(self.name).__name__}")
+        if self.description is not None and not isinstance(self.description, str):
+            raise TypeError(
+                "Connector description must be a string or None, "
+                f"got {type(self.description).__name__}"
+            )
+        if not isinstance(self.tools, list):
+            raise TypeError(f"Connector tools must be a list, got {type(self.tools).__name__}")
+        if not isinstance(self.mcp_servers, list):
+            raise TypeError(
+                f"Connector mcp_servers must be a list, got {type(self.mcp_servers).__name__}"
+            )
+        if not isinstance(self.metadata, dict):
+            raise TypeError(
+                f"Connector metadata must be a dict, got {type(self.metadata).__name__}"
+            )
+        if not isinstance(self.policy_labels, set):
+            raise TypeError(
+                f"Connector policy_labels must be a set, got {type(self.policy_labels).__name__}"
+            )
+
+    def components(self) -> ConnectorComponents:
+        """Return immutable runtime surfaces for callers that want explicit composition."""
+        return ConnectorComponents(
+            tools=tuple(self.tools),
+            mcp_servers=tuple(self.mcp_servers),
+            metadata=self.metadata,
+            policy_labels=tuple(sorted(self.policy_labels)),
+        )
+
+    @classmethod
+    def from_tools(
+        cls,
+        name: str,
+        tools: Iterable[Tool],
+        *,
+        description: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        policy_labels: Iterable[ConnectorPolicyLabel] | None = None,
+    ) -> Connector:
+        """Create a connector from SDK tools."""
+        return cls(
+            name=name,
+            description=description,
+            tools=list(tools),
+            metadata=dict(metadata or {}),
+            policy_labels=set(policy_labels or ()),
+        )
+
+    @classmethod
+    def from_mcp_server(
+        cls,
+        name: str,
+        server: MCPServer,
+        *,
+        description: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        policy_labels: Iterable[ConnectorPolicyLabel] | None = None,
+    ) -> Connector:
+        """Create a connector from a local MCP server instance."""
+        return cls.from_mcp_servers(
+            name,
+            [server],
+            description=description,
+            metadata=metadata,
+            policy_labels=policy_labels,
+        )
+
+    @classmethod
+    def from_mcp_servers(
+        cls,
+        name: str,
+        servers: Iterable[MCPServer],
+        *,
+        description: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        policy_labels: Iterable[ConnectorPolicyLabel] | None = None,
+    ) -> Connector:
+        """Create a connector from local MCP server instances."""
+        return cls(
+            name=name,
+            description=description,
+            mcp_servers=list(servers),
+            metadata=dict(metadata or {}),
+            policy_labels=set(policy_labels or ()),
+        )
+
+    @classmethod
+    def from_hosted_connector(
+        cls,
+        name: str,
+        *,
+        connector_id: str,
+        authorization: str,
+        server_label: str | None = None,
+        allowed_tools: list[str] | None = None,
+        require_approval: RequireApprovalSetting = None,
+        defer_loading: bool = False,
+        on_approval_request: MCPToolApprovalFunction | None = None,
+        tool_config: Mapping[str, Any] | None = None,
+        description: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        policy_labels: Iterable[ConnectorPolicyLabel] | None = None,
+    ) -> Connector:
+        """Create a connector for an OpenAI-hosted connector exposed through hosted MCP."""
+        config = _build_hosted_mcp_tool_config(
+            server_label=server_label or name,
+            connector_id=connector_id,
+            authorization=authorization,
+            allowed_tools=allowed_tools,
+            require_approval=require_approval,
+            defer_loading=defer_loading,
+            extra_config=tool_config,
+        )
+        return cls.from_tools(
+            name,
+            [HostedMCPTool(tool_config=config, on_approval_request=on_approval_request)],
+            description=description,
+            metadata={
+                **dict(metadata or {}),
+                "hosted_connector": {
+                    "connector_id": connector_id,
+                    "server_label": server_label or name,
+                },
+            },
+            policy_labels=set(policy_labels or ()) | {"network"},
+        )
+
+    @classmethod
+    def from_hosted_mcp(
+        cls,
+        name: str,
+        *,
+        server_url: str,
+        server_label: str | None = None,
+        allowed_tools: list[str] | None = None,
+        require_approval: RequireApprovalSetting = None,
+        defer_loading: bool = False,
+        on_approval_request: MCPToolApprovalFunction | None = None,
+        tool_config: Mapping[str, Any] | None = None,
+        description: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        policy_labels: Iterable[ConnectorPolicyLabel] | None = None,
+    ) -> Connector:
+        """Create a connector for a remote MCP server executed by the hosted Responses tool."""
+        config = _build_hosted_mcp_tool_config(
+            server_label=server_label or name,
+            server_url=server_url,
+            allowed_tools=allowed_tools,
+            require_approval=require_approval,
+            defer_loading=defer_loading,
+            extra_config=tool_config,
+        )
+        return cls.from_tools(
+            name,
+            [HostedMCPTool(tool_config=config, on_approval_request=on_approval_request)],
+            description=description,
+            metadata={
+                **dict(metadata or {}),
+                "hosted_mcp": {
+                    "server_url": server_url,
+                    "server_label": server_label or name,
+                },
+            },
+            policy_labels=set(policy_labels or ()) | {"network"},
+        )
+
+    @classmethod
+    def from_package(
+        cls,
+        path: str | Path,
+        *,
+        authorization: HostedConnectorAuthorization | None = None,
+        hosted_mcp_require_approval: RequireApprovalSetting = None,
+    ) -> Connector:
+        """Load a connector from a shared Codex plugin package layout.
+
+        The initial package bridge supports `.codex-plugin/plugin.json`, `.mcp.json`, and optional
+        `.app.json` hosted connector IDs. App entries become hosted MCP tools only when an
+        authorization source is supplied.
+        """
+        package_root = Path(path).expanduser().resolve()
+        manifest_path = package_root / ".codex-plugin" / "plugin.json"
+        if not manifest_path.exists():
+            raise UserError(f"Connector package manifest not found: {manifest_path}")
+
+        manifest = _read_json_object(manifest_path)
+        name = _expect_str(manifest.get("name"), "Connector package name")
+        description = _optional_str(manifest.get("description"), "Connector package description")
+        metadata: dict[str, Any] = {
+            key: value
+            for key, value in manifest.items()
+            if key
+            not in {
+                "description",
+                "mcpServers",
+                "mcp_servers",
+                "apps",
+            }
+        }
+
+        mcp_servers, policy_labels = _load_manifest_mcp_servers(package_root, manifest)
+        tools = _load_manifest_app_tools(
+            package_root,
+            manifest,
+            authorization=authorization,
+            require_approval=hosted_mcp_require_approval,
+        )
+        if tools:
+            policy_labels.add("network")
+
+        return cls(
+            name=name,
+            description=description,
+            tools=tools,
+            mcp_servers=mcp_servers,
+            metadata=metadata,
+            policy_labels=policy_labels,
+        )
+
+    @classmethod
+    def from_installed_plugin(
+        cls,
+        plugin: str,
+        registry: ConnectorRegistry,
+        *,
+        authorization: HostedConnectorAuthorization | None = None,
+        hosted_mcp_require_approval: RequireApprovalSetting = None,
+    ) -> Connector:
+        """Load an installed Unified Plugins-style record through a connector registry.
+
+        The registry is caller-provided so the SDK can consume records from Codex, ChatGPT, a
+        workspace plugin service, or tests without depending on one cloud transport.
+        """
+        return registry.load(
+            plugin,
+            authorization=authorization,
+            hosted_mcp_require_approval=hosted_mcp_require_approval,
+        )
+
+
+class ConnectorRegistry:
+    """In-memory adapter over installed plugin records.
+
+    `ConnectorRegistry` is the bridge point for Unified Plugins integration. It accepts
+    already-fetched directory records and resolves them into the same `Connector` surface used by
+    local package connectors.
+    """
+
+    def __init__(self, plugins: Iterable[ConnectorPlugin]) -> None:
+        self._plugins = tuple(plugins)
+        by_id: dict[str, ConnectorPlugin] = {}
+        by_name: dict[str, ConnectorPlugin] = {}
+        for plugin in self._plugins:
+            if plugin.id in by_id:
+                raise UserError(f"Duplicate connector plugin id: {plugin.id}")
+            by_id[plugin.id] = plugin
+            if plugin.name in by_name:
+                raise UserError(f"Duplicate connector plugin name: {plugin.name}")
+            by_name[plugin.name] = plugin
+        self._by_id = by_id
+        self._by_name = by_name
+
+    @classmethod
+    def from_plugin_records(
+        cls,
+        records: Iterable[Mapping[str, Any]],
+        *,
+        package_root: str | Path | None = None,
+    ) -> ConnectorRegistry:
+        """Create a registry from Unified Plugins-style directory records."""
+        return cls(
+            ConnectorPlugin.from_record(record, package_root=package_root) for record in records
+        )
+
+    def list_plugins(self) -> tuple[ConnectorPlugin, ...]:
+        """Return installed plugin descriptors in registry order."""
+        return self._plugins
+
+    def get(self, plugin: str) -> ConnectorPlugin:
+        """Resolve a plugin by id or name."""
+        if plugin in self._by_id:
+            return self._by_id[plugin]
+        if plugin in self._by_name:
+            return self._by_name[plugin]
+        raise UserError(f"Connector plugin not found: {plugin}")
+
+    def load(
+        self,
+        plugin: str,
+        *,
+        authorization: HostedConnectorAuthorization | None = None,
+        hosted_mcp_require_approval: RequireApprovalSetting = None,
+    ) -> Connector:
+        """Load an installed plugin as a connector."""
+        plugin_record = self.get(plugin)
+        if plugin_record.package_path is not None:
+            connector = Connector.from_package(
+                plugin_record.package_path,
+                authorization=authorization,
+                hosted_mcp_require_approval=hosted_mcp_require_approval,
+            )
+        else:
+            connector = Connector(
+                name=plugin_record.name,
+                description=plugin_record.description,
+            )
+
+        hosted_tools = _load_hosted_connector_tools(
+            plugin_record.hosted_connectors,
+            authorization=authorization,
+            require_approval=hosted_mcp_require_approval,
+        )
+        connector.policy_labels.update(plugin_record.policy_labels)
+        connector.tools.extend(hosted_tools)
+        if hosted_tools:
+            connector.policy_labels.add("network")
+        connector.metadata["unified_plugin"] = _plugin_metadata(plugin_record)
+        return connector
+
+
+def _build_hosted_mcp_tool_config(
+    *,
+    server_label: str,
+    server_url: str | None = None,
+    connector_id: str | None = None,
+    authorization: str | None = None,
+    allowed_tools: list[str] | None = None,
+    require_approval: RequireApprovalSetting = None,
+    defer_loading: bool = False,
+    extra_config: Mapping[str, Any] | None = None,
+) -> Mcp:
+    config: dict[str, Any] = {"type": "mcp", "server_label": server_label}
+    if server_url is not None:
+        config["server_url"] = server_url
+    if connector_id is not None:
+        config["connector_id"] = connector_id
+    if authorization is not None:
+        config["authorization"] = authorization
+    if allowed_tools is not None:
+        config["allowed_tools"] = allowed_tools
+    if require_approval is not None:
+        config["require_approval"] = require_approval
+    if defer_loading:
+        config["defer_loading"] = True
+    if extra_config:
+        config.update(extra_config)
+    return cast(Mcp, config)
+
+
+def _load_manifest_mcp_servers(
+    package_root: Path, manifest: Mapping[str, Any]
+) -> tuple[list[MCPServer], set[ConnectorPolicyLabel]]:
+    mcp_manifest_value = manifest.get("mcpServers") or manifest.get("mcp_servers")
+    if mcp_manifest_value is None:
+        return [], set()
+
+    mcp_manifest_path = _resolve_package_path(package_root, mcp_manifest_value, "mcpServers")
+    mcp_manifest = _read_json_object(mcp_manifest_path)
+    server_configs = mcp_manifest.get("mcpServers") or mcp_manifest.get("mcp_servers")
+    if not isinstance(server_configs, Mapping):
+        raise UserError(f"MCP manifest must contain an object of servers: {mcp_manifest_path}")
+
+    servers: list[MCPServer] = []
+    policy_labels: set[ConnectorPolicyLabel] = set()
+    for server_name, raw_config in server_configs.items():
+        if not isinstance(server_name, str):
+            raise UserError("MCP server names must be strings")
+        if not isinstance(raw_config, Mapping):
+            raise UserError(f"MCP server config for {server_name!r} must be an object")
+        if raw_config.get("enabled") is False:
+            continue
+        server, server_policy_labels = _build_mcp_server(package_root, server_name, raw_config)
+        servers.append(server)
+        policy_labels.update(server_policy_labels)
+
+    return servers, policy_labels
+
+
+def _build_mcp_server(
+    package_root: Path, server_name: str, config: Mapping[str, Any]
+) -> tuple[MCPServer, set[ConnectorPolicyLabel]]:
+    cache_tools_list = bool(config.get("cache_tools_list", False))
+    client_session_timeout_seconds = _optional_float(
+        config.get("client_session_timeout_seconds"), "client_session_timeout_seconds"
+    )
+    use_structured_content = bool(config.get("use_structured_content", False))
+    max_retry_attempts = int(config.get("max_retry_attempts", 0))
+    retry_backoff_seconds_base = float(config.get("retry_backoff_seconds_base", 1.0))
+    require_approval = cast(RequireApprovalSetting, config.get("require_approval"))
+
+    if "command" in config:
+        params: dict[str, Any] = {"command": _expect_str(config["command"], "MCP command")}
+        if "args" in config:
+            params["args"] = _expect_str_list(config["args"], "MCP args")
+        if "env" in config:
+            params["env"] = _expect_str_map(config["env"], "MCP env")
+        if "cwd" in config:
+            params["cwd"] = _resolve_package_path(package_root, config["cwd"], "MCP cwd")
+        for key in ("encoding", "encoding_error_handler"):
+            if key in config:
+                params[key] = _expect_str(config[key], f"MCP {key}")
+        return (
+            MCPServerStdio(
+                cast(Any, params),
+                cache_tools_list=cache_tools_list,
+                name=server_name,
+                client_session_timeout_seconds=client_session_timeout_seconds,
+                use_structured_content=use_structured_content,
+                max_retry_attempts=max_retry_attempts,
+                retry_backoff_seconds_base=retry_backoff_seconds_base,
+                require_approval=require_approval,
+            ),
+            {"local_execution"},
+        )
+
+    if "url" in config:
+        params = {"url": _expect_str(config["url"], "MCP url")}
+        for key in ("headers", "timeout", "sse_read_timeout"):
+            if key in config:
+                params[key] = config[key]
+        transport = str(config.get("transport") or config.get("type") or "streamable_http")
+        if transport == "sse":
+            return (
+                MCPServerSse(
+                    cast(Any, params),
+                    cache_tools_list=cache_tools_list,
+                    name=server_name,
+                    client_session_timeout_seconds=client_session_timeout_seconds,
+                    use_structured_content=use_structured_content,
+                    max_retry_attempts=max_retry_attempts,
+                    retry_backoff_seconds_base=retry_backoff_seconds_base,
+                    require_approval=require_approval,
+                ),
+                {"network"},
+            )
+        return (
+            MCPServerStreamableHttp(
+                cast(Any, params),
+                cache_tools_list=cache_tools_list,
+                name=server_name,
+                client_session_timeout_seconds=client_session_timeout_seconds,
+                use_structured_content=use_structured_content,
+                max_retry_attempts=max_retry_attempts,
+                retry_backoff_seconds_base=retry_backoff_seconds_base,
+                require_approval=require_approval,
+            ),
+            {"network"},
+        )
+
+    raise UserError(f"MCP server config for {server_name!r} must include either 'command' or 'url'")
+
+
+def _load_manifest_app_tools(
+    package_root: Path,
+    manifest: Mapping[str, Any],
+    *,
+    authorization: HostedConnectorAuthorization | None,
+    require_approval: RequireApprovalSetting,
+) -> list[Tool]:
+    apps_manifest_value = manifest.get("apps")
+    if apps_manifest_value is None:
+        return []
+
+    app_manifest_path = _resolve_package_path(package_root, apps_manifest_value, "apps")
+    app_manifest = _read_json_object(app_manifest_path)
+    apps = app_manifest.get("apps")
+    app_configs = _hosted_connector_configs(apps, f"App manifest apps: {app_manifest_path}")
+
+    return _load_hosted_connector_tools(
+        app_configs,
+        authorization=authorization,
+        require_approval=require_approval,
+    )
+
+
+def _load_hosted_connector_tools(
+    app_configs: Mapping[str, Mapping[str, Any]],
+    *,
+    authorization: HostedConnectorAuthorization | None,
+    require_approval: RequireApprovalSetting,
+) -> list[Tool]:
+    tools: list[Tool] = []
+    for app_name, raw_config in app_configs.items():
+        connector_id = _hosted_connector_id(raw_config, f"App id for {app_name!r}")
+        server_label = (
+            _optional_record_str(raw_config, ("server_label", "serverLabel"), "App server label")
+            or app_name
+        )
+        allowed_tools = _optional_record_str_list(
+            raw_config, ("allowed_tools", "allowedTools"), f"Allowed tools for {app_name!r}"
+        )
+        app_require_approval = cast(
+            RequireApprovalSetting,
+            raw_config.get("require_approval", raw_config.get("requireApproval", require_approval)),
+        )
+        defer_loading = _optional_record_bool(
+            raw_config, ("defer_loading", "deferLoading"), f"Defer loading for {app_name!r}"
+        )
+        resolved_authorization = _resolve_authorization(
+            authorization, app_name, connector_id, raw_config
+        )
+        if resolved_authorization is None:
+            continue
+        connector = Connector.from_hosted_connector(
+            app_name,
+            connector_id=connector_id,
+            authorization=resolved_authorization,
+            server_label=server_label,
+            allowed_tools=allowed_tools,
+            require_approval=app_require_approval,
+            defer_loading=defer_loading,
+        )
+        tools.extend(connector.tools)
+
+    return tools
+
+
+def _plugin_package_path(
+    record: Mapping[str, Any],
+    *,
+    package_root: str | Path | None,
+) -> Path | None:
+    path_value = _plugin_package_path_value(record)
+    if path_value is None:
+        return None
+    root_path = Path(package_root).expanduser().resolve() if package_root is not None else None
+    path = Path(path_value).expanduser()
+    candidate = (
+        path.resolve() if path.is_absolute() else ((root_path or Path.cwd()) / path).resolve()
+    )
+    if root_path is not None and not _is_relative_to(candidate, root_path):
+        raise UserError(
+            f"Plugin package path must stay inside the connector package root: {path_value}"
+        )
+    return candidate
+
+
+def _plugin_package_path_value(record: Mapping[str, Any]) -> str | None:
+    path_value = _optional_record_str(
+        record,
+        ("package_path", "packagePath", "local_path", "localPath", "path"),
+        "Plugin package path",
+    )
+    if path_value is not None:
+        return path_value
+
+    for key in ("package", "mount", "local_package", "localPackage"):
+        nested = record.get(key)
+        if nested is None:
+            continue
+        if not isinstance(nested, Mapping):
+            raise UserError(f"Plugin {key} must be an object")
+        path_value = _optional_record_str(
+            nested,
+            ("path", "package_path", "packagePath", "local_path", "localPath"),
+            f"Plugin {key} path",
+        )
+        if path_value is not None:
+            return path_value
+    return None
+
+
+def _plugin_policy_labels(record: Mapping[str, Any]) -> tuple[ConnectorPolicyLabel, ...]:
+    policy_labels = _optional_record_policy_labels(
+        record, ("policy_labels", "policyLabels"), "Plugin policy labels"
+    )
+    if policy_labels is not None:
+        return policy_labels
+
+    policy = record.get("policy")
+    if policy is None:
+        return ()
+    if not isinstance(policy, Mapping):
+        raise UserError("Plugin policy must be an object")
+    return (
+        _optional_record_policy_labels(
+            policy,
+            ("labels", "policy_labels", "policyLabels"),
+            "Plugin policy labels",
+        )
+        or ()
+    )
+
+
+def _plugin_hosted_connector_configs(
+    record: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    for key in ("apps", "hosted_connectors", "hostedConnectors", "connectors"):
+        raw_configs = record.get(key)
+        if raw_configs is not None:
+            return _hosted_connector_configs(raw_configs, f"Plugin {key}")
+    return {}
+
+
+def _hosted_connector_configs(value: Any, field_name: str) -> dict[str, dict[str, Any]]:
+    if isinstance(value, Mapping):
+        configs: dict[str, dict[str, Any]] = {}
+        for app_name, raw_config in value.items():
+            if not isinstance(app_name, str):
+                raise UserError(f"{field_name} names must be strings")
+            configs[app_name] = _hosted_connector_config(raw_config, f"{field_name} {app_name!r}")
+        return configs
+
+    if isinstance(value, list):
+        configs = {}
+        for raw_config in value:
+            if not isinstance(raw_config, Mapping):
+                raise UserError(f"{field_name} entries must be objects")
+            config = dict(raw_config)
+            connector_id = _hosted_connector_id(config, f"{field_name} id")
+            app_name = (
+                _optional_str(config.get("name"), f"{field_name} name")
+                or _optional_str(config.get("server_label"), f"{field_name} server_label")
+                or _optional_str(config.get("serverLabel"), f"{field_name} serverLabel")
+                or connector_id
+            )
+            config.setdefault("id", connector_id)
+            configs[app_name] = config
+        return configs
+
+    raise UserError(f"{field_name} must be an object or a list of objects")
+
+
+def _hosted_connector_config(value: Any, field_name: str) -> dict[str, Any]:
+    if isinstance(value, str):
+        return {"id": value}
+    if not isinstance(value, Mapping):
+        raise UserError(f"{field_name} config must be an object")
+    return dict(value)
+
+
+def _hosted_connector_id(config: Mapping[str, Any], field_name: str) -> str:
+    return _expect_str(
+        config.get("id") or config.get("connector_id") or config.get("connectorId"),
+        field_name,
+    )
+
+
+def _plugin_metadata(plugin: ConnectorPlugin) -> dict[str, Any]:
+    metadata = dict(plugin.metadata)
+    metadata["id"] = plugin.id
+    metadata["name"] = plugin.name
+    if plugin.description is not None:
+        metadata["description"] = plugin.description
+    if plugin.package_path is not None:
+        metadata["package_path"] = str(plugin.package_path)
+    if plugin.hosted_connectors:
+        metadata["hosted_connectors"] = {
+            app_name: dict(config) for app_name, config in plugin.hosted_connectors.items()
+        }
+    if plugin.policy_labels:
+        metadata["policy_labels"] = sorted(plugin.policy_labels)
+    return metadata
+
+
+def _resolve_authorization(
+    authorization: HostedConnectorAuthorization | None,
+    app_name: str,
+    connector_id: str,
+    app_config: Mapping[str, Any],
+) -> str | None:
+    if authorization is None:
+        return None
+    if isinstance(authorization, str):
+        return authorization
+    if isinstance(authorization, Mapping):
+        for key in _authorization_lookup_keys(app_name, connector_id, app_config):
+            token = authorization.get(key)
+            if token is not None:
+                return token
+        return None
+    return authorization(app_name, connector_id, app_config)
+
+
+def _authorization_lookup_keys(
+    app_name: str,
+    connector_id: str,
+    app_config: Mapping[str, Any],
+) -> tuple[str, ...]:
+    keys = [app_name, connector_id]
+    for field_name in (
+        "authorization_alias",
+        "authorizationAlias",
+        "authorization_ref",
+        "authorizationRef",
+        "auth_alias",
+        "authAlias",
+        "auth_reference",
+        "authReference",
+        "connection_id",
+        "connectionId",
+    ):
+        value = app_config.get(field_name)
+        if isinstance(value, str) and value:
+            keys.append(value)
+    return tuple(dict.fromkeys(keys))
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text())
+    except OSError as exc:
+        raise UserError(f"Unable to read connector package file: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise UserError(f"Invalid connector package JSON: {path}") from exc
+    if not isinstance(value, dict):
+        raise UserError(f"Connector package JSON must be an object: {path}")
+    return value
+
+
+def _resolve_package_path(package_root: Path, value: Any, field_name: str) -> Path:
+    path_value = _expect_str(value, f"{field_name} path")
+    path = Path(path_value)
+    if path.is_absolute():
+        candidate = path.resolve()
+    else:
+        candidate = (package_root / path).resolve()
+    if not _is_relative_to(candidate, package_root):
+        raise UserError(f"{field_name} path must stay inside the connector package: {value}")
+    return candidate
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _expect_str(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise UserError(f"{field_name} must be a non-empty string")
+    return value
+
+
+def _optional_str(value: Any, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _expect_str(value, field_name)
+
+
+def _optional_record_str(
+    record: Mapping[str, Any],
+    keys: tuple[str, ...],
+    field_name: str,
+) -> str | None:
+    for key in keys:
+        value = record.get(key)
+        if value is not None:
+            return _expect_str(value, field_name)
+    return None
+
+
+def _optional_record_str_list(
+    record: Mapping[str, Any],
+    keys: tuple[str, ...],
+    field_name: str,
+) -> list[str] | None:
+    for key in keys:
+        value = record.get(key)
+        if value is not None:
+            return _expect_str_list(value, field_name)
+    return None
+
+
+def _optional_record_bool(
+    record: Mapping[str, Any],
+    keys: tuple[str, ...],
+    field_name: str,
+) -> bool:
+    for key in keys:
+        value = record.get(key)
+        if value is not None:
+            if not isinstance(value, bool):
+                raise UserError(f"{field_name} must be a boolean")
+            return value
+    return False
+
+
+def _optional_record_policy_labels(
+    record: Mapping[str, Any],
+    keys: tuple[str, ...],
+    field_name: str,
+) -> tuple[ConnectorPolicyLabel, ...] | None:
+    for key in keys:
+        value = record.get(key)
+        if value is not None:
+            return _expect_policy_labels(value, field_name)
+    return None
+
+
+def _expect_policy_labels(value: Any, field_name: str) -> tuple[ConnectorPolicyLabel, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise UserError(f"{field_name} must be a list of policy label strings")
+    unknown = sorted(set(value) - _CONNECTOR_POLICY_LABELS)
+    if unknown:
+        raise UserError(f"{field_name} contains unknown labels: {', '.join(unknown)}")
+    return tuple(cast(ConnectorPolicyLabel, item) for item in value)
+
+
+def _expect_str_list(value: Any, field_name: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise UserError(f"{field_name} must be a list of strings")
+    return value
+
+
+def _expect_str_map(value: Any, field_name: str) -> dict[str, str]:
+    if not isinstance(value, Mapping) or not all(
+        isinstance(key, str) and isinstance(map_value, str) for key, map_value in value.items()
+    ):
+        raise UserError(f"{field_name} must be an object of string values")
+    return dict(value)
+
+
+def _optional_float(value: Any, field_name: str) -> float | None:
+    if value is None:
+        return None
+    if not isinstance(value, int | float):
+        raise UserError(f"{field_name} must be a number")
+    return float(value)

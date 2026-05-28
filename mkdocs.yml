@@ -61,6 +61,7 @@ plugins:
                     - Agent memory: sandbox/memory.md
                 - Models: models/index.md
                 - Tools: tools.md
+                - Connectors: connectors.md
                 - Guardrails: guardrails.md
                 - Running agents: running_agents.md
                 - Streaming: streaming.md
@@ -121,6 +122,7 @@ plugins:
                     - Run error handlers: ref/run_error_handlers.md
                     - Memory: ref/memory.md
                     - REPL: ref/repl.md
+                    - Connectors: ref/connectors.md
                     - Tools: ref/tool.md
                     - Tool context: ref/tool_context.md
                     - Results: ref/result.md

@@ -16,6 +16,14 @@ from .agent import (
 from .agent_output import AgentOutputSchema, AgentOutputSchemaBase
 from .apply_diff import apply_diff
 from .computer import AsyncComputer, Button, Computer, Environment
+from .connectors import (
+    Connector,
+    ConnectorComponents,
+    ConnectorPlugin,
+    ConnectorPolicyLabel,
+    ConnectorRegistry,
+    HostedConnectorAuthorization,
+)
 from .editor import ApplyPatchEditor, ApplyPatchOperation, ApplyPatchResult
 from .exceptions import (
     AgentsException,
@@ -369,6 +377,12 @@ __all__ = [
     "AsyncComputer",
     "Environment",
     "Button",
+    "Connector",
+    "ConnectorComponents",
+    "ConnectorPlugin",
+    "ConnectorPolicyLabel",
+    "ConnectorRegistry",
+    "HostedConnectorAuthorization",
     "AgentsException",
     "InputGuardrailTripwireTriggered",
     "OutputGuardrailTripwireTriggered",
