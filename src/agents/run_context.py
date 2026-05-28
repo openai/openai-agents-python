@@ -41,6 +41,14 @@ class _ApprovalRecord:
     sticky_rejection_message: str | None = None
 
 
+class _ApprovalRecords(dict[str, _ApprovalRecord]):
+    """Approval records mapping that carries the lock protecting it."""
+
+    def __init__(self, *args: Any, lock: Any | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.lock = RLock() if lock is None else lock
+
+
 @dataclass(eq=False)
 class RunContextWrapper(Generic[TContext]):
     """This wraps the context object that you passed to `Runner.run()`. It also contains
@@ -64,7 +72,11 @@ class RunContextWrapper(Generic[TContext]):
     """Structured input for the current agent tool run, when available."""
 
     def __post_init__(self) -> None:
-        self._approvals_lock: Any = RLock()
+        if isinstance(self._approvals, _ApprovalRecords):
+            self._approvals_lock: Any = self._approvals.lock
+        else:
+            self._approvals = _ApprovalRecords(self._approvals)
+            self._approvals_lock = self._approvals.lock
 
     @staticmethod
     def _to_str_or_none(value: Any) -> str | None:
@@ -455,7 +467,7 @@ class RunContextWrapper(Generic[TContext]):
     def _rebuild_approvals(self, approvals: Any) -> None:
         """Restore approvals from serialized state."""
         with self._approvals_lock:
-            self._approvals = {}
+            self._approvals.clear()
             if not isinstance(approvals, Mapping):
                 return
             for tool_name, record_dict in approvals.items():

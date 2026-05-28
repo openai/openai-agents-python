@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from agents import Agent, RunContextWrapper
+from agents.run_context import AgentHookContext
+from agents.tool_context import ToolContext
 
 from .utils.factories import make_tool_approval_item
 
@@ -239,3 +241,24 @@ def test_forked_contexts_share_approval_lock_with_parent() -> None:
 
     assert fork._approvals is context_wrapper._approvals
     assert fork._approvals_lock is context_wrapper._approvals_lock
+
+
+def test_contexts_constructed_with_shared_approvals_reuse_approval_lock() -> None:
+    context_wrapper = RunContextWrapper(context=None)
+    tool_context = ToolContext.from_agent_context(
+        context_wrapper,
+        tool_call_id="call-1",
+        tool_name="lookup",
+        tool_arguments="{}",
+    )
+    hook_context = AgentHookContext(
+        context=context_wrapper.context,
+        usage=context_wrapper.usage,
+        _approvals=context_wrapper._approvals,
+        turn_input=context_wrapper.turn_input,
+    )
+
+    assert tool_context._approvals is context_wrapper._approvals
+    assert tool_context._approvals_lock is context_wrapper._approvals_lock
+    assert hook_context._approvals is context_wrapper._approvals
+    assert hook_context._approvals_lock is context_wrapper._approvals_lock
