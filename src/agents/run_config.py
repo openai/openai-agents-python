@@ -329,6 +329,16 @@ class RunConfig:
       the run continue.
     """
 
+    emit_reasoning_deltas: bool = False
+    """Whether to emit `ReasoningDeltaEvent` for reasoning/thinking deltas during streaming.
+
+    Disabled by default so the default streamed event count stays unchanged. When set to True,
+    the runner emits a `ReasoningDeltaEvent` (with the incremental delta and a running snapshot)
+    alongside the underlying raw `response.reasoning_summary_text.delta` and
+    `response.reasoning_text.delta` events, which is convenient for reasoning UIs that want the
+    text without unwrapping the raw events.
+    """
+
 
 class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""

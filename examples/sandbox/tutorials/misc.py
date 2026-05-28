@@ -49,6 +49,7 @@ from agents.sandbox.session import BaseSandboxClient, SandboxSession
 from agents.stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
+    ReasoningDeltaEvent,
     StreamEvent,
 )
 from examples.auto_mode import input_with_fallback, is_auto_mode
@@ -289,6 +290,9 @@ def print_event(event: PrintableEvent) -> None:
         return
 
     if isinstance(event, RawResponsesStreamEvent):
+        return
+
+    if isinstance(event, ReasoningDeltaEvent):
         return
 
     body: PanelBody
