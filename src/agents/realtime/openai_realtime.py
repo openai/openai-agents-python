@@ -100,6 +100,7 @@ from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper, TContext
 from ..version import __version__
+from ._tool_validation import validate_realtime_tool_names
 from .agent import RealtimeAgent
 from .config import (
     RealtimeModelTracingConfig,
@@ -1548,6 +1549,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     type="function",
                 )
             )
+
+        validate_realtime_tool_names(tools, handoffs)
 
         for handoff in handoffs:
             converted_tools.append(
