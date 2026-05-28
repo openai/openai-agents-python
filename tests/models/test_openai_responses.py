@@ -312,6 +312,34 @@ async def test_get_response_span_exports_usage():
     }
 
 
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "incomplete"])
+async def test_get_response_rejects_failed_or_incomplete_response_status(status: str) -> None:
+    class DummyResponses:
+        async def create(self, **kwargs: Any) -> Any:
+            response = get_response_obj([], response_id="resp-terminal")
+            response.status = status  # type: ignore[assignment]
+            return response
+
+    class DummyResponsesClient:
+        def __init__(self) -> None:
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
+
+    with pytest.raises(ModelBehaviorError, match=f"response.{status}"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+
+
 def test_get_client_disables_provider_managed_retries_on_runner_retry() -> None:
     class DummyResponsesClient:
         def __init__(self) -> None:

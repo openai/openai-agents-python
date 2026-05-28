@@ -361,6 +361,13 @@ class AnyLLMModel(Model):
                 prompt=prompt,
             )
 
+            status = getattr(response, "status", None)
+            if status in {"failed", "incomplete"}:
+                raise response_terminal_failure_error(
+                    f"response.{status}",
+                    response if isinstance(response, Response) else None,
+                )
+
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.debug("LLM responded")
             else:
