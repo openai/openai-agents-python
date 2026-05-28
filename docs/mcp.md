@@ -54,6 +54,31 @@ Notes:
 - Server-level `failure_error_function` overrides `Agent.mcp_config["failure_error_function"]` for that server.
 - `include_server_in_tool_names` is opt-in. When enabled, each local MCP tool is exposed to the model with a deterministic server-prefixed name, which helps avoid collisions when multiple MCP servers publish tools with the same name. Generated names are ASCII-safe, stay within the function-tool name length limit, and avoid existing local function tool and enabled handoff names on the same agent. The SDK still invokes the original MCP tool name on the original server.
 
+## Disambiguating duplicate MCP tool names
+
+When the same tool name is published by more than one MCP server (for example, both a GitHub and a Linear server expose `create_issue`), the agent run fails with `Duplicate tool names found across MCP servers`. If you do not want to opt in to the auto-generated `include_server_in_tool_names` scheme, set a custom `tool_name_prefix` on each individual server. The SDK exposes tools to the model as `f"{prefix}_{original_name}"` and strips the prefix before dispatching `call_tool()` to the upstream server, so the underlying MCP server only ever sees its original tool names.
+
+```python
+from agents import Agent
+from agents.mcp import MCPServerStdio
+
+github = MCPServerStdio(
+    params={"command": "github-mcp"},
+    tool_name_prefix="gh",
+)
+linear = MCPServerStdio(
+    params={"command": "linear-mcp"},
+    tool_name_prefix="ln",
+)
+
+agent = Agent(
+    name="Assistant",
+    mcp_servers=[github, linear],
+)
+```
+
+`tool_name_prefix` is keyword-only, can be combined with `tool_filter`, and respects the 64-character tool-name limit – `list_tools()` raises a `UserError` early if a prefixed name would exceed it.
+
 ## Shared patterns across transports
 
 After you choose a transport, most integrations need the same follow-up decisions:

@@ -76,12 +76,15 @@ class FakeMCPServer(MCPServer):
         require_approval: object | None = None,
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
+        *,
+        tool_name_prefix: str | None = None,
     ):
         super().__init__(
             use_structured_content=False,
             require_approval=require_approval,  # type: ignore[arg-type]
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
+            tool_name_prefix=tool_name_prefix,
         )
         self.tools: list[MCPTool] = tools or []
         self.tool_calls: list[str] = []
@@ -109,7 +112,9 @@ class FakeMCPServer(MCPServer):
             filter_server = _TestFilterServer(self.tool_filter, self.name)
             tools = await filter_server._apply_tool_filter(tools, run_context, agent)
 
-        return tools
+        # Apply tool_name_prefix (if configured) using the real implementation so the
+        # FakeMCPServer behaves the same way as the production server classes.
+        return self._apply_tool_name_prefix(tools)
 
     async def call_tool(
         self,
@@ -117,6 +122,9 @@ class FakeMCPServer(MCPServer):
         arguments: dict[str, Any] | None,
         meta: dict[str, Any] | None = None,
     ) -> CallToolResult:
+        # Strip tool_name_prefix (if configured) so the recorded call matches what the
+        # upstream MCP server would actually receive.
+        tool_name = self._strip_tool_name_prefix(tool_name)
         self.tool_calls.append(tool_name)
         self.tool_results.append(f"result_{tool_name}_{json.dumps(arguments)}")
         self.tool_metas.append(meta)

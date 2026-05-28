@@ -220,6 +220,9 @@ MCPStreamTransport = (
 )
 
 
+MCP_TOOL_NAME_MAX_LENGTH = 64
+
+
 class MCPServer(abc.ABC):
     """Base class for Model Context Protocol servers."""
 
@@ -229,6 +232,8 @@ class MCPServer(abc.ABC):
         require_approval: RequireApprovalSetting = None,
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
+        *,
+        tool_name_prefix: str | None = None,
     ):
         """
         Args:
@@ -248,6 +253,13 @@ class MCPServer(abc.ABC):
                 SDK default) will be used.
             tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
+            tool_name_prefix: Optional custom prefix to apply to every tool name returned by this
+                server. When set, `list_tools()` returns tools named `f"{prefix}_{original_name}"`,
+                and `call_tool()` automatically strips the prefix before dispatching to the
+                upstream server. This is useful for disambiguating tools when multiple MCP servers
+                publish tools with the same name (for example, two servers that both expose
+                `create_issue`). The prefix plus underscore plus the longest tool name must not
+                exceed 64 characters or a UserError is raised at `list_tools()` time.
         """
         self.use_structured_content = use_structured_content
         self._needs_approval_policy = self._normalize_needs_approval(
@@ -255,6 +267,42 @@ class MCPServer(abc.ABC):
         )
         self._failure_error_function = failure_error_function
         self.tool_meta_resolver = tool_meta_resolver
+        self.tool_name_prefix = tool_name_prefix
+
+    def _apply_tool_name_prefix(self, tools: list[MCPTool]) -> list[MCPTool]:
+        """Return a new list of tools with `tool_name_prefix` applied to each tool name.
+
+        Validates that no prefixed name exceeds the MCP tool-name length limit. Returns the
+        original list unchanged when no prefix is configured.
+        """
+        if not self.tool_name_prefix:
+            return tools
+
+        prefix = self.tool_name_prefix
+        prefixed: list[MCPTool] = []
+        for tool in tools:
+            new_name = f"{prefix}_{tool.name}"
+            if len(new_name) > MCP_TOOL_NAME_MAX_LENGTH:
+                raise UserError(
+                    f"MCP tool name '{new_name}' on server '{self.name}' exceeds the "
+                    f"{MCP_TOOL_NAME_MAX_LENGTH}-character limit after applying "
+                    f"tool_name_prefix='{prefix}'. Choose a shorter prefix."
+                )
+            prefixed.append(tool.model_copy(update={"name": new_name}))
+        return prefixed
+
+    def _strip_tool_name_prefix(self, tool_name: str) -> str:
+        """Strip `tool_name_prefix` from a prefixed tool name.
+
+        Returns the input unchanged when no prefix is configured or when the input does not
+        begin with the configured prefix (e.g. an unprefixed name passed through directly).
+        """
+        if not self.tool_name_prefix:
+            return tool_name
+        prefix_with_sep = f"{self.tool_name_prefix}_"
+        if tool_name.startswith(prefix_with_sep):
+            return tool_name[len(prefix_with_sep) :]
+        return tool_name
 
     @abc.abstractmethod
     async def connect(self):
@@ -512,7 +560,10 @@ class MCPServer(abc.ABC):
             return _needs_approval
 
         if isinstance(policy, dict):
-            return bool(policy.get(tool.name, False))
+            # Look up the policy by the upstream (un-prefixed) tool name so that
+            # `require_approval={"create_issue": "always"}` keeps working even when
+            # `tool_name_prefix` is set.
+            return bool(policy.get(self._strip_tool_name_prefix(tool.name), False))
 
         return bool(policy)
 
@@ -544,6 +595,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         require_approval: RequireApprovalSetting = None,
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
+        *,
+        tool_name_prefix: str | None = None,
     ):
         """
         Args:
@@ -576,12 +629,19 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 SDK default) will be used.
             tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
+            tool_name_prefix: Optional custom prefix applied to every tool name returned by this
+                server. When set, `list_tools()` returns tools named
+                `f"{prefix}_{original_name}"`, and `call_tool()` strips the prefix before
+                dispatching upstream so the underlying MCP server only sees the original name.
+                Useful for disambiguating tools when multiple MCP servers publish tools with the
+                same name.
         """
         super().__init__(
             use_structured_content=use_structured_content,
             require_approval=require_approval,
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
+            tool_name_prefix=tool_name_prefix,
         )
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
@@ -841,11 +901,15 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 self._cache_dirty = False
                 tools = self._tools_list
 
-            # Filter tools based on tool_filter
+            # Filter tools based on tool_filter. The filter sees the upstream (unprefixed)
+            # tool names so users can author allow/block lists in terms of the names the MCP
+            # server actually publishes.
             filtered_tools = tools
             if self.tool_filter is not None:
                 filtered_tools = await self._apply_tool_filter(filtered_tools, run_context, agent)
-            return filtered_tools
+            # Apply tool_name_prefix (if any) last so that prefixed names are what the rest of
+            # the Agents SDK sees while the cache and upstream calls keep the original names.
+            return self._apply_tool_name_prefix(filtered_tools)
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
             raise UserError(
@@ -869,17 +933,19 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         session = self.session
         assert session is not None
 
+        # Strip tool_name_prefix (if any) so the upstream MCP server sees the original name.
+        upstream_tool_name = self._strip_tool_name_prefix(tool_name)
         try:
-            self._validate_required_parameters(tool_name=tool_name, arguments=arguments)
+            self._validate_required_parameters(tool_name=upstream_tool_name, arguments=arguments)
             if meta is None:
                 return await self._run_with_retries(
                     lambda: self._maybe_serialize_request(
-                        lambda: session.call_tool(tool_name, arguments)
+                        lambda: session.call_tool(upstream_tool_name, arguments)
                     )
                 )
             return await self._run_with_retries(
                 lambda: self._maybe_serialize_request(
-                    lambda: session.call_tool(tool_name, arguments, meta=meta)
+                    lambda: session.call_tool(upstream_tool_name, arguments, meta=meta)
                 )
             )
         except httpx.HTTPStatusError as e:
@@ -1108,6 +1174,8 @@ class MCPServerStdio(_MCPServerWithClientSession):
         require_approval: RequireApprovalSetting = None,
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
+        *,
+        tool_name_prefix: str | None = None,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -1145,6 +1213,11 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 SDK default) will be used.
             tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
+            tool_name_prefix: Optional custom prefix applied to every tool name returned by this
+                server. When set, `list_tools()` returns tools named
+                `f"{prefix}_{original_name}"`, and `call_tool()` strips the prefix before
+                dispatching upstream. Useful for disambiguating tools when multiple MCP servers
+                publish tools with the same name.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -1157,6 +1230,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
             require_approval=require_approval,
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
+            tool_name_prefix=tool_name_prefix,
         )
 
         self.params = StdioServerParameters(
@@ -1229,6 +1303,8 @@ class MCPServerSse(_MCPServerWithClientSession):
         require_approval: RequireApprovalSetting = None,
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
+        *,
+        tool_name_prefix: str | None = None,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -1268,6 +1344,11 @@ class MCPServerSse(_MCPServerWithClientSession):
                 SDK default) will be used.
             tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
+            tool_name_prefix: Optional custom prefix applied to every tool name returned by this
+                server. When set, `list_tools()` returns tools named
+                `f"{prefix}_{original_name}"`, and `call_tool()` strips the prefix before
+                dispatching upstream. Useful for disambiguating tools when multiple MCP servers
+                publish tools with the same name.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -1280,6 +1361,7 @@ class MCPServerSse(_MCPServerWithClientSession):
             require_approval=require_approval,
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
+            tool_name_prefix=tool_name_prefix,
         )
 
         self.params = params
@@ -1365,6 +1447,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         require_approval: RequireApprovalSetting = None,
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
+        *,
+        tool_name_prefix: str | None = None,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -1405,6 +1489,11 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 SDK default) will be used.
             tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
+            tool_name_prefix: Optional custom prefix applied to every tool name returned by this
+                server. When set, `list_tools()` returns tools named
+                `f"{prefix}_{original_name}"`, and `call_tool()` strips the prefix before
+                dispatching upstream. Useful for disambiguating tools when multiple MCP servers
+                publish tools with the same name.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -1417,6 +1506,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             require_approval=require_approval,
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
+            tool_name_prefix=tool_name_prefix,
         )
 
         self.params = params
@@ -1572,8 +1662,10 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
+        # Strip tool_name_prefix (if any) so the upstream MCP server sees the original name.
+        upstream_tool_name = self._strip_tool_name_prefix(tool_name)
         try:
-            self._validate_required_parameters(tool_name=tool_name, arguments=arguments)
+            self._validate_required_parameters(tool_name=upstream_tool_name, arguments=arguments)
             retries_used = 0
             first_attempt = True
             while True:
@@ -1584,7 +1676,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 )
                 try:
                     result, used_isolated_retry = await self._call_tool_with_isolated_retry(
-                        tool_name,
+                        upstream_tool_name,
                         arguments,
                         meta,
                         allow_isolated_retry=allow_isolated_retry,
