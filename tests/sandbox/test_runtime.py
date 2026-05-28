@@ -1220,9 +1220,9 @@ async def test_runner_adds_remote_mount_policy_instructions() -> None:
     expected_policy_pattern = expected_policy_pattern.replace(
         re.escape("{edit_instructions}"),
         re.escape(
-            "Use `apply_patch` directly for text edits. "
-            "For shell-based edits, first `cp` the mounted file to a normal local workspace "
-            "path, edit the local copy there, then `cp` it back. "
+            "Do not edit paths marked read-only in place, including with `apply_patch`, "
+            "and do not write edited files back to them. Copy read-only files to a normal "
+            "local workspace path only if you need an editable scratch copy."
         ),
     )
     assert isinstance(re.search(expected_policy_pattern, system_instructions), re.Match)
@@ -1338,10 +1338,10 @@ async def test_runner_marks_writable_remote_mounts_in_policy() -> None:
     system_instructions = model.first_turn_args["system_instructions"]
     assert isinstance(system_instructions, str)
     assert "- /workspace/remote (mounted in read+write mode)" in system_instructions
-    assert "Use `apply_patch` directly for text edits." in system_instructions
+    assert "Use `apply_patch` directly for text edits on read+write mounts." in system_instructions
     assert (
-        "For shell-based edits, first `cp` the mounted file to a normal local workspace path, "
-        "edit the local copy there, then `cp` it back." in system_instructions
+        "For shell-based edits on read+write mounts, first `cp` the mounted file to a normal "
+        "local workspace path, edit the local copy there, then copy it back." in system_instructions
     )
 
 
