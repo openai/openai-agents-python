@@ -7,7 +7,7 @@ They intentionally keep the flow simple:
 
 1. Build a tiny manifest in memory.
 2. Create a `SandboxAgent` that inspects that workspace through one shell tool.
-3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel, or Vercel.
+3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel, Superserve, or Vercel.
 
 All of these examples require `OPENAI_API_KEY`, because they call the model through the normal
 `Runner` path. Each cloud backend also needs its own provider credentials.
@@ -242,6 +242,42 @@ export DAYTONA_API_KEY=...
 ```bash
 uv run python examples/sandbox/extensions/daytona/daytona_runner.py --stream
 ```
+
+## Superserve
+
+### Setup
+
+Install the repo extra:
+
+```bash
+uv sync --extra superserve
+```
+
+Create a Superserve account at <https://console.superserve.ai>, generate an API key, and export
+the required environment variables:
+
+```bash
+export OPENAI_API_KEY=...
+export SUPERSERVE_API_KEY=...
+```
+
+### Run
+
+```bash
+uv run python examples/sandbox/extensions/superserve_runner.py --stream
+```
+
+Useful flags:
+
+- `--template <name>` -- use a different template; defaults to `superserve/base`.
+  Other curated templates: `superserve/python-3.11`, `superserve/node-22`,
+  `superserve/code-interpreter`, `superserve/python-ml`.
+- `--pause-on-exit` -- pause the sandbox on shutdown instead of killing it.
+- `--timeout-seconds 300` -- inactivity timeout in seconds (off by default).
+- `--skip-snapshot-check` -- skip the pause/resume snapshot round-trip verification.
+
+The example runs a pause/resume round-trip before the agent run to verify that workspace state
+survives shutdown.
 
 ## Runloop
 

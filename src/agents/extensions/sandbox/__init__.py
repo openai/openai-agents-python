@@ -98,6 +98,20 @@ except Exception:  # pragma: no cover
     _HAS_RUNLOOP = False
 
 try:
+    from .superserve import (
+        DEFAULT_SUPERSERVE_WORKSPACE_ROOT as DEFAULT_SUPERSERVE_WORKSPACE_ROOT,
+        SuperserveSandboxClient as SuperserveSandboxClient,
+        SuperserveSandboxClientOptions as SuperserveSandboxClientOptions,
+        SuperserveSandboxSession as SuperserveSandboxSession,
+        SuperserveSandboxSessionState as SuperserveSandboxSessionState,
+        SuperserveSandboxTimeouts as SuperserveSandboxTimeouts,
+    )
+
+    _HAS_SUPERSERVE = True
+except Exception:  # pragma: no cover
+    _HAS_SUPERSERVE = False
+
+try:
     from .vercel import (
         VercelSandboxClient as VercelSandboxClient,
         VercelSandboxClientOptions as VercelSandboxClientOptions,
@@ -174,6 +188,18 @@ if _HAS_CLOUDFLARE:
             "CloudflareSandboxClientOptions",
             "CloudflareSandboxSession",
             "CloudflareSandboxSessionState",
+        ]
+    )
+
+if _HAS_SUPERSERVE:
+    __all__.extend(
+        [
+            "DEFAULT_SUPERSERVE_WORKSPACE_ROOT",
+            "SuperserveSandboxClient",
+            "SuperserveSandboxClientOptions",
+            "SuperserveSandboxSession",
+            "SuperserveSandboxSessionState",
+            "SuperserveSandboxTimeouts",
         ]
     )
 
