@@ -1063,3 +1063,103 @@ def test_function_tool_timeout_error_function_must_be_callable() -> None:
             on_invoke_tool=_noop_on_invoke_tool,
             timeout_error_function=cast(Any, "not-callable"),
         )
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        None,
+        "",
+        "   ",
+        "\t",
+        "\n",
+        "  \n  ",
+        "\t\t\t",
+    ],
+)
+def test_function_tool_handles_empty_descriptions(description: str | None) -> None:
+    """Test that function_tool handles None, empty, or whitespace-only descriptions."""
+
+    def sample_tool() -> str:
+        return "result"
+
+    # Test that descriptions are preserved as provided (including whitespace)
+    tool = function_tool(sample_tool, description_override=description)
+    # None becomes empty string, others are preserved
+    expected = "" if description is None else description
+    assert tool.description == expected
+
+
+def test_function_tool_with_docstring_and_override() -> None:
+    """Test how description_override interacts with docstring."""
+
+    def documented_tool() -> str:
+        """This tool has documentation."""
+        return "result"
+
+    # With docstring and empty override, falls back to docstring (empty string is falsy)
+    tool = function_tool(documented_tool, description_override="")
+    assert tool.description == "This tool has documentation."
+
+    # With docstring and None override, should use docstring (no override)
+    tool = function_tool(documented_tool, description_override=None)
+    assert tool.description == "This tool has documentation."
+
+    # With docstring and whitespace override, should use whitespace (explicit override)
+    tool = function_tool(documented_tool, description_override="   ")
+    assert tool.description == "   "
+
+    # With docstring and valid override, should use override
+    tool = function_tool(documented_tool, description_override="Custom description")
+    assert tool.description == "Custom description"
+
+
+def test_function_tool_with_no_docstring_and_no_override() -> None:
+    """Test that function_tool defaults to empty string when no description source."""
+
+    def undocumented_tool() -> str:
+        return "result"
+
+    tool = function_tool(undocumented_tool)
+    assert tool.description == ""
+
+
+def test_function_tool_explicit_description_validation() -> None:
+    """Test direct FunctionTool creation with various descriptions."""
+
+    # Should accept empty description
+    tool = FunctionTool(
+        name="test",
+        description="",
+        params_json_schema={},
+        on_invoke_tool=_noop_on_invoke_tool,
+    )
+    assert tool.description == ""
+
+    # Should accept whitespace description
+    tool = FunctionTool(
+        name="test",
+        description="   ",
+        params_json_schema={},
+        on_invoke_tool=_noop_on_invoke_tool,
+    )
+    assert tool.description == "   "
+
+
+@pytest.mark.parametrize(
+    "description,expected",
+    [
+        ("Valid description", "Valid description"),
+        ("Multi\nline\ndescription", "Multi\nline\ndescription"),
+        ("Description with trailing space ", "Description with trailing space "),
+        ("\tTabbed description", "\tTabbed description"),
+    ],
+)
+def test_function_tool_preserves_valid_descriptions(description: str, expected: str) -> None:
+    """Test that valid descriptions are preserved exactly."""
+
+    def sample_tool() -> str:
+        return "result"
+
+    tool = function_tool(sample_tool, description_override=description)
+    assert tool.description == expected

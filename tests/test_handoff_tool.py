@@ -442,3 +442,55 @@ async def test_handoff_is_enabled_filtering_integration():
     agent_names = {h.agent_name for h in filtered_handoffs}
     assert agent_names == {"agent_1", "agent_3"}
     assert "agent_2" not in agent_names
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        None,
+        "",
+        "   ",
+        "\t",
+        "\n",
+        "  \n  ",
+    ],
+)
+def test_handoff_handles_empty_tool_descriptions(description: str | None) -> None:
+    """Test that handoff handles None, empty, or whitespace-only tool descriptions."""
+    agent = Agent(name="test_agent")
+
+    # Handoff should handle empty descriptions gracefully
+    h = handoff(agent, tool_description_override=description)
+
+    # Should use default description if None or empty (falsy)
+    if not description:
+        assert h.tool_description == Handoff.default_tool_description(agent)
+    else:
+        # Non-empty strings (including whitespace) are preserved
+        assert h.tool_description == description
+
+
+def test_handoff_preserves_custom_tool_descriptions() -> None:
+    """Test that handoff preserves custom tool descriptions."""
+    agent = Agent(name="test_agent")
+
+    custom_descriptions = [
+        "Custom handoff description",
+        "Multi\nline\ndescription",
+        "Description with trailing space ",
+        "\tTabbed description",
+    ]
+
+    for desc in custom_descriptions:
+        h = handoff(agent, tool_description_override=desc)
+        assert h.tool_description == desc
+
+
+def test_handoff_default_tool_description_format() -> None:
+    """Test the format of default handoff tool descriptions."""
+    agent = Agent(name="test_agent")
+    h = handoff(agent)
+
+    # Default description should mention the agent name
+    assert "test_agent" in h.tool_description
+    assert h.tool_description == Handoff.default_tool_description(agent)
