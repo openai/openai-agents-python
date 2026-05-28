@@ -212,10 +212,21 @@ def _describe_json_schema_field(
     if not isinstance(field_schema, dict):
         return None
 
-    if any(key in field_schema for key in ("properties", "items", "oneOf", "anyOf", "allOf")):
+    if any(key in field_schema for key in ("properties", "items", "oneOf", "allOf")):
         return None
 
     description = _read_schema_description(field_schema)
+
+    # Pydantic renders `T | None` as `anyOf: [{type: T}, {type: "null"}]`.
+    # Treat that exact shape as the same as `type: ["T", "null"]` so optional
+    # simple fields still appear in the schema summary.
+    any_of = field_schema.get("anyOf")
+    if any_of is not None:
+        nullable_label = _describe_nullable_anyof(any_of)
+        if nullable_label is None:
+            return None
+        return _SchemaFieldDescription(type=nullable_label, description=description)
+
     raw_type = field_schema.get("type")
 
     if isinstance(raw_type, list):
@@ -243,6 +254,42 @@ def _describe_json_schema_field(
         )
 
     return None
+
+
+def _describe_nullable_anyof(any_of: Any) -> str | None:
+    """Render a 2-branch `anyOf` of a simple type and `null` as `T | null`.
+
+    Also handles `Optional[Literal[...]]`, which Pydantic emits as an `enum`/`const`
+    branch (possibly with `type: "string"`) plus a `null` branch.
+    """
+    if not isinstance(any_of, list) or len(any_of) != 2:
+        return None
+    base_label: str | None = None
+    has_null = False
+    for entry in any_of:
+        if not isinstance(entry, dict):
+            return None
+        entry_type = entry.get("type")
+        if entry_type == "null":
+            has_null = True
+            continue
+        if base_label is not None:
+            return None
+        # Prefer `enum`/`const` over a bare `type` so `Optional[Literal[...]]`
+        # surfaces the allowed values rather than just e.g. `string | null`.
+        if isinstance(entry.get("enum"), list):
+            base_label = _format_enum_label(entry.get("enum"))
+            continue
+        if "const" in entry:
+            base_label = _format_literal_label(entry)
+            continue
+        if entry_type in _SIMPLE_JSON_SCHEMA_TYPES:
+            base_label = cast(str, entry_type)
+            continue
+        return None
+    if base_label is None or not has_null:
+        return None
+    return f"{base_label} | null"
 
 
 def _read_schema_description(value: Any) -> str | None:
