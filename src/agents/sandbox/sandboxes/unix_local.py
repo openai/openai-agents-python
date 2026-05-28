@@ -242,11 +242,17 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError as e:
-                try:
-                    # process tree cleanup
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except Exception:
-                    pass
+                # Avoid signaling a pid that has already exited and may have been
+                # reused: a stale `os.killpg(proc.pid, ...)` could otherwise hit an
+                # unrelated process group on systems with rapid pid wraparound.
+                if proc.returncode is None and proc.pid is not None:
+                    with suppress(ProcessLookupError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                # Reap the killed subprocess so asyncio releases its transport
+                # (pipes, child-watcher entry); otherwise the SubprocessTransport
+                # can outlive this call and surface as a delayed GC warning.
+                with suppress(Exception):
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
                 raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
         except ExecTimeoutError:
             raise
