@@ -284,7 +284,21 @@ def _default_retry_delay(
         else DEFAULT_BACKOFF_JITTER
     )
 
-    base = min(initial_delay * (multiplier ** max(attempt - 1, 0)), max_delay)
+    exponent = max(attempt - 1, 0)
+    # Compute the exponential growth defensively. With a large `attempt` or `multiplier`
+    # the intermediate `multiplier ** exponent` can raise OverflowError even though the
+    # result would be immediately capped at max_delay. Short-circuit to max_delay in that
+    # case so a high retry count does not surface a crash from the backoff helper itself.
+    # `initial_delay == 0` is a valid way to request immediate retries; preserve that
+    # rather than substituting `max_delay` on overflow.
+    if initial_delay == 0:
+        scaled = 0.0
+    else:
+        try:
+            scaled = initial_delay * (multiplier**exponent)
+        except OverflowError:
+            scaled = max_delay
+    base = min(scaled, max_delay)
     if not use_jitter:
         return base
     return min(max(base * (0.875 + random.random() * 0.25), 0.0), max_delay)
