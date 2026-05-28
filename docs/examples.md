@@ -116,6 +116,24 @@ Check out a variety of sample implementations of the SDK in the examples section
 -   **[research_bot](https://github.com/openai/openai-agents-python/tree/main/examples/research_bot):**
     Simple deep research clone that demonstrates complex multi-agent research workflows.
 
+-   **[sandbox](https://github.com/openai/openai-agents-python/tree/main/examples/sandbox):**
+    Examples showing how to run agents with an isolated workspace (see [Sandbox agents quickstart](sandbox_agents.md)), including:
+
+    -   Basic sandbox session from a manifest (`examples/sandbox/basic.py`)
+    -   Handoffs with sandbox-backed agents (`examples/sandbox/handoffs.py`)
+    -   Configuring a sandbox agent with workspace capabilities (`examples/sandbox/sandbox_agent_capabilities.py`)
+    -   Combining sandbox capabilities with host-defined tools (`examples/sandbox/sandbox_agent_with_tools.py`)
+    -   Exposing sandbox agents as tools for another agent (`examples/sandbox/sandbox_agents_as_tools.py`)
+    -   Starting from a remote sandbox snapshot (`examples/sandbox/sandbox_agent_with_remote_snapshot.py`)
+    -   Agent memory across sandbox runs (`examples/sandbox/memory.py`)
+    -   Multi-agent multi-turn memory in a shared workspace (`examples/sandbox/memory_multi_agent_multiturn.py`)
+    -   S3-backed memory with Docker sandboxes (`examples/sandbox/memory_s3.py`)
+    -   Interactive pseudo-terminal in a Unix-local sandbox (`examples/sandbox/unix_local_pty.py`)
+    -   Running against the Unix-local sandbox backend directly (`examples/sandbox/unix_local_runner.py`)
+    -   Cloud backend extensions (E2B, Modal, Daytona, Blaxel, Cloudflare, Vercel, Runloop) in `examples/sandbox/extensions/`
+    -   Healthcare support workflow with policy agent, memory, and human approvals (`examples/sandbox/healthcare_support/`)
+    -   Tutorials: `sandbox_resume`, `dataroom_qa`, `dataroom_metric_extract`, `repo_code_review`, `vision_website_clone`
+
 -   **[tools](https://github.com/openai/openai-agents-python/tree/main/examples/tools):**
     Learn how to implement OAI hosted tools and experimental Codex tooling such as:
 
