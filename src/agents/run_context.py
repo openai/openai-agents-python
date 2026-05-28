@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from threading import RLock
 from typing import TYPE_CHECKING, Any, Generic
 
 from typing_extensions import TypeVar
@@ -61,6 +62,9 @@ class RunContextWrapper(Generic[TContext]):
     _approvals: dict[str, _ApprovalRecord] = field(default_factory=dict)
     tool_input: Any | None = None
     """Structured input for the current agent tool run, when available."""
+
+    def __post_init__(self) -> None:
+        self._approvals_lock: Any = RLock()
 
     @staticmethod
     def _to_str_or_none(value: Any) -> str | None:
@@ -169,11 +173,12 @@ class RunContextWrapper(Generic[TContext]):
         return RunContextWrapper._to_str_or_none(candidate)
 
     def _get_or_create_approval_entry(self, tool_name: str) -> _ApprovalRecord:
-        approval_entry = self._approvals.get(tool_name)
-        if approval_entry is None:
-            approval_entry = _ApprovalRecord()
-            self._approvals[tool_name] = approval_entry
-        return approval_entry
+        with self._approvals_lock:
+            approval_entry = self._approvals.get(tool_name)
+            if approval_entry is None:
+                approval_entry = _ApprovalRecord()
+                self._approvals[tool_name] = approval_entry
+            return approval_entry
 
     def is_tool_approved(self, tool_name: str, call_id: str) -> bool | None:
         """Return True/False/None for the given tool call."""
@@ -181,34 +186,35 @@ class RunContextWrapper(Generic[TContext]):
 
     def _get_approval_status_for_key(self, approval_key: str, call_id: str) -> bool | None:
         """Return True/False/None for a concrete approval key and tool call."""
-        approval_entry = self._approvals.get(approval_key)
-        if not approval_entry:
+        with self._approvals_lock:
+            approval_entry = self._approvals.get(approval_key)
+            if not approval_entry:
+                return None
+
+            # Check for permanent approval/rejection
+            if approval_entry.approved is True and approval_entry.rejected is True:
+                # Approval takes precedence
+                return True
+
+            if approval_entry.approved is True:
+                return True
+
+            if approval_entry.rejected is True:
+                return False
+
+            approved_ids = (
+                set(approval_entry.approved) if isinstance(approval_entry.approved, list) else set()
+            )
+            rejected_ids = (
+                set(approval_entry.rejected) if isinstance(approval_entry.rejected, list) else set()
+            )
+
+            if call_id in approved_ids:
+                return True
+            if call_id in rejected_ids:
+                return False
+            # Per-call approvals are scoped to the exact call ID.
             return None
-
-        # Check for permanent approval/rejection
-        if approval_entry.approved is True and approval_entry.rejected is True:
-            # Approval takes precedence
-            return True
-
-        if approval_entry.approved is True:
-            return True
-
-        if approval_entry.rejected is True:
-            return False
-
-        approved_ids = (
-            set(approval_entry.approved) if isinstance(approval_entry.approved, list) else set()
-        )
-        rejected_ids = (
-            set(approval_entry.rejected) if isinstance(approval_entry.rejected, list) else set()
-        )
-
-        if call_id in approved_ids:
-            return True
-        if call_id in rejected_ids:
-            return False
-        # Per-call approvals are scoped to the exact call ID, so other calls require a new decision.
-        return None
 
     @staticmethod
     def _clear_rejection_message(record: _ApprovalRecord, call_id: str | None) -> None:
@@ -297,13 +303,14 @@ class RunContextWrapper(Generic[TContext]):
             ):
                 candidates.append(pending_tool_name)
 
-        for candidate in candidates:
-            approval_entry = self._approvals.get(candidate)
-            if not approval_entry:
-                continue
-            message = self._get_rejection_message_for_key(approval_entry, call_id)
-            if message is not None:
-                return message
+        with self._approvals_lock:
+            for candidate in candidates:
+                approval_entry = self._approvals.get(candidate)
+                if not approval_entry:
+                    continue
+                message = self._get_rejection_message_for_key(approval_entry, call_id)
+                if message is not None:
+                    return message
         return None
 
     def _apply_approval_decision(
@@ -320,37 +327,38 @@ class RunContextWrapper(Generic[TContext]):
         call_id = self._resolve_call_id(approval_item)
         decision_keys = (exact_approval_key,) if always or call_id is None else approval_keys
 
-        for approval_key in decision_keys:
-            approval_entry = self._get_or_create_approval_entry(approval_key)
-            if always or call_id is None:
-                approval_entry.approved = approve
-                approval_entry.rejected = [] if approve else True
-                if not approve:
-                    approval_entry.approved = False
-                    if rejection_message is not None and call_id is not None:
-                        approval_entry.rejection_messages[call_id] = rejection_message
-                    elif call_id is not None:
-                        self._clear_rejection_message(approval_entry, call_id)
-                    approval_entry.sticky_rejection_message = rejection_message
-                else:
-                    approval_entry.rejection_messages.clear()
-                    approval_entry.sticky_rejection_message = None
-                continue
+        with self._approvals_lock:
+            for approval_key in decision_keys:
+                approval_entry = self._get_or_create_approval_entry(approval_key)
+                if always or call_id is None:
+                    approval_entry.approved = approve
+                    approval_entry.rejected = [] if approve else True
+                    if not approve:
+                        approval_entry.approved = False
+                        if rejection_message is not None and call_id is not None:
+                            approval_entry.rejection_messages[call_id] = rejection_message
+                        elif call_id is not None:
+                            self._clear_rejection_message(approval_entry, call_id)
+                        approval_entry.sticky_rejection_message = rejection_message
+                    else:
+                        approval_entry.rejection_messages.clear()
+                        approval_entry.sticky_rejection_message = None
+                    continue
 
-            opposite = approval_entry.rejected if approve else approval_entry.approved
-            if isinstance(opposite, list) and call_id in opposite:
-                opposite.remove(call_id)
+                opposite = approval_entry.rejected if approve else approval_entry.approved
+                if isinstance(opposite, list) and call_id in opposite:
+                    opposite.remove(call_id)
 
-            target = approval_entry.approved if approve else approval_entry.rejected
-            if isinstance(target, list) and call_id not in target:
-                target.append(call_id)
-            if approve:
-                self._clear_rejection_message(approval_entry, call_id)
-            elif call_id is not None:
-                if rejection_message is not None:
-                    approval_entry.rejection_messages[call_id] = rejection_message
-                else:
+                target = approval_entry.approved if approve else approval_entry.rejected
+                if isinstance(target, list) and call_id not in target:
+                    target.append(call_id)
+                if approve:
                     self._clear_rejection_message(approval_entry, call_id)
+                elif call_id is not None:
+                    if rejection_message is not None:
+                        approval_entry.rejection_messages[call_id] = rejection_message
+                    else:
+                        self._clear_rejection_message(approval_entry, call_id)
 
     def approve_tool(self, approval_item: ToolApprovalItem, always_approve: bool = False) -> None:
         """Approve a tool call, optionally for all future calls."""
@@ -446,32 +454,56 @@ class RunContextWrapper(Generic[TContext]):
 
     def _rebuild_approvals(self, approvals: Any) -> None:
         """Restore approvals from serialized state."""
-        self._approvals = {}
-        if not isinstance(approvals, Mapping):
-            return
-        for tool_name, record_dict in approvals.items():
-            if not isinstance(tool_name, str) or not isinstance(record_dict, dict):
-                continue
-            record = _ApprovalRecord()
-            record.approved = self._restore_approval_value(record_dict.get("approved", []))
-            record.rejected = self._restore_approval_value(record_dict.get("rejected", []))
-            rejection_messages = record_dict.get("rejection_messages", {})
-            if isinstance(rejection_messages, dict):
-                record.rejection_messages = {
-                    str(call_id): message
-                    for call_id, message in rejection_messages.items()
-                    if isinstance(message, str)
-                }
-            sticky_rejection_message = record_dict.get("sticky_rejection_message")
-            if isinstance(sticky_rejection_message, str):
-                record.sticky_rejection_message = sticky_rejection_message
-            self._approvals[tool_name] = record
+        with self._approvals_lock:
+            self._approvals = {}
+            if not isinstance(approvals, Mapping):
+                return
+            for tool_name, record_dict in approvals.items():
+                if not isinstance(tool_name, str) or not isinstance(record_dict, dict):
+                    continue
+                record = _ApprovalRecord()
+                record.approved = self._restore_approval_value(record_dict.get("approved", []))
+                record.rejected = self._restore_approval_value(record_dict.get("rejected", []))
+                rejection_messages = record_dict.get("rejection_messages", {})
+                if isinstance(rejection_messages, dict):
+                    record.rejection_messages = {
+                        str(call_id): message
+                        for call_id, message in rejection_messages.items()
+                        if isinstance(message, str)
+                    }
+                sticky_rejection_message = record_dict.get("sticky_rejection_message")
+                if isinstance(sticky_rejection_message, str):
+                    record.sticky_rejection_message = sticky_rejection_message
+                self._approvals[tool_name] = record
+
+    def _approval_records_snapshot(self) -> list[tuple[str, _ApprovalRecord]]:
+        """Return a stable snapshot of the shared approval mapping."""
+        with self._approvals_lock:
+            snapshot: list[tuple[str, _ApprovalRecord]] = []
+            for tool_name, record in self._approvals.items():
+                snapshot.append(
+                    (
+                        tool_name,
+                        _ApprovalRecord(
+                            approved=record.approved
+                            if isinstance(record.approved, bool)
+                            else list(record.approved),
+                            rejected=record.rejected
+                            if isinstance(record.rejected, bool)
+                            else list(record.rejected),
+                            rejection_messages=dict(record.rejection_messages),
+                            sticky_rejection_message=record.sticky_rejection_message,
+                        ),
+                    )
+                )
+            return snapshot
 
     def _fork_with_tool_input(self, tool_input: Any) -> RunContextWrapper[TContext]:
         """Create a child context that shares approvals and usage with tool input set."""
         fork = RunContextWrapper(context=self.context)
         fork.usage = self.usage
         fork._approvals = self._approvals
+        fork._approvals_lock = self._approvals_lock
         fork.turn_input = self.turn_input
         fork.tool_input = tool_input
         return fork
@@ -481,6 +513,7 @@ class RunContextWrapper(Generic[TContext]):
         fork = RunContextWrapper(context=self.context)
         fork.usage = self.usage
         fork._approvals = self._approvals
+        fork._approvals_lock = self._approvals_lock
         fork.turn_input = self.turn_input
         return fork
 

@@ -231,3 +231,11 @@ def test_explicit_same_name_namespace_does_not_alias_to_bare_tool() -> None:
         )
         is True
     )
+
+
+def test_forked_contexts_share_approval_lock_with_parent() -> None:
+    context_wrapper = RunContextWrapper(context=None)
+    fork = context_wrapper._fork_without_tool_input()  # noqa: SLF001
+
+    assert fork._approvals is context_wrapper._approvals
+    assert fork._approvals_lock is context_wrapper._approvals_lock

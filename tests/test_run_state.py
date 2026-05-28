@@ -6,6 +6,8 @@ import gc
 import io
 import json
 import logging
+import threading
+import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -1564,6 +1566,59 @@ class TestRunState:
         assert new_state._context.is_tool_approved(tool_name="tool1", call_id="cid1") is True
         assert new_state._context.is_tool_approved(tool_name="tool2", call_id="cid2") is False
         assert new_state._context.get_rejection_message("tool2", "cid2") is None
+
+    def test_serializing_approvals_blocks_concurrent_approval_mutation(self):
+        """Test that approval serialization is stable while approvals are updated."""
+
+        class SlowItemsDict(dict[str, Any]):
+            def __init__(
+                self,
+                *args: Any,
+                iteration_started: threading.Event,
+                **kwargs: Any,
+            ) -> None:
+                super().__init__(*args, **kwargs)
+                self._iteration_started = iteration_started
+
+            def items(self):
+                iterator = super().items()
+                yielded_first = False
+                for item in iterator:
+                    if not yielded_first:
+                        yielded_first = True
+                        self._iteration_started.set()
+                        time.sleep(0.01)
+                    yield item
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ApprovalAgent")
+        state = make_state(agent, context=context, original_input="test")
+        for index in range(5):
+            state.approve(
+                make_tool_approval_item(agent, call_id=f"cid{index}", name=f"tool{index}")
+            )
+
+        iteration_started = threading.Event()
+        context._approvals = SlowItemsDict(  # noqa: SLF001
+            context._approvals,
+            iteration_started=iteration_started,
+        )
+
+        def approve_after_serialization_starts() -> None:
+            assert iteration_started.wait(timeout=1)
+            state.approve(make_tool_approval_item(agent, call_id="cid-new", name="tool-new"))
+
+        approval_thread = threading.Thread(
+            target=approve_after_serialization_starts,
+        )
+
+        approval_thread.start()
+        serialized = state._serialize_approvals()  # noqa: SLF001
+        approval_thread.join(timeout=1)
+
+        assert iteration_started.is_set()
+        assert "tool-new" not in serialized
+        assert context.is_tool_approved("tool-new", "cid-new") is True
 
     async def test_serializes_and_restores_rejection_messages(self):
         """Test that rejection messages are preserved through serialization."""

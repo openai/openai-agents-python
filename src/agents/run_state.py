@@ -360,7 +360,7 @@ class RunState(Generic[TContext, TAgent]):
         if self._context is None:
             return {}
         approvals_dict: dict[str, dict[str, Any]] = {}
-        for tool_name, record in self._context._approvals.items():
+        for tool_name, record in self._context._approval_records_snapshot():
             approvals_dict[tool_name] = {
                 "approved": record.approved
                 if isinstance(record.approved, bool)
