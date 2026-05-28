@@ -263,6 +263,7 @@ Typical hook timing:
 -   `on_llm_start` / `on_llm_end`: immediately around each model call.
 -   `on_tool_start` / `on_tool_end`: around each local tool invocation.
     For function tools, the hook `context` is typically a `ToolContext`, so you can inspect tool-call metadata such as `tool_call_id`.
+-   `on_tool_progress`: when a tool emits a mid-execution progress update via `await ctx.send_progress(data)`.
 -   `on_handoff`: when control moves from one agent to another.
 
 Use `RunHooks` when you want a single observer for the whole workflow, and `AgentHooks` when one agent needs custom side effects.
