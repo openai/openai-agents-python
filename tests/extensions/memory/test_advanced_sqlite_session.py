@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Any, cast
@@ -97,6 +98,37 @@ async def test_advanced_session_basic_functionality(agent: Agent):
     assert len(retrieved) == 2
     assert retrieved[0].get("content") == "Hello"
     assert retrieved[1].get("content") == "Hi there!"
+
+    session.close()
+
+
+async def test_add_items_rolls_back_when_structure_metadata_fails():
+    class BrokenMetadataSession(AdvancedSQLiteSession):
+        def _insert_structure_metadata(
+            self,
+            conn: sqlite3.Connection,
+            items: list[TResponseInputItem],
+        ) -> None:
+            raise RuntimeError("metadata write failed")
+
+    session = BrokenMetadataSession(session_id="metadata_failure_test", create_tables=True)
+
+    with pytest.raises(RuntimeError, match="metadata write failed"):
+        await session.add_items([{"role": "user", "content": "hello"}])
+
+    with session._locked_connection() as conn:
+        message_count = conn.execute(
+            f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()[0]
+        structure_count = conn.execute(
+            "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()[0]
+
+    assert message_count == 0
+    assert structure_count == 0
+    assert await session.get_items() == []
 
     session.close()
 
