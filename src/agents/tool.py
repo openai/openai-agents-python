@@ -1393,6 +1393,21 @@ def _extract_tool_argument_json_error(error: Exception) -> json.JSONDecodeError 
     return _extract_json_decode_error(error)
 
 
+def _is_tool_argument_input_error(error: Exception) -> bool:
+    """Return True when an error represents a non-object JSON input for a function tool.
+
+    Only the non-object case is matched here: schema validation failures share the
+    `Invalid JSON input for tool` prefix and should continue to flow through the
+    regular validation path rather than be reported as JSON parse errors.
+    """
+    if not isinstance(error, ModelBehaviorError):
+        return False
+    text = str(error)
+    return text.startswith("Invalid JSON input for tool") and text.endswith(
+        "expected a JSON object"
+    )
+
+
 def _build_handled_function_tool_error_handler(
     *,
     span_message: str,
@@ -1413,6 +1428,11 @@ def _build_handled_function_tool_error_handler(
         if json_decode_error is not None and span_message_for_json_decode_error is not None:
             resolved_span_message = span_message_for_json_decode_error
             span_error_detail = str(json_decode_error)
+        elif span_message_for_json_decode_error is not None and _is_tool_argument_input_error(
+            error
+        ):
+            resolved_span_message = span_message_for_json_decode_error
+            span_error_detail = str(error)
         else:
             resolved_span_message = span_message
             span_error_detail = str(error)
@@ -1491,6 +1511,12 @@ def default_tool_error_function(ctx: RunContextWrapper[Any], error: Exception) -
             "An error occurred while parsing tool arguments. "
             "Please try again with valid JSON. "
             f"Error: {json_decode_error}"
+        )
+    if _is_tool_argument_input_error(error):
+        return (
+            "An error occurred while parsing tool arguments. "
+            "Please try again with valid JSON. "
+            f"Error: {error}"
         )
     return f"An error occurred while running the tool. Please try again. Error: {str(error)}"
 
