@@ -66,6 +66,7 @@ from .model_events import (
 from .model_inputs import (
     RealtimeModelSendAudio,
     RealtimeModelSendInterrupt,
+    RealtimeModelSendRawMessage,
     RealtimeModelSendSessionUpdate,
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
@@ -194,6 +195,14 @@ class RealtimeSession(RealtimeModelListener):
         self._tool_call_tasks: set[asyncio.Task[Any]] = set()
         self._async_tool_calls: bool = bool(self._run_config.get("async_tool_calls", True))
 
+        # Coalesce response.create across parallel tool calls emitted in the same model response.
+        # Each entry tracks call_ids still pending and whether the model has signalled the end
+        # of the turn (response.done). Only the last completing tool call for a finished turn
+        # requests a new response so the OpenAI Realtime API never sees overlapping
+        # response.create events that would error with conversation_already_has_active_response.
+        self._tool_calls_by_response: dict[str, set[str]] = {}
+        self._turn_ended_responses: set[str] = set()
+
     @property
     def model(self) -> RealtimeModel:
         """Access the underlying model for adding listeners or other direct interaction."""
@@ -296,6 +305,7 @@ class RealtimeSession(RealtimeModelListener):
             await self._put_event(RealtimeError(info=self._event_info, error=event.error))
         elif event.type == "function_call":
             agent_snapshot = self._current_agent
+            self._register_pending_tool_call(event)
             if self._async_tool_calls:
                 self._enqueue_tool_call_task(event, agent_snapshot)
             else:
@@ -447,6 +457,8 @@ class RealtimeSession(RealtimeModelListener):
             self._item_transcripts.clear()
             self._item_guardrail_run_counts.clear()
 
+            await self._mark_turn_ended(event.response_id)
+
             await self._put_event(
                 RealtimeAgentEndEvent(
                     agent=self._current_agent,
@@ -574,11 +586,12 @@ class RealtimeSession(RealtimeModelListener):
             tool=tool,
             call_id=event.call_id,
         )
+        start_response = self._consume_pending_tool_call(event)
         await self._send_tool_output_completion(
             _PendingToolOutput(
                 tool_call=event,
                 output=rejection_message,
-                start_response=True,
+                start_response=start_response,
                 tool_end_event=RealtimeToolEnd(
                     info=self._event_info,
                     tool=tool,
@@ -779,11 +792,12 @@ class RealtimeSession(RealtimeModelListener):
                     arguments=event.arguments,
                 )
 
+                start_response = self._consume_pending_tool_call(event)
                 await self._send_tool_output_completion(
                     _PendingToolOutput(
                         tool_call=event,
                         output=_serialize_tool_output(result),
-                        start_response=True,
+                        start_response=start_response,
                         tool_end_event=RealtimeToolEnd(
                             info=self._event_info,
                             tool=func_tool,
@@ -835,11 +849,12 @@ class RealtimeSession(RealtimeModelListener):
 
                 # Send the session update before the tool output that triggers a new response.
                 transfer_message = handoff.get_transfer_message(result)
+                start_response = self._consume_pending_tool_call(event)
                 await self._send_tool_output_completion(
                     _PendingToolOutput(
                         tool_call=event,
                         output=transfer_message,
-                        start_response=True,
+                        start_response=start_response,
                         session_update=RealtimeModelSendSessionUpdate(
                             session_settings=updated_settings
                         ),
@@ -848,6 +863,7 @@ class RealtimeSession(RealtimeModelListener):
                 mark_completed = True
             else:
                 error_message = f"Tool {event.name} not found"
+                self._consume_pending_tool_call(event)
                 await self._send_tool_output_completion(
                     _PendingToolOutput(
                         tool_call=event,
@@ -1174,6 +1190,71 @@ class RealtimeSession(RealtimeModelListener):
         self._tool_call_tasks.add(task)
         task.add_done_callback(self._on_tool_call_task_done)
 
+    def _register_pending_tool_call(self, event: RealtimeModelToolCallEvent) -> None:
+        """Record a tool call so we can coalesce response.create per model response."""
+        response_id = event.response_id
+        if not response_id:
+            return
+        pending = self._tool_calls_by_response.setdefault(response_id, set())
+        pending.add(event.call_id)
+
+    def _consume_pending_tool_call(self, event: RealtimeModelToolCallEvent) -> bool:
+        """Mark a tool call as complete and return whether it should trigger response.create.
+
+        Returns True if this is the last pending tool call for a turn that has already ended,
+        meaning the caller should request a new response. Otherwise returns False so the
+        Realtime API never receives a response.create while another response is still active
+        or while other tool outputs for the same turn are still in flight.
+        """
+        response_id = event.response_id
+        if not response_id:
+            # Without a response id we can't coalesce, so fall back to the historical behavior
+            # of always requesting a response after every tool output.
+            return True
+
+        pending = self._tool_calls_by_response.get(response_id)
+        if pending is None:
+            # The function_call event arrived without going through on_event, or the bookkeeping
+            # has already been cleared. Be conservative and request a response.
+            return True
+
+        pending.discard(event.call_id)
+        if pending:
+            # Other tool outputs for the same turn are still in flight.
+            return False
+
+        if response_id not in self._turn_ended_responses:
+            # The model hasn't finished emitting this turn yet, so more tool calls may still
+            # arrive. Wait for turn_ended to drive response.create.
+            return False
+
+        self._tool_calls_by_response.pop(response_id, None)
+        self._turn_ended_responses.discard(response_id)
+        return True
+
+    async def _mark_turn_ended(self, response_id: str | None) -> None:
+        """Record that the model finished a turn and trigger response.create if needed."""
+        if not response_id:
+            return
+        pending = self._tool_calls_by_response.get(response_id)
+        if pending is None:
+            # No tool calls were tracked for this response, nothing to coalesce.
+            return
+        if pending:
+            # Tool outputs are still in flight; the last one to finish will request the response.
+            self._turn_ended_responses.add(response_id)
+            return
+
+        # All tool outputs have already been sent with start_response=False, so we have to
+        # request a response ourselves now that the turn is complete.
+        self._tool_calls_by_response.pop(response_id, None)
+        self._turn_ended_responses.discard(response_id)
+        await self._model.send_event(
+            RealtimeModelSendRawMessage(
+                message={"type": "response.create"},
+            )
+        )
+
     def _on_tool_call_task_done(self, task: asyncio.Task[Any]) -> None:
         self._tool_call_tasks.discard(task)
 
@@ -1248,6 +1329,8 @@ class RealtimeSession(RealtimeModelListener):
         # Clear pending approval tracking
         self._pending_tool_calls.clear()
         self._pending_tool_outputs.clear()
+        self._tool_calls_by_response.clear()
+        self._turn_ended_responses.clear()
 
         # Mark as closed
         self._closed = True
