@@ -1422,3 +1422,32 @@ async def test_output_tokens_details_persisted_when_input_details_missing():
     assert turn_usage["output_tokens_details"] == {"reasoning_tokens": 42}
     assert turn_usage["input_tokens_details"] is None
     session.close()
+
+
+async def test_add_items_propagates_structure_metadata_errors():
+    # Regression test for openai/openai-agents-python#3348.
+    # If _insert_structure_metadata raises, add_items used to log the error
+    # and return without raising, so callers could not tell that the new
+    # items were missing from later get_items() reads. Verify the error is
+    # now propagated to the caller and that the orphaned base rows are
+    # cleaned up (so the session stays internally consistent).
+    import sqlite3
+
+    class BrokenMetadataSession(AdvancedSQLiteSession):
+        def _insert_structure_metadata(
+            self, conn: sqlite3.Connection, items: list[TResponseInputItem]
+        ) -> None:
+            raise RuntimeError("simulated structure metadata write failure")
+
+    session = BrokenMetadataSession(session_id="propagation_test", create_tables=True)
+    try:
+        items: list[TResponseInputItem] = [{"role": "user", "content": "hi"}]
+        with pytest.raises(RuntimeError, match="simulated structure metadata write failure"):
+            await session.add_items(items)
+
+        # The orphan cleanup path runs in the except block, so subsequent
+        # reads see an empty session rather than rows the caller cannot reach.
+        retrieved = await session.get_items()
+        assert retrieved == []
+    finally:
+        session.close()
