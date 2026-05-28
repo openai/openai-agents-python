@@ -87,9 +87,14 @@ class RunHooksBase(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         agent: TAgent,
         tool: Tool,
-        result: str,
+        result: Any,
     ) -> None:
         """Called immediately after a local tool is invoked.
+
+        ``result`` is the raw value the tool returned (after any output guardrails). It can be
+        a string, a Pydantic model, a dict, or any other JSON-serialisable value depending on
+        the tool — function tools that return structured output will surface that here without
+        being stringified first.
 
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
@@ -161,9 +166,14 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         agent: TAgent,
         tool: Tool,
-        result: str,
+        result: Any,
     ) -> None:
         """Called immediately after a local tool is invoked.
+
+        ``result`` is the raw value the tool returned (after any output guardrails). It can be
+        a string, a Pydantic model, a dict, or any other JSON-serialisable value depending on
+        the tool — function tools that return structured output will surface that here without
+        being stringified first.
 
         For function-tool invocations, ``context`` is typically a ``ToolContext`` instance,
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,

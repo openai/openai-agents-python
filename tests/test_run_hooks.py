@@ -386,3 +386,42 @@ async def test_streamed_run_hooks_count_tool_and_handoff_invocations():
     assert hooks.events["on_agent_start"] == 2
     assert hooks.events["on_agent_end"] == 1
     assert len(hooks.tool_context_ids) == 2
+
+
+@pytest.mark.asyncio
+async def test_on_tool_end_receives_structured_dict_result():
+    # Regression for #3512: tools that return a dict (or any non-string structured
+    # value) used to hit `on_tool_end(... result: str)`'s narrow annotation and
+    # blow up at runtime once strict type checking was involved. The hook should
+    # see the raw payload the tool returned.
+    from agents.tool import function_tool
+
+    captured: dict[str, Any] = {}
+
+    @function_tool
+    def lookup_user(user_id: str) -> dict[str, Any]:
+        return {"id": user_id, "name": "Sam", "active": True}
+
+    class CapturingHooks(RunHooks):
+        async def on_tool_end(
+            self,
+            context: RunContextWrapper[TContext],
+            agent: Agent[TContext],
+            tool: Tool,
+            result: Any,
+        ) -> None:
+            captured["result"] = result
+
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tools=[lookup_user])
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("lookup_user", json.dumps({"user_id": "u-1"}))],
+            [get_text_message("done")],
+        ]
+    )
+
+    await Runner.run(agent, input="who is u-1", hooks=CapturingHooks())
+
+    assert captured["result"] == {"id": "u-1", "name": "Sam", "active": True}
