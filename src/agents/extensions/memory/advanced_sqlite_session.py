@@ -487,30 +487,22 @@ class AdvancedSQLiteSession(SQLiteSession):
 
     def _cleanup_orphaned_messages_sync(self, conn: sqlite3.Connection) -> int:
         with closing(conn.cursor()) as cursor:
-            # Find messages without structure metadata.
             cursor.execute(
                 f"""
-                SELECT am.id
-                FROM {self.messages_table} am
-                LEFT JOIN message_structure ms ON am.id = ms.message_id
-                WHERE am.session_id = ? AND ms.message_id IS NULL
-            """,
-                (self.session_id,),
-            )
-
-            orphaned_ids = [row[0] for row in cursor.fetchall()]
-
-            if not orphaned_ids:
-                return 0
-
-            placeholders = ",".join("?" * len(orphaned_ids))
-            cursor.execute(
-                f"DELETE FROM {self.messages_table} WHERE id IN ({placeholders})",
-                orphaned_ids,
+                DELETE FROM {self.messages_table}
+                WHERE session_id = ?
+                AND id NOT IN (
+                    SELECT message_id
+                    FROM message_structure ms
+                    WHERE ms.session_id = ?
+                )
+                """,
+                (self.session_id, self.session_id),
             )
 
             deleted_count = cursor.rowcount
-            self._logger.info(f"Cleaned up {deleted_count} orphaned messages")
+            if deleted_count:
+                self._logger.info(f"Cleaned up {deleted_count} orphaned messages")
             return deleted_count
 
     def _classify_message_type(self, item: TResponseInputItem) -> str:
@@ -786,14 +778,19 @@ class AdvancedSQLiteSession(SQLiteSession):
 
                     structure_deleted = cursor.rowcount
 
+                    orphaned_messages_deleted = self._cleanup_orphaned_messages_sync(conn)
+
                     conn.commit()
 
-                    return usage_deleted, structure_deleted
+                    return usage_deleted, structure_deleted, orphaned_messages_deleted
 
-        usage_deleted, structure_deleted = await asyncio.to_thread(_delete_sync)
+        usage_deleted, structure_deleted, orphaned_messages_deleted = await asyncio.to_thread(
+            _delete_sync
+        )
 
         self._logger.info(
-            f"Deleted branch '{branch_id}': {structure_deleted} message entries, {usage_deleted} usage entries"  # noqa: E501
+            f"Deleted branch '{branch_id}': {structure_deleted} message entries, "
+            f"{usage_deleted} usage entries, {orphaned_messages_deleted} orphaned messages"
         )
 
     async def list_branches(self) -> list[dict[str, Any]]:
