@@ -1018,7 +1018,7 @@ async def test_multiple_tool_calls_surface_hook_failure_over_sibling_cancellatio
             context: RunContextWrapper[Any],
             agent: Agent[Any],
             tool,
-            result: str,
+            result: object,
         ) -> None:
             if tool.name != "ok_tool":
                 return
@@ -1117,7 +1117,7 @@ async def test_function_tool_preserves_contextvar_from_tool_body_to_post_invoke_
             context: RunContextWrapper[Any],
             agent: Agent[Any],
             tool,
-            result: str,
+            result: object,
         ) -> None:
             seen_values.append(("hook", tool_state.get()))
 
@@ -1242,14 +1242,14 @@ async def test_multiple_tool_calls_do_not_run_on_tool_end_for_cancelled_tool():
 
     class RecordingHooks(RunHooks[Any]):
         def __init__(self):
-            self.results: dict[str, str] = {}
+            self.results: dict[str, object] = {}
 
         async def on_tool_end(
             self,
             context: RunContextWrapper[Any],
             agent: Agent[Any],
             tool,
-            result: str,
+            result: object,
         ) -> None:
             self.results[tool.name] = result
             if tool.name == "ok_tool":
@@ -1308,7 +1308,7 @@ async def test_multiple_tool_calls_skip_post_invoke_work_for_cancelled_sibling_t
             context: RunContextWrapper[Any],
             agent: Agent[Any],
             tool,
-            result: str,
+            result: object,
         ) -> None:
             if tool.name == "waiting_tool":
                 on_tool_end_called.set()
@@ -1378,7 +1378,7 @@ async def test_execute_function_tool_calls_parent_cancellation_skips_post_invoke
             context: RunContextWrapper[Any],
             agent: Agent[Any],
             tool,
-            result: str,
+            result: object,
         ) -> None:
             on_tool_end_called.set()
 
@@ -1922,7 +1922,7 @@ async def test_multiple_tool_calls_allow_successful_sibling_on_tool_end_to_finis
             context: RunContextWrapper[Any],
             agent: Agent[Any],
             tool,
-            result: str,
+            result: object,
         ) -> None:
             if tool.name != "ok_tool":
                 return
