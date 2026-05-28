@@ -2038,10 +2038,13 @@ async def test_resume_recreates_ephemeral_when_sprite_missing(
     session = await client.resume(state)
     inner = session._inner
     assert isinstance(inner, SpritesSandboxSession)
-    # Reattach was attempted, then we fell through to a fresh create on start.
+    # Reattach was attempted, then we fell through to a fresh create.
     assert fake_client.get_sprite_calls == [SPRITE_NAME]
-    # create_sprite has NOT happened yet — resume() leaves provisioning to start().
-    assert fake_client.create_sprite_calls == []
+    # The replacement must be provisioned during resume() so that start()'s
+    # first backend op finds it; otherwise _ensure_warm()'s get_sprite() poll
+    # would fail with sprite_not_found before _ensure_control() ever gets a
+    # chance to create it.
+    assert [name for name, _ in fake_client.create_sprite_calls] == [SPRITE_NAME]
     # Replacement must NOT be marked as preserved, and readiness was cleared
     # so the session's start() will run a full manifest apply.
     assert inner._start_workspace_state_preserved is False

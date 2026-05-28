@@ -1477,7 +1477,11 @@ class SpritesSandboxClient(BaseSandboxClient[SpritesSandboxClientOptions]):
         # a fresh provision. Workspace continuity is lost, so clear the
         # readiness flag and do NOT mark start state as preserved — the
         # session's ``start()`` lifecycle must run a full manifest apply.
+        # Provision the replacement now so ``start()``'s first backend op
+        # (``_prepare_backend_workspace`` → ``_ensure_warm`` → ``get_sprite``)
+        # finds the new sprite instead of failing with ``sprite_not_found``.
         state.workspace_root_ready = False
+        await inner._ensure_sprite()
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
