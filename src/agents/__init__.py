@@ -55,6 +55,7 @@ from .items import (
     CompactionItem,
     HandoffCallItem,
     HandoffOutputItem,
+    InjectedInputItem,
     ItemHelpers,
     MCPApprovalRequestItem,
     MCPApprovalResponseItem,
@@ -242,6 +243,7 @@ from .tracing import (
     transcription_span,
     turn_span,
 )
+from .turn_interceptor import TurnInterceptor
 from .usage import Usage
 from .version import __version__
 
@@ -420,6 +422,8 @@ __all__ = [
     "ToolOrigin",
     "ToolOriginType",
     "ReasoningItem",
+    "InjectedInputItem",
+    "TurnInterceptor",
     "ItemHelpers",
     "RunHooks",
     "AgentHooks",

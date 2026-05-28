@@ -62,6 +62,7 @@ from .items import (
     CompactionItem,
     HandoffCallItem,
     HandoffOutputItem,
+    InjectedInputItem,
     MCPApprovalRequestItem,
     MCPApprovalResponseItem,
     MCPListToolsItem,
@@ -3277,6 +3278,13 @@ def _deserialize_items(
                     normalized_raw_item
                 )
                 result.append(MCPApprovalResponseItem(agent=agent, raw_item=raw_item_mcp_response))
+
+            elif item_type == "injected_input_item":
+                result.append(
+                    InjectedInputItem(
+                        agent=agent, raw_item=cast(TResponseInputItem, normalized_raw_item)
+                    )
+                )
 
             elif item_type == "tool_approval_item":
                 approval_item = _deserialize_tool_approval_item(

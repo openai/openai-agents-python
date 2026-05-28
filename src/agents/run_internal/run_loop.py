@@ -42,6 +42,7 @@ from ..exceptions import (
 from ..handoffs import Handoff
 from ..items import (
     HandoffCallItem,
+    InjectedInputItem,
     ItemHelpers,
     ModelResponse,
     ReasoningItem,
@@ -84,6 +85,7 @@ from ..tool import (
 from ..tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
 from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData, TaskSpanData
+from ..turn_interceptor import TurnActionType, TurnInterceptor
 from ..usage import Usage
 from ..util import _coro, _error_tracing
 from .agent_bindings import AgentBindings, bind_public_agent
@@ -454,6 +456,7 @@ async def start_streaming(
     *,
     is_resumed_state: bool = False,
     sandbox_runtime: SandboxRuntime[TContext] | None = None,
+    turn_interceptor: TurnInterceptor | None = None,
 ):
     """Run the streaming loop for a run result."""
     if streamed_result.trace:
@@ -667,8 +670,14 @@ async def start_streaming(
             streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
         raise
 
+    if turn_interceptor is not None and not is_resumed_state:
+        await turn_interceptor.reset(starting_agent, context_wrapper.context)
+
     try:
         while True:
+            if turn_interceptor is not None:
+                turn_interceptor.update_agent(current_agent)
+
             all_input_guardrails = (
                 starting_agent.input_guardrails + (run_config.input_guardrails or [])
                 if current_turn == 0 and not is_resumed_state
@@ -1152,6 +1161,21 @@ async def start_streaming(
                     if streamed_result._state is not None:
                         streamed_result._state._current_step = NextStepRunAgain()
 
+                    # Drain interceptor if not cancelled.
+                    if (
+                        turn_interceptor is not None
+                        and streamed_result._cancel_mode != "after_turn"
+                    ):  # type: ignore[comparison-overlap]
+                        action = await turn_interceptor()
+                        if action.action == TurnActionType.INJECT_INPUT and action.data:
+                            for item in action.data:
+                                injected = InjectedInputItem(agent=current_agent, raw_item=item)
+                                streamed_result._model_input_items.append(injected)
+                                streamed_result.new_items.append(injected)
+                                turn_session_items.append(injected)
+                                if pending_server_items is not None:
+                                    pending_server_items.append(injected)
+
                     await _save_stream_items_with_count(
                         turn_session_items,
                         turn_result.model_response.response_id,
@@ -1200,6 +1224,8 @@ async def start_streaming(
     else:
         streamed_result.is_complete = True
     finally:
+        if turn_interceptor is not None and not streamed_result.interruptions:
+            await turn_interceptor._reject_all_pending()
         _sync_conversation_tracking_from_tracker()
         if streamed_result._input_guardrails_task:
             try:

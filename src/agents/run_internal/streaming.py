@@ -6,6 +6,7 @@ from ..items import (
     CompactionItem,
     HandoffCallItem,
     HandoffOutputItem,
+    InjectedInputItem,
     MCPApprovalRequestItem,
     MCPApprovalResponseItem,
     MCPListToolsItem,
@@ -57,6 +58,8 @@ def stream_step_items_to_queue(
             event = None  # approvals represent interruptions, not streamed items
         elif isinstance(item, CompactionItem):
             event = None  # compaction items are session bookkeeping, not streamed items
+        elif isinstance(item, InjectedInputItem):
+            event = None  # user input injected via TurnInterceptor, not a stream event
         else:
             logger.warning("Unexpected item type: %s", type(item))
             event = None
