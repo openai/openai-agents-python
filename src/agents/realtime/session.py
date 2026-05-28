@@ -1149,11 +1149,15 @@ class RealtimeSession(RealtimeModelListener):
                     )
                 )
 
-    def _cleanup_guardrail_tasks(self) -> None:
+    def _cleanup_guardrail_tasks(self) -> list[asyncio.Task[Any]]:
+        """Cancel all pending guardrail tasks and return them for awaiting."""
+        pending: list[asyncio.Task[Any]] = []
         for task in self._guardrail_tasks:
             if not task.done():
                 task.cancel()
+                pending.append(task)
         self._guardrail_tasks.clear()
+        return pending
 
     def _enqueue_tool_call_task(
         self,
@@ -1219,11 +1223,15 @@ class RealtimeSession(RealtimeModelListener):
             )
         )
 
-    def _cleanup_tool_call_tasks(self) -> None:
+    def _cleanup_tool_call_tasks(self) -> list[asyncio.Task[Any]]:
+        """Cancel all pending tool-call tasks and return them for awaiting."""
+        pending: list[asyncio.Task[Any]] = []
         for task in self._tool_call_tasks:
             if not task.done():
                 task.cancel()
+                pending.append(task)
         self._tool_call_tasks.clear()
+        return pending
 
     def _wake_event_iterators(self) -> None:
         for _ in range(self._event_iterator_waiters):
@@ -1235,9 +1243,15 @@ class RealtimeSession(RealtimeModelListener):
             self._wake_event_iterators()
             return
 
-        # Cancel and cleanup guardrail tasks
-        self._cleanup_guardrail_tasks()
-        self._cleanup_tool_call_tasks()
+        # Cancel and await all background tasks so their finally-blocks run
+        # before we close the model or mark the session closed.
+        # Using return_exceptions=True avoids raising CancelledError here and
+        # ensures every task fully drains even if some raise on cancellation.
+        pending_tasks = (
+            self._cleanup_guardrail_tasks() + self._cleanup_tool_call_tasks()
+        )
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
 
         # Remove ourselves as a listener
         self._model.remove_listener(self)
