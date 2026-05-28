@@ -4,6 +4,8 @@ import atexit
 import threading
 from typing import TYPE_CHECKING
 
+from ..logger import logger
+
 if TYPE_CHECKING:
     from .provider import TraceProvider
 
@@ -25,15 +27,30 @@ def _shutdown_global_trace_provider() -> None:
 
 
 def set_trace_provider(provider: TraceProvider) -> None:
-    """Set the global trace provider used by tracing utilities."""
+    """Set the global trace provider used by tracing utilities.
+
+    If a provider is already set and is being replaced, the previous provider
+    is shut down so any background threads, network clients, or other resources
+    held by its processors are released.
+    """
     global GLOBAL_TRACE_PROVIDER
     global _SHUTDOWN_HANDLER_REGISTERED
 
     with _GLOBAL_TRACE_PROVIDER_LOCK:
+        previous = GLOBAL_TRACE_PROVIDER
         GLOBAL_TRACE_PROVIDER = provider
         if not _SHUTDOWN_HANDLER_REGISTERED:
             atexit.register(_shutdown_global_trace_provider)
             _SHUTDOWN_HANDLER_REGISTERED = True
+
+        # Shut down inside the lock so a concurrent `set_trace_provider(previous)`
+        # cannot reinstall `previous` between releasing the lock and the shutdown
+        # call, which would close the processors of the now-active provider.
+        if previous is not None and previous is not provider:
+            try:
+                previous.shutdown()
+            except Exception as exc:
+                logger.error(f"Error shutting down previous trace provider: {exc}")
 
 
 def get_trace_provider() -> TraceProvider:
