@@ -92,7 +92,9 @@ async def prepare_input_with_session(
     ]
     if not is_openai_conversation_session:
         converted_history = [
-            _strip_reasoning_item_ids_from_history_item(item) for item in converted_history
+            sanitized_item
+            for item in converted_history
+            if (sanitized_item := _strip_reasoning_item_ids_from_history_item(item)) is not None
         ]
 
     new_input_list = [
@@ -191,18 +193,24 @@ async def prepare_input_with_session(
     return deduplicated, normalize_input_items_for_api(appended_as_inputs)
 
 
-def _strip_reasoning_item_ids_from_history_item(item: TResponseInputItem) -> TResponseInputItem:
+def _strip_reasoning_item_ids_from_history_item(
+    item: TResponseInputItem,
+) -> TResponseInputItem | None:
     """Remove reasoning item IDs from session history before sending to the Responses API.
 
     Some reasoning models emit `reasoning` items with `rs_...` IDs that are not guaranteed to be
     stable across turns. Replaying those IDs in a subsequent `responses.create` call can raise a
     404 "Item with id 'rs_...' not found". Stripping the ID keeps the reasoning payload usable
     without relying on server-side item retention.
+
+    Reasoning items without a summary cannot be replayed as model input, so they are dropped.
     """
     if not isinstance(item, dict):
         return item
     if item.get("type") != "reasoning":
         return item
+    if not item.get("summary"):
+        return None
     if "id" not in item:
         return item
     sanitized = dict(item)

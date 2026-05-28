@@ -1831,7 +1831,7 @@ async def test_prepare_input_with_session_strips_reasoning_item_ids_from_history
         {
             "type": "reasoning",
             "id": "rs_test",
-            "summary": [],
+            "summary": [{"type": "summary_text", "text": "thinking"}],
         },
     )
     session = SimpleListSession(history=[reasoning_item])
@@ -1847,8 +1847,30 @@ async def test_prepare_input_with_session_strips_reasoning_item_ids_from_history
         if isinstance(item, dict) and item.get("type") == "reasoning"
     ]
     assert len(prepared_reasoning) == 1
-    assert prepared_reasoning[0].get("summary") == []
+    assert prepared_reasoning[0].get("summary") == [{"type": "summary_text", "text": "thinking"}]
     assert "id" not in prepared_reasoning[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reasoning_item",
+    [
+        {"type": "reasoning", "id": "rs_missing_summary"},
+        {"type": "reasoning", "id": "rs_empty_summary", "summary": []},
+    ],
+)
+async def test_prepare_input_with_session_drops_reasoning_items_without_summary(
+    reasoning_item: dict[str, Any],
+):
+    session = SimpleListSession(history=[cast(TResponseInputItem, reasoning_item)])
+
+    prepared_input, session_items = await prepare_input_with_session("hello", session, None)
+
+    assert isinstance(prepared_input, list)
+    assert len(session_items) == 1
+    assert not any(
+        isinstance(item, dict) and item.get("type") == "reasoning" for item in prepared_input
+    )
 
 
 @pytest.mark.asyncio
