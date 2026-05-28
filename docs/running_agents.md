@@ -155,7 +155,8 @@ Use `RunConfig` to override behavior for a single run without changing each agen
 ##### Tool execution, approval, and tool error behavior
 
 -   [`tool_execution`][agents.run.RunConfig.tool_execution]: Configure SDK-side execution behavior for local tool calls, such as limiting how many function tools run at once.
--   [`tool_error_formatter`][agents.run.RunConfig.tool_error_formatter]: Customize the model-visible message when a tool call is rejected during approval flows.
+-   [`tool_not_found_behavior`][agents.run.RunConfig.tool_not_found_behavior]: Configure how the runner handles unresolved function tool calls emitted by the model. The default raises `ModelBehaviorError`; opt in to return a model-visible error output instead.
+-   [`tool_error_formatter`][agents.run.RunConfig.tool_error_formatter]: Customize model-visible tool error messages, such as approval rejections and opt-in tool-not-found outputs.
 
 Nested handoffs are available as an opt-in beta. Enable the collapsed-transcript behavior by passing `RunConfig(nest_handoff_history=True)` or set `handoff(..., nest_handoff_history=True)` to turn it on for a specific handoff. If you prefer to keep the raw transcript (the default), leave the flag unset or provide a `handoff_input_filter` (or `handoff_history_mapper`) that forwards the conversation exactly as you need. To change the wrapper text used in the generated summary without writing a custom mapper, call [`set_conversation_history_wrappers`][agents.handoffs.set_conversation_history_wrappers] (and [`reset_conversation_history_wrappers`][agents.handoffs.reset_conversation_history_wrappers] to restore the defaults).
 
@@ -183,13 +184,33 @@ result = await Runner.run(
 
 This is separate from provider-side [`ModelSettings.parallel_tool_calls`][agents.model_settings.ModelSettings.parallel_tool_calls]. `parallel_tool_calls` controls whether the model is allowed to emit multiple tool calls in a single response. `tool_execution.max_function_tool_concurrency` controls how the SDK executes local function tool calls after the model has emitted them.
 
+##### `tool_not_found_behavior`
+
+By default, if the model emits a function tool call that does not match any function tool available to the current agent, the runner raises `ModelBehaviorError`.
+
+Set `tool_not_found_behavior="return_error_to_model"` when you want the run to remain recoverable. In that mode, the SDK appends a `function_call_output` for the unresolved tool call and runs the model again, so the model can choose an available tool or answer without using that tool.
+
+```python
+from agents import Agent, RunConfig, Runner
+
+agent = Agent(name="Assistant", tools=[...])
+
+result = await Runner.run(
+    agent,
+    "Handle this request with the available tools.",
+    run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
+)
+```
+
+This option currently applies to unresolved function tool calls only. Other invalid tool payloads continue to use their existing error behavior.
+
 ##### `tool_error_formatter`
 
-Use `tool_error_formatter` to customize the message that is returned to the model when a tool call is rejected in an approval flow.
+Use `tool_error_formatter` to customize the message that is returned to the model when the SDK creates a model-visible tool error output.
 
 The formatter receives [`ToolErrorFormatterArgs`][agents.run_config.ToolErrorFormatterArgs] with:
 
--   `kind`: The error category. Today this is `"approval_rejected"`.
+-   `kind`: The error category, such as `"approval_rejected"` or `"tool_not_found"`.
 -   `tool_type`: The tool runtime (`"function"`, `"computer"`, `"shell"`, `"apply_patch"`, or `"custom"`).
 -   `tool_name`: The tool name.
 -   `call_id`: The tool call ID.
@@ -208,6 +229,8 @@ def format_rejection(args: ToolErrorFormatterArgs[None]) -> str | None:
             f"Tool call '{args.tool_name}' was rejected by a human reviewer. "
             "Ask for confirmation or propose a safer alternative."
         )
+    if args.kind == "tool_not_found":
+        return f"Tool '{args.tool_name}' is not available. Choose one of the listed tools."
     return None
 
 
