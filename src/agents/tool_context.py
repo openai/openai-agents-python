@@ -103,6 +103,9 @@ class ToolContext(RunContextWrapper[TContext]):
         )
         self.agent = agent
         self.run_config = run_config
+        # Populated by MCP tool invocation when the server returns ``CallToolResult._meta``.
+        # Surfaced on the resulting ToolCallOutputItem; not part of the public constructor.
+        self._mcp_response_meta: dict[str, Any] | None = None
 
     @property
     def qualified_tool_name(self) -> str:

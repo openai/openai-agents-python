@@ -1380,6 +1380,7 @@ class _FunctionToolBatchExecutor:
         self.task_states: dict[asyncio.Task[Any], _FunctionToolTaskState] = {}
         self.teardown_cancelled_tasks: set[asyncio.Task[Any]] = set()
         self.results_by_tool_run: dict[int, Any] = {}
+        self.mcp_response_meta_by_tool_run: dict[int, dict[str, Any]] = {}
         self.pending_tasks: set[asyncio.Task[Any]] = set()
         self.propagating_failure: BaseException | None = None
         self.available_function_tools: list[FunctionTool] = []
@@ -1758,6 +1759,9 @@ class _FunctionToolBatchExecutor:
                 context=tool_context,
                 arguments=tool_call.arguments,
             )
+            response_meta = getattr(tool_context, "_mcp_response_meta", None)
+            if response_meta:
+                self.mcp_response_meta_by_tool_run[id(task_state.tool_run)] = response_meta
         except asyncio.CancelledError as e:
             if outer_task in self.teardown_cancelled_tasks:
                 raise
@@ -1898,6 +1902,7 @@ class _FunctionToolBatchExecutor:
                     raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
                     agent=self.public_agent,
                     tool_origin=get_function_tool_origin(tool_run.function_tool),
+                    mcp_response_meta=self.mcp_response_meta_by_tool_run.get(id(tool_run)),
                 )
             else:
                 # Skip tool output until nested interruptions are resolved.

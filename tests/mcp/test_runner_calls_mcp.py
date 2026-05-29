@@ -400,3 +400,67 @@ async def test_runner_emits_mcp_error_tool_call_output_item(streaming: bool):
         wrapped_error,
     )
     assert tool_output_items[0].output == expected_error_message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_runner_surfaces_mcp_response_meta_on_tool_output_item(streaming: bool):
+    """Server-returned ``_meta`` on CallToolResult should appear on ToolCallOutputItem."""
+    server = FakeMCPServer()
+    server.add_tool("meta_tool", {})
+    server._response_meta = {"tool_meta": {"type": "chart", "vis_config": {"chart_type": "line"}}}
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        mcp_servers=[server],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_text_message("a_message"), get_function_tool_call("meta_tool", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+
+    if streaming:
+        streamed_result = Runner.run_streamed(agent, input="user_message")
+        async for _ in streamed_result.stream_events():
+            pass
+        new_items = streamed_result.new_items
+    else:
+        non_streamed_result = await Runner.run(agent, input="user_message")
+        new_items = non_streamed_result.new_items
+
+    tool_output_items = [item for item in new_items if item.type == "tool_call_output_item"]
+    assert len(tool_output_items) == 1
+    assert tool_output_items[0].mcp_response_meta == {
+        "tool_meta": {"type": "chart", "vis_config": {"chart_type": "line"}}
+    }
+
+
+@pytest.mark.asyncio
+async def test_runner_leaves_mcp_response_meta_none_when_server_omits_it():
+    """When the server omits ``_meta``, the item's ``mcp_response_meta`` stays ``None``."""
+    server = FakeMCPServer()
+    server.add_tool("plain_tool", {})
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        mcp_servers=[server],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_text_message("a_message"), get_function_tool_call("plain_tool", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="user_message")
+    tool_output_items = [item for item in result.new_items if item.type == "tool_call_output_item"]
+    assert len(tool_output_items) == 1
+    assert tool_output_items[0].mcp_response_meta is None

@@ -478,6 +478,69 @@ async def test_invoke_mcp_tool():
 
 
 @pytest.mark.asyncio
+async def test_invoke_mcp_tool_captures_response_meta_on_tool_context():
+    """Server-returned ``_meta`` is captured on ToolContext for the executor to surface."""
+    server = FakeMCPServer()
+    server.add_tool("test_tool_1", {})
+    server._response_meta = {"chart": {"type": "line"}, "trace_id": "abc-123"}
+
+    ctx = ToolContext(
+        context=None,
+        tool_name="test_tool_1",
+        tool_call_id="test_call_response_meta",
+        tool_arguments="{}",
+    )
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    assert ctx._mcp_response_meta == {"chart": {"type": "line"}, "trace_id": "abc-123"}
+    # Ensure the captured payload is a deep copy: mutating the server-side dict must
+    # not affect what the SDK exposed to the executor.
+    server._response_meta["mutated"] = True
+    assert "mutated" not in ctx._mcp_response_meta
+
+
+@pytest.mark.asyncio
+async def test_invoke_mcp_tool_leaves_response_meta_unset_when_server_omits_it():
+    """When the server returns no ``_meta``, the ToolContext stash stays None."""
+    server = FakeMCPServer()
+    server.add_tool("test_tool_1", {})
+
+    ctx = ToolContext(
+        context=None,
+        tool_name="test_tool_1",
+        tool_call_id="test_call_no_meta",
+        tool_arguments="{}",
+    )
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    assert ctx._mcp_response_meta is None
+
+
+@pytest.mark.asyncio
+async def test_invoke_mcp_tool_ignores_empty_response_meta():
+    """An empty ``_meta`` dict is treated the same as no meta (no stash, no propagation)."""
+    server = FakeMCPServer()
+    server.add_tool("test_tool_1", {})
+    server._response_meta = {}
+
+    ctx = ToolContext(
+        context=None,
+        tool_name="test_tool_1",
+        tool_call_id="test_call_empty_meta",
+        tool_arguments="{}",
+    )
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+
+    assert ctx._mcp_response_meta is None
+
+
+@pytest.mark.asyncio
 async def test_mcp_meta_resolver_merges_and_passes():
     captured: dict[str, Any] = {}
 

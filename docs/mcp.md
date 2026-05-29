@@ -277,6 +277,33 @@ server = MCPServerStreamableHttp(
 
 If your run context is a Pydantic model, dataclass, or custom class, read the tenant ID with attribute access instead.
 
+### Reading response `_meta` from MCP tools
+
+The MCP specification allows a server's `CallToolResult` to include a `_meta` object alongside `content` and `structuredContent`. The SDK captures it on the resulting `ToolCallOutputItem` as `mcp_response_meta`, so applications can read auxiliary payloads (chart configs, trace IDs, frontend-only state) without forwarding them to the model.
+
+`mcp_response_meta` is a deep copy of the server-returned dict and is never injected into model context — only `content` and `structuredContent` are. Use it for application-side consumers such as streaming UIs.
+
+```python
+from agents import Agent, Runner
+from agents.items import ToolCallOutputItem
+from agents.mcp import MCPServerStreamableHttp
+
+server = MCPServerStreamableHttp(
+    name="meta-emitting server",
+    params={"url": "http://localhost:8000/mcp"},
+)
+
+agent = Agent(name="assistant", mcp_servers=[server])
+result = await Runner.run(agent, input="show me a chart of Q1 sales")
+
+for item in result.new_items:
+    if isinstance(item, ToolCallOutputItem) and item.mcp_response_meta:
+        # e.g. {"tool_meta": {"type": "chart", "vis_config": {...}}}
+        frontend_payload = item.mcp_response_meta
+```
+
+When streaming, the same item is delivered as a `run_item_stream_event` with `name="tool_output"`; read `event.item.mcp_response_meta` on receipt.
+
 ### MCP tool outputs: text and images
 
 When an MCP tool returns image content, the SDK maps it to image tool output entries automatically. Mixed text/image responses are forwarded as a list of output items, so agents can consume MCP image results the same way they consume image output from regular function tools.

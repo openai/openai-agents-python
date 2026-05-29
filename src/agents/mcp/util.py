@@ -663,6 +663,10 @@ class MCPUtil:
         else:
             logger.debug(f"MCP tool {tool_name_for_display} returned {result}")
 
+        response_meta = getattr(result, "meta", None)
+        if isinstance(response_meta, dict) and response_meta and isinstance(context, ToolContext):
+            context._mcp_response_meta = copy.deepcopy(response_meta)
+
         # If structured content is requested and available, use it exclusively
         tool_output: ToolOutput
         if server.use_structured_content and result.structuredContent:
