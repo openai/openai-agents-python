@@ -453,7 +453,7 @@ def test_optional_sandbox_dataclass_constructor_field_order_is_stable(
         (
             "agents.extensions.sandbox.cloudflare",
             "CloudflareSandboxClientOptions",
-            ("worker_url", "api_key", "exposed_ports"),
+            ("worker_url", "api_key", "exposed_ports", "exposed_port_names"),
         ),
         (
             "agents.extensions.sandbox.daytona",
@@ -638,6 +638,7 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
                 "workspace_root_ready",
                 "worker_url",
                 "sandbox_id",
+                "exposed_port_names",
             ),
         ),
         (

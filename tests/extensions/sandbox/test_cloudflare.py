@@ -26,6 +26,7 @@ from agents.sandbox.errors import (
     ErrorCode,
     ExecTimeoutError,
     ExecTransportError,
+    ExposedPortUnavailableError,
     InvalidManifestPathError,
     MountConfigError,
     PtySessionNotFoundError,
@@ -206,11 +207,13 @@ def _make_state(
     worker_url: str = _WORKER_URL,
     sandbox_id: str = "abc123",
     manifest: Manifest | None = None,
+    exposed_ports: tuple[int, ...] = (),
 ) -> CloudflareSandboxSessionState:
     return CloudflareSandboxSessionState(
         session_id=uuid.uuid4(),
         manifest=manifest or Manifest(),
         snapshot=NoopSnapshot(id="snapshot"),
+        exposed_ports=exposed_ports,
         worker_url=worker_url,
         sandbox_id=sandbox_id,
     )
@@ -495,6 +498,32 @@ async def test_cloudflare_create_rejects_non_workspace_root() -> None:
         )
     assert exc_info.value.error_code is ErrorCode.SANDBOX_CONFIG_INVALID
     assert exc_info.value.context["manifest_root"] == "/tmp/app"
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_create_unions_exposed_port_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_request_sandbox_id(
+        self: CloudflareSandboxClient, worker_url: str, api_key: str | None, **kwargs: object
+    ) -> str:
+        return "server2generated3id4base32"
+
+    monkeypatch.setattr(CloudflareSandboxClient, "_request_sandbox_id", _fake_request_sandbox_id)
+
+    client = CloudflareSandboxClient()
+    session = await client.create(
+        options=CloudflareSandboxClientOptions(
+            worker_url=_WORKER_URL,
+            exposed_ports=(8080,),
+            exposed_port_names={9090: "app"},
+        ),
+        snapshot=None,
+    )
+
+    state = cast(CloudflareSandboxSessionState, session.state)
+    assert state.exposed_ports == (8080, 9090)
+    assert state.exposed_port_names == {9090: "app"}
 
 
 @pytest.mark.asyncio
@@ -1180,6 +1209,96 @@ async def test_cloudflare_persist_rejects_truncated_streamed_archive_payload() -
 
 
 @pytest.mark.asyncio
+async def test_cloudflare_resolve_exposed_port_without_name() -> None:
+    fake_http = _FakeHttp(
+        {
+            "POST /exposed-port/8080": _FakeResponse(
+                status=200,
+                json_body={
+                    "id": "quick-abc123",
+                    "port": 8080,
+                    "url": "https://abc.trycloudflare.com",
+                    "hostname": "abc.trycloudflare.com",
+                    "createdAt": "2026-05-29T00:00:00.000Z",
+                },
+            )
+        }
+    )
+    sess = _make_session(state=_make_state(exposed_ports=(8080,)), fake_http=fake_http)
+
+    endpoint = await sess.resolve_exposed_port(8080)
+
+    assert endpoint.host == "abc.trycloudflare.com"
+    assert endpoint.port == 443
+    assert endpoint.tls is True
+    assert endpoint.query == ""
+    assert fake_http.calls[-1]["method"] == "POST"
+    assert fake_http.calls[-1]["url"] == f"{_WORKER_URL}/v1/sandbox/abc123/exposed-port/8080"
+    assert "json" not in fake_http.calls[-1]
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_resolve_exposed_port_with_name() -> None:
+    fake_http = _FakeHttp(
+        {
+            "POST /exposed-port/9090": _FakeResponse(
+                status=200,
+                json_body={
+                    "id": "11111111-2222-3333-4444-555555555555",
+                    "port": 9090,
+                    "url": "https://app.example.com",
+                    "hostname": "app.example.com",
+                    "name": "app",
+                    "createdAt": "2026-05-29T00:00:00.000Z",
+                },
+            )
+        }
+    )
+    state = _make_state(exposed_ports=(9090,))
+    state.exposed_port_names = {9090: "app"}
+    sess = _make_session(state=state, fake_http=fake_http)
+
+    endpoint = await sess.resolve_exposed_port(9090)
+
+    assert endpoint.url_for("http") == "https://app.example.com/"
+    assert fake_http.calls[-1]["json"] == {"name": "app"}
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_resolve_exposed_port_maps_provider_errors() -> None:
+    fake_http = _FakeHttp(
+        {
+            "POST /exposed-port/8080": _FakeResponse(
+                status=502,
+                json_body={"error": "exposed port failed", "code": "exposed_port_error"},
+            )
+        }
+    )
+    sess = _make_session(state=_make_state(exposed_ports=(8080,)), fake_http=fake_http)
+
+    with pytest.raises(ExposedPortUnavailableError) as exc_info:
+        await sess.resolve_exposed_port(8080)
+
+    assert exc_info.value.context["backend"] == "cloudflare"
+    assert exc_info.value.context["http_status"] == 502
+    assert "exposed port failed" in str(exc_info.value.context["provider_error"])
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_resolve_exposed_port_rejects_malformed_response() -> None:
+    fake_http = _FakeHttp(
+        {"POST /exposed-port/8080": _FakeResponse(status=200, json_body={"url": "not-a-url"})}
+    )
+    sess = _make_session(state=_make_state(exposed_ports=(8080,)), fake_http=fake_http)
+
+    with pytest.raises(ExposedPortUnavailableError) as exc_info:
+        await sess.resolve_exposed_port(8080)
+
+    assert exc_info.value.context["backend"] == "cloudflare"
+    assert exc_info.value.context["provider_error"] == "invalid exposed port URL: 'not-a-url'"
+
+
+@pytest.mark.asyncio
 async def test_cloudflare_delete_calls_shutdown() -> None:
     fake_http = _FakeHttp()
     inner = _make_session(state=_make_state(), fake_http=fake_http)
@@ -1397,7 +1516,7 @@ async def test_cloudflare_read_validates_path_access() -> None:
 
     async def _tracking_normalize(path: Path | str, *, for_write: bool = False) -> Path:
         calls.append((Path(path).as_posix(), for_write))
-        # Fall back to synchronous normalize_path to avoid needing a real remote.
+        # Uses local path normalization; this test only tracks read() delegation.
         return sess.normalize_path(path, for_write=for_write)
 
     sess._validate_path_access = _tracking_normalize  # type: ignore[method-assign]

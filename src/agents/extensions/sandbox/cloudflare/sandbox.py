@@ -25,9 +25,10 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import aiohttp
+from pydantic import Field as PydanticField
 
 from ....sandbox.errors import (
     ConfigurationError,
@@ -305,12 +306,14 @@ class CloudflareSandboxClientOptions(BaseSandboxClientOptions):
     worker_url: str
     api_key: str | None = None
     exposed_ports: tuple[int, ...] = ()
+    exposed_port_names: dict[int, str] = PydanticField(default_factory=dict)
 
     def __init__(
         self,
         worker_url: str,
         api_key: str | None = None,
         exposed_ports: tuple[int, ...] = (),
+        exposed_port_names: dict[int, str] | None = None,
         *,
         type: Literal["cloudflare"] = "cloudflare",
     ) -> None:
@@ -319,6 +322,7 @@ class CloudflareSandboxClientOptions(BaseSandboxClientOptions):
             worker_url=worker_url,
             api_key=api_key,
             exposed_ports=exposed_ports,
+            exposed_port_names=exposed_port_names or {},
         )
 
 
@@ -326,6 +330,7 @@ class CloudflareSandboxSessionState(SandboxSessionState):
     type: Literal["cloudflare"] = "cloudflare"
     worker_url: str
     sandbox_id: str
+    exposed_port_names: dict[int, str] = PydanticField(default_factory=dict)
 
 
 @dataclass
@@ -425,20 +430,47 @@ class CloudflareSandboxSession(BaseSandboxSession):
         return await self._validate_remote_path_access(path, for_write=for_write)
 
     async def _resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
-        """Cloudflare sandboxes do not yet support exposed port resolution."""
-        raise ExposedPortUnavailableError(
-            port=port,
-            exposed_ports=self.state.exposed_ports,
-            reason="backend_unavailable",
-            context={
-                "backend": "cloudflare",
-                "detail": (
-                    "The Cloudflare sandbox worker does not currently expose "
-                    "a port-resolution endpoint. Exposed port support requires "
-                    "a compatible worker deployment."
-                ),
-            },
-        )
+        http = self._session()
+        url = self._url(f"exposed-port/{port}")
+        request_kwargs: dict[str, object] = {"timeout": self._request_timeout()}
+        name = self.state.exposed_port_names.get(port)
+        if name is not None:
+            request_kwargs["json"] = {"name": name}
+        try:
+            async with http.post(url, **request_kwargs) as resp:
+                if resp.status != 200:
+                    detail = await _read_cloudflare_response_body(resp)
+                    raise ExposedPortUnavailableError(
+                        port=port,
+                        exposed_ports=self.state.exposed_ports,
+                        reason="provider_error",
+                        context=_cloudflare_error_context(status=resp.status, detail=detail),
+                    )
+                data = await resp.json(content_type=None)
+                endpoint_url = data.get("url") if isinstance(data, dict) else None
+                parsed_url = urlparse(str(endpoint_url))
+                host = parsed_url.hostname
+                if not host or parsed_url.scheme not in {"http", "https"}:
+                    raise ValueError(f"invalid exposed port URL: {endpoint_url!r}")
+                tls = parsed_url.scheme == "https"
+                return ExposedPortEndpoint(
+                    host=host,
+                    port=parsed_url.port or (443 if tls else 80),
+                    tls=tls,
+                    query=parsed_url.query,
+                )
+        except ExposedPortUnavailableError:
+            raise
+        except Exception as e:
+            raise ExposedPortUnavailableError(
+                port=port,
+                exposed_ports=self.state.exposed_ports,
+                reason="provider_error",
+                context={
+                    "backend": "cloudflare",
+                    "provider_error": str(e),
+                },
+            ) from e
 
     async def mount_bucket(
         self,
@@ -1435,13 +1467,17 @@ class CloudflareSandboxClient(BaseSandboxClient[CloudflareSandboxClientOptions])
 
         session_id = uuid.uuid4()
         snapshot_instance = resolve_snapshot(snapshot, str(session_id))
+        exposed_ports = tuple(
+            dict.fromkeys((*options.exposed_ports, *options.exposed_port_names.keys()))
+        )
         state = CloudflareSandboxSessionState(
             session_id=session_id,
             manifest=manifest,
             snapshot=snapshot_instance,
             worker_url=options.worker_url.rstrip("/"),
             sandbox_id=sandbox_id,
-            exposed_ports=options.exposed_ports,
+            exposed_ports=exposed_ports,
+            exposed_port_names=dict(options.exposed_port_names),
         )
         inner = CloudflareSandboxSession(
             state=state,
