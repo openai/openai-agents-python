@@ -438,6 +438,7 @@ def test_convert_tools_basic_types_and_includes():
     assert web_params.get("user_location") == web_tool.user_location
     assert web_params.get("search_context_size") == web_tool.search_context_size
     assert "external_web_access" not in web_params
+    assert "search_content_types" not in web_params
     # Verify computer tool uses the GA built-in tool payload.
     comp_params = next(ct for ct in converted.tools if ct["type"] == "computer")
     assert comp_params == {"type": "computer"}
@@ -464,6 +465,40 @@ def test_convert_tools_includes_explicit_false_external_web_access() -> None:
             "user_location": None,
             "search_context_size": "medium",
             "external_web_access": False,
+        }
+    ]
+
+
+def test_convert_tools_forwards_web_search_content_types() -> None:
+    web_tool = WebSearchTool(search_content_types=["text", "image"])
+
+    converted = Converter.convert_tools([web_tool], handoffs=[], model="gpt-5.4")
+
+    assert converted.includes == ["web_search_call.results"]
+    assert converted.tools == [
+        {
+            "type": "web_search",
+            "filters": None,
+            "user_location": None,
+            "search_context_size": "medium",
+            "search_content_types": ["text", "image"],
+        }
+    ]
+
+
+def test_convert_tools_includes_results_for_image_only_web_search() -> None:
+    web_tool = WebSearchTool(search_content_types=["image"])
+
+    converted = Converter.convert_tools([web_tool], handoffs=[], model="gpt-5.4")
+
+    assert converted.includes == ["web_search_call.results"]
+    assert converted.tools == [
+        {
+            "type": "web_search",
+            "filters": None,
+            "user_location": None,
+            "search_context_size": "medium",
+            "search_content_types": ["image"],
         }
     ]
 
