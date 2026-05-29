@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Any, cast
@@ -1394,6 +1395,34 @@ async def test_concurrent_add_items_preserves_message_structure_for_file_db():
         assert len(rows) == len(expected_contents)
 
         session.close()
+
+
+async def test_add_items_raises_on_structure_metadata_failure(monkeypatch):
+    """Verify that add_items raises when structure metadata insertion fails.
+
+    Regression test for #3348: add_items() previously swallowed the exception
+    and reported success even when structure metadata could not be persisted.
+    """
+    session = AdvancedSQLiteSession(session_id="metadata_fail", create_tables=True)
+
+    # Force _insert_structure_metadata to raise.
+    def _raise(*args, **kwargs):
+        raise sqlite3.OperationalError("simulated metadata failure")
+
+    monkeypatch.setattr(session, "_insert_structure_metadata", _raise)
+
+    with pytest.raises(RuntimeError, match="Failed to persist structure metadata"):
+        await session.add_items([{"role": "user", "content": "hello"}])
+
+    # The orphaned message should have been cleaned up.
+    with session._locked_connection() as conn:
+        remaining = conn.execute(
+            f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()[0]
+
+    assert remaining == 0
+    session.close()
 
 
 async def test_output_tokens_details_persisted_when_input_details_missing():
