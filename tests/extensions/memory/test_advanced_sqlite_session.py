@@ -1396,6 +1396,44 @@ async def test_concurrent_add_items_preserves_message_structure_for_file_db():
         session.close()
 
 
+async def test_delete_branch_cleans_up_orphaned_messages():
+    """Verify that delete_branch removes messages only referenced by the deleted branch.
+
+    Regression test for #3346: delete_branch() previously left branch-only
+    messages in the messages table after removing their structure metadata.
+    """
+    session = AdvancedSQLiteSession(session_id="orphan_cleanup", create_tables=True)
+
+    # Add items to main branch.
+    await session.add_items([{"role": "user", "content": "Shared message"}])
+
+    # Create a branch from turn 1 and add a branch-only message.
+    await session.create_branch_from_turn(1, "feature_branch")
+    await session.add_items([{"role": "user", "content": "Branch-only message"}])
+
+    # Record total message count before deletion.
+    with session._locked_connection() as conn:
+        total_before = conn.execute(
+            f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()[0]
+
+    assert total_before == 2  # shared + branch-only
+
+    # Delete the feature branch.
+    await session.delete_branch("feature_branch", force=True)
+
+    # The branch-only message should now be removed from messages table.
+    with session._locked_connection() as conn:
+        total_after = conn.execute(
+            f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()[0]
+
+    assert total_after == 1  # only the shared message remains
+    session.close()
+
+
 async def test_output_tokens_details_persisted_when_input_details_missing():
     """Regression: output_tokens_details must persist even if input_tokens_details is None.
 

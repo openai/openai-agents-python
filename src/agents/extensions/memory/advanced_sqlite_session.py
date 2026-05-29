@@ -788,12 +788,18 @@ class AdvancedSQLiteSession(SQLiteSession):
 
                     conn.commit()
 
-                    return usage_deleted, structure_deleted
+                    # Clean up messages that are no longer referenced by any branch.
+                    orphaned_deleted = self._cleanup_orphaned_messages_sync(conn)
+                    if orphaned_deleted:
+                        conn.commit()
 
-        usage_deleted, structure_deleted = await asyncio.to_thread(_delete_sync)
+                    return usage_deleted, structure_deleted, orphaned_deleted
+
+        usage_deleted, structure_deleted, orphaned_deleted = await asyncio.to_thread(_delete_sync)
 
         self._logger.info(
-            f"Deleted branch '{branch_id}': {structure_deleted} message entries, {usage_deleted} usage entries"  # noqa: E501
+            f"Deleted branch '{branch_id}': {structure_deleted} structure entries, "
+            f"{usage_deleted} usage entries, {orphaned_deleted} orphaned messages removed"
         )
 
     async def list_branches(self) -> list[dict[str, Any]]:
