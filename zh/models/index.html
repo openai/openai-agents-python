@@ -1,0 +1,2608 @@
+
+<!doctype html>
+<html lang="zh" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+        <link rel="prev" href="../sandbox/memory/">
+      
+      
+        <link rel="next" href="../tools/">
+      
+      
+      <link rel="icon" href="../../images/favicon-platform.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.6.16">
+    
+    
+      
+        <title>模型 - OpenAI Agents SDK</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.7e37652d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.06af60db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#_1" class="md-skip">
+          跳转至
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="页眉">
+    <a href="../" title="OpenAI Agents SDK" class="md-header__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            OpenAI Agents SDK
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              模型
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+      <div class="md-header__option">
+  <div class="md-select">
+    
+    <button class="md-header__button md-icon" aria-label="选择当前语言">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m12.87 15.07-2.54-2.51.03-.03A17.5 17.5 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2zm-2.62 7 1.62-4.33L19.12 17z"/></svg>
+    </button>
+    <div class="md-select__inner">
+      <ul class="md-select__list">
+        
+          <li class="md-select__item">
+            <a href="../../models/" hreflang="en" class="md-select__link">
+              English
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../ja/models/" hreflang="ja" class="md-select__link">
+              日本語
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../ko/models/" hreflang="ko" class="md-select__link">
+              한국어
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="./" hreflang="zh" class="md-select__link">
+              简体中文
+            </a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+</div>
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="搜索" placeholder="搜索" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="查找">
+        
+        <button type="reset" class="md-search__icon md-icon" title="清空当前内容" aria-label="清空当前内容" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            正在初始化搜索引擎
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/openai/openai-agents-python" title="前往仓库" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="导航栏" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../" title="OpenAI Agents SDK" class="md-nav__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    OpenAI Agents SDK
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/openai/openai-agents-python" title="前往仓库" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    介绍
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    快速开始
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    配置
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    文档
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            文档
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    智能体
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_2" id="__nav_4_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    沙盒智能体
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_2">
+            <span class="md-nav__icon md-icon"></span>
+            沙盒智能体
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    快速入门
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    概念
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    沙箱客户端
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    智能体记忆
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    模型
+    
+  </span>
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    模型
+    
+  </span>
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="目录">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目录
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      模型设置选择
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai" class="md-nav__link">
+    <span class="md-ellipsis">
+      OpenAI模型
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="OpenAI模型">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      默认模型
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="默认模型">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#gpt-5" class="md-nav__link">
+    <span class="md-ellipsis">
+      GPT-5 模型
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#computertool" class="md-nav__link">
+    <span class="md-ellipsis">
+      ComputerTool 模型选择
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gpt-5_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      非 GPT-5 模型
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responses" class="md-nav__link">
+    <span class="md-ellipsis">
+      仅 Responses 支持的工具搜索特性
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responses-websocket" class="md-nav__link">
+    <span class="md-ellipsis">
+      Responses WebSocket 传输
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Responses WebSocket 传输">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      基本设置
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      提供商级或运行级设置
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#multiprovider" class="md-nav__link">
+    <span class="md-ellipsis">
+      使用 MultiProvider 的高级路由
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      注意事项
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      非OpenAI模型
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="非OpenAI模型">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#openai_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      非OpenAI提供商集成方式
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      单个工作流中的模型混用
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai-responses" class="md-nav__link">
+    <span class="md-ellipsis">
+      高级OpenAI Responses设置
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="高级OpenAI Responses设置">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#modelsettings" class="md-nav__link">
+    <span class="md-ellipsis">
+      常见高级 ModelSettings 选项
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#extra_args" class="md-nav__link">
+    <span class="md-ellipsis">
+      extra_args 的传递方式
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#runner" class="md-nav__link">
+    <span class="md-ellipsis">
+      由 Runner 管理的重试
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="由 Runner 管理的重试">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      安全边界
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#runner_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Runner 与智能体的合并行为
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      非OpenAI提供商故障排查
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="非OpenAI提供商故障排查">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#401" class="md-nav__link">
+    <span class="md-ellipsis">
+      追踪客户端错误 401
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responses-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      Responses API 支持
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#structured-outputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      Structured outputs 支持
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      跨提供商的模型混用
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_10" class="md-nav__link">
+    <span class="md-ellipsis">
+      第三方适配器
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="第三方适配器">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#any-llm" class="md-nav__link">
+    <span class="md-ellipsis">
+      Any-LLM
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#litellm" class="md-nav__link">
+    <span class="md-ellipsis">
+      LiteLLM
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    工具
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guardrails/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    安全防护措施
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../running_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    智能体运行
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    流式传输
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi_agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    智能体编排
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handoffs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    任务转移
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    结果
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../human_in_the_loop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    人在回路
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_12" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_12" id="__nav_4_12_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    会话
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_12_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_12">
+            <span class="md-nav__icon md-icon"></span>
+            会话
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    会话
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/sqlalchemy_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    SQLAlchemy 会话
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/advanced_sqlite_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    高级 SQLite 会话
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/encrypted_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    加密会话
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../context/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    上下文管理
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    用量
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Model context protocol (MCP)
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    追踪
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_17" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_17" id="__nav_4_17_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    实时智能体
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_17_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_17">
+            <span class="md-nav__icon md-icon"></span>
+            实时智能体
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    快速入门
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Realtime 智能体指南
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_18" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_18" id="__nav_4_18_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    语音智能体
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_18_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_18">
+            <span class="md-nav__icon md-icon"></span>
+            语音智能体
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    快速入门
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    管道与工作流
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    追踪
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../visualization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    智能体可视化
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../repl/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    REPL 实用工具
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    示例
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../release/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    发布流程/变更日志
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="目录">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目录
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      模型设置选择
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai" class="md-nav__link">
+    <span class="md-ellipsis">
+      OpenAI模型
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="OpenAI模型">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      默认模型
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="默认模型">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#gpt-5" class="md-nav__link">
+    <span class="md-ellipsis">
+      GPT-5 模型
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#computertool" class="md-nav__link">
+    <span class="md-ellipsis">
+      ComputerTool 模型选择
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gpt-5_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      非 GPT-5 模型
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responses" class="md-nav__link">
+    <span class="md-ellipsis">
+      仅 Responses 支持的工具搜索特性
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responses-websocket" class="md-nav__link">
+    <span class="md-ellipsis">
+      Responses WebSocket 传输
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Responses WebSocket 传输">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      基本设置
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      提供商级或运行级设置
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#multiprovider" class="md-nav__link">
+    <span class="md-ellipsis">
+      使用 MultiProvider 的高级路由
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      注意事项
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      非OpenAI模型
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="非OpenAI模型">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#openai_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      非OpenAI提供商集成方式
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      单个工作流中的模型混用
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai-responses" class="md-nav__link">
+    <span class="md-ellipsis">
+      高级OpenAI Responses设置
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="高级OpenAI Responses设置">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#modelsettings" class="md-nav__link">
+    <span class="md-ellipsis">
+      常见高级 ModelSettings 选项
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#extra_args" class="md-nav__link">
+    <span class="md-ellipsis">
+      extra_args 的传递方式
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#runner" class="md-nav__link">
+    <span class="md-ellipsis">
+      由 Runner 管理的重试
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="由 Runner 管理的重试">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      安全边界
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#runner_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Runner 与智能体的合并行为
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      非OpenAI提供商故障排查
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="非OpenAI提供商故障排查">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#401" class="md-nav__link">
+    <span class="md-ellipsis">
+      追踪客户端错误 401
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responses-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      Responses API 支持
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#structured-outputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      Structured outputs 支持
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      跨提供商的模型混用
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_10" class="md-nav__link">
+    <span class="md-ellipsis">
+      第三方适配器
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="第三方适配器">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#any-llm" class="md-nav__link">
+    <span class="md-ellipsis">
+      Any-LLM
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#litellm" class="md-nav__link">
+    <span class="md-ellipsis">
+      LiteLLM
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="_1">模型</h1>
+<p>Agents SDK开箱即用地支持两种形式的OpenAI模型：</p>
+<ul>
+<li><strong>推荐</strong>：<a class="autorefs autorefs-internal" title="OpenAIResponsesModel" href="../../ref/models/openai_responses/#agents.models.openai_responses.OpenAIResponsesModel"><code>OpenAIResponsesModel</code></a>，它使用新的<a href="https://platform.openai.com/docs/api-reference/responses">Responses API</a>调用OpenAI API。</li>
+<li><a class="autorefs autorefs-internal" title="OpenAIChatCompletionsModel" href="../../ref/models/openai_chatcompletions/#agents.models.openai_chatcompletions.OpenAIChatCompletionsModel"><code>OpenAIChatCompletionsModel</code></a>，它使用<a href="https://platform.openai.com/docs/api-reference/chat">Chat Completions API</a>调用OpenAI API。</li>
+</ul>
+<h2 id="_2">模型设置选择</h2>
+<p>从最符合你设置的最简单路径开始：</p>
+<table>
+<thead>
+<tr>
+<th>如果你想要...</th>
+<th>推荐路径</th>
+<th>了解更多</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>仅使用OpenAI模型</td>
+<td>使用默认OpenAI提供商和Responses模型路径</td>
+<td><a href="#openai-models">OpenAI模型</a></td>
+</tr>
+<tr>
+<td>通过 WebSocket 传输使用OpenAI Responses API</td>
+<td>保持Responses模型路径并启用 WebSocket 传输</td>
+<td><a href="#responses-websocket-transport">Responses WebSocket 传输</a></td>
+</tr>
+<tr>
+<td>使用一个非OpenAI提供商</td>
+<td>从内置提供商集成点开始</td>
+<td><a href="#non-openai-models">非OpenAI模型</a></td>
+</tr>
+<tr>
+<td>在多个智能体之间混用模型或提供商</td>
+<td>按每次运行或每个智能体选择提供商，并查看功能差异</td>
+<td><a href="#mixing-models-in-one-workflow">单个工作流中的模型混用</a>和<a href="#mixing-models-across-providers">跨提供商的模型混用</a></td>
+</tr>
+<tr>
+<td>调整高级OpenAI Responses请求设置</td>
+<td>在OpenAI Responses路径上使用 <code>ModelSettings</code></td>
+<td><a href="#advanced-openai-responses-settings">高级OpenAI Responses设置</a></td>
+</tr>
+<tr>
+<td>为非OpenAI或混合提供商路由使用第三方适配器</td>
+<td>比较受支持的 beta 适配器，并验证你计划上线的提供商路径</td>
+<td><a href="#third-party-adapters">第三方适配器</a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="openai">OpenAI模型</h2>
+<p>对于大多数仅使用OpenAI的应用，推荐路径是将字符串模型名称与默认OpenAI提供商配合使用，并保持在Responses模型路径上。</p>
+<p>如果在初始化 <code>Agent</code> 时未指定模型，则会使用默认模型。当前默认模型是 <a href="https://developers.openai.com/api/docs/models/gpt-5.4-mini"><code>gpt-5.4-mini</code></a>，并设置 <code>reasoning.effort="none"</code> 和 <code>verbosity="low"</code>，适用于低延迟智能体工作流。如果你具备访问权限，我们建议将智能体设置为 <a href="https://developers.openai.com/api/docs/models/gpt-5.5"><code>gpt-5.5</code></a>，以在保留显式 <code>model_settings</code> 的同时获得更高质量。</p>
+<p>如果你想切换到其他模型，例如 <a href="https://developers.openai.com/api/docs/models/gpt-5.5"><code>gpt-5.5</code></a>，有两种方式可以配置智能体。</p>
+<h3 id="_3">默认模型</h3>
+<p>首先，如果你想让所有未设置自定义模型的智能体始终使用某个特定模型，请在运行智能体之前设置 <code>OPENAI_DEFAULT_MODEL</code> 环境变量。</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OPENAI_DEFAULT_MODEL</span><span class="o">=</span>gpt-5.5
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>python3<span class="w"> </span>my_awesome_agent.py
+</span></code></pre></div>
+<p>其次，你可以通过 <code>RunConfig</code> 为一次运行设置默认模型。如果没有为某个智能体设置模型，则会使用这次运行的模型。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">RunConfig</span><span class="p">,</span> <span class="n">Runner</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You&#39;re a helpful agent.&quot;</span><span class="p">,</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="p">)</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    <span class="s2">&quot;Hello&quot;</span><span class="p">,</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5.5&quot;</span><span class="p">),</span>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="p">)</span>
+</span></code></pre></div>
+<h4 id="gpt-5">GPT-5 模型</h4>
+<p>当你以这种方式使用任何 GPT-5 模型（例如 <a href="https://developers.openai.com/api/docs/models/gpt-5.5"><code>gpt-5.5</code></a>）时，SDK会应用默认的 <code>ModelSettings</code>。它会设置最适合大多数使用场景的配置。若要调整默认模型的推理强度，请传入你自己的 <code>ModelSettings</code>：</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">openai.types.shared</span><span class="w"> </span><span class="kn">import</span> <span class="n">Reasoning</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">ModelSettings</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">my_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;My Agent&quot;</span><span class="p">,</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You&#39;re a helpful agent.&quot;</span><span class="p">,</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>    <span class="c1"># If OPENAI_DEFAULT_MODEL=gpt-5.5 is set, passing only model_settings works.</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>    <span class="c1"># It&#39;s also fine to pass a GPT-5 model name explicitly:</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5.5&quot;</span><span class="p">,</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>    <span class="n">model_settings</span><span class="o">=</span><span class="n">ModelSettings</span><span class="p">(</span><span class="n">reasoning</span><span class="o">=</span><span class="n">Reasoning</span><span class="p">(</span><span class="n">effort</span><span class="o">=</span><span class="s2">&quot;high&quot;</span><span class="p">),</span> <span class="n">verbosity</span><span class="o">=</span><span class="s2">&quot;low&quot;</span><span class="p">)</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>为了降低延迟，建议在 GPT-5 模型中使用 <code>reasoning.effort="none"</code>。</p>
+<h4 id="computertool">ComputerTool 模型选择</h4>
+<p>如果智能体包含 <a class="autorefs autorefs-internal" title="ComputerTool
+
+
+  
+      dataclass
+  " href="../../ref/tool/#agents.tool.ComputerTool"><code>ComputerTool</code></a>，实际Responses请求上的生效模型会决定SDK发送哪种计算机工具 payload。显式的 <code>gpt-5.5</code> 请求会使用 GA 内置 <code>computer</code> 工具，而显式的 <code>computer-use-preview</code> 请求会保留较旧的 <code>computer_use_preview</code> payload。</p>
+<p>由 prompt 管理的调用是主要例外。如果 prompt 模板拥有模型，并且SDK从请求中省略 <code>model</code>，SDK会默认使用兼容预览版的计算机 payload，以免猜测该 prompt 固定了哪个模型。若要在该流程中保持 GA 路径，请在请求中显式设置 <code>model="gpt-5.5"</code>，或使用 <code>ModelSettings(tool_choice="computer")</code> 或 <code>ModelSettings(tool_choice="computer_use")</code> 强制使用 GA 选择器。</p>
+<p>注册了 <a class="autorefs autorefs-internal" title="ComputerTool
+
+
+  
+      dataclass
+  " href="../../ref/tool/#agents.tool.ComputerTool"><code>ComputerTool</code></a> 时，<code>tool_choice="computer"</code>、<code>"computer_use"</code> 和 <code>"computer_use_preview"</code> 会被规范化为与生效请求模型匹配的内置选择器。如果没有注册 <code>ComputerTool</code>，这些字符串会继续像普通函数名称一样工作。</p>
+<p>兼容预览版的请求必须预先序列化 <code>environment</code> 和显示尺寸，因此使用 <a class="autorefs autorefs-internal" title="ComputerProvider
+
+
+  
+      dataclass
+  " href="../../ref/tool/#agents.tool.ComputerProvider"><code>ComputerProvider</code></a> 工厂的 prompt 管理流程，应传入一个具体的 <code>Computer</code> 或 <code>AsyncComputer</code> 实例，或在发送请求前强制使用 GA 选择器。完整迁移详情请参见<a href="../tools/#computertool-and-the-responses-computer-tool">工具</a>。</p>
+<h4 id="gpt-5_1">非 GPT-5 模型</h4>
+<p>如果传入非 GPT-5 模型名称且没有自定义 <code>model_settings</code>，SDK会回退到与任何模型兼容的通用 <code>ModelSettings</code>。</p>
+<h3 id="responses">仅 Responses 支持的工具搜索特性</h3>
+<p>以下工具特性仅OpenAI Responses模型支持：</p>
+<ul>
+<li><a class="autorefs autorefs-internal" title="ToolSearchTool
+
+
+  
+      dataclass
+  " href="../../ref/tool/#agents.tool.ToolSearchTool"><code>ToolSearchTool</code></a></li>
+<li><a class="autorefs autorefs-internal" title="tool_namespace" href="../../ref/tool/#agents.tool.tool_namespace"><code>tool_namespace()</code></a></li>
+<li><code>@function_tool(defer_loading=True)</code> 以及其他延迟加载的Responses工具接口</li>
+</ul>
+<p>Chat Completions模型和非Responses后端会拒绝这些特性。使用延迟加载工具时，请向智能体添加 <code>ToolSearchTool()</code>，并让模型通过 <code>auto</code> 或 <code>required</code> tool choice 加载工具，而不是强制使用裸命名空间名称或仅延迟加载的函数名称。设置详情和当前约束请参见<a href="../tools/#hosted-tool-search">工具</a>。</p>
+<h3 id="responses-websocket">Responses WebSocket 传输</h3>
+<p>默认情况下，OpenAI Responses API请求使用 HTTP 传输。使用OpenAI支持的模型时，你可以选择启用 WebSocket 传输。</p>
+<h4 id="_4">基本设置</h4>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_default_openai_responses_transport</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">set_default_openai_responses_transport</span><span class="p">(</span><span class="s2">&quot;websocket&quot;</span><span class="p">)</span>
+</span></code></pre></div>
+<p>这会影响由默认OpenAI提供商解析的OpenAI Responses模型（包括诸如 <code>"gpt-5.5"</code> 之类的字符串模型名称）。</p>
+<p>传输选择发生在SDK将模型名称解析为模型实例时。如果传入具体的 <a class="autorefs autorefs-internal" title="Model" href="../../ref/models/interface/#agents.models.interface.Model"><code>Model</code></a> 对象，它的传输已经固定：<a class="autorefs autorefs-internal" title="OpenAIResponsesWSModel" href="../../ref/models/openai_responses/#agents.models.openai_responses.OpenAIResponsesWSModel"><code>OpenAIResponsesWSModel</code></a> 使用 WebSocket，<a class="autorefs autorefs-internal" title="OpenAIResponsesModel" href="../../ref/models/openai_responses/#agents.models.openai_responses.OpenAIResponsesModel"><code>OpenAIResponsesModel</code></a> 使用 HTTP，而 <a class="autorefs autorefs-internal" title="OpenAIChatCompletionsModel" href="../../ref/models/openai_chatcompletions/#agents.models.openai_chatcompletions.OpenAIChatCompletionsModel"><code>OpenAIChatCompletionsModel</code></a> 保持在Chat Completions上。如果传入 <code>RunConfig(model_provider=...)</code>，则由该提供商控制传输选择，而不是使用全局默认值。</p>
+<h4 id="_5">提供商级或运行级设置</h4>
+<p>你也可以按提供商或按运行配置 WebSocket 传输：</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">OpenAIProvider</span><span class="p">,</span> <span class="n">RunConfig</span><span class="p">,</span> <span class="n">Runner</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="n">provider</span> <span class="o">=</span> <span class="n">OpenAIProvider</span><span class="p">(</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>    <span class="n">use_responses_websocket</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>    <span class="c1"># Optional; if omitted, OPENAI_WEBSOCKET_BASE_URL is used when set.</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>    <span class="n">websocket_base_url</span><span class="o">=</span><span class="s2">&quot;wss://your-proxy.example/v1&quot;</span><span class="p">,</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>    <span class="c1"># Optional low-level websocket keepalive settings.</span>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>    <span class="n">responses_websocket_options</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;ping_interval&quot;</span><span class="p">:</span> <span class="mf">20.0</span><span class="p">,</span> <span class="s2">&quot;ping_timeout&quot;</span><span class="p">:</span> <span class="mf">60.0</span><span class="p">},</span>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="p">)</span>
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>
+</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">)</span>
+</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-4-13"><a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a>    <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-4-14"><a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a>    <span class="s2">&quot;Hello&quot;</span><span class="p">,</span>
+</span><span id="__span-4-15"><a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">model_provider</span><span class="o">=</span><span class="n">provider</span><span class="p">),</span>
+</span><span id="__span-4-16"><a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>OpenAI支持的提供商还接受可选的智能体注册配置。这是一个高级选项，适用于你的OpenAI设置需要提供商级注册元数据（例如 harness ID）的场景。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>    <span class="n">Agent</span><span class="p">,</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>    <span class="n">OpenAIAgentRegistrationConfig</span><span class="p">,</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>    <span class="n">OpenAIProvider</span><span class="p">,</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="n">RunConfig</span><span class="p">,</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    <span class="n">Runner</span><span class="p">,</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="p">)</span>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>
+</span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="n">provider</span> <span class="o">=</span> <span class="n">OpenAIProvider</span><span class="p">(</span>
+</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>    <span class="n">use_responses_websocket</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>    <span class="n">agent_registration</span><span class="o">=</span><span class="n">OpenAIAgentRegistrationConfig</span><span class="p">(</span><span class="n">harness_id</span><span class="o">=</span><span class="s2">&quot;your-harness-id&quot;</span><span class="p">),</span>
+</span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a><span class="p">)</span>
+</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>
+</span><span id="__span-5-14"><a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">)</span>
+</span><span id="__span-5-15"><a id="__codelineno-5-15" name="__codelineno-5-15" href="#__codelineno-5-15"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-5-16"><a id="__codelineno-5-16" name="__codelineno-5-16" href="#__codelineno-5-16"></a>    <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-5-17"><a id="__codelineno-5-17" name="__codelineno-5-17" href="#__codelineno-5-17"></a>    <span class="s2">&quot;Hello&quot;</span><span class="p">,</span>
+</span><span id="__span-5-18"><a id="__codelineno-5-18" name="__codelineno-5-18" href="#__codelineno-5-18"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">model_provider</span><span class="o">=</span><span class="n">provider</span><span class="p">),</span>
+</span><span id="__span-5-19"><a id="__codelineno-5-19" name="__codelineno-5-19" href="#__codelineno-5-19"></a><span class="p">)</span>
+</span></code></pre></div>
+<h4 id="multiprovider">使用 <code>MultiProvider</code> 的高级路由</h4>
+<p>如果需要基于前缀的模型路由（例如在同一次运行中混用 <code>openai/...</code> 和 <code>any-llm/...</code> 模型名称），请使用 <a class="autorefs autorefs-internal" title="MultiProvider" href="../ref/models/multi_provider/#agents.models.multi_provider.MultiProvider"><code>MultiProvider</code></a>，并在那里设置 <code>openai_use_responses_websocket=True</code>。</p>
+<p><code>MultiProvider</code> 保留了两个历史默认行为：</p>
+<ul>
+<li><code>openai/...</code> 被视为OpenAI提供商的别名，因此 <code>openai/gpt-4.1</code> 会被路由为模型 <code>gpt-4.1</code>。</li>
+<li>未知前缀会引发 <code>UserError</code>，而不是被透传。</li>
+</ul>
+<p>当你将OpenAI提供商指向期望字面命名空间模型 ID 的OpenAI兼容端点时，请显式选择透传行为。在启用 WebSocket 的设置中，也请在 <code>MultiProvider</code> 上保留 <code>openai_use_responses_websocket=True</code>：</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">MultiProvider</span><span class="p">,</span> <span class="n">RunConfig</span><span class="p">,</span> <span class="n">Runner</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="n">provider</span> <span class="o">=</span> <span class="n">MultiProvider</span><span class="p">(</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>    <span class="n">openai_base_url</span><span class="o">=</span><span class="s2">&quot;https://openrouter.ai/api/v1&quot;</span><span class="p">,</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>    <span class="n">openai_api_key</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>    <span class="n">openai_use_responses_websocket</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>    <span class="n">openai_prefix_mode</span><span class="o">=</span><span class="s2">&quot;model_id&quot;</span><span class="p">,</span>
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>    <span class="n">unknown_prefix_mode</span><span class="o">=</span><span class="s2">&quot;model_id&quot;</span><span class="p">,</span>
+</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="p">)</span>
+</span><span id="__span-6-10"><a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>
+</span><span id="__span-6-11"><a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-6-12"><a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span>
+</span><span id="__span-6-13"><a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Be concise.&quot;</span><span class="p">,</span>
+</span><span id="__span-6-14"><a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;openai/gpt-4.1&quot;</span><span class="p">,</span>
+</span><span id="__span-6-15"><a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a><span class="p">)</span>
+</span><span id="__span-6-16"><a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a>
+</span><span id="__span-6-17"><a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-6-18"><a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a>    <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-6-19"><a id="__codelineno-6-19" name="__codelineno-6-19" href="#__codelineno-6-19"></a>    <span class="s2">&quot;Hello&quot;</span><span class="p">,</span>
+</span><span id="__span-6-20"><a id="__codelineno-6-20" name="__codelineno-6-20" href="#__codelineno-6-20"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">model_provider</span><span class="o">=</span><span class="n">provider</span><span class="p">),</span>
+</span><span id="__span-6-21"><a id="__codelineno-6-21" name="__codelineno-6-21" href="#__codelineno-6-21"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>当后端期望字面 <code>openai/...</code> 字符串时，请使用 <code>openai_prefix_mode="model_id"</code>。当后端期望其他命名空间模型 ID（例如 <code>openrouter/openai/gpt-4.1-mini</code>）时，请使用 <code>unknown_prefix_mode="model_id"</code>。这些选项也适用于 WebSocket 传输之外的 <code>MultiProvider</code>；此示例保持启用 WebSocket，因为它是本节所述传输设置的一部分。同样的选项也可用于 <a class="autorefs autorefs-internal" href="../../ref/responses_websocket_session/#agents.responses_websocket_session"><code>responses_websocket_session()</code></a>。</p>
+<p>如果你在通过 <code>MultiProvider</code> 路由时需要相同的提供商级注册元数据，请传入 <code>openai_agent_registration=OpenAIAgentRegistrationConfig(...)</code>，它会被转发到底层OpenAI提供商。</p>
+<p>如果你使用自定义OpenAI兼容端点或代理，WebSocket 传输还需要兼容的 WebSocket <code>/responses</code> 端点。在这些设置中，你可能需要显式设置 <code>websocket_base_url</code>。</p>
+<h4 id="_6">注意事项</h4>
+<ul>
+<li>这是通过 WebSocket 传输使用的Responses API，而不是 <a href="../realtime/guide/">Realtime API</a>。它不适用于Chat Completions或非OpenAI提供商，除非它们支持Responses WebSocket <code>/responses</code> 端点。</li>
+<li>如果你的环境中尚未提供 <code>websockets</code> 包，请安装它。</li>
+<li>启用 WebSocket 传输后，你可以直接使用 <a class="autorefs autorefs-internal" title="run_streamed
+
+
+  
+      classmethod
+  " href="../../ref/run/#agents.run.Runner.run_streamed"><code>Runner.run_streamed()</code></a>。对于希望在多个轮次（以及嵌套的智能体作为工具调用）之间复用同一个 WebSocket 连接的多轮工作流，建议使用 <a class="autorefs autorefs-internal" href="../../ref/responses_websocket_session/#agents.responses_websocket_session"><code>responses_websocket_session()</code></a> 辅助函数。请参见<a href="../running_agents/">运行智能体</a>指南和 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/basic/stream_ws.py"><code>examples/basic/stream_ws.py</code></a>。</li>
+<li>对于长时间推理轮次或存在延迟尖峰的网络，请使用 <code>responses_websocket_options</code> 自定义 WebSocket 保活行为。增大 <code>ping_timeout</code> 以容忍延迟的 pong 帧，或设置 <code>ping_timeout=None</code> 以在保持 ping 启用的同时禁用心跳超时。当可靠性比 WebSocket 延迟更重要时，请优先使用 HTTP/SSE 传输。</li>
+</ul>
+<h2 id="openai_1">非OpenAI模型</h2>
+<p>如果需要非OpenAI提供商，请从SDK的内置提供商集成点开始。在许多设置中，这已经足够，无需添加第三方适配器。每种模式的代码示例位于 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/">examples/model_providers</a>。</p>
+<h3 id="openai_2">非OpenAI提供商集成方式</h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>适用场景</th>
+<th>范围</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a class="autorefs autorefs-internal" title="set_default_openai_client" href="../../ref/#agents.set_default_openai_client"><code>set_default_openai_client</code></a></td>
+<td>一个OpenAI兼容端点应作为大多数或所有智能体的默认端点</td>
+<td>全局默认</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="ModelProvider" href="../../ref/models/interface/#agents.models.interface.ModelProvider"><code>ModelProvider</code></a></td>
+<td>一个自定义提供商应应用于单次运行</td>
+<td>按运行</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="model
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../../ref/agent/#agents.agent.Agent.model"><code>Agent.model</code></a></td>
+<td>不同智能体需要不同的提供商或具体模型对象</td>
+<td>按智能体</td>
+</tr>
+<tr>
+<td>第三方适配器</td>
+<td>你需要内置路径无法提供的、由适配器管理的提供商覆盖范围或路由</td>
+<td>参见<a href="#third-party-adapters">第三方适配器</a></td>
+</tr>
+</tbody>
+</table>
+<p>你可以通过这些内置路径集成其他LLM提供商：</p>
+<ol>
+<li><a class="autorefs autorefs-internal" title="set_default_openai_client" href="../../ref/#agents.set_default_openai_client"><code>set_default_openai_client</code></a> 适用于希望全局使用某个 <code>AsyncOpenAI</code> 实例作为LLM客户端的场景。这适用于LLM提供商拥有OpenAI兼容 API 端点，并且你可以设置 <code>base_url</code> 和 <code>api_key</code> 的情况。可配置的代码示例请参见 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_global.py">examples/model_providers/custom_example_global.py</a>。</li>
+<li><a class="autorefs autorefs-internal" title="ModelProvider" href="../../ref/models/interface/#agents.models.interface.ModelProvider"><code>ModelProvider</code></a> 位于 <code>Runner.run</code> 级别。这让你可以声明“在本次运行中为所有智能体使用自定义模型提供商”。可配置的代码示例请参见 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_provider.py">examples/model_providers/custom_example_provider.py</a>。</li>
+<li><a class="autorefs autorefs-internal" title="model
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../../ref/agent/#agents.agent.Agent.model"><code>Agent.model</code></a> 让你可以在特定智能体实例上指定模型。这使你能够为不同智能体混合搭配不同提供商。可配置的代码示例请参见 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_agent.py">examples/model_providers/custom_example_agent.py</a>。</li>
+</ol>
+<p>如果你没有来自 <code>platform.openai.com</code> 的 API key，我们建议通过 <code>set_tracing_disabled()</code> 禁用追踪，或设置<a href="../tracing/">其他追踪进程</a>。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">AsyncOpenAI</span><span class="p">,</span> <span class="n">OpenAIChatCompletionsModel</span><span class="p">,</span> <span class="n">set_tracing_disabled</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">set_tracing_disabled</span><span class="p">(</span><span class="n">disabled</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="n">client</span> <span class="o">=</span> <span class="n">AsyncOpenAI</span><span class="p">(</span><span class="n">api_key</span><span class="o">=</span><span class="s2">&quot;Api_Key&quot;</span><span class="p">,</span> <span class="n">base_url</span><span class="o">=</span><span class="s2">&quot;Base URL of Provider&quot;</span><span class="p">)</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="n">model</span> <span class="o">=</span> <span class="n">OpenAIChatCompletionsModel</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;Model_Name&quot;</span><span class="p">,</span> <span class="n">openai_client</span><span class="o">=</span><span class="n">client</span><span class="p">)</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="n">agent</span><span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Helping Agent&quot;</span><span class="p">,</span> <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You are a Helping Agent&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">)</span>
+</span></code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>在这些代码示例中，我们使用Chat Completions API/模型，因为许多LLM提供商仍不支持Responses API。如果你的LLM提供商支持它，我们建议使用Responses。</p>
+</div>
+<h2 id="_7">单个工作流中的模型混用</h2>
+<p>在单个工作流中，你可能希望为每个智能体使用不同模型。例如，你可以使用更小、更快的模型进行初筛，同时使用更大、能力更强的模型处理复杂任务。配置 <a class="autorefs autorefs-internal" title="Agent
+
+
+  
+      dataclass
+  " href="../ref/agent/#agents.agent.Agent"><code>Agent</code></a> 时，你可以通过以下任一方式选择特定模型：</p>
+<ol>
+<li>传入模型名称。</li>
+<li>传入任意模型名称 + 可将该名称映射到 Model 实例的 <a class="autorefs autorefs-internal" title="ModelProvider" href="../../ref/models/interface/#agents.models.interface.ModelProvider"><code>ModelProvider</code></a>。</li>
+<li>直接提供 <a class="autorefs autorefs-internal" title="Model" href="../../ref/models/interface/#agents.models.interface.Model"><code>Model</code></a> 实现。</li>
+</ol>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>虽然我们的SDK同时支持 <a class="autorefs autorefs-internal" title="OpenAIResponsesModel" href="../../ref/models/openai_responses/#agents.models.openai_responses.OpenAIResponsesModel"><code>OpenAIResponsesModel</code></a> 和 <a class="autorefs autorefs-internal" title="OpenAIChatCompletionsModel" href="../../ref/models/openai_chatcompletions/#agents.models.openai_chatcompletions.OpenAIChatCompletionsModel"><code>OpenAIChatCompletionsModel</code></a> 这两种形态，但我们建议每个工作流使用单一模型形态，因为这两种形态支持的功能和工具集合不同。如果你的工作流需要混合搭配模型形态，请确保你使用的所有功能在两者上都可用。</p>
+</div>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">AsyncOpenAI</span><span class="p">,</span> <span class="n">OpenAIChatCompletionsModel</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="n">spanish_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Spanish agent&quot;</span><span class="p">,</span>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You only speak Spanish.&quot;</span><span class="p">,</span>
+</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5-mini&quot;</span><span class="p">,</span> <span class="c1"># (1)!</span>
+</span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a><span class="p">)</span>
+</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>
+</span><span id="__span-8-10"><a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="n">english_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-8-11"><a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;English agent&quot;</span><span class="p">,</span>
+</span><span id="__span-8-12"><a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You only speak English&quot;</span><span class="p">,</span>
+</span><span id="__span-8-13"><a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a>    <span class="n">model</span><span class="o">=</span><span class="n">OpenAIChatCompletionsModel</span><span class="p">(</span> <span class="c1"># (2)!</span>
+</span><span id="__span-8-14"><a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a>        <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5-nano&quot;</span><span class="p">,</span>
+</span><span id="__span-8-15"><a id="__codelineno-8-15" name="__codelineno-8-15" href="#__codelineno-8-15"></a>        <span class="n">openai_client</span><span class="o">=</span><span class="n">AsyncOpenAI</span><span class="p">()</span>
+</span><span id="__span-8-16"><a id="__codelineno-8-16" name="__codelineno-8-16" href="#__codelineno-8-16"></a>    <span class="p">),</span>
+</span><span id="__span-8-17"><a id="__codelineno-8-17" name="__codelineno-8-17" href="#__codelineno-8-17"></a><span class="p">)</span>
+</span><span id="__span-8-18"><a id="__codelineno-8-18" name="__codelineno-8-18" href="#__codelineno-8-18"></a>
+</span><span id="__span-8-19"><a id="__codelineno-8-19" name="__codelineno-8-19" href="#__codelineno-8-19"></a><span class="n">triage_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-8-20"><a id="__codelineno-8-20" name="__codelineno-8-20" href="#__codelineno-8-20"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Triage agent&quot;</span><span class="p">,</span>
+</span><span id="__span-8-21"><a id="__codelineno-8-21" name="__codelineno-8-21" href="#__codelineno-8-21"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Handoff to the appropriate agent based on the language of the request.&quot;</span><span class="p">,</span>
+</span><span id="__span-8-22"><a id="__codelineno-8-22" name="__codelineno-8-22" href="#__codelineno-8-22"></a>    <span class="n">handoffs</span><span class="o">=</span><span class="p">[</span><span class="n">spanish_agent</span><span class="p">,</span> <span class="n">english_agent</span><span class="p">],</span>
+</span><span id="__span-8-23"><a id="__codelineno-8-23" name="__codelineno-8-23" href="#__codelineno-8-23"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5.5&quot;</span><span class="p">,</span>
+</span><span id="__span-8-24"><a id="__codelineno-8-24" name="__codelineno-8-24" href="#__codelineno-8-24"></a><span class="p">)</span>
+</span><span id="__span-8-25"><a id="__codelineno-8-25" name="__codelineno-8-25" href="#__codelineno-8-25"></a>
+</span><span id="__span-8-26"><a id="__codelineno-8-26" name="__codelineno-8-26" href="#__codelineno-8-26"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+</span><span id="__span-8-27"><a id="__codelineno-8-27" name="__codelineno-8-27" href="#__codelineno-8-27"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">triage_agent</span><span class="p">,</span> <span class="nb">input</span><span class="o">=</span><span class="s2">&quot;Hola, ¿cómo estás?&quot;</span><span class="p">)</span>
+</span><span id="__span-8-28"><a id="__codelineno-8-28" name="__codelineno-8-28" href="#__codelineno-8-28"></a>    <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>
+</span></code></pre></div>
+<ol>
+<li>直接设置OpenAI模型的名称。</li>
+<li>提供 <a class="autorefs autorefs-internal" title="Model" href="../../ref/models/interface/#agents.models.interface.Model"><code>Model</code></a> 实现。</li>
+</ol>
+<p>当你想进一步配置智能体所使用的模型时，可以传入 [<code>ModelSettings</code>][agents.models.interface.ModelSettings]，它提供了可选的模型配置参数，例如 temperature。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">ModelSettings</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="n">english_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;English agent&quot;</span><span class="p">,</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You only speak English&quot;</span><span class="p">,</span>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-4.1&quot;</span><span class="p">,</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>    <span class="n">model_settings</span><span class="o">=</span><span class="n">ModelSettings</span><span class="p">(</span><span class="n">temperature</span><span class="o">=</span><span class="mf">0.1</span><span class="p">),</span>
+</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="p">)</span>
+</span></code></pre></div>
+<h2 id="openai-responses">高级OpenAI Responses设置</h2>
+<p>当你使用OpenAI Responses路径并需要更多控制时，请从 <code>ModelSettings</code> 开始。</p>
+<h3 id="modelsettings">常见高级 <code>ModelSettings</code> 选项</h3>
+<p>使用OpenAI Responses API时，一些请求字段已经有直接对应的 <code>ModelSettings</code> 字段，因此不需要为它们使用 <code>extra_args</code>。</p>
+<ul>
+<li><code>parallel_tool_calls</code>：允许或禁止在同一轮次中进行多个工具调用。</li>
+<li><code>truncation</code>：设置为 <code>"auto"</code> 可让Responses API在上下文将要溢出时丢弃最早的对话项，而不是失败。</li>
+<li><code>store</code>：控制生成的响应是否存储在服务端以便之后检索。这对于依赖响应 ID 的后续工作流，以及在 <code>store=False</code> 时可能需要回退到本地输入的会话压缩流程很重要。</li>
+<li><code>context_management</code>：配置服务端上下文处理，例如带有 <code>compact_threshold</code> 的Responses压缩。</li>
+<li><code>prompt_cache_retention</code>：更长时间保留缓存的 prompt 前缀，例如使用 <code>"24h"</code>。</li>
+<li><code>response_include</code>：请求更丰富的响应 payload，例如 <code>web_search_call.action.sources</code>、<code>file_search_call.results</code> 或 <code>reasoning.encrypted_content</code>。</li>
+<li><code>top_logprobs</code>：请求输出文本的 top-token logprobs。SDK还会自动添加 <code>message.output_text.logprobs</code>。</li>
+<li><code>retry</code>：为模型调用选择启用由 runner 管理的重试设置。参见<a href="#runner-managed-retries">由 Runner 管理的重试</a>。</li>
+</ul>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">ModelSettings</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="n">research_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Research agent&quot;</span><span class="p">,</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5.5&quot;</span><span class="p">,</span>
+</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>    <span class="n">model_settings</span><span class="o">=</span><span class="n">ModelSettings</span><span class="p">(</span>
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>        <span class="n">parallel_tool_calls</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a>        <span class="n">truncation</span><span class="o">=</span><span class="s2">&quot;auto&quot;</span><span class="p">,</span>
+</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>        <span class="n">store</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>        <span class="n">context_management</span><span class="o">=</span><span class="p">[{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;compaction&quot;</span><span class="p">,</span> <span class="s2">&quot;compact_threshold&quot;</span><span class="p">:</span> <span class="mi">200000</span><span class="p">}],</span>
+</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a>        <span class="n">prompt_cache_retention</span><span class="o">=</span><span class="s2">&quot;24h&quot;</span><span class="p">,</span>
+</span><span id="__span-10-12"><a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a>        <span class="n">response_include</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;web_search_call.action.sources&quot;</span><span class="p">],</span>
+</span><span id="__span-10-13"><a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a>        <span class="n">top_logprobs</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+</span><span id="__span-10-14"><a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a>    <span class="p">),</span>
+</span><span id="__span-10-15"><a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>当你设置 <code>store=False</code> 时，Responses API不会保留该响应以供之后进行服务端检索。这对于无状态或零数据保留风格的流程很有用，但也意味着原本会复用响应 ID 的功能需要依赖本地管理的状态。例如，当最后一个响应未被存储时，<a class="autorefs autorefs-internal" title="OpenAIResponsesCompactionSession" href="../../ref/memory/openai_responses_compaction_session/#agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession"><code>OpenAIResponsesCompactionSession</code></a> 会将其默认的 <code>"auto"</code> 压缩路径切换为基于输入的压缩。请参见<a href="../sessions/#openai-responses-compaction-sessions">会话指南</a>。</p>
+<p>服务端压缩不同于 <a class="autorefs autorefs-internal" title="OpenAIResponsesCompactionSession" href="../../ref/memory/openai_responses_compaction_session/#agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession"><code>OpenAIResponsesCompactionSession</code></a>。<code>context_management=[{"type": "compaction", "compact_threshold": ...}]</code> 会随每个Responses API请求一起发送，并且当渲染后的上下文超过阈值时，API可以将压缩项作为响应的一部分发出。<code>OpenAIResponsesCompactionSession</code> 会在轮次之间调用独立的 <code>responses.compact</code> 端点，并重写本地会话历史。</p>
+<h3 id="extra_args"><code>extra_args</code> 的传递方式</h3>
+<p>当你需要提供商特定的请求字段，或SDK尚未在顶层直接暴露的较新请求字段时，请使用 <code>extra_args</code>。</p>
+<p>此外，当你使用OpenAI的Responses API时，<a href="https://platform.openai.com/docs/api-reference/responses/create">还有一些其他可选参数</a>（例如 <code>user</code>、<code>service_tier</code> 等）。如果它们在顶层不可用，你也可以使用 <code>extra_args</code> 传入它们。不要同时通过直接的 <code>ModelSettings</code> 字段设置相同请求字段。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">ModelSettings</span>
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="n">english_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;English agent&quot;</span><span class="p">,</span>
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You only speak English&quot;</span><span class="p">,</span>
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-4.1&quot;</span><span class="p">,</span>
+</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>    <span class="n">model_settings</span><span class="o">=</span><span class="n">ModelSettings</span><span class="p">(</span>
+</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a>        <span class="n">temperature</span><span class="o">=</span><span class="mf">0.1</span><span class="p">,</span>
+</span><span id="__span-11-9"><a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a>        <span class="n">extra_args</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;service_tier&quot;</span><span class="p">:</span> <span class="s2">&quot;flex&quot;</span><span class="p">,</span> <span class="s2">&quot;user&quot;</span><span class="p">:</span> <span class="s2">&quot;user_12345&quot;</span><span class="p">},</span>
+</span><span id="__span-11-10"><a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>    <span class="p">),</span>
+</span><span id="__span-11-11"><a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a><span class="p">)</span>
+</span></code></pre></div>
+<h2 id="runner">由 Runner 管理的重试</h2>
+<p>重试仅在运行时生效且需要显式启用。除非你设置了 <code>ModelSettings(retry=...)</code>，并且你的重试策略选择重试，否则SDK不会重试一般模型请求。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">ModelRetrySettings</span><span class="p">,</span> <span class="n">ModelSettings</span><span class="p">,</span> <span class="n">retry_policies</span>
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span>
+</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5.5&quot;</span><span class="p">,</span>
+</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>    <span class="n">model_settings</span><span class="o">=</span><span class="n">ModelSettings</span><span class="p">(</span>
+</span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a>        <span class="n">retry</span><span class="o">=</span><span class="n">ModelRetrySettings</span><span class="p">(</span>
+</span><span id="__span-12-8"><a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a>            <span class="n">max_retries</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+</span><span id="__span-12-9"><a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a>            <span class="n">backoff</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-12-10"><a id="__codelineno-12-10" name="__codelineno-12-10" href="#__codelineno-12-10"></a>                <span class="s2">&quot;initial_delay&quot;</span><span class="p">:</span> <span class="mf">0.5</span><span class="p">,</span>
+</span><span id="__span-12-11"><a id="__codelineno-12-11" name="__codelineno-12-11" href="#__codelineno-12-11"></a>                <span class="s2">&quot;max_delay&quot;</span><span class="p">:</span> <span class="mf">5.0</span><span class="p">,</span>
+</span><span id="__span-12-12"><a id="__codelineno-12-12" name="__codelineno-12-12" href="#__codelineno-12-12"></a>                <span class="s2">&quot;multiplier&quot;</span><span class="p">:</span> <span class="mf">2.0</span><span class="p">,</span>
+</span><span id="__span-12-13"><a id="__codelineno-12-13" name="__codelineno-12-13" href="#__codelineno-12-13"></a>                <span class="s2">&quot;jitter&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-12-14"><a id="__codelineno-12-14" name="__codelineno-12-14" href="#__codelineno-12-14"></a>            <span class="p">},</span>
+</span><span id="__span-12-15"><a id="__codelineno-12-15" name="__codelineno-12-15" href="#__codelineno-12-15"></a>            <span class="n">policy</span><span class="o">=</span><span class="n">retry_policies</span><span class="o">.</span><span class="n">any</span><span class="p">(</span>
+</span><span id="__span-12-16"><a id="__codelineno-12-16" name="__codelineno-12-16" href="#__codelineno-12-16"></a>                <span class="n">retry_policies</span><span class="o">.</span><span class="n">provider_suggested</span><span class="p">(),</span>
+</span><span id="__span-12-17"><a id="__codelineno-12-17" name="__codelineno-12-17" href="#__codelineno-12-17"></a>                <span class="n">retry_policies</span><span class="o">.</span><span class="n">retry_after</span><span class="p">(),</span>
+</span><span id="__span-12-18"><a id="__codelineno-12-18" name="__codelineno-12-18" href="#__codelineno-12-18"></a>                <span class="n">retry_policies</span><span class="o">.</span><span class="n">network_error</span><span class="p">(),</span>
+</span><span id="__span-12-19"><a id="__codelineno-12-19" name="__codelineno-12-19" href="#__codelineno-12-19"></a>                <span class="n">retry_policies</span><span class="o">.</span><span class="n">http_status</span><span class="p">([</span><span class="mi">408</span><span class="p">,</span> <span class="mi">409</span><span class="p">,</span> <span class="mi">429</span><span class="p">,</span> <span class="mi">500</span><span class="p">,</span> <span class="mi">502</span><span class="p">,</span> <span class="mi">503</span><span class="p">,</span> <span class="mi">504</span><span class="p">]),</span>
+</span><span id="__span-12-20"><a id="__codelineno-12-20" name="__codelineno-12-20" href="#__codelineno-12-20"></a>            <span class="p">),</span>
+</span><span id="__span-12-21"><a id="__codelineno-12-21" name="__codelineno-12-21" href="#__codelineno-12-21"></a>        <span class="p">)</span>
+</span><span id="__span-12-22"><a id="__codelineno-12-22" name="__codelineno-12-22" href="#__codelineno-12-22"></a>    <span class="p">),</span>
+</span><span id="__span-12-23"><a id="__codelineno-12-23" name="__codelineno-12-23" href="#__codelineno-12-23"></a><span class="p">)</span>
+</span></code></pre></div>
+<p><code>ModelRetrySettings</code> 有三个字段：</p>
+<div class="field-table">
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>max_retries</code></td>
+<td><code>int | None</code></td>
+<td>初始请求之后允许的重试尝试次数。</td>
+</tr>
+<tr>
+<td><code>backoff</code></td>
+<td><code>ModelRetryBackoffSettings | dict | None</code></td>
+<td>当策略重试但未返回显式延迟时使用的默认延迟策略。<code>backoff.max_delay</code> 只会限制这个计算得出的 backoff 延迟。它不会限制策略返回的显式延迟或 retry-after 提示。</td>
+</tr>
+<tr>
+<td><code>policy</code></td>
+<td><code>RetryPolicy | None</code></td>
+<td>决定是否重试的回调。该字段仅在运行时生效，不会被序列化。</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>重试策略会收到包含以下内容的 <a class="autorefs autorefs-internal" title="RetryPolicyContext
+
+
+  
+      dataclass
+  " href="../../ref/retry/#agents.retry.RetryPolicyContext"><code>RetryPolicyContext</code></a>：</p>
+<ul>
+<li><code>attempt</code> 和 <code>max_retries</code>，以便你根据尝试次数做出决策。</li>
+<li><code>stream</code>，以便你在流式传输和非流式传输行为之间分支。</li>
+<li><code>error</code>，用于原始检查。</li>
+<li><code>normalized</code> 事实，例如 <code>status_code</code>、<code>retry_after</code>、<code>error_code</code>、<code>is_network_error</code>、<code>is_timeout</code> 和 <code>is_abort</code>。</li>
+<li>当底层模型适配器能够提供重试指导时，会包含 <code>provider_advice</code>。</li>
+</ul>
+<p>策略可以返回以下任一项：</p>
+<ul>
+<li><code>True</code> / <code>False</code>，用于简单的重试决策。</li>
+<li>当你想覆盖延迟或附加诊断原因时，返回 <a class="autorefs autorefs-internal" title="RetryDecision
+
+
+  
+      dataclass
+  " href="../../ref/retry/#agents.retry.RetryDecision"><code>RetryDecision</code></a>。</li>
+</ul>
+<p>SDK在 <code>retry_policies</code> 上导出了现成辅助函数：</p>
+<table>
+<thead>
+<tr>
+<th>辅助函数</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>retry_policies.never()</code></td>
+<td>始终不启用重试。</td>
+</tr>
+<tr>
+<td><code>retry_policies.provider_suggested()</code></td>
+<td>在提供商重试建议可用时遵循该建议。</td>
+</tr>
+<tr>
+<td><code>retry_policies.network_error()</code></td>
+<td>匹配暂时性传输和超时故障。</td>
+</tr>
+<tr>
+<td><code>retry_policies.http_status([...])</code></td>
+<td>匹配选定的 HTTP 状态码。</td>
+</tr>
+<tr>
+<td><code>retry_policies.retry_after()</code></td>
+<td>仅在 retry-after 提示可用时重试，并使用该延迟。该辅助函数会将 retry-after 值视为显式策略延迟，因此 <code>backoff.max_delay</code> 不会限制它。</td>
+</tr>
+<tr>
+<td><code>retry_policies.any(...)</code></td>
+<td>当任一嵌套策略选择启用时重试。</td>
+</tr>
+<tr>
+<td><code>retry_policies.all(...)</code></td>
+<td>仅当每个嵌套策略都选择启用时重试。</td>
+</tr>
+</tbody>
+</table>
+<p>组合策略时，<code>provider_suggested()</code> 是最安全的首个构建块，因为当提供商能够区分时，它会保留提供商否决和重放安全批准。</p>
+<h5 id="_8">安全边界</h5>
+<p>某些故障永远不会自动重试：</p>
+<ul>
+<li>中止错误。</li>
+<li>提供商建议将重放标记为不安全的请求。</li>
+<li>输出已经以会使重放不安全的方式开始之后的流式传输运行。</li>
+</ul>
+<p>使用 <code>previous_response_id</code> 或 <code>conversation_id</code> 的有状态后续请求也会被更保守地处理。对于这些请求，<code>network_error()</code> 或 <code>http_status([500])</code> 等非提供商判断条件本身并不足够。重试策略应包含来自提供商的重放安全批准，通常通过 <code>retry_policies.provider_suggested()</code> 实现。</p>
+<h5 id="runner_1">Runner 与智能体的合并行为</h5>
+<p><code>retry</code> 会在 runner 级和智能体级 <code>ModelSettings</code> 之间进行深度合并：</p>
+<ul>
+<li>智能体可以只覆盖 <code>retry.max_retries</code>，同时仍继承 runner 的 <code>policy</code>。</li>
+<li>智能体可以只覆盖 <code>retry.backoff</code> 的一部分，并保留 runner 中同级的 backoff 字段。</li>
+<li><code>policy</code> 仅在运行时生效，因此序列化后的 <code>ModelSettings</code> 会保留 <code>max_retries</code> 和 <code>backoff</code>，但省略回调本身。</li>
+</ul>
+<p>更多完整代码示例请参见 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/basic/retry.py"><code>examples/basic/retry.py</code></a> 和<a href="https://github.com/openai/openai-agents-python/tree/main/examples/basic/retry_litellm.py">由适配器支持的重试示例</a>。</p>
+<h2 id="openai_3">非OpenAI提供商故障排查</h2>
+<h3 id="401">追踪客户端错误 401</h3>
+<p>如果遇到与追踪相关的错误，这是因为追踪数据会上传到OpenAI服务，而你没有OpenAI API key。你有三个选项可解决此问题：</p>
+<ol>
+<li>完全禁用追踪：<a class="autorefs autorefs-internal" title="set_tracing_disabled" href="../../ref/#agents.set_tracing_disabled"><code>set_tracing_disabled(True)</code></a>。</li>
+<li>为追踪设置OpenAI key：<a class="autorefs autorefs-internal" title="set_tracing_export_api_key" href="../../ref/#agents.set_tracing_export_api_key"><code>set_tracing_export_api_key(...)</code></a>。此 API key 仅用于上传追踪数据，且必须来自 <a href="https://platform.openai.com/">platform.openai.com</a>。</li>
+<li>使用非OpenAI追踪进程。参见<a href="../tracing/#custom-tracing-processors">追踪文档</a>。</li>
+</ol>
+<h3 id="responses-api">Responses API 支持</h3>
+<p>SDK默认使用Responses API，但许多其他LLM提供商仍不支持它。因此你可能会看到 404 错误或类似问题。要解决此问题，你有两个选项：</p>
+<ol>
+<li>调用 <a class="autorefs autorefs-internal" title="set_default_openai_api" href="../../ref/#agents.set_default_openai_api"><code>set_default_openai_api("chat_completions")</code></a>。如果你通过环境变量设置 <code>OPENAI_API_KEY</code> 和 <code>OPENAI_BASE_URL</code>，这会生效。</li>
+<li>使用 <a class="autorefs autorefs-internal" title="OpenAIChatCompletionsModel" href="../../ref/models/openai_chatcompletions/#agents.models.openai_chatcompletions.OpenAIChatCompletionsModel"><code>OpenAIChatCompletionsModel</code></a>。代码示例在<a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/">此处</a>。</li>
+</ol>
+<h3 id="structured-outputs">Structured outputs 支持</h3>
+<p>一些模型提供商不支持 <a href="https://platform.openai.com/docs/guides/structured-outputs">structured outputs</a>。这有时会导致类似如下的错误：</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>BadRequestError: Error code: 400 - {&#39;error&#39;: {&#39;message&#39;: &quot;&#39;response_format.type&#39; : value is not one of the allowed values [&#39;text&#39;,&#39;json_object&#39;]&quot;, &#39;type&#39;: &#39;invalid_request_error&#39;}}
+</span></code></pre></div>
+<p>这是一些模型提供商的不足——它们支持 JSON 输出，但不允许你指定输出要使用的 <code>json_schema</code>。我们正在修复此问题，但我们建议依赖确实支持 JSON schema 输出的提供商，否则你的应用经常会因为格式错误的 JSON 而出错。</p>
+<h2 id="_9">跨提供商的模型混用</h2>
+<p>你需要了解模型提供商之间的功能差异，否则可能会遇到错误。例如，OpenAI支持 structured outputs、多模态输入，以及托管的文件检索和网络检索，但许多其他提供商不支持这些功能。请注意这些限制：</p>
+<ul>
+<li>不要向无法理解的提供商发送不受支持的 <code>tools</code></li>
+<li>在调用仅支持文本的模型之前，过滤掉多模态输入</li>
+<li>请注意，不支持结构化 JSON 输出的提供商偶尔会生成无效 JSON。</li>
+</ul>
+<h2 id="_10">第三方适配器</h2>
+<p>仅当SDK的内置提供商集成点不足够时，才使用第三方适配器。如果你只通过此SDK使用OpenAI模型，请优先使用内置的 <a class="autorefs autorefs-internal" title="OpenAIResponsesModel" href="../../ref/models/openai_responses/#agents.models.openai_responses.OpenAIResponsesModel"><code>OpenAIResponsesModel</code></a> 路径，而不是 Any-LLM 或 LiteLLM。第三方适配器适用于需要将OpenAI模型与非OpenAI提供商组合使用，或需要内置路径无法提供的、由适配器管理的提供商覆盖范围或路由的场景。适配器会在SDK和上游模型提供商之间增加另一层兼容层，因此功能支持和请求语义可能因提供商而异。SDK目前包含 Any-LLM 和 LiteLLM，作为尽力而为的 beta 版适配器集成。</p>
+<h3 id="any-llm">Any-LLM</h3>
+<p>Any-LLM 支持以尽力而为的 beta 形式提供，适用于你需要由Any-LLM管理的提供商覆盖范围或路由的场景。</p>
+<p>根据上游提供商路径，Any-LLM 可能会使用Responses API、Chat Completions兼容 API，或提供商特定的兼容层。</p>
+<p>如果需要 Any-LLM，请安装 <code>openai-agents[any-llm]</code>，然后从 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/any_llm_auto.py"><code>examples/model_providers/any_llm_auto.py</code></a> 或 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/any_llm_provider.py"><code>examples/model_providers/any_llm_provider.py</code></a> 开始。你可以将 <code>any-llm/...</code> 模型名称与 <a class="autorefs autorefs-internal" title="MultiProvider" href="../ref/models/multi_provider/#agents.models.multi_provider.MultiProvider"><code>MultiProvider</code></a> 一起使用，直接实例化 <code>AnyLLMModel</code>，或在运行范围内使用 <code>AnyLLMProvider</code>。如果需要显式固定模型接口，请在构造 <code>AnyLLMModel</code> 时传入 <code>api="responses"</code> 或 <code>api="chat_completions"</code>。</p>
+<p>Any-LLM 仍是第三方适配器层，因此提供商依赖和能力差距由上游Any-LLM定义，而不是由SDK定义。当上游提供商返回使用量指标时，这些指标会自动传播，但流式传输的Chat Completions后端可能需要先设置 <code>ModelSettings(include_usage=True)</code> 才会发出 usage 片段。如果你依赖 structured outputs、工具调用、使用量报告或Responses特定行为，请验证你计划部署的确切提供商后端。</p>
+<h3 id="litellm">LiteLLM</h3>
+<p>LiteLLM 支持以尽力而为的 beta 形式提供，适用于你需要 LiteLLM 特定的提供商覆盖范围或路由的场景。</p>
+<p>如果需要 LiteLLM，请安装 <code>openai-agents[litellm]</code>，然后从 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/litellm_auto.py"><code>examples/model_providers/litellm_auto.py</code></a> 或 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/litellm_provider.py"><code>examples/model_providers/litellm_provider.py</code></a> 开始。你可以使用 <code>litellm/...</code> 模型名称，或直接实例化 <a class="autorefs autorefs-internal" title="LitellmModel" href="../../ref/extensions/models/litellm_model/#agents.extensions.models.litellm_model.LitellmModel"><code>LitellmModel</code></a>。</p>
+<p>一些由LiteLLM支持的提供商默认不会填充SDK使用量指标。如果需要使用量报告，请传入 <code>ModelSettings(include_usage=True)</code>；如果你依赖 structured outputs、工具调用、使用量报告或适配器特定的路由行为，请验证你计划部署的确切提供商后端。</p>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      <script id="__config" type="application/json">{"base": "../..", "features": ["content.code.copy", "content.code.select", "navigation.path", "navigation.sections", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.d50fe291.min.js", "tags": null, "translations": {"clipboard.copied": "\u5df2\u590d\u5236", "clipboard.copy": "\u590d\u5236", "search.result.more.one": "\u5728\u8be5\u9875\u4e0a\u8fd8\u6709 1 \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.more.other": "\u5728\u8be5\u9875\u4e0a\u8fd8\u6709 # \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.none": "\u6ca1\u6709\u627e\u5230\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.one": "\u627e\u5230 1 \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.other": "# \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.placeholder": "\u952e\u5165\u4ee5\u5f00\u59cb\u641c\u7d22", "search.result.term.missing": "\u7f3a\u5c11", "select.version": "\u9009\u62e9\u5f53\u524d\u7248\u672c"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.50899def.min.js"></script>
+      
+    
+  </body>
+</html>

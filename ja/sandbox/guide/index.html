@@ -1,0 +1,2987 @@
+
+<!doctype html>
+<html lang="ja" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+        <link rel="prev" href="../../sandbox_agents/">
+      
+      
+        <link rel="next" href="../clients/">
+      
+      
+      <link rel="icon" href="../../../images/favicon-platform.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.6.16">
+    
+    
+      
+        <title>概念 - OpenAI Agents SDK</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.7e37652d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.06af60db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#_1" class="md-skip">
+          コンテンツにスキップ
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="ヘッダー">
+    <a href="../../" title="OpenAI Agents SDK" class="md-header__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            OpenAI Agents SDK
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              概念
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+      <div class="md-header__option">
+  <div class="md-select">
+    
+    <button class="md-header__button md-icon" aria-label="言語切り替え">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m12.87 15.07-2.54-2.51.03-.03A17.5 17.5 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2zm-2.62 7 1.62-4.33L19.12 17z"/></svg>
+    </button>
+    <div class="md-select__inner">
+      <ul class="md-select__list">
+        
+          <li class="md-select__item">
+            <a href="../../../sandbox/guide/" hreflang="en" class="md-select__link">
+              English
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="./" hreflang="ja" class="md-select__link">
+              日本語
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../../ko/sandbox/guide/" hreflang="ko" class="md-select__link">
+              한국어
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../../zh/sandbox/guide/" hreflang="zh" class="md-select__link">
+              简体中文
+            </a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+</div>
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="検索" placeholder="検索" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="検索">
+        
+        <button type="reset" class="md-search__icon md-icon" title="クリア" aria-label="クリア" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            検索を初期化
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/openai/openai-agents-python" title="リポジトリへ" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="ナビゲーション" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../../" title="OpenAI Agents SDK" class="md-nav__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../../assets/logo.svg" alt="logo">
+
+    </a>
+    OpenAI Agents SDK
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/openai/openai-agents-python" title="リポジトリへ" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    はじめに
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    設定
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    ドキュメント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            ドキュメント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェント
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4_2" id="__nav_4_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Sandbox エージェント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4_2">
+            <span class="md-nav__icon md-icon"></span>
+            Sandbox エージェント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../sandbox_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    概念
+    
+  </span>
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    概念
+    
+  </span>
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="目次">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目次
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      各要素の関係
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      使用すべき場面
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      サンドボックスクライアントの選択
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      主要な構成要素
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      サンドボックス実行の準備
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sandboxagent" class="md-nav__link">
+    <span class="md-ellipsis">
+      SandboxAgent のオプション
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="SandboxAgent のオプション">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#default_manifest" class="md-nav__link">
+    <span class="md-ellipsis">
+      default_manifest
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#instructions-base_instructions" class="md-nav__link">
+    <span class="md-ellipsis">
+      instructions と base_instructions
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#capabilities" class="md-nav__link">
+    <span class="md-ellipsis">
+      capabilities
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      概念
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="概念">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      マニフェスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      権限
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_10" class="md-nav__link">
+    <span class="md-ellipsis">
+      スナップショット仕様
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_11" class="md-nav__link">
+    <span class="md-ellipsis">
+      サンドボックスのライフサイクル
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sandboxrunconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      SandboxRunConfig のオプション
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="SandboxRunConfig のオプション">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_12" class="md-nav__link">
+    <span class="md-ellipsis">
+      サンドボックスの取得元
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_13" class="md-nav__link">
+    <span class="md-ellipsis">
+      新規セッションの入力
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_14" class="md-nav__link">
+    <span class="md-ellipsis">
+      マテリアライズ制御
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_15" class="md-nav__link">
+    <span class="md-ellipsis">
+      完全な例: コーディングタスク
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_16" class="md-nav__link">
+    <span class="md-ellipsis">
+      一般的なパターン
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="一般的なパターン">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_17" class="md-nav__link">
+    <span class="md-ellipsis">
+      サンドボックスクライアントの切り替え
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_18" class="md-nav__link">
+    <span class="md-ellipsis">
+      ワークスペースのオーバーライド
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_19" class="md-nav__link">
+    <span class="md-ellipsis">
+      サンドボックスセッションの注入
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_20" class="md-nav__link">
+    <span class="md-ellipsis">
+      セッション状態からの再開
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_21" class="md-nav__link">
+    <span class="md-ellipsis">
+      スナップショットからの開始
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#git" class="md-nav__link">
+    <span class="md-ellipsis">
+      Git からのスキル読み込み
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_22" class="md-nav__link">
+    <span class="md-ellipsis">
+      ツールとしての公開
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mcp" class="md-nav__link">
+    <span class="md-ellipsis">
+      ローカルツールおよび MCP との組み合わせ
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_23" class="md-nav__link">
+    <span class="md-ellipsis">
+      メモリ
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_24" class="md-nav__link">
+    <span class="md-ellipsis">
+      構成パターン
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="構成パターン">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_25" class="md-nav__link">
+    <span class="md-ellipsis">
+      ターンとサンドボックス実行
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_26" class="md-nav__link">
+    <span class="md-ellipsis">
+      関連情報
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Sandbox クライアント
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントメモリ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../models/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    モデル
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ツール
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guardrails/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ガードレール
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../running_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントの実行
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ストリーミング
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../multi_agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントオーケストレーション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../handoffs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ハンドオフ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    実行結果
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../human_in_the_loop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ヒューマンインザループ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_12" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_12" id="__nav_4_12_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    セッション
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_12_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_12">
+            <span class="md-nav__icon md-icon"></span>
+            セッション
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../sessions/sqlalchemy_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    SQLAlchemy セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../sessions/advanced_sqlite_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    高度な SQLite セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../sessions/encrypted_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    暗号化セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../context/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    コンテキスト管理
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    使用量
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Model context protocol (MCP)
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    トレーシング
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_17" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_17" id="__nav_4_17_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    リアルタイムエージェント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_17_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_17">
+            <span class="md-nav__icon md-icon"></span>
+            リアルタイムエージェント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../realtime/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../realtime/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    リアルタイムエージェントガイド
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_18" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_18" id="__nav_4_18_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    音声エージェント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_18_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_18">
+            <span class="md-nav__icon md-icon"></span>
+            音声エージェント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../voice/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../voice/pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    パイプラインとワークフロー
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../voice/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    トレーシング
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../visualization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントの可視化
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../repl/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    REPL ユーティリティ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    コード例
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../release/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    リリースプロセス / 変更履歴
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="目次">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目次
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      各要素の関係
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      使用すべき場面
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      サンドボックスクライアントの選択
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      主要な構成要素
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      サンドボックス実行の準備
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sandboxagent" class="md-nav__link">
+    <span class="md-ellipsis">
+      SandboxAgent のオプション
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="SandboxAgent のオプション">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#default_manifest" class="md-nav__link">
+    <span class="md-ellipsis">
+      default_manifest
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#instructions-base_instructions" class="md-nav__link">
+    <span class="md-ellipsis">
+      instructions と base_instructions
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#capabilities" class="md-nav__link">
+    <span class="md-ellipsis">
+      capabilities
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      概念
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="概念">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      マニフェスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      権限
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_10" class="md-nav__link">
+    <span class="md-ellipsis">
+      スナップショット仕様
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_11" class="md-nav__link">
+    <span class="md-ellipsis">
+      サンドボックスのライフサイクル
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sandboxrunconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      SandboxRunConfig のオプション
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="SandboxRunConfig のオプション">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_12" class="md-nav__link">
+    <span class="md-ellipsis">
+      サンドボックスの取得元
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_13" class="md-nav__link">
+    <span class="md-ellipsis">
+      新規セッションの入力
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_14" class="md-nav__link">
+    <span class="md-ellipsis">
+      マテリアライズ制御
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_15" class="md-nav__link">
+    <span class="md-ellipsis">
+      完全な例: コーディングタスク
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_16" class="md-nav__link">
+    <span class="md-ellipsis">
+      一般的なパターン
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="一般的なパターン">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_17" class="md-nav__link">
+    <span class="md-ellipsis">
+      サンドボックスクライアントの切り替え
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_18" class="md-nav__link">
+    <span class="md-ellipsis">
+      ワークスペースのオーバーライド
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_19" class="md-nav__link">
+    <span class="md-ellipsis">
+      サンドボックスセッションの注入
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_20" class="md-nav__link">
+    <span class="md-ellipsis">
+      セッション状態からの再開
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_21" class="md-nav__link">
+    <span class="md-ellipsis">
+      スナップショットからの開始
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#git" class="md-nav__link">
+    <span class="md-ellipsis">
+      Git からのスキル読み込み
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_22" class="md-nav__link">
+    <span class="md-ellipsis">
+      ツールとしての公開
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mcp" class="md-nav__link">
+    <span class="md-ellipsis">
+      ローカルツールおよび MCP との組み合わせ
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_23" class="md-nav__link">
+    <span class="md-ellipsis">
+      メモリ
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_24" class="md-nav__link">
+    <span class="md-ellipsis">
+      構成パターン
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="構成パターン">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_25" class="md-nav__link">
+    <span class="md-ellipsis">
+      ターンとサンドボックス実行
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_26" class="md-nav__link">
+    <span class="md-ellipsis">
+      関連情報
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="_1">概念</h1>
+<div class="admonition warning">
+<p class="admonition-title">ベータ機能</p>
+<p>サンドボックスエージェントはベータ版です。一般提供前に API の詳細、デフォルト、サポートされる機能が変更される可能性があります。また、時間の経過とともにより高度な機能が追加される予定です。</p>
+</div>
+<p>現代的なエージェントは、ファイルシステム上の実ファイルを操作できるときに最も効果的に動作します。<strong>サンドボックスエージェント</strong> は、専用ツールとシェルコマンドを使用して、大規模なドキュメントセットの検索や操作、ファイルの編集、成果物の生成、コマンドの実行を行えます。サンドボックスは、エージェントがユーザーの代わりに作業するために利用できる永続的なワークスペースをモデルに提供します。Agents SDK のサンドボックスエージェントは、サンドボックス環境と組み合わせたエージェントを簡単に実行できるようにし、ファイルシステム上に適切なファイルを配置し、サンドボックスをオーケストレーションして、タスクを大規模に開始、停止、再開しやすくします。</p>
+<p>エージェントが必要とするデータを中心にワークスペースを定義します。ワークスペースは、GitHub リポジトリ、ローカルファイルとディレクトリ、合成タスクファイル、S3 や Azure Blob Storage などのリモートファイルシステム、その他提供するサンドボックス入力から開始できます。</p>
+<div class="sandbox-harness-image">
+<p><img alt="コンピュートを備えたサンドボックスエージェントハーネス" src="../../../assets/images/harness_with_compute.png" /></p>
+</div>
+<p><code>SandboxAgent</code> は引き続き <code>Agent</code> です。<code>instructions</code>、<code>prompt</code>、<code>tools</code>、<code>handoffs</code>、<code>mcp_servers</code>、<code>model_settings</code>、<code>output_type</code>、ガードレール、フックなど、通常のエージェントのインターフェイスを保持し、通常の <code>Runner</code> API を通じて実行されます。変わるのは実行境界です。</p>
+<ul>
+<li><code>SandboxAgent</code> はエージェント自体を定義します。通常のエージェント設定に加えて、<code>default_manifest</code>、<code>base_instructions</code>、<code>run_as</code> などのサンドボックス固有のデフォルト、ファイルシステムツール、シェルアクセス、スキル、メモリ、コンパクションなどの機能を含みます。</li>
+<li><code>Manifest</code> は、ファイル、リポジトリ、マウント、環境など、新規サンドボックスワークスペースの望ましい初期内容とレイアウトを宣言します。</li>
+<li>サンドボックスセッションは、コマンドが実行されファイルが変更される、ライブの隔離環境です。</li>
+<li><a class="autorefs autorefs-internal" title="SandboxRunConfig
+
+
+  
+      dataclass
+  " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig"><code>SandboxRunConfig</code></a> は、実行がサンドボックスセッションをどのように取得するかを決定します。たとえば、直接注入する、シリアライズ済みのサンドボックスセッション状態から再接続する、またはサンドボックスクライアントを通じて新規サンドボックスセッションを作成する、といった方法があります。</li>
+<li>保存済みのサンドボックス状態とスナップショットにより、後続の実行は以前の作業に再接続したり、保存済みの内容から新規サンドボックスセッションを初期化したりできます。</li>
+</ul>
+<p><code>Manifest</code> は新規セッションのワークスペース契約であり、すべてのライブサンドボックスに対する完全な唯一の情報源ではありません。実行の有効なワークスペースは、再利用されたサンドボックスセッション、シリアライズ済みのサンドボックスセッション状態、または実行時に選択されたスナップショットから取得される場合があります。</p>
+<p>このページ全体で、「サンドボックスセッション」とはサンドボックスクライアントによって管理されるライブ実行環境を意味します。これは、<a href="../../sessions/">Sessions</a> で説明されている SDK の会話型 <a class="autorefs autorefs-internal" title="Session" href="../../../ref/memory/session/#agents.memory.session.Session"><code>Session</code></a> インターフェイスとは異なります。</p>
+<p>外側のランタイムは引き続き、承認、トレーシング、ハンドオフ、再開の記録管理を所有します。サンドボックスセッションは、コマンド、ファイル変更、環境隔離を所有します。この分担は、このモデルの中核です。</p>
+<h3 id="_2">各要素の関係</h3>
+<p>サンドボックス実行は、エージェント定義と実行ごとのサンドボックス設定を組み合わせます。Runner はエージェントを準備し、ライブのサンドボックスセッションにバインドし、後続の実行のために状態を保存できます。</p>
+<pre class="mermaid"><code>flowchart LR
+    agent["SandboxAgent&lt;br/&gt;&lt;small&gt;full Agent + sandbox defaults&lt;/small&gt;"]
+    config["SandboxRunConfig&lt;br/&gt;&lt;small&gt;client / session / resume inputs&lt;/small&gt;"]
+    runner["Runner&lt;br/&gt;&lt;small&gt;prepare instructions&lt;br/&gt;bind capability tools&lt;/small&gt;"]
+    sandbox["sandbox session&lt;br/&gt;&lt;small&gt;workspace where commands run&lt;br/&gt;and files change&lt;/small&gt;"]
+    saved["saved state / snapshot&lt;br/&gt;&lt;small&gt;for resume or fresh-start later&lt;/small&gt;"]
+
+    agent --&gt; runner
+    config --&gt; runner
+    runner --&gt; sandbox
+    sandbox --&gt; saved</code></pre>
+<p>サンドボックス固有のデフォルトは <code>SandboxAgent</code> に保持します。実行ごとのサンドボックスセッションの選択は <code>SandboxRunConfig</code> に保持します。</p>
+<p>ライフサイクルは 3 つのフェーズで考えてください。</p>
+<ol>
+<li><code>SandboxAgent</code>、<code>Manifest</code>、機能を使って、エージェントと新規ワークスペース契約を定義します。</li>
+<li>サンドボックスセッションを注入、再開、または作成する <code>SandboxRunConfig</code> を <code>Runner</code> に渡して、実行を行います。</li>
+<li>Runner 管理の <code>RunState</code>、明示的なサンドボックス <code>session_state</code>、または保存済みワークスペーススナップショットから、後で継続します。</li>
+</ol>
+<p>シェルアクセスが時々使うツールの 1 つにすぎない場合は、<a href="../../tools/">ツールガイド</a> のホスト型シェルから始めてください。ワークスペースの隔離、サンドボックスクライアントの選択、またはサンドボックスセッションの再開動作が設計の一部である場合は、サンドボックスエージェントを選択してください。</p>
+<h2 id="_3">使用すべき場面</h2>
+<p>サンドボックスエージェントは、ワークスペース中心のワークフローに適しています。例:</p>
+<ul>
+<li>コーディングとデバッグ。たとえば、GitHub リポジトリ内の issue レポートに対する自動修正をオーケストレーションし、対象を絞ったテストを実行する場合</li>
+<li>ドキュメント処理と編集。たとえば、ユーザーの財務ドキュメントから情報を抽出し、完成済みの税務フォーム草案を作成する場合</li>
+<li>ファイルに基づくレビューまたは分析。たとえば、回答前にオンボーディング資料、生成されたレポート、成果物バンドルを確認する場合</li>
+<li>隔離されたマルチエージェントパターン。たとえば、各レビュアーまたはコーディングサブエージェントに独自のワークスペースを与える場合</li>
+<li>複数ステップのワークスペースタスク。たとえば、ある実行でバグを修正し、後で回帰テストを追加する場合、またはスナップショットやサンドボックスセッション状態から再開する場合</li>
+</ul>
+<p>ファイルや生きたファイルシステムへのアクセスが不要な場合は、<code>Agent</code> を使い続けてください。シェルアクセスが時々使う機能の 1 つにすぎない場合は、ホスト型シェルを追加してください。ワークスペース境界自体が機能の一部である場合は、サンドボックスエージェントを使用してください。</p>
+<h2 id="_4">サンドボックスクライアントの選択</h2>
+<p>ローカル開発では <code>UnixLocalSandboxClient</code> から始めてください。コンテナ隔離やイメージの一致性が必要になったら <code>DockerSandboxClient</code> に移行してください。プロバイダー管理の実行が必要になったら、ホスト型プロバイダーに移行してください。</p>
+<p>ほとんどの場合、<code>SandboxAgent</code> 定義は同じままで、サンドボックスクライアントとそのオプションを <a class="autorefs autorefs-internal" title="SandboxRunConfig
+
+
+  
+      dataclass
+  " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig"><code>SandboxRunConfig</code></a> で変更します。ローカル、Docker、ホスト型、リモートマウントのオプションについては、<a href="../clients/">サンドボックスクライアント</a> を参照してください。</p>
+<h2 id="_5">主要な構成要素</h2>
+<div class="sandbox-nowrap-first-column-table">
+<table>
+<thead>
+<tr>
+<th>レイヤー</th>
+<th>主な SDK 構成要素</th>
+<th>答える問い</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>エージェント定義</td>
+<td><code>SandboxAgent</code>, <code>Manifest</code>, capabilities</td>
+<td>どのエージェントを実行し、新規セッションのワークスペース契約を何から開始すべきですか？</td>
+</tr>
+<tr>
+<td>サンドボックス実行</td>
+<td><code>SandboxRunConfig</code>、サンドボックスクライアント、ライブサンドボックスセッション</td>
+<td>この実行はライブサンドボックスセッションをどのように取得し、作業はどこで実行されますか？</td>
+</tr>
+<tr>
+<td>保存済みサンドボックス状態</td>
+<td><code>RunState</code> サンドボックスペイロード、<code>session_state</code>、スナップショット</td>
+<td>このワークフローは以前のサンドボックス作業にどのように再接続するか、または保存済み内容から新規サンドボックスセッションをどのように初期化しますか？</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>主な SDK 構成要素は、これらのレイヤーに次のように対応します。</p>
+<div class="sandbox-nowrap-first-column-table">
+<table>
+<thead>
+<tr>
+<th>構成要素</th>
+<th>管理するもの</th>
+<th>問うべきこと</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a class="autorefs autorefs-internal" title="SandboxAgent
+
+
+  
+      dataclass
+  " href="../../../ref/sandbox/sandbox_agent/#agents.sandbox.sandbox_agent.SandboxAgent"><code>SandboxAgent</code></a></td>
+<td>エージェント定義</td>
+<td>このエージェントは何を行うべきで、どのデフォルトを一緒に持ち運ぶべきですか？</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="Manifest" href="../../../ref/sandbox/manifest/#agents.sandbox.manifest.Manifest"><code>Manifest</code></a></td>
+<td>新規セッションのワークスペースファイルとフォルダー</td>
+<td>実行開始時に、ファイルシステム上にどのファイルとフォルダーが存在すべきですか？</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="Capability" href="../../../ref/sandbox/capabilities/capability/#agents.sandbox.capabilities.capability.Capability"><code>Capability</code></a></td>
+<td>サンドボックスネイティブな挙動</td>
+<td>どのツール、指示の断片、またはランタイム挙動をこのエージェントに付与すべきですか？</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="SandboxRunConfig
+
+
+  
+      dataclass
+  " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig"><code>SandboxRunConfig</code></a></td>
+<td>実行ごとのサンドボックスクライアントとサンドボックスセッションの取得元</td>
+<td>この実行ではサンドボックスセッションを注入、再開、または作成すべきですか？</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="RunState
+
+
+  
+      dataclass
+  " href="../../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a></td>
+<td>Runner が管理する保存済みサンドボックス状態</td>
+<td>以前の Runner 管理ワークフローを再開し、そのサンドボックス状態を自動的に引き継いでいますか？</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="session_state
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig.session_state"><code>SandboxRunConfig.session_state</code></a></td>
+<td>明示的なシリアライズ済みサンドボックスセッション状態</td>
+<td><code>RunState</code> の外部で既にシリアライズしたサンドボックス状態から再開したいですか？</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="snapshot
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig.snapshot"><code>SandboxRunConfig.snapshot</code></a></td>
+<td>新規サンドボックスセッション用の保存済みワークスペース内容</td>
+<td>新規サンドボックスセッションを保存済みファイルや成果物から開始すべきですか？</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>実践的な設計順序は次のとおりです。</p>
+<ol>
+<li><code>Manifest</code> で新規セッションのワークスペース契約を定義します。</li>
+<li><code>SandboxAgent</code> でエージェントを定義します。</li>
+<li>組み込みまたはカスタムの機能を追加します。</li>
+<li>各実行がサンドボックスセッションをどのように取得するかを <code>RunConfig(sandbox=SandboxRunConfig(...))</code> で決定します。</li>
+</ol>
+<h2 id="_6">サンドボックス実行の準備</h2>
+<p>実行時に、Runner はその定義を具体的なサンドボックス backed の実行に変換します。</p>
+<ol>
+<li><code>SandboxRunConfig</code> からサンドボックスセッションを解決します。
+   <code>session=...</code> を渡すと、そのライブサンドボックスセッションを再利用します。
+   それ以外の場合は、<code>client=...</code> を使用して作成または再開します。</li>
+<li>実行の有効なワークスペース入力を決定します。
+   実行がサンドボックスセッションを注入または再開する場合、その既存のサンドボックス状態が優先されます。
+   それ以外の場合、Runner は 1 回限りのマニフェストオーバーライド、または <code>agent.default_manifest</code> から開始します。
+   そのため、<code>Manifest</code> だけでは、すべての実行における最終的なライブワークスペースは定義されません。</li>
+<li>機能に、結果として得られたマニフェストを処理させます。
+   これにより、最終的なエージェントを準備する前に、機能がファイル、マウント、またはその他のワークスペーススコープの挙動を追加できます。</li>
+<li>固定された順序で最終的な instructions を構築します。
+   SDK のデフォルトサンドボックスプロンプト、または明示的にオーバーライドした場合は <code>base_instructions</code>、次に <code>instructions</code>、次に機能の指示断片、次にリモートマウントのポリシーテキスト、最後にレンダリングされたファイルシステムツリーです。</li>
+<li>機能ツールをライブサンドボックスセッションにバインドし、通常の <code>Runner</code> API を通じて準備済みエージェントを実行します。</li>
+</ol>
+<p>サンドボックス化によって、ターンの意味は変わりません。ターンは引き続きモデルステップであり、単一のシェルコマンドやサンドボックスアクションではありません。サンドボックス側の操作とターンの間に固定の 1:1 対応はありません。一部の作業はサンドボックス実行レイヤー内に留まる一方、別のアクションはツール結果、承認、または次のモデルステップを必要とするその他の状態を返す場合があります。実践上の規則として、サンドボックス作業の後にエージェントランタイムが別のモデル応答を必要とする場合にのみ、もう 1 ターンが消費されます。</p>
+<p>これらの準備手順があるため、<code>SandboxAgent</code> を設計するときに考えるべき主なサンドボックス固有オプションは、<code>default_manifest</code>、<code>instructions</code>、<code>base_instructions</code>、<code>capabilities</code>、<code>run_as</code> です。</p>
+<h2 id="sandboxagent"><code>SandboxAgent</code> のオプション</h2>
+<p>通常の <code>Agent</code> フィールドに加えて用意されている、サンドボックス固有のオプションは次のとおりです。</p>
+<div class="sandbox-nowrap-first-column-table">
+<table>
+<thead>
+<tr>
+<th>オプション</th>
+<th>主な用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>default_manifest</code></td>
+<td>Runner が作成する新規サンドボックスセッションのデフォルトワークスペース。</td>
+</tr>
+<tr>
+<td><code>instructions</code></td>
+<td>SDK サンドボックスプロンプトの後に追加される、追加の役割、ワークフロー、成功基準。</td>
+</tr>
+<tr>
+<td><code>base_instructions</code></td>
+<td>SDK サンドボックスプロンプトを置き換える高度なオーバーライド手段。</td>
+</tr>
+<tr>
+<td><code>capabilities</code></td>
+<td>このエージェントと一緒に持ち運ぶべきサンドボックスネイティブなツールと挙動。</td>
+</tr>
+<tr>
+<td><code>run_as</code></td>
+<td>シェルコマンド、ファイル読み取り、パッチなど、モデル向けサンドボックスツールのユーザー ID。</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>サンドボックスクライアントの選択、サンドボックスセッションの再利用、マニフェストオーバーライド、スナップショット選択は、エージェントではなく <a class="autorefs autorefs-internal" title="SandboxRunConfig
+
+
+  
+      dataclass
+  " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig"><code>SandboxRunConfig</code></a> に属します。</p>
+<h3 id="default_manifest"><code>default_manifest</code></h3>
+<p><code>default_manifest</code> は、Runner がこのエージェント用に新規サンドボックスセッションを作成するときに使用されるデフォルトの <a class="autorefs autorefs-internal" title="Manifest" href="../../../ref/sandbox/manifest/#agents.sandbox.manifest.Manifest"><code>Manifest</code></a> です。エージェントが通常開始すべきファイル、リポジトリ、補助資料、出力ディレクトリ、マウントに使用します。</p>
+<p>これはデフォルトにすぎません。実行は <code>SandboxRunConfig(manifest=...)</code> でこれをオーバーライドできます。また、再利用または再開されたサンドボックスセッションは、既存のワークスペース状態を保持します。</p>
+<h3 id="instructions-base_instructions"><code>instructions</code> と <code>base_instructions</code></h3>
+<p>異なるプロンプトでも維持すべき短いルールには <code>instructions</code> を使用します。<code>SandboxAgent</code> では、これらの instructions は SDK のサンドボックスベースプロンプトの後に追加されるため、組み込みのサンドボックスガイダンスを保持しつつ、独自の役割、ワークフロー、成功基準を追加できます。</p>
+<p>SDK サンドボックスベースプロンプトを置き換えたい場合にのみ、<code>base_instructions</code> を使用してください。ほとんどのエージェントでは設定すべきではありません。</p>
+<div class="sandbox-nowrap-first-column-table">
+<table>
+<thead>
+<tr>
+<th>配置先...</th>
+<th>用途</th>
+<th>例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>instructions</code></td>
+<td>エージェントの安定した役割、ワークフロールール、成功基準。</td>
+<td>「オンボーディングドキュメントを調査してから、ハンドオフします。」、「最終ファイルを <code>output/</code> に書き込みます。」</td>
+</tr>
+<tr>
+<td><code>base_instructions</code></td>
+<td>SDK サンドボックスベースプロンプトの完全な置き換え。</td>
+<td>カスタムの低レベルサンドボックスラッパープロンプト。</td>
+</tr>
+<tr>
+<td>ユーザープロンプト</td>
+<td>この実行の 1 回限りのリクエスト。</td>
+<td>「このワークスペースを要約してください。」</td>
+</tr>
+<tr>
+<td>マニフェスト内のワークスペースファイル</td>
+<td>より長いタスク仕様、リポジトリローカルの指示、または範囲が限定された参照資料。</td>
+<td><code>repo/task.md</code>、ドキュメントバンドル、サンプルパケット。</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code>instructions</code> の適切な用途には、次のようなものがあります。</p>
+<ul>
+<li><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/unix_local_pty.py">examples/sandbox/unix_local_pty.py</a> は、PTY 状態が重要な場合に、エージェントを 1 つの対話型プロセス内に留めます。</li>
+<li><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/handoffs.py">examples/sandbox/handoffs.py</a> は、サンドボックスレビュアーが検査後にユーザーへ直接回答することを禁止します。</li>
+<li><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/tax_prep.py">examples/sandbox/tax_prep.py</a> は、最終的に記入済みのファイルが実際に <code>output/</code> に配置されることを要求します。</li>
+<li><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a> は、正確な検証コマンドを固定し、ワークスペースルート相対のパッチパスを明確にします。</li>
+</ul>
+<p>ユーザーの 1 回限りのタスクを <code>instructions</code> にコピーすること、マニフェストに置くべき長い参照資料を埋め込むこと、組み込み機能が既に注入するツールドキュメントを繰り返すこと、または実行時にモデルが必要としないローカルインストールメモを混ぜることは避けてください。</p>
+<p><code>instructions</code> を省略しても、SDK はデフォルトのサンドボックスプロンプトを含めます。低レベルのラッパーにはそれで十分ですが、ほとんどのユーザー向けエージェントでは、明示的な <code>instructions</code> を提供すべきです。</p>
+<h3 id="capabilities"><code>capabilities</code></h3>
+<p>機能は、サンドボックスネイティブな挙動を <code>SandboxAgent</code> に付与します。実行開始前にワークスペースを形作り、サンドボックス固有の指示を追加し、ライブサンドボックスセッションにバインドされるツールを公開し、そのエージェントのモデル挙動や入力処理を調整できます。</p>
+<p>組み込み機能には次のものがあります。</p>
+<div class="sandbox-nowrap-first-column-table">
+<table>
+<thead>
+<tr>
+<th>機能</th>
+<th>追加する場面</th>
+<th>注意</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Shell</code></td>
+<td>エージェントがシェルアクセスを必要とする場合。</td>
+<td><code>exec_command</code> を追加し、サンドボックスクライアントが PTY インタラクションをサポートする場合は <code>write_stdin</code> も追加します。</td>
+</tr>
+<tr>
+<td><code>Filesystem</code></td>
+<td>エージェントがファイルを編集する、またはローカル画像を検査する必要がある場合。</td>
+<td><code>apply_patch</code> と <code>view_image</code> を追加します。パッチパスはワークスペースルート相対です。</td>
+</tr>
+<tr>
+<td><code>Skills</code></td>
+<td>サンドボックス内でスキル検出とマテリアライズを行いたい場合。</td>
+<td><code>.agents</code> または <code>.agents/skills</code> を手動でマウントするよりもこちらを優先してください。<code>Skills</code> はスキルのインデックス化とサンドボックスへのマテリアライズを行います。</td>
+</tr>
+<tr>
+<td><code>Memory</code></td>
+<td>後続の実行でメモリ成果物を読み取る、または生成する必要がある場合。</td>
+<td><code>Shell</code> が必要です。ライブ更新には <code>Filesystem</code> も必要です。</td>
+</tr>
+<tr>
+<td><code>Compaction</code></td>
+<td>長時間実行されるフローで、コンパクション項目の後にコンテキストのトリミングが必要な場合。</td>
+<td>モデルサンプリングと入力処理を調整します。</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>デフォルトでは、<code>SandboxAgent.capabilities</code> は <code>Capabilities.default()</code> を使用します。これには <code>Filesystem()</code>、<code>Shell()</code>、<code>Compaction()</code> が含まれます。<code>capabilities=[...]</code> を渡すと、そのリストがデフォルトを置き換えるため、引き続き必要なデフォルト機能を含めてください。</p>
+<p>スキルについては、どのようにマテリアライズしたいかに基づいてソースを選択してください。</p>
+<ul>
+<li><code>Skills(lazy_from=LocalDirLazySkillSource(...))</code> は、大きめのローカルスキルディレクトリに適したデフォルトです。モデルがまずインデックスを発見し、必要なものだけを読み込めるためです。</li>
+<li><code>LocalDirLazySkillSource(source=LocalDir(src=...))</code> は、SDK プロセスが実行されているファイルシステムから読み取ります。サンドボックスイメージまたはワークスペース内にのみ存在するパスではなく、元のホスト側スキルディレクトリを渡してください。</li>
+<li><code>Skills(from_=LocalDir(src=...))</code> は、事前にステージングしたい小さなローカルバンドルに適しています。</li>
+<li><code>Skills(from_=GitRepo(repo=..., ref=...))</code> は、スキル自体をリポジトリから取得すべき場合に適しています。</li>
+</ul>
+<p><code>LocalDir.src</code> は SDK ホスト上のソースパスです。<code>skills_path</code> は、<code>load_skill</code> が呼び出されたときにスキルがステージングされる、サンドボックスワークスペース内の相対宛先パスです。</p>
+<p>スキルが既に <code>.agents/skills/&lt;name&gt;/SKILL.md</code> のような場所にディスク上で存在する場合は、そのソースルートを <code>LocalDir(...)</code> に指定し、それでも <code>Skills(...)</code> を使用して公開してください。別のサンドボックス内レイアウトに依存する既存のワークスペース契約がない限り、デフォルトの <code>skills_path=".agents"</code> を維持してください。</p>
+<p>適合する場合は、組み込み機能を優先してください。組み込みでカバーされないサンドボックス固有のツールや指示面が必要な場合にのみ、カスタム機能を作成してください。</p>
+<h2 id="_7">概念</h2>
+<h3 id="_8">マニフェスト</h3>
+<p><a class="autorefs autorefs-internal" title="Manifest" href="../../../ref/sandbox/manifest/#agents.sandbox.manifest.Manifest"><code>Manifest</code></a> は、新規サンドボックスセッションのワークスペースを記述します。ワークスペースの <code>root</code> を設定し、ファイルとディレクトリを宣言し、ローカルファイルをコピーし、Git リポジトリをクローンし、リモートストレージマウントを接続し、環境変数を設定し、ユーザーやグループを定義し、ワークスペース外の特定の絶対パスへのアクセスを許可できます。</p>
+<p>マニフェストエントリのパスはワークスペース相対です。絶対パスにすることや、<code>..</code> でワークスペース外へ抜けることはできません。これにより、ワークスペース契約はローカル、Docker、ホスト型クライアント間で移植可能になります。</p>
+<p>作業開始前にエージェントが必要とする資料には、マニフェストエントリを使用します。</p>
+<div class="sandbox-nowrap-first-column-table">
+<table>
+<thead>
+<tr>
+<th>マニフェストエントリ</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>File</code>, <code>Dir</code></td>
+<td>小さな合成入力、補助ファイル、または出力ディレクトリ。</td>
+</tr>
+<tr>
+<td><code>LocalFile</code>, <code>LocalDir</code></td>
+<td>サンドボックスにマテリアライズすべきホストファイルまたはディレクトリ。</td>
+</tr>
+<tr>
+<td><code>GitRepo</code></td>
+<td>ワークスペースに取得すべきリポジトリ。</td>
+</tr>
+<tr>
+<td><code>S3Mount</code>, <code>GCSMount</code>, <code>R2Mount</code>, <code>AzureBlobMount</code>, <code>BoxMount</code>, <code>S3FilesMount</code> などのマウント</td>
+<td>サンドボックス内に表示すべき外部ストレージ。</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code>Dir</code> は、合成子要素から、または出力場所として、サンドボックスワークスペース内にディレクトリを作成します。ホストファイルシステムから読み取るわけではありません。既存のホストディレクトリをサンドボックスワークスペースにコピーすべき場合は、<code>LocalDir</code> を使用してください。</p>
+<p><code>LocalFile.src</code> と <code>LocalDir.src</code> は、デフォルトでは SDK プロセスの作業ディレクトリを基準に解決されます。ソースは、<code>extra_path_grants</code> でカバーされていない限り、そのベースディレクトリの下に留まる必要があります。これにより、ローカルソースのマテリアライズは、サンドボックスマニフェストの他の部分と同じホストパスの信頼境界内に保たれます。</p>
+<p>マウントエントリは公開するストレージを記述し、マウント戦略はサンドボックスバックエンドがそのストレージをどのように接続するかを記述します。マウントオプションとプロバイダーサポートについては、<a href="../clients/#mounts-and-remote-storage">サンドボックスクライアント</a> を参照してください。</p>
+<p>適切なマニフェスト設計では通常、ワークスペース契約を狭く保ち、長いタスク手順を <code>repo/task.md</code> などのワークスペースファイルに置き、<code>repo/task.md</code> や <code>output/report.md</code> などの相対ワークスペースパスを指示で使用します。エージェントが <code>Filesystem</code> 機能の <code>apply_patch</code> ツールでファイルを編集する場合、パッチパスはシェルの <code>workdir</code> ではなくサンドボックスワークスペースルートからの相対であることを忘れないでください。</p>
+<p>エージェントがワークスペース外の具体的な絶対パスを必要とする場合、または SDK プロセスの作業ディレクトリ外にある信頼済みローカルソースをマニフェストがコピーする必要がある場合にのみ、<code>extra_path_grants</code> を使用してください。例として、一時的なツール出力用の <code>/tmp</code>、読み取り専用ランタイム用の <code>/opt/toolchain</code>、サンドボックスにマテリアライズすべき生成済みスキルディレクトリなどがあります。付与は、ローカルソースのマテリアライズ、SDK ファイル API、バックエンドがファイルシステムポリシーを適用できる場合のシェル実行に適用されます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">Manifest</span><span class="p">,</span> <span class="n">SandboxPathGrant</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">manifest</span> <span class="o">=</span> <span class="n">Manifest</span><span class="p">(</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="n">extra_path_grants</span><span class="o">=</span><span class="p">(</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>        <span class="n">SandboxPathGrant</span><span class="p">(</span><span class="n">path</span><span class="o">=</span><span class="s2">&quot;/tmp&quot;</span><span class="p">),</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>        <span class="n">SandboxPathGrant</span><span class="p">(</span><span class="n">path</span><span class="o">=</span><span class="s2">&quot;/opt/toolchain&quot;</span><span class="p">,</span> <span class="n">read_only</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="p">),</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="p">)</span>
+</span></code></pre></div>
+<p><code>extra_path_grants</code> を含むマニフェストは、信頼済み設定として扱ってください。アプリケーションがそれらのホストパスを既に承認していない限り、モデル出力やその他の信頼できないペイロードから付与を読み込まないでください。</p>
+<p>スナップショットと <code>persist_workspace()</code> は、引き続きワークスペースルートのみを含みます。追加で許可されたパスはランタイムアクセスであり、永続的なワークスペース状態ではありません。</p>
+<h3 id="_9">権限</h3>
+<p><code>Permissions</code> は、マニフェストエントリのファイルシステム権限を制御します。これはサンドボックスがマテリアライズするファイルに関するものであり、モデル権限、承認ポリシー、API 認証情報に関するものではありません。</p>
+<p>デフォルトでは、マニフェストエントリは所有者が読み取り/書き込み/実行可能で、グループとその他のユーザーが読み取り/実行可能です。ステージングされたファイルをプライベート、読み取り専用、または実行可能にすべき場合は、これをオーバーライドしてください。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">FileMode</span><span class="p">,</span> <span class="n">Permissions</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.entries</span><span class="w"> </span><span class="kn">import</span> <span class="n">File</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="n">private_notes</span> <span class="o">=</span> <span class="n">File</span><span class="p">(</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>    <span class="n">text</span><span class="o">=</span><span class="s2">&quot;internal notes&quot;</span><span class="p">,</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>    <span class="n">permissions</span><span class="o">=</span><span class="n">Permissions</span><span class="p">(</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>        <span class="n">owner</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">READ</span> <span class="o">|</span> <span class="n">FileMode</span><span class="o">.</span><span class="n">WRITE</span><span class="p">,</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>        <span class="n">group</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">NONE</span><span class="p">,</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>        <span class="n">other</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">NONE</span><span class="p">,</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    <span class="p">),</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="p">)</span>
+</span></code></pre></div>
+<p><code>Permissions</code> は、所有者、グループ、その他のビットを個別に保持し、さらにエントリがディレクトリかどうかも保持します。直接構築することも、<code>Permissions.from_str(...)</code> でモード文字列からパースすることも、<code>Permissions.from_mode(...)</code> で OS モードから導出することもできます。</p>
+<p>ユーザーは、作業を実行できるサンドボックス ID です。その ID をサンドボックスに存在させたい場合は、マニフェストに <code>User</code> を追加し、シェルコマンド、ファイル読み取り、パッチなどのモデル向けサンドボックスツールをそのユーザーとして実行すべき場合は <code>SandboxAgent.run_as</code> を設定してください。<code>run_as</code> がマニフェスト内にまだ存在しないユーザーを指している場合、Runner は有効なマニフェストにそのユーザーを追加します。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Runner</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">FileMode</span><span class="p">,</span> <span class="n">Manifest</span><span class="p">,</span> <span class="n">Permissions</span><span class="p">,</span> <span class="n">SandboxAgent</span><span class="p">,</span> <span class="n">SandboxRunConfig</span><span class="p">,</span> <span class="n">User</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.entries</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dir</span><span class="p">,</span> <span class="n">LocalDir</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.sandboxes.unix_local</span><span class="w"> </span><span class="kn">import</span> <span class="n">UnixLocalSandboxClient</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="n">analyst</span> <span class="o">=</span> <span class="n">User</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;analyst&quot;</span><span class="p">)</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">SandboxAgent</span><span class="p">(</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Dataroom analyst&quot;</span><span class="p">,</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Review the files in `dataroom/` and write findings to `output/`.&quot;</span><span class="p">,</span>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>    <span class="n">default_manifest</span><span class="o">=</span><span class="n">Manifest</span><span class="p">(</span>
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>        <span class="c1"># Declare the sandbox user so manifest entries can grant access to it.</span>
+</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>        <span class="n">users</span><span class="o">=</span><span class="p">[</span><span class="n">analyst</span><span class="p">],</span>
+</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>        <span class="n">entries</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>            <span class="s2">&quot;dataroom&quot;</span><span class="p">:</span> <span class="n">LocalDir</span><span class="p">(</span>
+</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a>                <span class="n">src</span><span class="o">=</span><span class="s2">&quot;./dataroom&quot;</span><span class="p">,</span>
+</span><span id="__span-2-18"><a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a>                <span class="c1"># Let the analyst traverse and read the mounted dataroom, but not edit it.</span>
+</span><span id="__span-2-19"><a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a>                <span class="n">group</span><span class="o">=</span><span class="n">analyst</span><span class="p">,</span>
+</span><span id="__span-2-20"><a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a>                <span class="n">permissions</span><span class="o">=</span><span class="n">Permissions</span><span class="p">(</span>
+</span><span id="__span-2-21"><a id="__codelineno-2-21" name="__codelineno-2-21" href="#__codelineno-2-21"></a>                    <span class="n">owner</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">READ</span> <span class="o">|</span> <span class="n">FileMode</span><span class="o">.</span><span class="n">EXEC</span><span class="p">,</span>
+</span><span id="__span-2-22"><a id="__codelineno-2-22" name="__codelineno-2-22" href="#__codelineno-2-22"></a>                    <span class="n">group</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">READ</span> <span class="o">|</span> <span class="n">FileMode</span><span class="o">.</span><span class="n">EXEC</span><span class="p">,</span>
+</span><span id="__span-2-23"><a id="__codelineno-2-23" name="__codelineno-2-23" href="#__codelineno-2-23"></a>                    <span class="n">other</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">NONE</span><span class="p">,</span>
+</span><span id="__span-2-24"><a id="__codelineno-2-24" name="__codelineno-2-24" href="#__codelineno-2-24"></a>                <span class="p">),</span>
+</span><span id="__span-2-25"><a id="__codelineno-2-25" name="__codelineno-2-25" href="#__codelineno-2-25"></a>            <span class="p">),</span>
+</span><span id="__span-2-26"><a id="__codelineno-2-26" name="__codelineno-2-26" href="#__codelineno-2-26"></a>            <span class="s2">&quot;output&quot;</span><span class="p">:</span> <span class="n">Dir</span><span class="p">(</span>
+</span><span id="__span-2-27"><a id="__codelineno-2-27" name="__codelineno-2-27" href="#__codelineno-2-27"></a>                <span class="c1"># Give the analyst a writable scratch/output directory for artifacts.</span>
+</span><span id="__span-2-28"><a id="__codelineno-2-28" name="__codelineno-2-28" href="#__codelineno-2-28"></a>                <span class="n">group</span><span class="o">=</span><span class="n">analyst</span><span class="p">,</span>
+</span><span id="__span-2-29"><a id="__codelineno-2-29" name="__codelineno-2-29" href="#__codelineno-2-29"></a>                <span class="n">permissions</span><span class="o">=</span><span class="n">Permissions</span><span class="p">(</span>
+</span><span id="__span-2-30"><a id="__codelineno-2-30" name="__codelineno-2-30" href="#__codelineno-2-30"></a>                    <span class="n">owner</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">ALL</span><span class="p">,</span>
+</span><span id="__span-2-31"><a id="__codelineno-2-31" name="__codelineno-2-31" href="#__codelineno-2-31"></a>                    <span class="n">group</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">ALL</span><span class="p">,</span>
+</span><span id="__span-2-32"><a id="__codelineno-2-32" name="__codelineno-2-32" href="#__codelineno-2-32"></a>                    <span class="n">other</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">NONE</span><span class="p">,</span>
+</span><span id="__span-2-33"><a id="__codelineno-2-33" name="__codelineno-2-33" href="#__codelineno-2-33"></a>                <span class="p">),</span>
+</span><span id="__span-2-34"><a id="__codelineno-2-34" name="__codelineno-2-34" href="#__codelineno-2-34"></a>            <span class="p">),</span>
+</span><span id="__span-2-35"><a id="__codelineno-2-35" name="__codelineno-2-35" href="#__codelineno-2-35"></a>        <span class="p">},</span>
+</span><span id="__span-2-36"><a id="__codelineno-2-36" name="__codelineno-2-36" href="#__codelineno-2-36"></a>    <span class="p">),</span>
+</span><span id="__span-2-37"><a id="__codelineno-2-37" name="__codelineno-2-37" href="#__codelineno-2-37"></a>    <span class="c1"># Run model-facing sandbox actions as this user, so those permissions apply.</span>
+</span><span id="__span-2-38"><a id="__codelineno-2-38" name="__codelineno-2-38" href="#__codelineno-2-38"></a>    <span class="n">run_as</span><span class="o">=</span><span class="n">analyst</span><span class="p">,</span>
+</span><span id="__span-2-39"><a id="__codelineno-2-39" name="__codelineno-2-39" href="#__codelineno-2-39"></a><span class="p">)</span>
+</span><span id="__span-2-40"><a id="__codelineno-2-40" name="__codelineno-2-40" href="#__codelineno-2-40"></a>
+</span><span id="__span-2-41"><a id="__codelineno-2-41" name="__codelineno-2-41" href="#__codelineno-2-41"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-2-42"><a id="__codelineno-2-42" name="__codelineno-2-42" href="#__codelineno-2-42"></a>    <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-2-43"><a id="__codelineno-2-43" name="__codelineno-2-43" href="#__codelineno-2-43"></a>    <span class="s2">&quot;Summarize the contracts and call out renewal dates.&quot;</span><span class="p">,</span>
+</span><span id="__span-2-44"><a id="__codelineno-2-44" name="__codelineno-2-44" href="#__codelineno-2-44"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span>
+</span><span id="__span-2-45"><a id="__codelineno-2-45" name="__codelineno-2-45" href="#__codelineno-2-45"></a>        <span class="n">sandbox</span><span class="o">=</span><span class="n">SandboxRunConfig</span><span class="p">(</span><span class="n">client</span><span class="o">=</span><span class="n">UnixLocalSandboxClient</span><span class="p">()),</span>
+</span><span id="__span-2-46"><a id="__codelineno-2-46" name="__codelineno-2-46" href="#__codelineno-2-46"></a>    <span class="p">),</span>
+</span><span id="__span-2-47"><a id="__codelineno-2-47" name="__codelineno-2-47" href="#__codelineno-2-47"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>ファイルレベルの共有ルールも必要な場合は、ユーザーとマニフェストグループ、エントリの <code>group</code> メタデータを組み合わせてください。<code>run_as</code> ユーザーは誰がサンドボックスネイティブなアクションを実行するかを制御し、<code>Permissions</code> はサンドボックスがワークスペースをマテリアライズした後に、そのユーザーがどのファイルを読み取り、書き込み、実行できるかを制御します。</p>
+<h3 id="_10">スナップショット仕様</h3>
+<p><code>SnapshotSpec</code> は、新規サンドボックスセッションで保存済みワークスペース内容をどこから復元し、どこへ永続化して戻すかを指定します。これはサンドボックスワークスペースのスナップショットポリシーであり、<code>session_state</code> は特定のサンドボックスバックエンドを再開するためのシリアライズ済み接続状態です。</p>
+<p>ローカルの永続スナップショットには <code>LocalSnapshotSpec</code> を使用し、アプリがリモートスナップショットクライアントを提供する場合は <code>RemoteSnapshotSpec</code> を使用します。ローカルスナップショットのセットアップが利用できない場合はフォールバックとして no-op スナップショットが使用され、高度な呼び出し元はワークスペーススナップショットの永続化を望まない場合に明示的に使用できます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">LocalSnapshotSpec</span><span class="p">,</span> <span class="n">SandboxRunConfig</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.sandboxes.unix_local</span><span class="w"> </span><span class="kn">import</span> <span class="n">UnixLocalSandboxClient</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="n">run_config</span> <span class="o">=</span> <span class="n">RunConfig</span><span class="p">(</span>
+</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>    <span class="n">sandbox</span><span class="o">=</span><span class="n">SandboxRunConfig</span><span class="p">(</span>
+</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>        <span class="n">client</span><span class="o">=</span><span class="n">UnixLocalSandboxClient</span><span class="p">(),</span>
+</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>        <span class="n">snapshot</span><span class="o">=</span><span class="n">LocalSnapshotSpec</span><span class="p">(</span><span class="n">base_path</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/tmp/my-sandbox-snapshots&quot;</span><span class="p">)),</span>
+</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>    <span class="p">)</span>
+</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>Runner が新規サンドボックスセッションを作成すると、サンドボックスクライアントはそのセッション用のスナップショットインスタンスを構築します。開始時に、スナップショットが復元可能であれば、実行が継続する前にサンドボックスは保存済みワークスペース内容を復元します。クリーンアップ時には、Runner 所有のサンドボックスセッションがワークスペースをアーカイブし、スナップショットを通じて永続化して戻します。</p>
+<p><code>snapshot</code> を省略すると、ランタイムは可能な場合にデフォルトのローカルスナップショット場所を使用しようとします。それをセットアップできない場合は、no-op スナップショットにフォールバックします。マウントされたパスと一時パスは、永続的なワークスペース内容としてスナップショットにコピーされません。</p>
+<h3 id="_11">サンドボックスのライフサイクル</h3>
+<p>ライフサイクルモードは 2 つあります。<strong>SDK 所有</strong> と <strong>開発者所有</strong> です。</p>
+<div class="sandbox-lifecycle-diagram">
+<pre class="mermaid"><code>sequenceDiagram
+    participant App
+    participant Runner
+    participant Client
+    participant Sandbox
+
+    App-&gt;&gt;Runner: Runner.run(..., SandboxRunConfig(client=...))
+    Runner-&gt;&gt;Client: create or resume sandbox
+    Client--&gt;&gt;Runner: sandbox session
+    Runner-&gt;&gt;Sandbox: start, run tools
+    Runner-&gt;&gt;Sandbox: stop and persist snapshot
+    Runner-&gt;&gt;Client: delete runner-owned resources
+
+    App-&gt;&gt;Client: create(...)
+    Client--&gt;&gt;App: sandbox session
+    App-&gt;&gt;Sandbox: async with sandbox
+    App-&gt;&gt;Runner: Runner.run(..., SandboxRunConfig(session=sandbox))
+    Runner-&gt;&gt;Sandbox: run tools
+    App-&gt;&gt;Sandbox: cleanup on context exit / aclose()</code></pre>
+</div>
+<p>サンドボックスが 1 回の実行の間だけ存続すればよい場合は、SDK 所有のライフサイクルを使用します。<code>client</code>、任意の <code>manifest</code>、任意の <code>snapshot</code>、クライアント <code>options</code> を渡します。Runner はサンドボックスを作成または再開し、開始し、エージェントを実行し、スナップショット backed のワークスペース状態を永続化し、サンドボックスをシャットダウンし、クライアントに Runner 所有リソースをクリーンアップさせます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>    <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>    <span class="s2">&quot;Inspect the workspace and summarize what changed.&quot;</span><span class="p">,</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>        <span class="n">sandbox</span><span class="o">=</span><span class="n">SandboxRunConfig</span><span class="p">(</span><span class="n">client</span><span class="o">=</span><span class="n">UnixLocalSandboxClient</span><span class="p">()),</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>    <span class="p">),</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>サンドボックスを先に作成したい場合、1 つのライブサンドボックスを複数の実行で再利用したい場合、実行後にファイルを検査したい場合、自分で作成したサンドボックス上でストリーミングしたい場合、またはクリーンアップのタイミングを厳密に決めたい場合は、開発者所有のライフサイクルを使用します。<code>session=...</code> を渡すと、Runner はそのライブサンドボックスを使用しますが、代わりに閉じることはありません。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="n">sandbox</span> <span class="o">=</span> <span class="k">await</span> <span class="n">client</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">manifest</span><span class="o">=</span><span class="n">agent</span><span class="o">.</span><span class="n">default_manifest</span><span class="p">)</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="k">async</span> <span class="k">with</span> <span class="n">sandbox</span><span class="p">:</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>    <span class="n">run_config</span> <span class="o">=</span> <span class="n">RunConfig</span><span class="p">(</span><span class="n">sandbox</span><span class="o">=</span><span class="n">SandboxRunConfig</span><span class="p">(</span><span class="n">session</span><span class="o">=</span><span class="n">sandbox</span><span class="p">))</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Analyze the files.&quot;</span><span class="p">,</span> <span class="n">run_config</span><span class="o">=</span><span class="n">run_config</span><span class="p">)</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Write the final report.&quot;</span><span class="p">,</span> <span class="n">run_config</span><span class="o">=</span><span class="n">run_config</span><span class="p">)</span>
+</span></code></pre></div>
+<p>通常はコンテキストマネージャーの形を使用します。エントリ時にサンドボックスを開始し、終了時にセッションのクリーンアップライフサイクルを実行します。アプリでコンテキストマネージャーを使用できない場合は、ライフサイクルメソッドを直接呼び出してください。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">sandbox</span> <span class="o">=</span> <span class="k">await</span> <span class="n">client</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>    <span class="n">manifest</span><span class="o">=</span><span class="n">agent</span><span class="o">.</span><span class="n">default_manifest</span><span class="p">,</span>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>    <span class="n">snapshot</span><span class="o">=</span><span class="n">LocalSnapshotSpec</span><span class="p">(</span><span class="n">base_path</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/tmp/my-sandbox-snapshots&quot;</span><span class="p">)),</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="p">)</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="k">try</span><span class="p">:</span>
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>    <span class="k">await</span> <span class="n">sandbox</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>    <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>        <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>        <span class="s2">&quot;Analyze the files.&quot;</span><span class="p">,</span>
+</span><span id="__span-6-10"><a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>        <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">sandbox</span><span class="o">=</span><span class="n">SandboxRunConfig</span><span class="p">(</span><span class="n">session</span><span class="o">=</span><span class="n">sandbox</span><span class="p">)),</span>
+</span><span id="__span-6-11"><a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>    <span class="p">)</span>
+</span><span id="__span-6-12"><a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a>    <span class="c1"># Persist a checkpoint of the live workspace before doing more work.</span>
+</span><span id="__span-6-13"><a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a>    <span class="c1"># `aclose()` also calls `stop()`, so this is only needed for an explicit mid-lifecycle save.</span>
+</span><span id="__span-6-14"><a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a>    <span class="k">await</span> <span class="n">sandbox</span><span class="o">.</span><span class="n">stop</span><span class="p">()</span>
+</span><span id="__span-6-15"><a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a><span class="k">finally</span><span class="p">:</span>
+</span><span id="__span-6-16"><a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a>    <span class="k">await</span> <span class="n">sandbox</span><span class="o">.</span><span class="n">aclose</span><span class="p">()</span>
+</span></code></pre></div>
+<p><code>stop()</code> はスナップショット backed のワークスペース内容だけを永続化し、サンドボックスを破棄しません。<code>aclose()</code> は完全なセッションクリーンアップパスです。停止前フックを実行し、<code>stop()</code> を呼び出し、サンドボックスリソースをシャットダウンし、セッションスコープの依存関係を閉じます。</p>
+<h2 id="sandboxrunconfig"><code>SandboxRunConfig</code> のオプション</h2>
+<p><a class="autorefs autorefs-internal" title="SandboxRunConfig
+
+
+  
+      dataclass
+  " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig"><code>SandboxRunConfig</code></a> は、サンドボックスセッションがどこから来るか、および新規セッションをどのように初期化すべきかを決定する、実行ごとのオプションを保持します。</p>
+<h3 id="_12">サンドボックスの取得元</h3>
+<p>これらのオプションは、Runner がサンドボックスセッションを再利用、再開、または作成すべきかを決定します。</p>
+<div class="sandbox-nowrap-first-column-table">
+<table>
+<thead>
+<tr>
+<th>オプション</th>
+<th>使用する場面</th>
+<th>注意</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>client</code></td>
+<td>Runner にサンドボックスセッションの作成、再開、クリーンアップを任せたい場合。</td>
+<td>ライブサンドボックス <code>session</code> を提供しない限り必須です。</td>
+</tr>
+<tr>
+<td><code>session</code></td>
+<td>既にライブサンドボックスセッションを自分で作成している場合。</td>
+<td>呼び出し元がライフサイクルを所有します。Runner はそのライブサンドボックスセッションを再利用します。</td>
+</tr>
+<tr>
+<td><code>session_state</code></td>
+<td>シリアライズ済みのサンドボックスセッション状態はあるが、ライブサンドボックスセッションオブジェクトはない場合。</td>
+<td><code>client</code> が必要です。Runner はその明示的な状態から所有セッションとして再開します。</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>実際には、Runner は次の順序でサンドボックスセッションを解決します。</p>
+<ol>
+<li><code>run_config.sandbox.session</code> を注入した場合、そのライブサンドボックスセッションが直接再利用されます。</li>
+<li>それ以外で、実行が <code>RunState</code> から再開される場合、保存されているサンドボックスセッション状態が再開されます。</li>
+<li>それ以外で、<code>run_config.sandbox.session_state</code> を渡した場合、Runner はその明示的なシリアライズ済みサンドボックスセッション状態から再開します。</li>
+<li>それ以外の場合、Runner は新規サンドボックスセッションを作成します。その新規セッションでは、提供されている場合は <code>run_config.sandbox.manifest</code> を使用し、そうでない場合は <code>agent.default_manifest</code> を使用します。</li>
+</ol>
+<h3 id="_13">新規セッションの入力</h3>
+<p>これらのオプションは、Runner が新規サンドボックスセッションを作成する場合にのみ意味を持ちます。</p>
+<div class="sandbox-nowrap-first-column-table">
+<table>
+<thead>
+<tr>
+<th>オプション</th>
+<th>使用する場面</th>
+<th>注意</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>manifest</code></td>
+<td>1 回限りの新規セッションワークスペースオーバーライドが必要な場合。</td>
+<td>省略時は <code>agent.default_manifest</code> にフォールバックします。</td>
+</tr>
+<tr>
+<td><code>snapshot</code></td>
+<td>新規サンドボックスセッションをスナップショットから初期化すべき場合。</td>
+<td>再開に似たフローやリモートスナップショットクライアントに有用です。</td>
+</tr>
+<tr>
+<td><code>options</code></td>
+<td>サンドボックスクライアントが作成時オプションを必要とする場合。</td>
+<td>Docker イメージ、Modal アプリ名、E2B テンプレート、タイムアウト、および同様のクライアント固有設定で一般的です。</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h3 id="_14">マテリアライズ制御</h3>
+<p><code>concurrency_limits</code> は、サンドボックスのマテリアライズ作業をどの程度並列に実行できるかを制御します。大きなマニフェストやローカルディレクトリコピーでより厳密なリソース制御が必要な場合は、<code>SandboxConcurrencyLimits(manifest_entries=..., local_dir_files=...)</code> を使用してください。いずれかの値を <code>None</code> に設定すると、その特定の制限を無効にできます。</p>
+<p><code>archive_limits</code> は、アーカイブ抽出に対する SDK 側のリソースチェックを制御します。SDK のデフォルトしきい値を有効にするには <code>archive_limits=SandboxArchiveLimits()</code> を設定します。アーカイブにより厳密なリソース制御が必要な場合は、<code>SandboxArchiveLimits(max_input_bytes=..., max_extracted_bytes=..., max_members=...)</code> などの明示的な値を渡してください。SDK アーカイブリソース制限なしのデフォルト動作を維持するには <code>archive_limits=None</code> のままにし、個別のフィールドだけを無効にするにはそのフィールドを <code>None</code> に設定します。</p>
+<p>留意すべき点がいくつかあります。</p>
+<ul>
+<li>新規セッション: <code>manifest=</code> と <code>snapshot=</code> は、Runner が新規サンドボックスセッションを作成する場合にのみ適用されます。</li>
+<li>再開とスナップショット: <code>session_state=</code> は以前にシリアライズされたサンドボックス状態に再接続します。一方、<code>snapshot=</code> は保存済みワークスペース内容から新規サンドボックスセッションを初期化します。</li>
+<li>クライアント固有オプション: <code>options=</code> はサンドボックスクライアントに依存します。Docker や多くのホスト型クライアントでは必須です。</li>
+<li>注入されたライブセッション: 実行中のサンドボックス <code>session</code> を渡す場合、機能駆動のマニフェスト更新は互換性のある非マウントエントリを追加できます。<code>manifest.root</code>、<code>manifest.environment</code>、<code>manifest.users</code>、<code>manifest.groups</code> を変更すること、既存エントリを削除すること、エントリタイプを置き換えること、マウントエントリを追加または変更することはできません。</li>
+<li>Runner API: <code>SandboxAgent</code> の実行は引き続き、通常の <code>Runner.run()</code>、<code>Runner.run_sync()</code>、<code>Runner.run_streamed()</code> API を使用します。</li>
+</ul>
+<h2 id="_15">完全な例: コーディングタスク</h2>
+<p>このコーディングスタイルの例は、デフォルトの出発点として適しています。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">ModelSettings</span><span class="p">,</span> <span class="n">Runner</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">Manifest</span><span class="p">,</span> <span class="n">SandboxAgent</span><span class="p">,</span> <span class="n">SandboxRunConfig</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.capabilities</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>    <span class="n">Capabilities</span><span class="p">,</span>
+</span><span id="__span-7-9"><a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>    <span class="n">LocalDirLazySkillSource</span><span class="p">,</span>
+</span><span id="__span-7-10"><a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>    <span class="n">Skills</span><span class="p">,</span>
+</span><span id="__span-7-11"><a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="p">)</span>
+</span><span id="__span-7-12"><a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.entries</span><span class="w"> </span><span class="kn">import</span> <span class="n">LocalDir</span>
+</span><span id="__span-7-13"><a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.sandboxes.unix_local</span><span class="w"> </span><span class="kn">import</span> <span class="n">UnixLocalSandboxClient</span>
+</span><span id="__span-7-14"><a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a>
+</span><span id="__span-7-15"><a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a><span class="n">EXAMPLE_DIR</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span><span class="o">.</span><span class="n">parent</span>
+</span><span id="__span-7-16"><a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a><span class="n">HOST_REPO_DIR</span> <span class="o">=</span> <span class="n">EXAMPLE_DIR</span> <span class="o">/</span> <span class="s2">&quot;repo&quot;</span>
+</span><span id="__span-7-17"><a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a><span class="n">HOST_SKILLS_DIR</span> <span class="o">=</span> <span class="n">EXAMPLE_DIR</span> <span class="o">/</span> <span class="s2">&quot;skills&quot;</span>
+</span><span id="__span-7-18"><a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a><span class="n">TARGET_TEST_CMD</span> <span class="o">=</span> <span class="s2">&quot;sh tests/test_credit_note.sh&quot;</span>
+</span><span id="__span-7-19"><a id="__codelineno-7-19" name="__codelineno-7-19" href="#__codelineno-7-19"></a>
+</span><span id="__span-7-20"><a id="__codelineno-7-20" name="__codelineno-7-20" href="#__codelineno-7-20"></a>
+</span><span id="__span-7-21"><a id="__codelineno-7-21" name="__codelineno-7-21" href="#__codelineno-7-21"></a><span class="k">def</span><span class="w"> </span><span class="nf">build_agent</span><span class="p">(</span><span class="n">model</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SandboxAgent</span><span class="p">[</span><span class="kc">None</span><span class="p">]:</span>
+</span><span id="__span-7-22"><a id="__codelineno-7-22" name="__codelineno-7-22" href="#__codelineno-7-22"></a>    <span class="k">return</span> <span class="n">SandboxAgent</span><span class="p">(</span>
+</span><span id="__span-7-23"><a id="__codelineno-7-23" name="__codelineno-7-23" href="#__codelineno-7-23"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Sandbox engineer&quot;</span><span class="p">,</span>
+</span><span id="__span-7-24"><a id="__codelineno-7-24" name="__codelineno-7-24" href="#__codelineno-7-24"></a>        <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span>
+</span><span id="__span-7-25"><a id="__codelineno-7-25" name="__codelineno-7-25" href="#__codelineno-7-25"></a>        <span class="n">instructions</span><span class="o">=</span><span class="p">(</span>
+</span><span id="__span-7-26"><a id="__codelineno-7-26" name="__codelineno-7-26" href="#__codelineno-7-26"></a>            <span class="s2">&quot;Inspect the repo, make the smallest correct change, run the most relevant checks, &quot;</span>
+</span><span id="__span-7-27"><a id="__codelineno-7-27" name="__codelineno-7-27" href="#__codelineno-7-27"></a>            <span class="s2">&quot;and summarize the file changes and risks. &quot;</span>
+</span><span id="__span-7-28"><a id="__codelineno-7-28" name="__codelineno-7-28" href="#__codelineno-7-28"></a>            <span class="s2">&quot;Read `repo/task.md` before editing files. Stay grounded in the repository, preserve &quot;</span>
+</span><span id="__span-7-29"><a id="__codelineno-7-29" name="__codelineno-7-29" href="#__codelineno-7-29"></a>            <span class="s2">&quot;existing behavior, and mention the exact verification command you ran. &quot;</span>
+</span><span id="__span-7-30"><a id="__codelineno-7-30" name="__codelineno-7-30" href="#__codelineno-7-30"></a>            <span class="s2">&quot;Use the `$credit-note-fixer` skill before editing files. If the repo lives under &quot;</span>
+</span><span id="__span-7-31"><a id="__codelineno-7-31" name="__codelineno-7-31" href="#__codelineno-7-31"></a>            <span class="s2">&quot;`repo/`, remember that `apply_patch` paths stay relative to the sandbox workspace &quot;</span>
+</span><span id="__span-7-32"><a id="__codelineno-7-32" name="__codelineno-7-32" href="#__codelineno-7-32"></a>            <span class="s2">&quot;root, so edits still target `repo/...`.&quot;</span>
+</span><span id="__span-7-33"><a id="__codelineno-7-33" name="__codelineno-7-33" href="#__codelineno-7-33"></a>        <span class="p">),</span>
+</span><span id="__span-7-34"><a id="__codelineno-7-34" name="__codelineno-7-34" href="#__codelineno-7-34"></a>        <span class="c1"># Put repos and task files in the manifest.</span>
+</span><span id="__span-7-35"><a id="__codelineno-7-35" name="__codelineno-7-35" href="#__codelineno-7-35"></a>        <span class="n">default_manifest</span><span class="o">=</span><span class="n">Manifest</span><span class="p">(</span>
+</span><span id="__span-7-36"><a id="__codelineno-7-36" name="__codelineno-7-36" href="#__codelineno-7-36"></a>            <span class="n">entries</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-7-37"><a id="__codelineno-7-37" name="__codelineno-7-37" href="#__codelineno-7-37"></a>                <span class="s2">&quot;repo&quot;</span><span class="p">:</span> <span class="n">LocalDir</span><span class="p">(</span><span class="n">src</span><span class="o">=</span><span class="n">HOST_REPO_DIR</span><span class="p">),</span>
+</span><span id="__span-7-38"><a id="__codelineno-7-38" name="__codelineno-7-38" href="#__codelineno-7-38"></a>            <span class="p">}</span>
+</span><span id="__span-7-39"><a id="__codelineno-7-39" name="__codelineno-7-39" href="#__codelineno-7-39"></a>        <span class="p">),</span>
+</span><span id="__span-7-40"><a id="__codelineno-7-40" name="__codelineno-7-40" href="#__codelineno-7-40"></a>        <span class="n">capabilities</span><span class="o">=</span><span class="n">Capabilities</span><span class="o">.</span><span class="n">default</span><span class="p">()</span> <span class="o">+</span> <span class="p">[</span>
+</span><span id="__span-7-41"><a id="__codelineno-7-41" name="__codelineno-7-41" href="#__codelineno-7-41"></a>            <span class="n">Skills</span><span class="p">(</span>
+</span><span id="__span-7-42"><a id="__codelineno-7-42" name="__codelineno-7-42" href="#__codelineno-7-42"></a>                <span class="n">lazy_from</span><span class="o">=</span><span class="n">LocalDirLazySkillSource</span><span class="p">(</span>
+</span><span id="__span-7-43"><a id="__codelineno-7-43" name="__codelineno-7-43" href="#__codelineno-7-43"></a>                    <span class="c1"># This is a host path read by the SDK process.</span>
+</span><span id="__span-7-44"><a id="__codelineno-7-44" name="__codelineno-7-44" href="#__codelineno-7-44"></a>                    <span class="c1"># Requested skills are copied into `skills_path` in the sandbox.</span>
+</span><span id="__span-7-45"><a id="__codelineno-7-45" name="__codelineno-7-45" href="#__codelineno-7-45"></a>                    <span class="n">source</span><span class="o">=</span><span class="n">LocalDir</span><span class="p">(</span><span class="n">src</span><span class="o">=</span><span class="n">HOST_SKILLS_DIR</span><span class="p">),</span>
+</span><span id="__span-7-46"><a id="__codelineno-7-46" name="__codelineno-7-46" href="#__codelineno-7-46"></a>                <span class="p">)</span>
+</span><span id="__span-7-47"><a id="__codelineno-7-47" name="__codelineno-7-47" href="#__codelineno-7-47"></a>            <span class="p">),</span>
+</span><span id="__span-7-48"><a id="__codelineno-7-48" name="__codelineno-7-48" href="#__codelineno-7-48"></a>        <span class="p">],</span>
+</span><span id="__span-7-49"><a id="__codelineno-7-49" name="__codelineno-7-49" href="#__codelineno-7-49"></a>        <span class="n">model_settings</span><span class="o">=</span><span class="n">ModelSettings</span><span class="p">(</span><span class="n">tool_choice</span><span class="o">=</span><span class="s2">&quot;required&quot;</span><span class="p">),</span>
+</span><span id="__span-7-50"><a id="__codelineno-7-50" name="__codelineno-7-50" href="#__codelineno-7-50"></a>    <span class="p">)</span>
+</span><span id="__span-7-51"><a id="__codelineno-7-51" name="__codelineno-7-51" href="#__codelineno-7-51"></a>
+</span><span id="__span-7-52"><a id="__codelineno-7-52" name="__codelineno-7-52" href="#__codelineno-7-52"></a>
+</span><span id="__span-7-53"><a id="__codelineno-7-53" name="__codelineno-7-53" href="#__codelineno-7-53"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="n">model</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">prompt</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-7-54"><a id="__codelineno-7-54" name="__codelineno-7-54" href="#__codelineno-7-54"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-7-55"><a id="__codelineno-7-55" name="__codelineno-7-55" href="#__codelineno-7-55"></a>        <span class="n">build_agent</span><span class="p">(</span><span class="n">model</span><span class="p">),</span>
+</span><span id="__span-7-56"><a id="__codelineno-7-56" name="__codelineno-7-56" href="#__codelineno-7-56"></a>        <span class="n">prompt</span><span class="p">,</span>
+</span><span id="__span-7-57"><a id="__codelineno-7-57" name="__codelineno-7-57" href="#__codelineno-7-57"></a>        <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span>
+</span><span id="__span-7-58"><a id="__codelineno-7-58" name="__codelineno-7-58" href="#__codelineno-7-58"></a>            <span class="n">sandbox</span><span class="o">=</span><span class="n">SandboxRunConfig</span><span class="p">(</span><span class="n">client</span><span class="o">=</span><span class="n">UnixLocalSandboxClient</span><span class="p">()),</span>
+</span><span id="__span-7-59"><a id="__codelineno-7-59" name="__codelineno-7-59" href="#__codelineno-7-59"></a>            <span class="n">workflow_name</span><span class="o">=</span><span class="s2">&quot;Sandbox coding example&quot;</span><span class="p">,</span>
+</span><span id="__span-7-60"><a id="__codelineno-7-60" name="__codelineno-7-60" href="#__codelineno-7-60"></a>        <span class="p">),</span>
+</span><span id="__span-7-61"><a id="__codelineno-7-61" name="__codelineno-7-61" href="#__codelineno-7-61"></a>    <span class="p">)</span>
+</span><span id="__span-7-62"><a id="__codelineno-7-62" name="__codelineno-7-62" href="#__codelineno-7-62"></a>    <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>
+</span><span id="__span-7-63"><a id="__codelineno-7-63" name="__codelineno-7-63" href="#__codelineno-7-63"></a>
+</span><span id="__span-7-64"><a id="__codelineno-7-64" name="__codelineno-7-64" href="#__codelineno-7-64"></a>
+</span><span id="__span-7-65"><a id="__codelineno-7-65" name="__codelineno-7-65" href="#__codelineno-7-65"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+</span><span id="__span-7-66"><a id="__codelineno-7-66" name="__codelineno-7-66" href="#__codelineno-7-66"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-7-67"><a id="__codelineno-7-67" name="__codelineno-7-67" href="#__codelineno-7-67"></a>        <span class="n">main</span><span class="p">(</span>
+</span><span id="__span-7-68"><a id="__codelineno-7-68" name="__codelineno-7-68" href="#__codelineno-7-68"></a>            <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5.5&quot;</span><span class="p">,</span>
+</span><span id="__span-7-69"><a id="__codelineno-7-69" name="__codelineno-7-69" href="#__codelineno-7-69"></a>            <span class="n">prompt</span><span class="o">=</span><span class="p">(</span>
+</span><span id="__span-7-70"><a id="__codelineno-7-70" name="__codelineno-7-70" href="#__codelineno-7-70"></a>                <span class="s2">&quot;Open `repo/task.md`, use the `$credit-note-fixer` skill, fix the bug, &quot;</span>
+</span><span id="__span-7-71"><a id="__codelineno-7-71" name="__codelineno-7-71" href="#__codelineno-7-71"></a>                <span class="sa">f</span><span class="s2">&quot;run `</span><span class="si">{</span><span class="n">TARGET_TEST_CMD</span><span class="si">}</span><span class="s2">`, and summarize the change.&quot;</span>
+</span><span id="__span-7-72"><a id="__codelineno-7-72" name="__codelineno-7-72" href="#__codelineno-7-72"></a>            <span class="p">),</span>
+</span><span id="__span-7-73"><a id="__codelineno-7-73" name="__codelineno-7-73" href="#__codelineno-7-73"></a>        <span class="p">)</span>
+</span><span id="__span-7-74"><a id="__codelineno-7-74" name="__codelineno-7-74" href="#__codelineno-7-74"></a>    <span class="p">)</span>
+</span></code></pre></div>
+<p><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a> を参照してください。この例は、Unix ローカル実行間で決定論的に検証できるように、小さなシェルベースのリポジトリを使用しています。実際のタスクリポジトリは、もちろん Python、JavaScript、またはその他何でもかまいません。</p>
+<h2 id="_16">一般的なパターン</h2>
+<p>上記の完全な例から始めてください。多くの場合、同じ <code>SandboxAgent</code> をそのまま維持し、サンドボックスクライアント、サンドボックスセッションの取得元、またはワークスペースの取得元だけを変更できます。</p>
+<h3 id="_17">サンドボックスクライアントの切り替え</h3>
+<p>エージェント定義は同じままにし、実行設定だけを変更します。コンテナ隔離やイメージの一致性が必要な場合は Docker を使用し、プロバイダー管理の実行が必要な場合はホスト型プロバイダーを使用します。例とプロバイダーオプションについては、<a href="../clients/">サンドボックスクライアント</a> を参照してください。</p>
+<h3 id="_18">ワークスペースのオーバーライド</h3>
+<p>エージェント定義は同じままにし、新規セッションのマニフェストだけを差し替えます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">Manifest</span><span class="p">,</span> <span class="n">SandboxRunConfig</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.entries</span><span class="w"> </span><span class="kn">import</span> <span class="n">GitRepo</span>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.sandboxes.unix_local</span><span class="w"> </span><span class="kn">import</span> <span class="n">UnixLocalSandboxClient</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="n">run_config</span> <span class="o">=</span> <span class="n">RunConfig</span><span class="p">(</span>
+</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>    <span class="n">sandbox</span><span class="o">=</span><span class="n">SandboxRunConfig</span><span class="p">(</span>
+</span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>        <span class="n">client</span><span class="o">=</span><span class="n">UnixLocalSandboxClient</span><span class="p">(),</span>
+</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>        <span class="n">manifest</span><span class="o">=</span><span class="n">Manifest</span><span class="p">(</span>
+</span><span id="__span-8-10"><a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a>            <span class="n">entries</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-8-11"><a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>                <span class="s2">&quot;repo&quot;</span><span class="p">:</span> <span class="n">GitRepo</span><span class="p">(</span><span class="n">repo</span><span class="o">=</span><span class="s2">&quot;openai/openai-agents-python&quot;</span><span class="p">,</span> <span class="n">ref</span><span class="o">=</span><span class="s2">&quot;main&quot;</span><span class="p">),</span>
+</span><span id="__span-8-12"><a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a>            <span class="p">}</span>
+</span><span id="__span-8-13"><a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a>        <span class="p">),</span>
+</span><span id="__span-8-14"><a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a>    <span class="p">),</span>
+</span><span id="__span-8-15"><a id="__codelineno-8-15" name="__codelineno-8-15" href="#__codelineno-8-15"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>同じエージェントの役割を、エージェントを再構築せずに異なるリポジトリ、パケット、またはタスクバンドルに対して実行すべき場合に使用します。上記の検証済みコーディング例では、1 回限りのオーバーライドではなく <code>default_manifest</code> で同じパターンを示しています。</p>
+<h3 id="_19">サンドボックスセッションの注入</h3>
+<p>明示的なライフサイクル制御、実行後の検査、または出力コピーが必要な場合は、ライブサンドボックスセッションを注入します。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Runner</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">SandboxRunConfig</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.sandboxes.unix_local</span><span class="w"> </span><span class="kn">import</span> <span class="n">UnixLocalSandboxClient</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="n">client</span> <span class="o">=</span> <span class="n">UnixLocalSandboxClient</span><span class="p">()</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="n">sandbox</span> <span class="o">=</span> <span class="k">await</span> <span class="n">client</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">manifest</span><span class="o">=</span><span class="n">agent</span><span class="o">.</span><span class="n">default_manifest</span><span class="p">)</span>
+</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a>
+</span><span id="__span-9-9"><a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a><span class="k">async</span> <span class="k">with</span> <span class="n">sandbox</span><span class="p">:</span>
+</span><span id="__span-9-10"><a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-9-11"><a id="__codelineno-9-11" name="__codelineno-9-11" href="#__codelineno-9-11"></a>        <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-9-12"><a id="__codelineno-9-12" name="__codelineno-9-12" href="#__codelineno-9-12"></a>        <span class="n">prompt</span><span class="p">,</span>
+</span><span id="__span-9-13"><a id="__codelineno-9-13" name="__codelineno-9-13" href="#__codelineno-9-13"></a>        <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span>
+</span><span id="__span-9-14"><a id="__codelineno-9-14" name="__codelineno-9-14" href="#__codelineno-9-14"></a>            <span class="n">sandbox</span><span class="o">=</span><span class="n">SandboxRunConfig</span><span class="p">(</span><span class="n">session</span><span class="o">=</span><span class="n">sandbox</span><span class="p">),</span>
+</span><span id="__span-9-15"><a id="__codelineno-9-15" name="__codelineno-9-15" href="#__codelineno-9-15"></a>        <span class="p">),</span>
+</span><span id="__span-9-16"><a id="__codelineno-9-16" name="__codelineno-9-16" href="#__codelineno-9-16"></a>    <span class="p">)</span>
+</span></code></pre></div>
+<p>実行後にワークスペースを検査したい場合や、既に開始済みのサンドボックスセッション上でストリーミングしたい場合に使用します。<a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a> と <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docker/docker_runner.py">examples/sandbox/docker/docker_runner.py</a> を参照してください。</p>
+<h3 id="_20">セッション状態からの再開</h3>
+<p><code>RunState</code> の外部で既にサンドボックス状態をシリアライズしている場合は、Runner にその状態から再接続させます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">SandboxRunConfig</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="n">serialized</span> <span class="o">=</span> <span class="n">load_saved_payload</span><span class="p">()</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="n">restored_state</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">deserialize_session_state</span><span class="p">(</span><span class="n">serialized</span><span class="p">)</span>
+</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="n">run_config</span> <span class="o">=</span> <span class="n">RunConfig</span><span class="p">(</span>
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a>    <span class="n">sandbox</span><span class="o">=</span><span class="n">SandboxRunConfig</span><span class="p">(</span>
+</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>        <span class="n">client</span><span class="o">=</span><span class="n">client</span><span class="p">,</span>
+</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>        <span class="n">session_state</span><span class="o">=</span><span class="n">restored_state</span><span class="p">,</span>
+</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a>    <span class="p">),</span>
+</span><span id="__span-10-12"><a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>サンドボックス状態が独自のストレージまたはジョブシステムに存在し、<code>Runner</code> にそこから直接再開させたい場合に使用します。シリアライズ/デシリアライズのフローについては、<a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/blaxel_runner.py">examples/sandbox/extensions/blaxel_runner.py</a> を参照してください。</p>
+<h3 id="_21">スナップショットからの開始</h3>
+<p>保存済みファイルと成果物から新規サンドボックスを初期化します。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">LocalSnapshotSpec</span><span class="p">,</span> <span class="n">SandboxRunConfig</span>
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.sandboxes.unix_local</span><span class="w"> </span><span class="kn">import</span> <span class="n">UnixLocalSandboxClient</span>
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>
+</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="n">run_config</span> <span class="o">=</span> <span class="n">RunConfig</span><span class="p">(</span>
+</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a>    <span class="n">sandbox</span><span class="o">=</span><span class="n">SandboxRunConfig</span><span class="p">(</span>
+</span><span id="__span-11-9"><a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a>        <span class="n">client</span><span class="o">=</span><span class="n">UnixLocalSandboxClient</span><span class="p">(),</span>
+</span><span id="__span-11-10"><a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>        <span class="n">snapshot</span><span class="o">=</span><span class="n">LocalSnapshotSpec</span><span class="p">(</span><span class="n">base_path</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/tmp/my-sandbox-snapshot&quot;</span><span class="p">)),</span>
+</span><span id="__span-11-11"><a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a>    <span class="p">),</span>
+</span><span id="__span-11-12"><a id="__codelineno-11-12" name="__codelineno-11-12" href="#__codelineno-11-12"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>新規実行を <code>agent.default_manifest</code> だけではなく、保存済みワークスペース内容から開始すべき場合に使用します。ローカルスナップショットフローについては <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/memory.py">examples/sandbox/memory.py</a> を、リモートスナップショットクライアントについては <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agent_with_remote_snapshot.py">examples/sandbox/sandbox_agent_with_remote_snapshot.py</a> を参照してください。</p>
+<h3 id="git">Git からのスキル読み込み</h3>
+<p>ローカルスキルソースを、リポジトリ backed のものに差し替えます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.capabilities</span><span class="w"> </span><span class="kn">import</span> <span class="n">Capabilities</span><span class="p">,</span> <span class="n">Skills</span>
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.entries</span><span class="w"> </span><span class="kn">import</span> <span class="n">GitRepo</span>
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="n">capabilities</span> <span class="o">=</span> <span class="n">Capabilities</span><span class="o">.</span><span class="n">default</span><span class="p">()</span> <span class="o">+</span> <span class="p">[</span>
+</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>    <span class="n">Skills</span><span class="p">(</span><span class="n">from_</span><span class="o">=</span><span class="n">GitRepo</span><span class="p">(</span><span class="n">repo</span><span class="o">=</span><span class="s2">&quot;sdcoffey/tax-prep-skills&quot;</span><span class="p">,</span> <span class="n">ref</span><span class="o">=</span><span class="s2">&quot;main&quot;</span><span class="p">)),</span>
+</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="p">]</span>
+</span></code></pre></div>
+<p>スキルバンドルに独自のリリースサイクルがある場合や、サンドボックス間で共有すべき場合に使用します。<a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/tax_prep.py">examples/sandbox/tax_prep.py</a> を参照してください。</p>
+<h3 id="_22">ツールとしての公開</h3>
+<p>ツールエージェントは、独自のサンドボックス境界を持つことも、親実行のライブサンドボックスを再利用することもできます。再利用は、高速な読み取り専用の探索エージェントに有用です。別のサンドボックスの作成、ハイドレーション、スナップショット作成にコストをかけずに、親が使用している正確なワークスペースを検査できます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Runner</span>
+</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
+</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">FileMode</span><span class="p">,</span> <span class="n">Manifest</span><span class="p">,</span> <span class="n">Permissions</span><span class="p">,</span> <span class="n">SandboxAgent</span><span class="p">,</span> <span class="n">SandboxRunConfig</span><span class="p">,</span> <span class="n">User</span>
+</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.entries</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dir</span><span class="p">,</span> <span class="n">File</span>
+</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.sandboxes.unix_local</span><span class="w"> </span><span class="kn">import</span> <span class="n">UnixLocalSandboxClient</span>
+</span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a>
+</span><span id="__span-13-7"><a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a><span class="n">coordinator</span> <span class="o">=</span> <span class="n">User</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;coordinator&quot;</span><span class="p">)</span>
+</span><span id="__span-13-8"><a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a><span class="n">explorer</span> <span class="o">=</span> <span class="n">User</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;explorer&quot;</span><span class="p">)</span>
+</span><span id="__span-13-9"><a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a>
+</span><span id="__span-13-10"><a id="__codelineno-13-10" name="__codelineno-13-10" href="#__codelineno-13-10"></a><span class="n">manifest</span> <span class="o">=</span> <span class="n">Manifest</span><span class="p">(</span>
+</span><span id="__span-13-11"><a id="__codelineno-13-11" name="__codelineno-13-11" href="#__codelineno-13-11"></a>    <span class="n">users</span><span class="o">=</span><span class="p">[</span><span class="n">coordinator</span><span class="p">,</span> <span class="n">explorer</span><span class="p">],</span>
+</span><span id="__span-13-12"><a id="__codelineno-13-12" name="__codelineno-13-12" href="#__codelineno-13-12"></a>    <span class="n">entries</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-13-13"><a id="__codelineno-13-13" name="__codelineno-13-13" href="#__codelineno-13-13"></a>        <span class="s2">&quot;pricing_packet&quot;</span><span class="p">:</span> <span class="n">Dir</span><span class="p">(</span>
+</span><span id="__span-13-14"><a id="__codelineno-13-14" name="__codelineno-13-14" href="#__codelineno-13-14"></a>            <span class="n">group</span><span class="o">=</span><span class="n">coordinator</span><span class="p">,</span>
+</span><span id="__span-13-15"><a id="__codelineno-13-15" name="__codelineno-13-15" href="#__codelineno-13-15"></a>            <span class="n">permissions</span><span class="o">=</span><span class="n">Permissions</span><span class="p">(</span>
+</span><span id="__span-13-16"><a id="__codelineno-13-16" name="__codelineno-13-16" href="#__codelineno-13-16"></a>                <span class="n">owner</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">ALL</span><span class="p">,</span>
+</span><span id="__span-13-17"><a id="__codelineno-13-17" name="__codelineno-13-17" href="#__codelineno-13-17"></a>                <span class="n">group</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">ALL</span><span class="p">,</span>
+</span><span id="__span-13-18"><a id="__codelineno-13-18" name="__codelineno-13-18" href="#__codelineno-13-18"></a>                <span class="n">other</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">READ</span> <span class="o">|</span> <span class="n">FileMode</span><span class="o">.</span><span class="n">EXEC</span><span class="p">,</span>
+</span><span id="__span-13-19"><a id="__codelineno-13-19" name="__codelineno-13-19" href="#__codelineno-13-19"></a>                <span class="n">directory</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-13-20"><a id="__codelineno-13-20" name="__codelineno-13-20" href="#__codelineno-13-20"></a>            <span class="p">),</span>
+</span><span id="__span-13-21"><a id="__codelineno-13-21" name="__codelineno-13-21" href="#__codelineno-13-21"></a>            <span class="n">children</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-13-22"><a id="__codelineno-13-22" name="__codelineno-13-22" href="#__codelineno-13-22"></a>                <span class="s2">&quot;pricing.md&quot;</span><span class="p">:</span> <span class="n">File</span><span class="p">(</span>
+</span><span id="__span-13-23"><a id="__codelineno-13-23" name="__codelineno-13-23" href="#__codelineno-13-23"></a>                    <span class="n">content</span><span class="o">=</span><span class="sa">b</span><span class="s2">&quot;Pricing packet contents...&quot;</span><span class="p">,</span>
+</span><span id="__span-13-24"><a id="__codelineno-13-24" name="__codelineno-13-24" href="#__codelineno-13-24"></a>                    <span class="n">group</span><span class="o">=</span><span class="n">coordinator</span><span class="p">,</span>
+</span><span id="__span-13-25"><a id="__codelineno-13-25" name="__codelineno-13-25" href="#__codelineno-13-25"></a>                    <span class="n">permissions</span><span class="o">=</span><span class="n">Permissions</span><span class="p">(</span>
+</span><span id="__span-13-26"><a id="__codelineno-13-26" name="__codelineno-13-26" href="#__codelineno-13-26"></a>                        <span class="n">owner</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">ALL</span><span class="p">,</span>
+</span><span id="__span-13-27"><a id="__codelineno-13-27" name="__codelineno-13-27" href="#__codelineno-13-27"></a>                        <span class="n">group</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">ALL</span><span class="p">,</span>
+</span><span id="__span-13-28"><a id="__codelineno-13-28" name="__codelineno-13-28" href="#__codelineno-13-28"></a>                        <span class="n">other</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">READ</span><span class="p">,</span>
+</span><span id="__span-13-29"><a id="__codelineno-13-29" name="__codelineno-13-29" href="#__codelineno-13-29"></a>                    <span class="p">),</span>
+</span><span id="__span-13-30"><a id="__codelineno-13-30" name="__codelineno-13-30" href="#__codelineno-13-30"></a>                <span class="p">),</span>
+</span><span id="__span-13-31"><a id="__codelineno-13-31" name="__codelineno-13-31" href="#__codelineno-13-31"></a>            <span class="p">},</span>
+</span><span id="__span-13-32"><a id="__codelineno-13-32" name="__codelineno-13-32" href="#__codelineno-13-32"></a>        <span class="p">),</span>
+</span><span id="__span-13-33"><a id="__codelineno-13-33" name="__codelineno-13-33" href="#__codelineno-13-33"></a>        <span class="s2">&quot;work&quot;</span><span class="p">:</span> <span class="n">Dir</span><span class="p">(</span>
+</span><span id="__span-13-34"><a id="__codelineno-13-34" name="__codelineno-13-34" href="#__codelineno-13-34"></a>            <span class="n">group</span><span class="o">=</span><span class="n">coordinator</span><span class="p">,</span>
+</span><span id="__span-13-35"><a id="__codelineno-13-35" name="__codelineno-13-35" href="#__codelineno-13-35"></a>            <span class="n">permissions</span><span class="o">=</span><span class="n">Permissions</span><span class="p">(</span>
+</span><span id="__span-13-36"><a id="__codelineno-13-36" name="__codelineno-13-36" href="#__codelineno-13-36"></a>                <span class="n">owner</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">ALL</span><span class="p">,</span>
+</span><span id="__span-13-37"><a id="__codelineno-13-37" name="__codelineno-13-37" href="#__codelineno-13-37"></a>                <span class="n">group</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">ALL</span><span class="p">,</span>
+</span><span id="__span-13-38"><a id="__codelineno-13-38" name="__codelineno-13-38" href="#__codelineno-13-38"></a>                <span class="n">other</span><span class="o">=</span><span class="n">FileMode</span><span class="o">.</span><span class="n">NONE</span><span class="p">,</span>
+</span><span id="__span-13-39"><a id="__codelineno-13-39" name="__codelineno-13-39" href="#__codelineno-13-39"></a>                <span class="n">directory</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-13-40"><a id="__codelineno-13-40" name="__codelineno-13-40" href="#__codelineno-13-40"></a>            <span class="p">),</span>
+</span><span id="__span-13-41"><a id="__codelineno-13-41" name="__codelineno-13-41" href="#__codelineno-13-41"></a>        <span class="p">),</span>
+</span><span id="__span-13-42"><a id="__codelineno-13-42" name="__codelineno-13-42" href="#__codelineno-13-42"></a>    <span class="p">},</span>
+</span><span id="__span-13-43"><a id="__codelineno-13-43" name="__codelineno-13-43" href="#__codelineno-13-43"></a><span class="p">)</span>
+</span><span id="__span-13-44"><a id="__codelineno-13-44" name="__codelineno-13-44" href="#__codelineno-13-44"></a>
+</span><span id="__span-13-45"><a id="__codelineno-13-45" name="__codelineno-13-45" href="#__codelineno-13-45"></a><span class="n">pricing_explorer</span> <span class="o">=</span> <span class="n">SandboxAgent</span><span class="p">(</span>
+</span><span id="__span-13-46"><a id="__codelineno-13-46" name="__codelineno-13-46" href="#__codelineno-13-46"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Pricing Explorer&quot;</span><span class="p">,</span>
+</span><span id="__span-13-47"><a id="__codelineno-13-47" name="__codelineno-13-47" href="#__codelineno-13-47"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Read `pricing_packet/` and summarize commercial risk. Do not edit files.&quot;</span><span class="p">,</span>
+</span><span id="__span-13-48"><a id="__codelineno-13-48" name="__codelineno-13-48" href="#__codelineno-13-48"></a>    <span class="n">run_as</span><span class="o">=</span><span class="n">explorer</span><span class="p">,</span>
+</span><span id="__span-13-49"><a id="__codelineno-13-49" name="__codelineno-13-49" href="#__codelineno-13-49"></a><span class="p">)</span>
+</span><span id="__span-13-50"><a id="__codelineno-13-50" name="__codelineno-13-50" href="#__codelineno-13-50"></a>
+</span><span id="__span-13-51"><a id="__codelineno-13-51" name="__codelineno-13-51" href="#__codelineno-13-51"></a><span class="n">client</span> <span class="o">=</span> <span class="n">UnixLocalSandboxClient</span><span class="p">()</span>
+</span><span id="__span-13-52"><a id="__codelineno-13-52" name="__codelineno-13-52" href="#__codelineno-13-52"></a><span class="n">sandbox</span> <span class="o">=</span> <span class="k">await</span> <span class="n">client</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">manifest</span><span class="o">=</span><span class="n">manifest</span><span class="p">)</span>
+</span><span id="__span-13-53"><a id="__codelineno-13-53" name="__codelineno-13-53" href="#__codelineno-13-53"></a>
+</span><span id="__span-13-54"><a id="__codelineno-13-54" name="__codelineno-13-54" href="#__codelineno-13-54"></a><span class="k">async</span> <span class="k">with</span> <span class="n">sandbox</span><span class="p">:</span>
+</span><span id="__span-13-55"><a id="__codelineno-13-55" name="__codelineno-13-55" href="#__codelineno-13-55"></a>    <span class="n">shared_run_config</span> <span class="o">=</span> <span class="n">RunConfig</span><span class="p">(</span>
+</span><span id="__span-13-56"><a id="__codelineno-13-56" name="__codelineno-13-56" href="#__codelineno-13-56"></a>        <span class="n">sandbox</span><span class="o">=</span><span class="n">SandboxRunConfig</span><span class="p">(</span><span class="n">session</span><span class="o">=</span><span class="n">sandbox</span><span class="p">),</span>
+</span><span id="__span-13-57"><a id="__codelineno-13-57" name="__codelineno-13-57" href="#__codelineno-13-57"></a>    <span class="p">)</span>
+</span><span id="__span-13-58"><a id="__codelineno-13-58" name="__codelineno-13-58" href="#__codelineno-13-58"></a>
+</span><span id="__span-13-59"><a id="__codelineno-13-59" name="__codelineno-13-59" href="#__codelineno-13-59"></a>    <span class="n">orchestrator</span> <span class="o">=</span> <span class="n">SandboxAgent</span><span class="p">(</span>
+</span><span id="__span-13-60"><a id="__codelineno-13-60" name="__codelineno-13-60" href="#__codelineno-13-60"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Revenue Operations Coordinator&quot;</span><span class="p">,</span>
+</span><span id="__span-13-61"><a id="__codelineno-13-61" name="__codelineno-13-61" href="#__codelineno-13-61"></a>        <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Coordinate the review and write final notes to `work/`.&quot;</span><span class="p">,</span>
+</span><span id="__span-13-62"><a id="__codelineno-13-62" name="__codelineno-13-62" href="#__codelineno-13-62"></a>        <span class="n">run_as</span><span class="o">=</span><span class="n">coordinator</span><span class="p">,</span>
+</span><span id="__span-13-63"><a id="__codelineno-13-63" name="__codelineno-13-63" href="#__codelineno-13-63"></a>        <span class="n">tools</span><span class="o">=</span><span class="p">[</span>
+</span><span id="__span-13-64"><a id="__codelineno-13-64" name="__codelineno-13-64" href="#__codelineno-13-64"></a>            <span class="n">pricing_explorer</span><span class="o">.</span><span class="n">as_tool</span><span class="p">(</span>
+</span><span id="__span-13-65"><a id="__codelineno-13-65" name="__codelineno-13-65" href="#__codelineno-13-65"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="s2">&quot;review_pricing_packet&quot;</span><span class="p">,</span>
+</span><span id="__span-13-66"><a id="__codelineno-13-66" name="__codelineno-13-66" href="#__codelineno-13-66"></a>                <span class="n">tool_description</span><span class="o">=</span><span class="s2">&quot;Inspect the pricing packet and summarize commercial risk.&quot;</span><span class="p">,</span>
+</span><span id="__span-13-67"><a id="__codelineno-13-67" name="__codelineno-13-67" href="#__codelineno-13-67"></a>                <span class="n">run_config</span><span class="o">=</span><span class="n">shared_run_config</span><span class="p">,</span>
+</span><span id="__span-13-68"><a id="__codelineno-13-68" name="__codelineno-13-68" href="#__codelineno-13-68"></a>                <span class="n">max_turns</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+</span><span id="__span-13-69"><a id="__codelineno-13-69" name="__codelineno-13-69" href="#__codelineno-13-69"></a>            <span class="p">),</span>
+</span><span id="__span-13-70"><a id="__codelineno-13-70" name="__codelineno-13-70" href="#__codelineno-13-70"></a>        <span class="p">],</span>
+</span><span id="__span-13-71"><a id="__codelineno-13-71" name="__codelineno-13-71" href="#__codelineno-13-71"></a>    <span class="p">)</span>
+</span><span id="__span-13-72"><a id="__codelineno-13-72" name="__codelineno-13-72" href="#__codelineno-13-72"></a>
+</span><span id="__span-13-73"><a id="__codelineno-13-73" name="__codelineno-13-73" href="#__codelineno-13-73"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-13-74"><a id="__codelineno-13-74" name="__codelineno-13-74" href="#__codelineno-13-74"></a>        <span class="n">orchestrator</span><span class="p">,</span>
+</span><span id="__span-13-75"><a id="__codelineno-13-75" name="__codelineno-13-75" href="#__codelineno-13-75"></a>        <span class="s2">&quot;Review the pricing packet, then write final notes to `work/summary.md`.&quot;</span><span class="p">,</span>
+</span><span id="__span-13-76"><a id="__codelineno-13-76" name="__codelineno-13-76" href="#__codelineno-13-76"></a>        <span class="n">run_config</span><span class="o">=</span><span class="n">shared_run_config</span><span class="p">,</span>
+</span><span id="__span-13-77"><a id="__codelineno-13-77" name="__codelineno-13-77" href="#__codelineno-13-77"></a>    <span class="p">)</span>
+</span></code></pre></div>
+<p>ここでは、親エージェントは <code>coordinator</code> として実行され、探索ツールエージェントは同じライブサンドボックスセッション内で <code>explorer</code> として実行されます。<code>pricing_packet/</code> エントリは <code>other</code> ユーザーが読み取り可能であるため、explorer はすばやく検査できますが、書き込みビットは持ちません。<code>work/</code> ディレクトリは coordinator のユーザー/グループだけが利用できるため、親は最終成果物を書き込めますが、explorer は読み取り専用のままです。</p>
+<p>ツールエージェントに実際の隔離が必要な場合は、代わりに独自のサンドボックス <code>RunConfig</code> を与えます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">docker</span><span class="w"> </span><span class="kn">import</span> <span class="n">from_env</span> <span class="k">as</span> <span class="n">docker_from_env</span>
+</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>
+</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
+</span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">SandboxRunConfig</span>
+</span><span id="__span-14-5"><a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.sandboxes.docker</span><span class="w"> </span><span class="kn">import</span> <span class="n">DockerSandboxClient</span><span class="p">,</span> <span class="n">DockerSandboxClientOptions</span>
+</span><span id="__span-14-6"><a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a>
+</span><span id="__span-14-7"><a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="n">rollout_agent</span><span class="o">.</span><span class="n">as_tool</span><span class="p">(</span>
+</span><span id="__span-14-8"><a id="__codelineno-14-8" name="__codelineno-14-8" href="#__codelineno-14-8"></a>    <span class="n">tool_name</span><span class="o">=</span><span class="s2">&quot;review_rollout_risk&quot;</span><span class="p">,</span>
+</span><span id="__span-14-9"><a id="__codelineno-14-9" name="__codelineno-14-9" href="#__codelineno-14-9"></a>    <span class="n">tool_description</span><span class="o">=</span><span class="s2">&quot;Inspect the rollout packet and summarize implementation risk.&quot;</span><span class="p">,</span>
+</span><span id="__span-14-10"><a id="__codelineno-14-10" name="__codelineno-14-10" href="#__codelineno-14-10"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span>
+</span><span id="__span-14-11"><a id="__codelineno-14-11" name="__codelineno-14-11" href="#__codelineno-14-11"></a>        <span class="n">sandbox</span><span class="o">=</span><span class="n">SandboxRunConfig</span><span class="p">(</span>
+</span><span id="__span-14-12"><a id="__codelineno-14-12" name="__codelineno-14-12" href="#__codelineno-14-12"></a>            <span class="n">client</span><span class="o">=</span><span class="n">DockerSandboxClient</span><span class="p">(</span><span class="n">docker_from_env</span><span class="p">()),</span>
+</span><span id="__span-14-13"><a id="__codelineno-14-13" name="__codelineno-14-13" href="#__codelineno-14-13"></a>            <span class="n">options</span><span class="o">=</span><span class="n">DockerSandboxClientOptions</span><span class="p">(</span><span class="n">image</span><span class="o">=</span><span class="s2">&quot;python:3.14-slim&quot;</span><span class="p">),</span>
+</span><span id="__span-14-14"><a id="__codelineno-14-14" name="__codelineno-14-14" href="#__codelineno-14-14"></a>        <span class="p">),</span>
+</span><span id="__span-14-15"><a id="__codelineno-14-15" name="__codelineno-14-15" href="#__codelineno-14-15"></a>    <span class="p">),</span>
+</span><span id="__span-14-16"><a id="__codelineno-14-16" name="__codelineno-14-16" href="#__codelineno-14-16"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>ツールエージェントが自由に変更すべき場合、信頼できないコマンドを実行すべき場合、または異なるバックエンド/イメージを使用すべき場合は、別のサンドボックスを使用してください。<a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agents_as_tools.py">examples/sandbox/sandbox_agents_as_tools.py</a> を参照してください。</p>
+<h3 id="mcp">ローカルツールおよび MCP との組み合わせ</h3>
+<p>同じエージェントで通常のツールを使用しながら、サンドボックスワークスペースも維持します。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">SandboxAgent</span>
+</span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.capabilities</span><span class="w"> </span><span class="kn">import</span> <span class="n">Shell</span>
+</span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>
+</span><span id="__span-15-4"><a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">SandboxAgent</span><span class="p">(</span>
+</span><span id="__span-15-5"><a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Workspace reviewer&quot;</span><span class="p">,</span>
+</span><span id="__span-15-6"><a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Inspect the workspace and call host tools when needed.&quot;</span><span class="p">,</span>
+</span><span id="__span-15-7"><a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_discount_approval_path</span><span class="p">],</span>
+</span><span id="__span-15-8"><a id="__codelineno-15-8" name="__codelineno-15-8" href="#__codelineno-15-8"></a>    <span class="n">mcp_servers</span><span class="o">=</span><span class="p">[</span><span class="n">server</span><span class="p">],</span>
+</span><span id="__span-15-9"><a id="__codelineno-15-9" name="__codelineno-15-9" href="#__codelineno-15-9"></a>    <span class="n">capabilities</span><span class="o">=</span><span class="p">[</span><span class="n">Shell</span><span class="p">()],</span>
+</span><span id="__span-15-10"><a id="__codelineno-15-10" name="__codelineno-15-10" href="#__codelineno-15-10"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>ワークスペース検査がエージェントの仕事の一部にすぎない場合に使用します。<a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agent_with_tools.py">examples/sandbox/sandbox_agent_with_tools.py</a> を参照してください。</p>
+<h2 id="_23">メモリ</h2>
+<p>将来のサンドボックスエージェント実行が以前の実行から学習すべき場合は、<code>Memory</code> 機能を使用します。メモリは SDK の会話型 <code>Session</code> メモリとは別です。学びをサンドボックスワークスペース内のファイルに蒸留し、後続の実行がそれらのファイルを読み取れるようにします。</p>
+<p>セットアップ、読み取り/生成の挙動、マルチターン会話、レイアウト隔離については、<a href="../memory/">エージェントメモリ</a> を参照してください。</p>
+<h2 id="_24">構成パターン</h2>
+<p>単一エージェントのパターンが明確になったら、次の設計上の問いは、より大きなシステムのどこにサンドボックス境界を置くかです。</p>
+<p>サンドボックスエージェントは、引き続き SDK の他の部分と組み合わせられます。</p>
+<ul>
+<li><a href="../../handoffs/">ハンドオフ</a>: ドキュメントの多い作業を、非サンドボックスの受付エージェントからサンドボックスレビュアーにハンドオフします。</li>
+<li><a href="../../tools/#agents-as-tools">Agents as tools</a>: 複数のサンドボックスエージェントをツールとして公開します。通常は各 <code>Agent.as_tool(...)</code> 呼び出しに <code>run_config=RunConfig(sandbox=SandboxRunConfig(...))</code> を渡し、各ツールが独自のサンドボックス境界を持つようにします。</li>
+<li><a href="../../mcp/">MCP</a> と通常の関数ツール: サンドボックス機能は、<code>mcp_servers</code> や通常の Python ツールと共存できます。</li>
+<li><a href="../../running_agents/">エージェントの実行</a>: サンドボックス実行も通常の <code>Runner</code> API を使用します。</li>
+</ul>
+<p>特に一般的なパターンは 2 つあります。</p>
+<ul>
+<li>ワークフローのうちワークスペース隔離が必要な部分だけを、非サンドボックスエージェントからサンドボックスエージェントにハンドオフする</li>
+<li>オーケストレーターが複数のサンドボックスエージェントをツールとして公開する。通常は各 <code>Agent.as_tool(...)</code> 呼び出しごとに別々のサンドボックス <code>RunConfig</code> を使い、各ツールが独自の隔離ワークスペースを持つようにする</li>
+</ul>
+<h3 id="_25">ターンとサンドボックス実行</h3>
+<p>ハンドオフと agent-as-tool 呼び出しは分けて説明すると理解しやすくなります。</p>
+<p>ハンドオフでは、引き続き 1 つのトップレベル実行と 1 つのトップレベルターンループがあります。アクティブなエージェントは変わりますが、実行がネストされるわけではありません。非サンドボックスの受付エージェントがサンドボックスレビュアーにハンドオフすると、同じ実行内の次のモデル呼び出しはサンドボックスエージェント用に準備され、そのサンドボックスエージェントが次のターンを担当します。言い換えると、ハンドオフは同じ実行の次のターンをどのエージェントが所有するかを変更します。<a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/handoffs.py">examples/sandbox/handoffs.py</a> を参照してください。</p>
+<p><code>Agent.as_tool(...)</code> では、関係が異なります。外側のオーケストレーターは、ツールを呼び出すと決定するために外側の 1 ターンを使用し、そのツール呼び出しがサンドボックスエージェントのネストされた実行を開始します。ネストされた実行は、独自のターンループ、<code>max_turns</code>、承認、そして通常は独自のサンドボックス <code>RunConfig</code> を持ちます。1 つのネストされたターンで完了する場合もあれば、複数かかる場合もあります。外側のオーケストレーターの視点では、その作業全体が 1 つのツール呼び出しの背後にあるため、ネストされたターンは外側の実行のターンカウンターを増やしません。<a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agents_as_tools.py">examples/sandbox/sandbox_agents_as_tools.py</a> を参照してください。</p>
+<p>承認の挙動も同じ分担に従います。</p>
+<ul>
+<li>ハンドオフでは、サンドボックスエージェントがその実行内のアクティブエージェントになるため、承認は同じトップレベル実行に留まります</li>
+<li><code>Agent.as_tool(...)</code> では、サンドボックスツールエージェント内で発生した承認も外側の実行に表示されますが、それらは保存されたネスト実行状態から来ており、外側の実行が再開されるとネストされたサンドボックス実行を再開します</li>
+</ul>
+<h2 id="_26">関連情報</h2>
+<ul>
+<li><a href="quickstart.md">クイックスタート</a>: 1 つのサンドボックスエージェントを実行します。</li>
+<li><a href="../clients/">サンドボックスクライアント</a>: ローカル、Docker、ホスト型、マウントのオプションを選択します。</li>
+<li><a href="../memory/">エージェントメモリ</a>: 以前のサンドボックス実行からの学びを保持し、再利用します。</li>
+<li><a href="https://github.com/openai/openai-agents-python/tree/main/examples/sandbox">examples/sandbox/</a>: 実行可能なローカル、コーディング、メモリ、ハンドオフ、エージェント構成のパターン。</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      <script id="__config" type="application/json">{"base": "../../..", "features": ["content.code.copy", "content.code.select", "navigation.path", "navigation.sections", "content.code.annotate"], "search": "../../../assets/javascripts/workers/search.d50fe291.min.js", "tags": null, "translations": {"clipboard.copied": "\u30b3\u30d4\u30fc\u3057\u307e\u3057\u305f", "clipboard.copy": "\u30af\u30ea\u30c3\u30d7\u30dc\u30fc\u30c9\u3078\u30b3\u30d4\u30fc", "search.result.more.one": "\u3053\u306e\u30da\u30fc\u30b8\u5185\u306b\u3082\u30461\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.more.other": "\u3053\u306e\u30da\u30fc\u30b8\u5185\u306b\u3042\u3068#\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.none": "\u4f55\u3082\u898b\u3064\u304b\u308a\u307e\u305b\u3093\u3067\u3057\u305f", "search.result.one": "1\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.other": "#\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.placeholder": "\u691c\u7d22\u30ad\u30fc\u30ef\u30fc\u30c9\u3092\u5165\u529b\u3057\u3066\u304f\u3060\u3055\u3044", "search.result.term.missing": "\u691c\u7d22\u306b\u542b\u307e\u308c\u306a\u3044", "select.version": "\u30d0\u30fc\u30b8\u30e7\u30f3\u5207\u308a\u66ff\u3048"}, "version": null}</script>
+    
+    
+      <script src="../../../assets/javascripts/bundle.50899def.min.js"></script>
+      
+    
+  </body>
+</html>

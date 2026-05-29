@@ -1,0 +1,2604 @@
+
+<!doctype html>
+<html lang="ja" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+        <link rel="prev" href="../sandbox/memory/">
+      
+      
+        <link rel="next" href="../tools/">
+      
+      
+      <link rel="icon" href="../../images/favicon-platform.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.6.16">
+    
+    
+      
+        <title>モデル - OpenAI Agents SDK</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.7e37652d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.06af60db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#_1" class="md-skip">
+          コンテンツにスキップ
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="ヘッダー">
+    <a href="../" title="OpenAI Agents SDK" class="md-header__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            OpenAI Agents SDK
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              モデル
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+      <div class="md-header__option">
+  <div class="md-select">
+    
+    <button class="md-header__button md-icon" aria-label="言語切り替え">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m12.87 15.07-2.54-2.51.03-.03A17.5 17.5 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2zm-2.62 7 1.62-4.33L19.12 17z"/></svg>
+    </button>
+    <div class="md-select__inner">
+      <ul class="md-select__list">
+        
+          <li class="md-select__item">
+            <a href="../../models/" hreflang="en" class="md-select__link">
+              English
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="./" hreflang="ja" class="md-select__link">
+              日本語
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../ko/models/" hreflang="ko" class="md-select__link">
+              한국어
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../zh/models/" hreflang="zh" class="md-select__link">
+              简体中文
+            </a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+</div>
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="検索" placeholder="検索" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="検索">
+        
+        <button type="reset" class="md-search__icon md-icon" title="クリア" aria-label="クリア" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            検索を初期化
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/openai/openai-agents-python" title="リポジトリへ" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="ナビゲーション" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../" title="OpenAI Agents SDK" class="md-nav__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    OpenAI Agents SDK
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/openai/openai-agents-python" title="リポジトリへ" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    はじめに
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    設定
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    ドキュメント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            ドキュメント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェント
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_2" id="__nav_4_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Sandbox エージェント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_2">
+            <span class="md-nav__icon md-icon"></span>
+            Sandbox エージェント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    概念
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Sandbox クライアント
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントメモリ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    モデル
+    
+  </span>
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    モデル
+    
+  </span>
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="目次">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目次
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      モデル設定の選択
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai" class="md-nav__link">
+    <span class="md-ellipsis">
+      OpenAI モデル
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="OpenAI モデル">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      デフォルトモデル
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="デフォルトモデル">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#gpt-5" class="md-nav__link">
+    <span class="md-ellipsis">
+      GPT-5 モデル
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#computertool" class="md-nav__link">
+    <span class="md-ellipsis">
+      ComputerTool のモデル選択
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gpt-5_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      非 GPT-5 モデル
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responses" class="md-nav__link">
+    <span class="md-ellipsis">
+      Responses のみのツール検索機能
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responses-websocket" class="md-nav__link">
+    <span class="md-ellipsis">
+      Responses WebSocket トランスポート
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Responses WebSocket トランスポート">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      基本設定
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      プロバイダーまたは実行レベルの設定
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#multiprovider" class="md-nav__link">
+    <span class="md-ellipsis">
+      MultiProvider による高度なルーティング
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      注記
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      非 OpenAI モデル
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="非 OpenAI モデル">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#openai_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      非 OpenAI プロバイダーの統合方法
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#1" class="md-nav__link">
+    <span class="md-ellipsis">
+      1 つのワークフローでのモデルの混在
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai-responses" class="md-nav__link">
+    <span class="md-ellipsis">
+      高度な OpenAI Responses 設定
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="高度な OpenAI Responses 設定">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#modelsettings" class="md-nav__link">
+    <span class="md-ellipsis">
+      一般的な高度な ModelSettings オプション
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#extra_args" class="md-nav__link">
+    <span class="md-ellipsis">
+      extra_args の受け渡し
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#runner" class="md-nav__link">
+    <span class="md-ellipsis">
+      Runner 管理の再試行
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Runner 管理の再試行">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      安全境界
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#runner_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Runner とエージェントのマージ動作
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      非 OpenAI プロバイダーのトラブルシューティング
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="非 OpenAI プロバイダーのトラブルシューティング">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#401" class="md-nav__link">
+    <span class="md-ellipsis">
+      トレーシングクライアントエラー 401
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responses-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      Responses API のサポート
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#structured-outputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      structured outputs のサポート
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      プロバイダー間でのモデルの混在
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      サードパーティアダプター
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="サードパーティアダプター">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#any-llm" class="md-nav__link">
+    <span class="md-ellipsis">
+      Any-LLM
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#litellm" class="md-nav__link">
+    <span class="md-ellipsis">
+      LiteLLM
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ツール
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guardrails/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ガードレール
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../running_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントの実行
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ストリーミング
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi_agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントオーケストレーション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handoffs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ハンドオフ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    実行結果
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../human_in_the_loop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ヒューマンインザループ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_12" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_12" id="__nav_4_12_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    セッション
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_12_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_12">
+            <span class="md-nav__icon md-icon"></span>
+            セッション
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/sqlalchemy_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    SQLAlchemy セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/advanced_sqlite_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    高度な SQLite セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/encrypted_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    暗号化セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../context/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    コンテキスト管理
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    使用量
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Model context protocol (MCP)
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    トレーシング
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_17" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_17" id="__nav_4_17_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    リアルタイムエージェント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_17_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_17">
+            <span class="md-nav__icon md-icon"></span>
+            リアルタイムエージェント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    リアルタイムエージェントガイド
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_18" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_18" id="__nav_4_18_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    音声エージェント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_18_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_18">
+            <span class="md-nav__icon md-icon"></span>
+            音声エージェント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    パイプラインとワークフロー
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    トレーシング
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../visualization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントの可視化
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../repl/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    REPL ユーティリティ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    コード例
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../release/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    リリースプロセス / 変更履歴
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="目次">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目次
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      モデル設定の選択
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai" class="md-nav__link">
+    <span class="md-ellipsis">
+      OpenAI モデル
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="OpenAI モデル">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      デフォルトモデル
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="デフォルトモデル">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#gpt-5" class="md-nav__link">
+    <span class="md-ellipsis">
+      GPT-5 モデル
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#computertool" class="md-nav__link">
+    <span class="md-ellipsis">
+      ComputerTool のモデル選択
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gpt-5_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      非 GPT-5 モデル
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responses" class="md-nav__link">
+    <span class="md-ellipsis">
+      Responses のみのツール検索機能
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responses-websocket" class="md-nav__link">
+    <span class="md-ellipsis">
+      Responses WebSocket トランスポート
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Responses WebSocket トランスポート">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      基本設定
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      プロバイダーまたは実行レベルの設定
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#multiprovider" class="md-nav__link">
+    <span class="md-ellipsis">
+      MultiProvider による高度なルーティング
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      注記
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      非 OpenAI モデル
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="非 OpenAI モデル">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#openai_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      非 OpenAI プロバイダーの統合方法
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#1" class="md-nav__link">
+    <span class="md-ellipsis">
+      1 つのワークフローでのモデルの混在
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai-responses" class="md-nav__link">
+    <span class="md-ellipsis">
+      高度な OpenAI Responses 設定
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="高度な OpenAI Responses 設定">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#modelsettings" class="md-nav__link">
+    <span class="md-ellipsis">
+      一般的な高度な ModelSettings オプション
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#extra_args" class="md-nav__link">
+    <span class="md-ellipsis">
+      extra_args の受け渡し
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#runner" class="md-nav__link">
+    <span class="md-ellipsis">
+      Runner 管理の再試行
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Runner 管理の再試行">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      安全境界
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#runner_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Runner とエージェントのマージ動作
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      非 OpenAI プロバイダーのトラブルシューティング
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="非 OpenAI プロバイダーのトラブルシューティング">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#401" class="md-nav__link">
+    <span class="md-ellipsis">
+      トレーシングクライアントエラー 401
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responses-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      Responses API のサポート
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#structured-outputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      structured outputs のサポート
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      プロバイダー間でのモデルの混在
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      サードパーティアダプター
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="サードパーティアダプター">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#any-llm" class="md-nav__link">
+    <span class="md-ellipsis">
+      Any-LLM
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#litellm" class="md-nav__link">
+    <span class="md-ellipsis">
+      LiteLLM
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="_1">モデル</h1>
+<p>Agents SDK には、OpenAI モデルの標準サポートが 2 種類用意されています。</p>
+<ul>
+<li><strong>推奨</strong>: 新しい <a href="https://platform.openai.com/docs/api-reference/responses">Responses API</a> を使用して OpenAI API を呼び出す <a class="autorefs autorefs-internal" title="OpenAIResponsesModel" href="../../ref/models/openai_responses/#agents.models.openai_responses.OpenAIResponsesModel"><code>OpenAIResponsesModel</code></a>。</li>
+<li><a href="https://platform.openai.com/docs/api-reference/chat">Chat Completions API</a> を使用して OpenAI API を呼び出す <a class="autorefs autorefs-internal" title="OpenAIChatCompletionsModel" href="../../ref/models/openai_chatcompletions/#agents.models.openai_chatcompletions.OpenAIChatCompletionsModel"><code>OpenAIChatCompletionsModel</code></a>。</li>
+</ul>
+<h2 id="_2">モデル設定の選択</h2>
+<p>セットアップに合う最もシンプルな方法から始めてください。</p>
+<table>
+<thead>
+<tr>
+<th>実現したいこと</th>
+<th>推奨される方法</th>
+<th>詳細</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>OpenAI モデルのみを使用する</td>
+<td>デフォルトの OpenAI プロバイダーを Responses モデルパスで使用する</td>
+<td><a href="#openai-models">OpenAI モデル</a></td>
+</tr>
+<tr>
+<td>websocket トランスポート経由で OpenAI Responses API を使用する</td>
+<td>Responses モデルパスを維持し、websocket トランスポートを有効にする</td>
+<td><a href="#responses-websocket-transport">Responses WebSocket トランスポート</a></td>
+</tr>
+<tr>
+<td>1 つの非 OpenAI プロバイダーを使用する</td>
+<td>組み込みのプロバイダー統合ポイントから始める</td>
+<td><a href="#non-openai-models">非 OpenAI モデル</a></td>
+</tr>
+<tr>
+<td>エージェント間でモデルまたはプロバイダーを混在させる</td>
+<td>実行ごと、またはエージェントごとにプロバイダーを選択し、機能差を確認する</td>
+<td><a href="#mixing-models-in-one-workflow">1 つのワークフローでのモデルの混在</a> と <a href="#mixing-models-across-providers">プロバイダー間でのモデルの混在</a></td>
+</tr>
+<tr>
+<td>高度な OpenAI Responses リクエスト設定を調整する</td>
+<td>OpenAI Responses パスで <code>ModelSettings</code> を使用する</td>
+<td><a href="#advanced-openai-responses-settings">高度な OpenAI Responses 設定</a></td>
+</tr>
+<tr>
+<td>非 OpenAI または混在プロバイダーのルーティングにサードパーティアダプターを使用する</td>
+<td>サポートされているベータ版アダプターを比較し、リリース予定のプロバイダーパスを検証する</td>
+<td><a href="#third-party-adapters">サードパーティアダプター</a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="openai">OpenAI モデル</h2>
+<p>ほとんどの OpenAI のみのアプリでは、デフォルトの OpenAI プロバイダーで文字列のモデル名を使用し、Responses モデルパスを維持する方法が推奨されます。</p>
+<p><code>Agent</code> の初期化時にモデルを指定しない場合、デフォルトモデルが使用されます。低レイテンシのエージェントワークフロー向けに、現在のデフォルトは <a href="https://developers.openai.com/api/docs/models/gpt-5.4-mini"><code>gpt-5.4-mini</code></a> で、<code>reasoning.effort="none"</code> と <code>verbosity="low"</code> が設定されています。アクセス権がある場合は、明示的な <code>model_settings</code> を維持しつつ、より高品質な <a href="https://developers.openai.com/api/docs/models/gpt-5.5"><code>gpt-5.5</code></a> をエージェントに設定することを推奨します。</p>
+<p><a href="https://developers.openai.com/api/docs/models/gpt-5.5"><code>gpt-5.5</code></a> などの他のモデルに切り替えたい場合、エージェントを設定する方法は 2 つあります。</p>
+<h3 id="_3">デフォルトモデル</h3>
+<p>まず、カスタムモデルを設定していないすべてのエージェントで特定のモデルを一貫して使用したい場合は、エージェントを実行する前に <code>OPENAI_DEFAULT_MODEL</code> 環境変数を設定します。</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OPENAI_DEFAULT_MODEL</span><span class="o">=</span>gpt-5.5
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>python3<span class="w"> </span>my_awesome_agent.py
+</span></code></pre></div>
+<p>次に、<code>RunConfig</code> を通じて実行のデフォルトモデルを設定できます。エージェントにモデルを設定しない場合、この実行のモデルが使用されます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">RunConfig</span><span class="p">,</span> <span class="n">Runner</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You&#39;re a helpful agent.&quot;</span><span class="p">,</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="p">)</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    <span class="s2">&quot;Hello&quot;</span><span class="p">,</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5.5&quot;</span><span class="p">),</span>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="p">)</span>
+</span></code></pre></div>
+<h4 id="gpt-5">GPT-5 モデル</h4>
+<p>この方法で <a href="https://developers.openai.com/api/docs/models/gpt-5.5"><code>gpt-5.5</code></a> などの GPT-5 モデルを使用すると、SDK はデフォルトの <code>ModelSettings</code> を適用します。ほとんどのユースケースで最も適切に動作する設定が適用されます。デフォルトモデルの reasoning effort を調整するには、独自の <code>ModelSettings</code> を渡します。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">openai.types.shared</span><span class="w"> </span><span class="kn">import</span> <span class="n">Reasoning</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">ModelSettings</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">my_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;My Agent&quot;</span><span class="p">,</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You&#39;re a helpful agent.&quot;</span><span class="p">,</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>    <span class="c1"># If OPENAI_DEFAULT_MODEL=gpt-5.5 is set, passing only model_settings works.</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>    <span class="c1"># It&#39;s also fine to pass a GPT-5 model name explicitly:</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5.5&quot;</span><span class="p">,</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>    <span class="n">model_settings</span><span class="o">=</span><span class="n">ModelSettings</span><span class="p">(</span><span class="n">reasoning</span><span class="o">=</span><span class="n">Reasoning</span><span class="p">(</span><span class="n">effort</span><span class="o">=</span><span class="s2">&quot;high&quot;</span><span class="p">),</span> <span class="n">verbosity</span><span class="o">=</span><span class="s2">&quot;low&quot;</span><span class="p">)</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>低レイテンシにするには、GPT-5 モデルで <code>reasoning.effort="none"</code> を使用することを推奨します。</p>
+<h4 id="computertool">ComputerTool のモデル選択</h4>
+<p>エージェントに <a class="autorefs autorefs-internal" title="ComputerTool
+
+
+  
+      dataclass
+  " href="../../ref/tool/#agents.tool.ComputerTool"><code>ComputerTool</code></a> が含まれる場合、実際の Responses リクエストで有効なモデルによって、SDK が送信する computer-tool ペイロードが決まります。明示的な <code>gpt-5.5</code> リクエストでは GA 組み込み <code>computer</code> ツールが使用され、明示的な <code>computer-use-preview</code> リクエストでは従来の <code>computer_use_preview</code> ペイロードが維持されます。</p>
+<p>主な例外は、プロンプト管理の呼び出しです。プロンプトテンプレートがモデルを保持し、SDK がリクエストから <code>model</code> を省略する場合、SDK は、プロンプトが固定しているモデルを推測しないように、プレビュー互換の computer ペイロードをデフォルトにします。そのフローで GA パスを維持するには、リクエストで <code>model="gpt-5.5"</code> を明示するか、<code>ModelSettings(tool_choice="computer")</code> または <code>ModelSettings(tool_choice="computer_use")</code> で GA セレクターを強制します。</p>
+<p>登録済みの <a class="autorefs autorefs-internal" title="ComputerTool
+
+
+  
+      dataclass
+  " href="../../ref/tool/#agents.tool.ComputerTool"><code>ComputerTool</code></a> がある場合、<code>tool_choice="computer"</code>、<code>"computer_use"</code>、<code>"computer_use_preview"</code> は、有効なリクエストモデルに一致する組み込みセレクターに正規化されます。<code>ComputerTool</code> が登録されていない場合、これらの文字列は通常の関数名と同様に動作し続けます。</p>
+<p>プレビュー互換のリクエストでは、<code>environment</code> と表示寸法を事前にシリアライズする必要があります。そのため、<a class="autorefs autorefs-internal" title="ComputerProvider
+
+
+  
+      dataclass
+  " href="../../ref/tool/#agents.tool.ComputerProvider"><code>ComputerProvider</code></a> ファクトリーを使用するプロンプト管理フローでは、具体的な <code>Computer</code> または <code>AsyncComputer</code> インスタンスを渡すか、リクエスト送信前に GA セレクターを強制する必要があります。移行の詳細については、<a href="../tools/#computertool-and-the-responses-computer-tool">ツール</a>を参照してください。</p>
+<h4 id="gpt-5_1">非 GPT-5 モデル</h4>
+<p>カスタムの <code>model_settings</code> なしで非 GPT-5 モデル名を渡すと、SDK は任意のモデルと互換性のある汎用の <code>ModelSettings</code> に戻します。</p>
+<h3 id="responses">Responses のみのツール検索機能</h3>
+<p>次のツール機能は、OpenAI Responses モデルでのみサポートされています。</p>
+<ul>
+<li><a class="autorefs autorefs-internal" title="ToolSearchTool
+
+
+  
+      dataclass
+  " href="../../ref/tool/#agents.tool.ToolSearchTool"><code>ToolSearchTool</code></a></li>
+<li><a class="autorefs autorefs-internal" title="tool_namespace" href="../../ref/tool/#agents.tool.tool_namespace"><code>tool_namespace()</code></a></li>
+<li><code>@function_tool(defer_loading=True)</code> とその他の遅延読み込み Responses ツールサーフェス</li>
+</ul>
+<p>これらの機能は、Chat Completions モデルおよび非 Responses バックエンドでは拒否されます。遅延読み込みツールを使用する場合は、エージェントに <code>ToolSearchTool()</code> を追加し、裸の名前空間名や遅延専用の関数名を強制するのではなく、<code>auto</code> または <code>required</code> のツール選択を通じてモデルにツールを読み込ませてください。セットアップの詳細と現在の制約については、<a href="../tools/#hosted-tool-search">ツール</a>を参照してください。</p>
+<h3 id="responses-websocket">Responses WebSocket トランスポート</h3>
+<p>デフォルトでは、OpenAI Responses API リクエストは HTTP トランスポートを使用します。OpenAI ベースのモデルを使用する場合は、websocket トランスポートを有効にできます。</p>
+<h4 id="_4">基本設定</h4>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_default_openai_responses_transport</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">set_default_openai_responses_transport</span><span class="p">(</span><span class="s2">&quot;websocket&quot;</span><span class="p">)</span>
+</span></code></pre></div>
+<p>これは、デフォルトの OpenAI プロバイダーによって解決される OpenAI Responses モデル（<code>"gpt-5.5"</code> などの文字列モデル名を含む）に影響します。</p>
+<p>トランスポートの選択は、SDK がモデル名をモデルインスタンスに解決するときに行われます。具体的な <a class="autorefs autorefs-internal" title="Model" href="../../ref/models/interface/#agents.models.interface.Model"><code>Model</code></a> オブジェクトを渡す場合、そのトランスポートはすでに固定されています。<a class="autorefs autorefs-internal" title="OpenAIResponsesWSModel" href="../../ref/models/openai_responses/#agents.models.openai_responses.OpenAIResponsesWSModel"><code>OpenAIResponsesWSModel</code></a> は websocket を使用し、<a class="autorefs autorefs-internal" title="OpenAIResponsesModel" href="../../ref/models/openai_responses/#agents.models.openai_responses.OpenAIResponsesModel"><code>OpenAIResponsesModel</code></a> は HTTP を使用し、<a class="autorefs autorefs-internal" title="OpenAIChatCompletionsModel" href="../../ref/models/openai_chatcompletions/#agents.models.openai_chatcompletions.OpenAIChatCompletionsModel"><code>OpenAIChatCompletionsModel</code></a> は Chat Completions のままです。<code>RunConfig(model_provider=...)</code> を渡す場合、グローバルデフォルトではなく、そのプロバイダーがトランスポート選択を制御します。</p>
+<h4 id="_5">プロバイダーまたは実行レベルの設定</h4>
+<p>プロバイダーごと、または実行ごとに websocket トランスポートを設定することもできます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">OpenAIProvider</span><span class="p">,</span> <span class="n">RunConfig</span><span class="p">,</span> <span class="n">Runner</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="n">provider</span> <span class="o">=</span> <span class="n">OpenAIProvider</span><span class="p">(</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>    <span class="n">use_responses_websocket</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>    <span class="c1"># Optional; if omitted, OPENAI_WEBSOCKET_BASE_URL is used when set.</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>    <span class="n">websocket_base_url</span><span class="o">=</span><span class="s2">&quot;wss://your-proxy.example/v1&quot;</span><span class="p">,</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>    <span class="c1"># Optional low-level websocket keepalive settings.</span>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>    <span class="n">responses_websocket_options</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;ping_interval&quot;</span><span class="p">:</span> <span class="mf">20.0</span><span class="p">,</span> <span class="s2">&quot;ping_timeout&quot;</span><span class="p">:</span> <span class="mf">60.0</span><span class="p">},</span>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="p">)</span>
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>
+</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">)</span>
+</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-4-13"><a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a>    <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-4-14"><a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a>    <span class="s2">&quot;Hello&quot;</span><span class="p">,</span>
+</span><span id="__span-4-15"><a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">model_provider</span><span class="o">=</span><span class="n">provider</span><span class="p">),</span>
+</span><span id="__span-4-16"><a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>OpenAI ベースのプロバイダーは、任意のエージェント登録設定も受け付けます。これは、OpenAI の設定で harness ID などのプロバイダーレベルの登録メタデータが想定されている場合の高度なオプションです。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>    <span class="n">Agent</span><span class="p">,</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>    <span class="n">OpenAIAgentRegistrationConfig</span><span class="p">,</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>    <span class="n">OpenAIProvider</span><span class="p">,</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="n">RunConfig</span><span class="p">,</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    <span class="n">Runner</span><span class="p">,</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="p">)</span>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>
+</span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="n">provider</span> <span class="o">=</span> <span class="n">OpenAIProvider</span><span class="p">(</span>
+</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>    <span class="n">use_responses_websocket</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>    <span class="n">agent_registration</span><span class="o">=</span><span class="n">OpenAIAgentRegistrationConfig</span><span class="p">(</span><span class="n">harness_id</span><span class="o">=</span><span class="s2">&quot;your-harness-id&quot;</span><span class="p">),</span>
+</span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a><span class="p">)</span>
+</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>
+</span><span id="__span-5-14"><a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">)</span>
+</span><span id="__span-5-15"><a id="__codelineno-5-15" name="__codelineno-5-15" href="#__codelineno-5-15"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-5-16"><a id="__codelineno-5-16" name="__codelineno-5-16" href="#__codelineno-5-16"></a>    <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-5-17"><a id="__codelineno-5-17" name="__codelineno-5-17" href="#__codelineno-5-17"></a>    <span class="s2">&quot;Hello&quot;</span><span class="p">,</span>
+</span><span id="__span-5-18"><a id="__codelineno-5-18" name="__codelineno-5-18" href="#__codelineno-5-18"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">model_provider</span><span class="o">=</span><span class="n">provider</span><span class="p">),</span>
+</span><span id="__span-5-19"><a id="__codelineno-5-19" name="__codelineno-5-19" href="#__codelineno-5-19"></a><span class="p">)</span>
+</span></code></pre></div>
+<h4 id="multiprovider"><code>MultiProvider</code> による高度なルーティング</h4>
+<p>プレフィックスベースのモデルルーティングが必要な場合（たとえば 1 つの実行で <code>openai/...</code> と <code>any-llm/...</code> のモデル名を混在させる場合）は、<a class="autorefs autorefs-internal" title="MultiProvider" href="../ref/models/multi_provider/#agents.models.multi_provider.MultiProvider"><code>MultiProvider</code></a> を使用し、そこで <code>openai_use_responses_websocket=True</code> を設定します。</p>
+<p><code>MultiProvider</code> は、歴史的なデフォルトを 2 つ保持しています。</p>
+<ul>
+<li><code>openai/...</code> は OpenAI プロバイダーのエイリアスとして扱われるため、<code>openai/gpt-4.1</code> はモデル <code>gpt-4.1</code> としてルーティングされます。</li>
+<li>不明なプレフィックスは、パススルーされるのではなく <code>UserError</code> を発生させます。</li>
+</ul>
+<p>OpenAI プロバイダーを、リテラルな名前空間付きモデル ID を想定する OpenAI 互換エンドポイントに向ける場合は、パススルー動作を明示的に有効にします。websocket が有効なセットアップでは、<code>MultiProvider</code> でも <code>openai_use_responses_websocket=True</code> を維持してください。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">MultiProvider</span><span class="p">,</span> <span class="n">RunConfig</span><span class="p">,</span> <span class="n">Runner</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="n">provider</span> <span class="o">=</span> <span class="n">MultiProvider</span><span class="p">(</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>    <span class="n">openai_base_url</span><span class="o">=</span><span class="s2">&quot;https://openrouter.ai/api/v1&quot;</span><span class="p">,</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>    <span class="n">openai_api_key</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>    <span class="n">openai_use_responses_websocket</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>    <span class="n">openai_prefix_mode</span><span class="o">=</span><span class="s2">&quot;model_id&quot;</span><span class="p">,</span>
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>    <span class="n">unknown_prefix_mode</span><span class="o">=</span><span class="s2">&quot;model_id&quot;</span><span class="p">,</span>
+</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="p">)</span>
+</span><span id="__span-6-10"><a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>
+</span><span id="__span-6-11"><a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-6-12"><a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span>
+</span><span id="__span-6-13"><a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Be concise.&quot;</span><span class="p">,</span>
+</span><span id="__span-6-14"><a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;openai/gpt-4.1&quot;</span><span class="p">,</span>
+</span><span id="__span-6-15"><a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a><span class="p">)</span>
+</span><span id="__span-6-16"><a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a>
+</span><span id="__span-6-17"><a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-6-18"><a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a>    <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-6-19"><a id="__codelineno-6-19" name="__codelineno-6-19" href="#__codelineno-6-19"></a>    <span class="s2">&quot;Hello&quot;</span><span class="p">,</span>
+</span><span id="__span-6-20"><a id="__codelineno-6-20" name="__codelineno-6-20" href="#__codelineno-6-20"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">model_provider</span><span class="o">=</span><span class="n">provider</span><span class="p">),</span>
+</span><span id="__span-6-21"><a id="__codelineno-6-21" name="__codelineno-6-21" href="#__codelineno-6-21"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>バックエンドがリテラルな <code>openai/...</code> 文字列を想定する場合は、<code>openai_prefix_mode="model_id"</code> を使用します。バックエンドが <code>openrouter/openai/gpt-4.1-mini</code> など、他の名前空間付きモデル ID を想定する場合は、<code>unknown_prefix_mode="model_id"</code> を使用します。これらのオプションは、websocket トランスポート外の <code>MultiProvider</code> でも機能します。この例では、このセクションで説明しているトランスポート設定の一部であるため、websocket を有効なままにしています。同じオプションは <a class="autorefs autorefs-internal" href="../../ref/responses_websocket_session/#agents.responses_websocket_session"><code>responses_websocket_session()</code></a> でも利用できます。</p>
+<p><code>MultiProvider</code> 経由でルーティングしながら同じプロバイダーレベルの登録メタデータが必要な場合は、<code>openai_agent_registration=OpenAIAgentRegistrationConfig(...)</code> を渡すと、基盤となる OpenAI プロバイダーに転送されます。</p>
+<p>カスタムの OpenAI 互換エンドポイントまたはプロキシを使用する場合、websocket トランスポートには互換性のある websocket <code>/responses</code> エンドポイントも必要です。そのようなセットアップでは、<code>websocket_base_url</code> を明示的に設定する必要がある場合があります。</p>
+<h4 id="_6">注記</h4>
+<ul>
+<li>これは websocket トランスポート上の Responses API であり、<a href="../realtime/guide/">Realtime API</a> ではありません。Responses websocket <code>/responses</code> エンドポイントをサポートしていない限り、Chat Completions や非 OpenAI プロバイダーには適用されません。</li>
+<li>環境でまだ利用できない場合は、<code>websockets</code> パッケージをインストールしてください。</li>
+<li>websocket トランスポートを有効にした後、<a class="autorefs autorefs-internal" title="run_streamed
+
+
+  
+      classmethod
+  " href="../../ref/run/#agents.run.Runner.run_streamed"><code>Runner.run_streamed()</code></a> を直接使用できます。複数ターンのワークフローで、ターン間（および入れ子の agent-as-tool 呼び出し）で同じ websocket 接続を再利用したい場合は、<a class="autorefs autorefs-internal" href="../../ref/responses_websocket_session/#agents.responses_websocket_session"><code>responses_websocket_session()</code></a> ヘルパーを推奨します。<a href="../running_agents/">エージェントの実行</a>ガイドと <a href="https://github.com/openai/openai-agents-python/tree/main/examples/basic/stream_ws.py"><code>examples/basic/stream_ws.py</code></a> を参照してください。</li>
+<li>長い推論ターンやレイテンシの急増があるネットワークでは、<code>responses_websocket_options</code> で websocket keepalive の動作をカスタマイズしてください。遅延した pong フレームを許容するには <code>ping_timeout</code> を増やすか、ping を有効にしたままハートビートタイムアウトを無効にするには <code>ping_timeout=None</code> を設定します。websocket レイテンシより信頼性が重要な場合は、HTTP/SSE トランスポートを優先してください。</li>
+</ul>
+<h2 id="openai_1">非 OpenAI モデル</h2>
+<p>非 OpenAI プロバイダーが必要な場合は、SDK の組み込みプロバイダー統合ポイントから始めてください。多くのセットアップでは、サードパーティアダプターを追加しなくてもこれで十分です。各パターンの例は <a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/">examples/model_providers</a> にあります。</p>
+<h3 id="openai_2">非 OpenAI プロバイダーの統合方法</h3>
+<table>
+<thead>
+<tr>
+<th>アプローチ</th>
+<th>使用する場合</th>
+<th>範囲</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a class="autorefs autorefs-internal" title="set_default_openai_client" href="../../ref/#agents.set_default_openai_client"><code>set_default_openai_client</code></a></td>
+<td>1 つの OpenAI 互換エンドポイントを、ほとんどまたはすべてのエージェントのデフォルトにしたい場合</td>
+<td>グローバルデフォルト</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="ModelProvider" href="../../ref/models/interface/#agents.models.interface.ModelProvider"><code>ModelProvider</code></a></td>
+<td>1 つのカスタムプロバイダーを 1 回の実行に適用したい場合</td>
+<td>実行ごと</td>
+</tr>
+<tr>
+<td><a class="autorefs autorefs-internal" title="model
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../../ref/agent/#agents.agent.Agent.model"><code>Agent.model</code></a></td>
+<td>異なるエージェントに異なるプロバイダーや具体的なモデルオブジェクトが必要な場合</td>
+<td>エージェントごと</td>
+</tr>
+<tr>
+<td>サードパーティアダプター</td>
+<td>組み込みパスでは提供されない、アダプター管理のプロバイダー対応範囲やルーティングが必要な場合</td>
+<td><a href="#third-party-adapters">サードパーティアダプター</a>を参照</td>
+</tr>
+</tbody>
+</table>
+<p>これらの組み込みパスで、他の LLM プロバイダーを統合できます。</p>
+<ol>
+<li><a class="autorefs autorefs-internal" title="set_default_openai_client" href="../../ref/#agents.set_default_openai_client"><code>set_default_openai_client</code></a> は、<code>AsyncOpenAI</code> のインスタンスを LLM クライアントとしてグローバルに使用したい場合に便利です。これは、LLM プロバイダーに OpenAI 互換 API エンドポイントがあり、<code>base_url</code> と <code>api_key</code> を設定できる場合に使用します。設定可能な例については、<a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_global.py">examples/model_providers/custom_example_global.py</a> を参照してください。</li>
+<li><a class="autorefs autorefs-internal" title="ModelProvider" href="../../ref/models/interface/#agents.models.interface.ModelProvider"><code>ModelProvider</code></a> は <code>Runner.run</code> レベルです。これにより、「この実行内のすべてのエージェントにカスタムモデルプロバイダーを使用する」と指定できます。設定可能な例については、<a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_provider.py">examples/model_providers/custom_example_provider.py</a> を参照してください。</li>
+<li><a class="autorefs autorefs-internal" title="model
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../../ref/agent/#agents.agent.Agent.model"><code>Agent.model</code></a> により、特定の Agent インスタンスでモデルを指定できます。これにより、異なるエージェントに対して異なるプロバイダーを自由に組み合わせられます。設定可能な例については、<a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_agent.py">examples/model_providers/custom_example_agent.py</a> を参照してください。</li>
+</ol>
+<p><code>platform.openai.com</code> からの API キーがない場合は、<code>set_tracing_disabled()</code> でトレーシングを無効にするか、<a href="../tracing/">別のトレーシングプロセッサー</a>を設定することを推奨します。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">AsyncOpenAI</span><span class="p">,</span> <span class="n">OpenAIChatCompletionsModel</span><span class="p">,</span> <span class="n">set_tracing_disabled</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">set_tracing_disabled</span><span class="p">(</span><span class="n">disabled</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="n">client</span> <span class="o">=</span> <span class="n">AsyncOpenAI</span><span class="p">(</span><span class="n">api_key</span><span class="o">=</span><span class="s2">&quot;Api_Key&quot;</span><span class="p">,</span> <span class="n">base_url</span><span class="o">=</span><span class="s2">&quot;Base URL of Provider&quot;</span><span class="p">)</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="n">model</span> <span class="o">=</span> <span class="n">OpenAIChatCompletionsModel</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;Model_Name&quot;</span><span class="p">,</span> <span class="n">openai_client</span><span class="o">=</span><span class="n">client</span><span class="p">)</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="n">agent</span><span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Helping Agent&quot;</span><span class="p">,</span> <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You are a Helping Agent&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">)</span>
+</span></code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>これらの例では、Chat Completions API/モデルを使用しています。多くの LLM プロバイダーは、まだ Responses API をサポートしていないためです。LLM プロバイダーが Responses API をサポートしている場合は、Responses の使用を推奨します。</p>
+</div>
+<h2 id="1">1 つのワークフローでのモデルの混在</h2>
+<p>単一のワークフロー内で、エージェントごとに異なるモデルを使用したい場合があります。たとえば、トリアージには小さく高速なモデルを使用し、複雑なタスクにはより大きく高性能なモデルを使用できます。<a class="autorefs autorefs-internal" title="Agent
+
+
+  
+      dataclass
+  " href="../ref/agent/#agents.agent.Agent"><code>Agent</code></a> を設定する際、次のいずれかの方法で特定のモデルを選択できます。</p>
+<ol>
+<li>モデル名を渡す。</li>
+<li>任意のモデル名と、その名前を Model インスタンスにマッピングできる <a class="autorefs autorefs-internal" title="ModelProvider" href="../../ref/models/interface/#agents.models.interface.ModelProvider"><code>ModelProvider</code></a> を渡す。</li>
+<li><a class="autorefs autorefs-internal" title="Model" href="../../ref/models/interface/#agents.models.interface.Model"><code>Model</code></a> 実装を直接提供する。</li>
+</ol>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>SDK は <a class="autorefs autorefs-internal" title="OpenAIResponsesModel" href="../../ref/models/openai_responses/#agents.models.openai_responses.OpenAIResponsesModel"><code>OpenAIResponsesModel</code></a> と <a class="autorefs autorefs-internal" title="OpenAIChatCompletionsModel" href="../../ref/models/openai_chatcompletions/#agents.models.openai_chatcompletions.OpenAIChatCompletionsModel"><code>OpenAIChatCompletionsModel</code></a> の両方の形状をサポートしていますが、2 つの形状でサポートされる機能とツールのセットが異なるため、各ワークフローでは単一のモデル形状を使用することを推奨します。ワークフローでモデル形状を組み合わせる必要がある場合は、使用するすべての機能が両方で利用できることを確認してください。</p>
+</div>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">AsyncOpenAI</span><span class="p">,</span> <span class="n">OpenAIChatCompletionsModel</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="n">spanish_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Spanish agent&quot;</span><span class="p">,</span>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You only speak Spanish.&quot;</span><span class="p">,</span>
+</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5-mini&quot;</span><span class="p">,</span> <span class="c1"># (1)!</span>
+</span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a><span class="p">)</span>
+</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>
+</span><span id="__span-8-10"><a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="n">english_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-8-11"><a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;English agent&quot;</span><span class="p">,</span>
+</span><span id="__span-8-12"><a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You only speak English&quot;</span><span class="p">,</span>
+</span><span id="__span-8-13"><a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a>    <span class="n">model</span><span class="o">=</span><span class="n">OpenAIChatCompletionsModel</span><span class="p">(</span> <span class="c1"># (2)!</span>
+</span><span id="__span-8-14"><a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a>        <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5-nano&quot;</span><span class="p">,</span>
+</span><span id="__span-8-15"><a id="__codelineno-8-15" name="__codelineno-8-15" href="#__codelineno-8-15"></a>        <span class="n">openai_client</span><span class="o">=</span><span class="n">AsyncOpenAI</span><span class="p">()</span>
+</span><span id="__span-8-16"><a id="__codelineno-8-16" name="__codelineno-8-16" href="#__codelineno-8-16"></a>    <span class="p">),</span>
+</span><span id="__span-8-17"><a id="__codelineno-8-17" name="__codelineno-8-17" href="#__codelineno-8-17"></a><span class="p">)</span>
+</span><span id="__span-8-18"><a id="__codelineno-8-18" name="__codelineno-8-18" href="#__codelineno-8-18"></a>
+</span><span id="__span-8-19"><a id="__codelineno-8-19" name="__codelineno-8-19" href="#__codelineno-8-19"></a><span class="n">triage_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-8-20"><a id="__codelineno-8-20" name="__codelineno-8-20" href="#__codelineno-8-20"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Triage agent&quot;</span><span class="p">,</span>
+</span><span id="__span-8-21"><a id="__codelineno-8-21" name="__codelineno-8-21" href="#__codelineno-8-21"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Handoff to the appropriate agent based on the language of the request.&quot;</span><span class="p">,</span>
+</span><span id="__span-8-22"><a id="__codelineno-8-22" name="__codelineno-8-22" href="#__codelineno-8-22"></a>    <span class="n">handoffs</span><span class="o">=</span><span class="p">[</span><span class="n">spanish_agent</span><span class="p">,</span> <span class="n">english_agent</span><span class="p">],</span>
+</span><span id="__span-8-23"><a id="__codelineno-8-23" name="__codelineno-8-23" href="#__codelineno-8-23"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5.5&quot;</span><span class="p">,</span>
+</span><span id="__span-8-24"><a id="__codelineno-8-24" name="__codelineno-8-24" href="#__codelineno-8-24"></a><span class="p">)</span>
+</span><span id="__span-8-25"><a id="__codelineno-8-25" name="__codelineno-8-25" href="#__codelineno-8-25"></a>
+</span><span id="__span-8-26"><a id="__codelineno-8-26" name="__codelineno-8-26" href="#__codelineno-8-26"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+</span><span id="__span-8-27"><a id="__codelineno-8-27" name="__codelineno-8-27" href="#__codelineno-8-27"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">triage_agent</span><span class="p">,</span> <span class="nb">input</span><span class="o">=</span><span class="s2">&quot;Hola, ¿cómo estás?&quot;</span><span class="p">)</span>
+</span><span id="__span-8-28"><a id="__codelineno-8-28" name="__codelineno-8-28" href="#__codelineno-8-28"></a>    <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>
+</span></code></pre></div>
+<ol>
+<li>OpenAI モデルの名前を直接設定します。</li>
+<li><a class="autorefs autorefs-internal" title="Model" href="../../ref/models/interface/#agents.models.interface.Model"><code>Model</code></a> 実装を提供します。</li>
+</ol>
+<p>エージェントで使用するモデルをさらに設定したい場合は、temperature などの任意のモデル設定パラメーターを提供する [<code>ModelSettings</code>][agents.models.interface.ModelSettings] を渡せます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">ModelSettings</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="n">english_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;English agent&quot;</span><span class="p">,</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You only speak English&quot;</span><span class="p">,</span>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-4.1&quot;</span><span class="p">,</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>    <span class="n">model_settings</span><span class="o">=</span><span class="n">ModelSettings</span><span class="p">(</span><span class="n">temperature</span><span class="o">=</span><span class="mf">0.1</span><span class="p">),</span>
+</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="p">)</span>
+</span></code></pre></div>
+<h2 id="openai-responses">高度な OpenAI Responses 設定</h2>
+<p>OpenAI Responses パスを使用していて、より詳細な制御が必要な場合は、<code>ModelSettings</code> から始めてください。</p>
+<h3 id="modelsettings">一般的な高度な <code>ModelSettings</code> オプション</h3>
+<p>OpenAI Responses API を使用している場合、いくつかのリクエストフィールドにはすでに直接対応する <code>ModelSettings</code> フィールドがあるため、それらに <code>extra_args</code> は不要です。</p>
+<ul>
+<li><code>parallel_tool_calls</code>: 同じターン内の複数のツール呼び出しを許可または禁止します。</li>
+<li><code>truncation</code>: コンテキストがあふれる場合に失敗するのではなく、Responses API が最も古い会話アイテムを削除できるようにするには、<code>"auto"</code> を設定します。</li>
+<li><code>store</code>: 生成されたレスポンスを後で取得できるようにサーバー側に保存するかどうかを制御します。これは、レスポンス ID に依存する後続ワークフローや、<code>store=False</code> のときにローカル入力へのフォールバックが必要になる可能性があるセッション圧縮フローで重要です。</li>
+<li><code>context_management</code>: <code>compact_threshold</code> を使用した Responses 圧縮など、サーバー側のコンテキスト処理を設定します。</li>
+<li><code>prompt_cache_retention</code>: たとえば <code>"24h"</code> を使って、キャッシュされたプロンプトプレフィックスをより長く保持します。</li>
+<li><code>response_include</code>: <code>web_search_call.action.sources</code>、<code>file_search_call.results</code>、<code>reasoning.encrypted_content</code> など、よりリッチなレスポンスペイロードをリクエストします。</li>
+<li><code>top_logprobs</code>: 出力テキストの top-token logprobs をリクエストします。SDK は <code>message.output_text.logprobs</code> も自動的に追加します。</li>
+<li><code>retry</code>: モデル呼び出しに対する runner 管理の再試行設定を有効にします。<a href="#runner-managed-retries">Runner 管理の再試行</a>を参照してください。</li>
+</ul>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">ModelSettings</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="n">research_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Research agent&quot;</span><span class="p">,</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5.5&quot;</span><span class="p">,</span>
+</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>    <span class="n">model_settings</span><span class="o">=</span><span class="n">ModelSettings</span><span class="p">(</span>
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>        <span class="n">parallel_tool_calls</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a>        <span class="n">truncation</span><span class="o">=</span><span class="s2">&quot;auto&quot;</span><span class="p">,</span>
+</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>        <span class="n">store</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>        <span class="n">context_management</span><span class="o">=</span><span class="p">[{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;compaction&quot;</span><span class="p">,</span> <span class="s2">&quot;compact_threshold&quot;</span><span class="p">:</span> <span class="mi">200000</span><span class="p">}],</span>
+</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a>        <span class="n">prompt_cache_retention</span><span class="o">=</span><span class="s2">&quot;24h&quot;</span><span class="p">,</span>
+</span><span id="__span-10-12"><a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a>        <span class="n">response_include</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;web_search_call.action.sources&quot;</span><span class="p">],</span>
+</span><span id="__span-10-13"><a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a>        <span class="n">top_logprobs</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+</span><span id="__span-10-14"><a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a>    <span class="p">),</span>
+</span><span id="__span-10-15"><a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a><span class="p">)</span>
+</span></code></pre></div>
+<p><code>store=False</code> を設定すると、Responses API はそのレスポンスを後でサーバー側から取得できるようには保持しません。これはステートレス、またはゼロデータ保持スタイルのフローに便利ですが、通常ならレスポンス ID を再利用する機能が、代わりにローカル管理の状態に依存する必要があることも意味します。たとえば、<a class="autorefs autorefs-internal" title="OpenAIResponsesCompactionSession" href="../../ref/memory/openai_responses_compaction_session/#agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession"><code>OpenAIResponsesCompactionSession</code></a> は、最後のレスポンスが保存されていない場合、デフォルトの <code>"auto"</code> 圧縮パスを入力ベースの圧縮に切り替えます。<a href="../sessions/#openai-responses-compaction-sessions">Sessions ガイド</a>を参照してください。</p>
+<p>サーバー側圧縮は、<a class="autorefs autorefs-internal" title="OpenAIResponsesCompactionSession" href="../../ref/memory/openai_responses_compaction_session/#agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession"><code>OpenAIResponsesCompactionSession</code></a> とは異なります。<code>context_management=[{"type": "compaction", "compact_threshold": ...}]</code> は各 Responses API リクエストと一緒に送信され、レンダリングされたコンテキストがしきい値を超えると、API はレスポンスの一部として圧縮アイテムを出力できます。<code>OpenAIResponsesCompactionSession</code> はターン間でスタンドアロンの <code>responses.compact</code> エンドポイントを呼び出し、ローカルセッション履歴を書き換えます。</p>
+<h3 id="extra_args"><code>extra_args</code> の受け渡し</h3>
+<p>プロバイダー固有、または SDK がまだトップレベルで直接公開していない新しいリクエストフィールドが必要な場合は、<code>extra_args</code> を使用します。</p>
+<p>また、OpenAI の Responses API を使用する場合、<a href="https://platform.openai.com/docs/api-reference/responses/create">他にもいくつかの任意パラメーター</a>（例: <code>user</code>、<code>service_tier</code> など）があります。それらがトップレベルで利用できない場合は、<code>extra_args</code> を使用して渡すこともできます。同じリクエストフィールドを、直接の <code>ModelSettings</code> フィールドでも同時に設定しないでください。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">ModelSettings</span>
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="n">english_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;English agent&quot;</span><span class="p">,</span>
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You only speak English&quot;</span><span class="p">,</span>
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-4.1&quot;</span><span class="p">,</span>
+</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>    <span class="n">model_settings</span><span class="o">=</span><span class="n">ModelSettings</span><span class="p">(</span>
+</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a>        <span class="n">temperature</span><span class="o">=</span><span class="mf">0.1</span><span class="p">,</span>
+</span><span id="__span-11-9"><a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a>        <span class="n">extra_args</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;service_tier&quot;</span><span class="p">:</span> <span class="s2">&quot;flex&quot;</span><span class="p">,</span> <span class="s2">&quot;user&quot;</span><span class="p">:</span> <span class="s2">&quot;user_12345&quot;</span><span class="p">},</span>
+</span><span id="__span-11-10"><a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>    <span class="p">),</span>
+</span><span id="__span-11-11"><a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a><span class="p">)</span>
+</span></code></pre></div>
+<h2 id="runner">Runner 管理の再試行</h2>
+<p>再試行はランタイム専用で、明示的な有効化が必要です。<code>ModelSettings(retry=...)</code> を設定し、再試行ポリシーが再試行を選択しない限り、SDK は一般的なモデルリクエストを再試行しません。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">ModelRetrySettings</span><span class="p">,</span> <span class="n">ModelSettings</span><span class="p">,</span> <span class="n">retry_policies</span>
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span>
+</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5.5&quot;</span><span class="p">,</span>
+</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>    <span class="n">model_settings</span><span class="o">=</span><span class="n">ModelSettings</span><span class="p">(</span>
+</span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a>        <span class="n">retry</span><span class="o">=</span><span class="n">ModelRetrySettings</span><span class="p">(</span>
+</span><span id="__span-12-8"><a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a>            <span class="n">max_retries</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+</span><span id="__span-12-9"><a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a>            <span class="n">backoff</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-12-10"><a id="__codelineno-12-10" name="__codelineno-12-10" href="#__codelineno-12-10"></a>                <span class="s2">&quot;initial_delay&quot;</span><span class="p">:</span> <span class="mf">0.5</span><span class="p">,</span>
+</span><span id="__span-12-11"><a id="__codelineno-12-11" name="__codelineno-12-11" href="#__codelineno-12-11"></a>                <span class="s2">&quot;max_delay&quot;</span><span class="p">:</span> <span class="mf">5.0</span><span class="p">,</span>
+</span><span id="__span-12-12"><a id="__codelineno-12-12" name="__codelineno-12-12" href="#__codelineno-12-12"></a>                <span class="s2">&quot;multiplier&quot;</span><span class="p">:</span> <span class="mf">2.0</span><span class="p">,</span>
+</span><span id="__span-12-13"><a id="__codelineno-12-13" name="__codelineno-12-13" href="#__codelineno-12-13"></a>                <span class="s2">&quot;jitter&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-12-14"><a id="__codelineno-12-14" name="__codelineno-12-14" href="#__codelineno-12-14"></a>            <span class="p">},</span>
+</span><span id="__span-12-15"><a id="__codelineno-12-15" name="__codelineno-12-15" href="#__codelineno-12-15"></a>            <span class="n">policy</span><span class="o">=</span><span class="n">retry_policies</span><span class="o">.</span><span class="n">any</span><span class="p">(</span>
+</span><span id="__span-12-16"><a id="__codelineno-12-16" name="__codelineno-12-16" href="#__codelineno-12-16"></a>                <span class="n">retry_policies</span><span class="o">.</span><span class="n">provider_suggested</span><span class="p">(),</span>
+</span><span id="__span-12-17"><a id="__codelineno-12-17" name="__codelineno-12-17" href="#__codelineno-12-17"></a>                <span class="n">retry_policies</span><span class="o">.</span><span class="n">retry_after</span><span class="p">(),</span>
+</span><span id="__span-12-18"><a id="__codelineno-12-18" name="__codelineno-12-18" href="#__codelineno-12-18"></a>                <span class="n">retry_policies</span><span class="o">.</span><span class="n">network_error</span><span class="p">(),</span>
+</span><span id="__span-12-19"><a id="__codelineno-12-19" name="__codelineno-12-19" href="#__codelineno-12-19"></a>                <span class="n">retry_policies</span><span class="o">.</span><span class="n">http_status</span><span class="p">([</span><span class="mi">408</span><span class="p">,</span> <span class="mi">409</span><span class="p">,</span> <span class="mi">429</span><span class="p">,</span> <span class="mi">500</span><span class="p">,</span> <span class="mi">502</span><span class="p">,</span> <span class="mi">503</span><span class="p">,</span> <span class="mi">504</span><span class="p">]),</span>
+</span><span id="__span-12-20"><a id="__codelineno-12-20" name="__codelineno-12-20" href="#__codelineno-12-20"></a>            <span class="p">),</span>
+</span><span id="__span-12-21"><a id="__codelineno-12-21" name="__codelineno-12-21" href="#__codelineno-12-21"></a>        <span class="p">)</span>
+</span><span id="__span-12-22"><a id="__codelineno-12-22" name="__codelineno-12-22" href="#__codelineno-12-22"></a>    <span class="p">),</span>
+</span><span id="__span-12-23"><a id="__codelineno-12-23" name="__codelineno-12-23" href="#__codelineno-12-23"></a><span class="p">)</span>
+</span></code></pre></div>
+<p><code>ModelRetrySettings</code> には 3 つのフィールドがあります。</p>
+<div class="field-table">
+<table>
+<thead>
+<tr>
+<th>フィールド</th>
+<th>型</th>
+<th>注記</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>max_retries</code></td>
+<td><code>int | None</code></td>
+<td>初回リクエスト後に許可される再試行回数。</td>
+</tr>
+<tr>
+<td><code>backoff</code></td>
+<td><code>ModelRetryBackoffSettings | dict | None</code></td>
+<td>ポリシーが明示的な遅延を返さずに再試行する場合のデフォルトの遅延戦略。<code>backoff.max_delay</code> は、この計算された backoff 遅延のみを上限設定します。ポリシーから返された明示的な遅延や retry-after ヒントには上限を設定しません。</td>
+</tr>
+<tr>
+<td><code>policy</code></td>
+<td><code>RetryPolicy | None</code></td>
+<td>再試行するかどうかを決定するコールバック。このフィールドはランタイム専用で、シリアライズされません。</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>再試行ポリシーは、以下を含む <a class="autorefs autorefs-internal" title="RetryPolicyContext
+
+
+  
+      dataclass
+  " href="../../ref/retry/#agents.retry.RetryPolicyContext"><code>RetryPolicyContext</code></a> を受け取ります。</p>
+<ul>
+<li><code>attempt</code> と <code>max_retries</code>。試行回数を考慮した判断を行えます。</li>
+<li><code>stream</code>。ストリーミングと非ストリーミングの動作を分岐できます。</li>
+<li><code>error</code>。生の内容を確認できます。</li>
+<li><code>status_code</code>、<code>retry_after</code>、<code>error_code</code>、<code>is_network_error</code>、<code>is_timeout</code>、<code>is_abort</code> などの正規化された情報。</li>
+<li>基盤のモデルアダプターが再試行ガイダンスを提供できる場合の <code>provider_advice</code>。</li>
+</ul>
+<p>ポリシーは以下のいずれかを返せます。</p>
+<ul>
+<li>単純な再試行判断のための <code>True</code> / <code>False</code>。</li>
+<li>遅延を上書きしたり、診断理由を付加したりしたい場合の <a class="autorefs autorefs-internal" title="RetryDecision
+
+
+  
+      dataclass
+  " href="../../ref/retry/#agents.retry.RetryDecision"><code>RetryDecision</code></a>。</li>
+</ul>
+<p>SDK は、<code>retry_policies</code> に既製のヘルパーをエクスポートしています。</p>
+<table>
+<thead>
+<tr>
+<th>ヘルパー</th>
+<th>動作</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>retry_policies.never()</code></td>
+<td>常にオプトアウトします。</td>
+</tr>
+<tr>
+<td><code>retry_policies.provider_suggested()</code></td>
+<td>利用可能な場合、プロバイダーの再試行助言に従います。</td>
+</tr>
+<tr>
+<td><code>retry_policies.network_error()</code></td>
+<td>一時的なトランスポート障害とタイムアウト障害に一致します。</td>
+</tr>
+<tr>
+<td><code>retry_policies.http_status([...])</code></td>
+<td>選択した HTTP ステータスコードに一致します。</td>
+</tr>
+<tr>
+<td><code>retry_policies.retry_after()</code></td>
+<td>retry-after ヒントが利用可能な場合にのみ、その遅延を使用して再試行します。このヘルパーは retry-after 値を明示的なポリシー遅延として扱うため、<code>backoff.max_delay</code> はそれを上限設定しません。</td>
+</tr>
+<tr>
+<td><code>retry_policies.any(...)</code></td>
+<td>入れ子のポリシーのいずれかが有効化した場合に再試行します。</td>
+</tr>
+<tr>
+<td><code>retry_policies.all(...)</code></td>
+<td>入れ子のすべてのポリシーが有効化した場合にのみ再試行します。</td>
+</tr>
+</tbody>
+</table>
+<p>ポリシーを合成する場合、<code>provider_suggested()</code> は最も安全な最初の構成要素です。プロバイダーがそれらを区別できる場合に、プロバイダーの拒否とリプレイ安全性の承認を保持するためです。</p>
+<h5 id="_7">安全境界</h5>
+<p>一部の障害は自動的には再試行されません。</p>
+<ul>
+<li>中止エラー。</li>
+<li>プロバイダーからの助言がリプレイを安全でないと示すリクエスト。</li>
+<li>リプレイが安全でなくなる形で出力がすでに開始された後のストリーミング実行。</li>
+</ul>
+<p><code>previous_response_id</code> または <code>conversation_id</code> を使用するステートフルな後続リクエストも、より保守的に扱われます。これらのリクエストでは、<code>network_error()</code> や <code>http_status([500])</code> など、プロバイダー以外の述語だけでは十分ではありません。再試行ポリシーには、通常 <code>retry_policies.provider_suggested()</code> を通じて、プロバイダーからのリプレイ安全性の承認を含める必要があります。</p>
+<h5 id="runner_1">Runner とエージェントのマージ動作</h5>
+<p><code>retry</code> は、runner レベルとエージェントレベルの <code>ModelSettings</code> の間でディープマージされます。</p>
+<ul>
+<li>エージェントは <code>retry.max_retries</code> だけを上書きし、runner の <code>policy</code> を継承できます。</li>
+<li>エージェントは <code>retry.backoff</code> の一部だけを上書きし、runner の兄弟 backoff フィールドを維持できます。</li>
+<li><code>policy</code> はランタイム専用であるため、シリアライズされた <code>ModelSettings</code> は <code>max_retries</code> と <code>backoff</code> を保持しますが、コールバック自体は省略します。</li>
+</ul>
+<p>より完全な例については、<a href="https://github.com/openai/openai-agents-python/tree/main/examples/basic/retry.py"><code>examples/basic/retry.py</code></a> と <a href="https://github.com/openai/openai-agents-python/tree/main/examples/basic/retry_litellm.py">アダプターベースの再試行例</a>を参照してください。</p>
+<h2 id="openai_3">非 OpenAI プロバイダーのトラブルシューティング</h2>
+<h3 id="401">トレーシングクライアントエラー 401</h3>
+<p>トレーシングに関連するエラーが発生する場合、トレースが OpenAI サーバーにアップロードされる一方で、OpenAI API キーがないことが原因です。これを解決するには、3 つの選択肢があります。</p>
+<ol>
+<li>トレーシングを完全に無効にする: <a class="autorefs autorefs-internal" title="set_tracing_disabled" href="../../ref/#agents.set_tracing_disabled"><code>set_tracing_disabled(True)</code></a>。</li>
+<li>トレーシング用の OpenAI キーを設定する: <a class="autorefs autorefs-internal" title="set_tracing_export_api_key" href="../../ref/#agents.set_tracing_export_api_key"><code>set_tracing_export_api_key(...)</code></a>。この API キーはトレースのアップロードにのみ使用され、<a href="https://platform.openai.com/">platform.openai.com</a> のものである必要があります。</li>
+<li>非 OpenAI トレースプロセッサーを使用する。<a href="../tracing/#custom-tracing-processors">トレーシングドキュメント</a>を参照してください。</li>
+</ol>
+<h3 id="responses-api">Responses API のサポート</h3>
+<p>SDK はデフォルトで Responses API を使用しますが、他の多くの LLM プロバイダーはまだこれをサポートしていません。その結果、404 などの問題が発生する場合があります。解決するには、2 つの選択肢があります。</p>
+<ol>
+<li><a class="autorefs autorefs-internal" title="set_default_openai_api" href="../../ref/#agents.set_default_openai_api"><code>set_default_openai_api("chat_completions")</code></a> を呼び出す。これは、環境変数で <code>OPENAI_API_KEY</code> と <code>OPENAI_BASE_URL</code> を設定している場合に機能します。</li>
+<li><a class="autorefs autorefs-internal" title="OpenAIChatCompletionsModel" href="../../ref/models/openai_chatcompletions/#agents.models.openai_chatcompletions.OpenAIChatCompletionsModel"><code>OpenAIChatCompletionsModel</code></a> を使用する。<a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/">こちら</a>に例があります。</li>
+</ol>
+<h3 id="structured-outputs">structured outputs のサポート</h3>
+<p>一部のモデルプロバイダーは、<a href="https://platform.openai.com/docs/guides/structured-outputs">structured outputs</a> をサポートしていません。これにより、次のようなエラーが発生する場合があります。</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>BadRequestError: Error code: 400 - {&#39;error&#39;: {&#39;message&#39;: &quot;&#39;response_format.type&#39; : value is not one of the allowed values [&#39;text&#39;,&#39;json_object&#39;]&quot;, &#39;type&#39;: &#39;invalid_request_error&#39;}}
+</span></code></pre></div>
+<p>これは一部のモデルプロバイダーの制約です。JSON 出力はサポートしていますが、出力に使用する <code>json_schema</code> の指定は許可していません。この問題の修正に取り組んでいますが、JSON schema 出力をサポートしているプロバイダーに依存することを推奨します。そうしないと、不正な形式の JSON が原因でアプリが頻繁に壊れるためです。</p>
+<h2 id="_8">プロバイダー間でのモデルの混在</h2>
+<p>モデルプロバイダー間の機能差を理解しておく必要があります。そうしないと、エラーが発生する可能性があります。たとえば、OpenAI は structured outputs、マルチモーダル入力、ホスト型のファイル検索と Web 検索をサポートしていますが、他の多くのプロバイダーはこれらの機能をサポートしていません。次の制限に注意してください。</p>
+<ul>
+<li>サポートされていない <code>tools</code> を、それらを理解しないプロバイダーに送信しないでください</li>
+<li>テキスト専用のモデルを呼び出す前に、マルチモーダル入力を除外してください</li>
+<li>structured JSON 出力をサポートしていないプロバイダーは、無効な JSON を生成することがある点に注意してください。</li>
+</ul>
+<h2 id="_9">サードパーティアダプター</h2>
+<p>SDK の組み込みプロバイダー統合ポイントで十分でない場合にのみ、サードパーティアダプターを使用してください。この SDK で OpenAI モデルのみを使用している場合は、Any-LLM や LiteLLM ではなく、組み込みの <a class="autorefs autorefs-internal" title="OpenAIResponsesModel" href="../../ref/models/openai_responses/#agents.models.openai_responses.OpenAIResponsesModel"><code>OpenAIResponsesModel</code></a> パスを優先してください。サードパーティアダプターは、OpenAI モデルと非 OpenAI プロバイダーを組み合わせる必要がある場合、または組み込みパスでは提供されないアダプター管理のプロバイダー対応範囲やルーティングが必要な場合のためのものです。アダプターは SDK と上流のモデルプロバイダーの間に別の互換性レイヤーを追加するため、機能サポートとリクエストセマンティクスはプロバイダーによって異なる場合があります。SDK には現在、Any-LLM と LiteLLM がベストエフォートのベータ版アダプター統合として含まれています。</p>
+<h3 id="any-llm">Any-LLM</h3>
+<p>Any-LLM のサポートは、Any-LLM 管理のプロバイダー対応範囲やルーティングが必要な場合向けに、ベストエフォートのベータ版として含まれています。</p>
+<p>上流プロバイダーパスによって、Any-LLM は Responses API、Chat Completions 互換 API、またはプロバイダー固有の互換性レイヤーを使用する場合があります。</p>
+<p>Any-LLM が必要な場合は、<code>openai-agents[any-llm]</code> をインストールし、<a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/any_llm_auto.py"><code>examples/model_providers/any_llm_auto.py</code></a> または <a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/any_llm_provider.py"><code>examples/model_providers/any_llm_provider.py</code></a> から始めてください。<a class="autorefs autorefs-internal" title="MultiProvider" href="../ref/models/multi_provider/#agents.models.multi_provider.MultiProvider"><code>MultiProvider</code></a> で <code>any-llm/...</code> モデル名を使用するか、<code>AnyLLMModel</code> を直接インスタンス化するか、実行スコープで <code>AnyLLMProvider</code> を使用できます。モデルサーフェスを明示的に固定する必要がある場合は、<code>AnyLLMModel</code> を構築するときに <code>api="responses"</code> または <code>api="chat_completions"</code> を渡します。</p>
+<p>Any-LLM はサードパーティアダプターレイヤーであり続けるため、プロバイダー依存関係と機能ギャップは SDK ではなく Any-LLM によって上流で定義されます。使用状況メトリクスは、上流プロバイダーが返す場合に自動的に伝播されますが、ストリーミング Chat Completions バックエンドでは、usage chunks を出力する前に <code>ModelSettings(include_usage=True)</code> が必要になる場合があります。structured outputs、ツール呼び出し、使用状況レポート、または Responses 固有の動作に依存する場合は、デプロイ予定の正確なプロバイダーバックエンドを検証してください。</p>
+<h3 id="litellm">LiteLLM</h3>
+<p>LiteLLM のサポートは、LiteLLM 固有のプロバイダー対応範囲やルーティングが必要な場合向けに、ベストエフォートのベータ版として含まれています。</p>
+<p>LiteLLM が必要な場合は、<code>openai-agents[litellm]</code> をインストールし、<a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/litellm_auto.py"><code>examples/model_providers/litellm_auto.py</code></a> または <a href="https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/litellm_provider.py"><code>examples/model_providers/litellm_provider.py</code></a> から始めてください。<code>litellm/...</code> モデル名を使用するか、<a class="autorefs autorefs-internal" title="LitellmModel" href="../../ref/extensions/models/litellm_model/#agents.extensions.models.litellm_model.LitellmModel"><code>LitellmModel</code></a> を直接インスタンス化できます。</p>
+<p>一部の LiteLLM ベースのプロバイダーは、デフォルトでは SDK の使用状況メトリクスを設定しません。使用状況レポートが必要な場合は、<code>ModelSettings(include_usage=True)</code> を渡し、structured outputs、ツール呼び出し、使用状況レポート、またはアダプター固有のルーティング動作に依存する場合は、デプロイ予定の正確なプロバイダーバックエンドを検証してください。</p>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      <script id="__config" type="application/json">{"base": "../..", "features": ["content.code.copy", "content.code.select", "navigation.path", "navigation.sections", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.d50fe291.min.js", "tags": null, "translations": {"clipboard.copied": "\u30b3\u30d4\u30fc\u3057\u307e\u3057\u305f", "clipboard.copy": "\u30af\u30ea\u30c3\u30d7\u30dc\u30fc\u30c9\u3078\u30b3\u30d4\u30fc", "search.result.more.one": "\u3053\u306e\u30da\u30fc\u30b8\u5185\u306b\u3082\u30461\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.more.other": "\u3053\u306e\u30da\u30fc\u30b8\u5185\u306b\u3042\u3068#\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.none": "\u4f55\u3082\u898b\u3064\u304b\u308a\u307e\u305b\u3093\u3067\u3057\u305f", "search.result.one": "1\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.other": "#\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.placeholder": "\u691c\u7d22\u30ad\u30fc\u30ef\u30fc\u30c9\u3092\u5165\u529b\u3057\u3066\u304f\u3060\u3055\u3044", "search.result.term.missing": "\u691c\u7d22\u306b\u542b\u307e\u308c\u306a\u3044", "select.version": "\u30d0\u30fc\u30b8\u30e7\u30f3\u5207\u308a\u66ff\u3048"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.50899def.min.js"></script>
+      
+    
+  </body>
+</html>
