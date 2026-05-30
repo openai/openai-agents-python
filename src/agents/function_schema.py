@@ -40,6 +40,8 @@ class FuncSchema:
     strict_json_schema: bool = True
     """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
     as it increases the likelihood of correct JSON input."""
+    omitted_parameter_names: tuple[str, ...] = ()
+    """Parameter names that are supplied by the SDK instead of model-generated JSON."""
 
     def to_call_args(self, data: BaseModel) -> tuple[list[Any], dict[str, Any]]:
         """
@@ -52,6 +54,8 @@ class FuncSchema:
 
         # Use enumerate() so we can skip the first parameter if it's context.
         for idx, (name, param) in enumerate(self.signature.parameters.items()):
+            if name in self.omitted_parameter_names:
+                continue
             # If the function takes a RunContextWrapper and this is the first parameter, skip it.
             if self.takes_context and idx == 0:
                 continue
@@ -228,6 +232,7 @@ def function_schema(
     description_override: str | None = None,
     use_docstring_info: bool = True,
     strict_json_schema: bool = True,
+    skip_first_parameter: bool = False,
 ) -> FuncSchema:
     """
     Given a Python function, extracts a `FuncSchema` from it, capturing the name, description,
@@ -246,6 +251,8 @@ def function_schema(
             the schema adheres to the "strict" standard the OpenAI API expects. We **strongly**
             recommend setting this to True, as it increases the likelihood of the LLM producing
             correct JSON input.
+        skip_first_parameter: If True, omit the first signature parameter from the tool schema and
+            call arguments. This is used for instance methods decorated with `@function_tool`.
 
     Returns:
         A `FuncSchema` object containing the function's name, description, parameter descriptions,
@@ -288,22 +295,29 @@ def function_schema(
     params = list(sig.parameters.items())
     takes_context = False
     filtered_params = []
+    omitted_parameter_names: list[str] = []
 
-    if params:
-        first_name, first_param = params[0]
+    params_to_check = params
+    if skip_first_parameter and params:
+        omitted_parameter_names.append(params[0][0])
+        params_to_check = params[1:]
+
+    if params_to_check:
+        first_name, first_param = params_to_check[0]
         # Prefer the evaluated type hint if available
         ann = type_hints.get(first_name, first_param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
             if origin is RunContextWrapper or origin is ToolContext:
                 takes_context = True  # Mark that the function takes context
+                omitted_parameter_names.append(first_name)
             else:
                 filtered_params.append((first_name, first_param))
         else:
             filtered_params.append((first_name, first_param))
 
     # For parameters other than the first, raise error if any use RunContextWrapper or ToolContext.
-    for name, param in params[1:]:
+    for name, param in params_to_check[1:]:
         ann = type_hints.get(name, param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
@@ -421,4 +435,5 @@ def function_schema(
         signature=sig,
         takes_context=takes_context,
         strict_json_schema=strict_json_schema,
+        omitted_parameter_names=tuple(omitted_parameter_names),
     )
