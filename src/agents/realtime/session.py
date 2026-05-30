@@ -22,7 +22,13 @@ from ..items import ToolApprovalItem
 from ..logger import logger
 from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
-from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, invoke_function_tool
+from ..tool import (
+    DEFAULT_APPROVAL_REJECTION_MESSAGE,
+    FunctionTool,
+    default_tool_error_function,
+    invoke_function_tool,
+    maybe_invoke_function_tool_failure_error_function,
+)
 from ..tool_context import ToolContext
 from ..util._approvals import evaluate_needs_approval_setting
 from .agent import RealtimeAgent
@@ -714,6 +720,54 @@ class RealtimeSession(RealtimeModelListener):
         finally:
             self._finish_tool_call(call_id, mark_completed=mark_completed)
 
+    async def _send_function_tool_failure_output(
+        self,
+        event: RealtimeModelToolCallEvent,
+        *,
+        tool: FunctionTool,
+        tool_context: ToolContext[Any],
+        agent: RealtimeAgent,
+        error: Exception,
+    ) -> bool:
+        output = await maybe_invoke_function_tool_failure_error_function(
+            function_tool=tool,
+            context=tool_context,
+            error=error,
+        )
+        if output is None:
+            return False
+
+        await self._send_tool_output_completion(
+            _PendingToolOutput(
+                tool_call=event,
+                output=output,
+                start_response=True,
+                tool_end_event=RealtimeToolEnd(
+                    info=self._event_info,
+                    tool=tool,
+                    output=output,
+                    agent=agent,
+                    arguments=event.arguments,
+                ),
+            )
+        )
+        return True
+
+    async def _send_handoff_failure_output(
+        self,
+        event: RealtimeModelToolCallEvent,
+        *,
+        tool_context: ToolContext[Any],
+        error: Exception,
+    ) -> None:
+        await self._send_tool_output_completion(
+            _PendingToolOutput(
+                tool_call=event,
+                output=default_tool_error_function(tool_context, error),
+                start_response=True,
+            )
+        )
+
     async def _handle_tool_call(
         self,
         event: RealtimeModelToolCallEvent,
@@ -773,11 +827,22 @@ class RealtimeSession(RealtimeModelListener):
                     tool_arguments=event.arguments,
                     agent=agent,
                 )
-                result = await invoke_function_tool(
-                    function_tool=func_tool,
-                    context=tool_context,
-                    arguments=event.arguments,
-                )
+                try:
+                    result = await invoke_function_tool(
+                        function_tool=func_tool,
+                        context=tool_context,
+                        arguments=event.arguments,
+                    )
+                except Exception as exc:
+                    if await self._send_function_tool_failure_output(
+                        event,
+                        tool=func_tool,
+                        tool_context=tool_context,
+                        agent=agent,
+                        error=exc,
+                    ):
+                        mark_completed = True
+                    raise
 
                 await self._send_tool_output_completion(
                     _PendingToolOutput(
@@ -806,11 +871,20 @@ class RealtimeSession(RealtimeModelListener):
                 )
 
                 # Execute the handoff to get the new agent
-                result = await handoff.on_invoke_handoff(self._context_wrapper, event.arguments)
-                if not isinstance(result, RealtimeAgent):
-                    raise UserError(
-                        f"Handoff {handoff.tool_name} returned invalid result: {type(result)}"
+                try:
+                    result = await handoff.on_invoke_handoff(self._context_wrapper, event.arguments)
+                    if not isinstance(result, RealtimeAgent):
+                        raise UserError(
+                            f"Handoff {handoff.tool_name} returned invalid result: {type(result)}"
+                        )
+                except Exception as exc:
+                    await self._send_handoff_failure_output(
+                        event,
+                        tool_context=tool_context,
+                        error=exc,
                     )
+                    mark_completed = True
+                    raise
 
                 # Store previous agent for event
                 previous_agent = agent
