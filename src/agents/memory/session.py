@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import inspect
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Literal, Protocol, TypeGuard, runtime_checkable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeGuard, runtime_checkable
 
 from typing_extensions import TypedDict
 
 if TYPE_CHECKING:
     from ..items import TResponseInputItem
+    from ..run_context import RunContextWrapper
     from .session_settings import SessionSettings
 
 
@@ -21,7 +24,12 @@ class Session(Protocol):
     session_id: str
     session_settings: SessionSettings | None = None
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -33,7 +41,12 @@ class Session(Protocol):
         """
         ...
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:
@@ -41,7 +54,11 @@ class Session(Protocol):
         """
         ...
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(
+        self,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
 
         Returns:
@@ -68,7 +85,12 @@ class SessionABC(ABC):
     session_settings: SessionSettings | None = None
 
     @abstractmethod
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -81,7 +103,12 @@ class SessionABC(ABC):
         ...
 
     @abstractmethod
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:
@@ -90,7 +117,11 @@ class SessionABC(ABC):
         ...
 
     @abstractmethod
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(
+        self,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
 
         Returns:
@@ -148,3 +179,55 @@ def is_openai_responses_compaction_aware_session(
     except Exception:
         return False
     return callable(run_compaction)
+
+
+def _session_method_accepts_wrapper(method: Callable[..., Any]) -> bool:
+    """Return whether a session method can accept ``wrapper=...`` safely."""
+    try:
+        parameters = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return False
+
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == "wrapper"
+        for parameter in parameters
+    )
+
+
+async def get_session_items(
+    session: Session,
+    limit: int | None = None,
+    *,
+    wrapper: RunContextWrapper[Any] | None = None,
+) -> list[TResponseInputItem]:
+    """Call ``Session.get_items`` while remaining compatible with legacy sessions."""
+    get_items = session.get_items
+    if wrapper is not None and _session_method_accepts_wrapper(get_items):
+        return await get_items(limit=limit, wrapper=wrapper)
+    return await get_items(limit=limit)
+
+
+async def add_session_items(
+    session: Session,
+    items: list[TResponseInputItem],
+    *,
+    wrapper: RunContextWrapper[Any] | None = None,
+) -> None:
+    """Call ``Session.add_items`` while remaining compatible with legacy sessions."""
+    add_items = session.add_items
+    if wrapper is not None and _session_method_accepts_wrapper(add_items):
+        await add_items(items, wrapper=wrapper)
+        return
+    await add_items(items)
+
+
+async def pop_session_item(
+    session: Session,
+    *,
+    wrapper: RunContextWrapper[Any] | None = None,
+) -> TResponseInputItem | None:
+    """Call ``Session.pop_item`` while remaining compatible with legacy sessions."""
+    pop_item = session.pop_item
+    if wrapper is not None and _session_method_accepts_wrapper(pop_item):
+        return await pop_item(wrapper=wrapper)
+    return await pop_item()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from openai import AsyncOpenAI
 
 from agents.models._openai_shared import get_default_openai_client
@@ -70,7 +72,12 @@ class OpenAIConversationsSession(SessionABC):
     async def _clear_session_id(self) -> None:
         self._session_id = None
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: Any = None,
+    ) -> list[TResponseInputItem]:
         session_id = await self._get_session_id()
 
         session_limit = resolve_session_limit(limit, self.session_settings)
@@ -97,7 +104,12 @@ class OpenAIConversationsSession(SessionABC):
 
         return all_items  # type: ignore
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: Any = None,
+    ) -> None:
         session_id = await self._get_session_id()
         if not items:
             return
@@ -107,9 +119,9 @@ class OpenAIConversationsSession(SessionABC):
             items=items,
         )
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(self, *, wrapper: Any = None) -> TResponseInputItem | None:
         session_id = await self._get_session_id()
-        items = await self.get_items(limit=1)
+        items = await self.get_items(limit=1, wrapper=wrapper)
         if not items:
             return None
         item_id: str = str(items[0]["id"])  # type: ignore [typeddict-item]

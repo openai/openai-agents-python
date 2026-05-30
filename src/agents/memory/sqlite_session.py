@@ -7,7 +7,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from ..items import TResponseInputItem
 from .session import SessionABC
@@ -199,7 +199,12 @@ class SQLiteSession(SessionABC):
             (self.session_id,),
         )
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: Any = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -254,7 +259,12 @@ class SQLiteSession(SessionABC):
 
         return await asyncio.to_thread(_get_items_sync)
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: Any = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:
@@ -270,7 +280,7 @@ class SQLiteSession(SessionABC):
 
         await asyncio.to_thread(_add_items_sync)
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(self, *, wrapper: Any = None) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
 
         Returns:
