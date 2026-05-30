@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from collections.abc import Callable
 from typing import Literal
 
 import pytest
@@ -61,19 +62,33 @@ def test_sandbox_client_options_exclude_unset_preserves_type_discriminator() -> 
     }
 
 
+def _sailbox_client_options() -> BaseSandboxClientOptions:
+    sailbox_module = pytest.importorskip("agents.extensions.sandbox.sailbox")
+    app_module = pytest.importorskip("sail.app")
+    return sailbox_module.SailboxSandboxClientOptions(
+        app=app_module.App(id="app_test", name="agents", created_at=1),
+        app_name=None,
+        exposed_ports=(8080,),
+    )
+
+
 @pytest.mark.parametrize(
-    "options",
+    "options_factory",
     [
-        DockerSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE, exposed_ports=(8080,)),
-        UnixLocalSandboxClientOptions(exposed_ports=(8080,)),
-        E2BSandboxClientOptions(sandbox_type="e2b", template="base"),
-        DaytonaSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE),
-        CloudflareSandboxClientOptions(worker_url="https://example.com"),
+        lambda: DockerSandboxClientOptions(
+            image=DEFAULT_PYTHON_SANDBOX_IMAGE, exposed_ports=(8080,)
+        ),
+        lambda: UnixLocalSandboxClientOptions(exposed_ports=(8080,)),
+        lambda: E2BSandboxClientOptions(sandbox_type="e2b", template="base"),
+        lambda: DaytonaSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE),
+        lambda: CloudflareSandboxClientOptions(worker_url="https://example.com"),
+        _sailbox_client_options,
     ],
 )
 def test_sandbox_client_options_roundtrip_preserves_concrete_type(
-    options: BaseSandboxClientOptions,
+    options_factory: Callable[[], BaseSandboxClientOptions],
 ) -> None:
+    options = options_factory()
     payload = options.model_dump(mode="json")
 
     restored = BaseSandboxClientOptions.parse(payload)

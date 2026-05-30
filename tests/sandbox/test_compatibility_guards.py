@@ -325,6 +325,15 @@ def test_core_sandbox_public_export_surface_is_stable() -> None:
             },
         ),
         (
+            "agents.extensions.sandbox.sailbox",
+            {
+                "SailboxSandboxClient",
+                "SailboxSandboxClientOptions",
+                "SailboxSandboxSession",
+                "SailboxSandboxSessionState",
+            },
+        ),
+        (
             "agents.extensions.sandbox.vercel",
             {
                 "VercelSandboxClient",
@@ -491,6 +500,22 @@ def test_optional_sandbox_dataclass_constructor_field_order_is_stable(
                 "mcp",
                 "metadata",
                 "managed_secrets",
+            ),
+        ),
+        (
+            "agents.extensions.sandbox.sailbox",
+            "SailboxSandboxClientOptions",
+            (
+                "app",
+                "app_name",
+                "image",
+                "name_prefix",
+                "image_build_timeout",
+                "memory_mib",
+                "cpu",
+                "disk_gib",
+                "exposed_ports",
+                "pause_on_exit",
             ),
         ),
         (
@@ -721,6 +746,32 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
             ),
         ),
         (
+            "agents.extensions.sandbox.sailbox",
+            "SailboxSandboxSessionState",
+            (
+                "type",
+                "session_id",
+                "snapshot",
+                "manifest",
+                "exposed_ports",
+                "snapshot_fingerprint",
+                "snapshot_fingerprint_version",
+                "workspace_root_ready",
+                "sailbox_id",
+                "sailbox_name",
+                "app_name",
+                "exec_endpoint",
+                "worker_address",
+                "status",
+                "image",
+                "image_build_timeout",
+                "memory_mib",
+                "cpu",
+                "disk_gib",
+                "pause_on_exit",
+            ),
+        ),
+        (
             "agents.extensions.sandbox.vercel",
             "VercelSandboxSessionState",
             (
@@ -785,6 +836,7 @@ def test_sandbox_session_state_field_order_is_stable(
         ),
         ("agents.extensions.sandbox.daytona", "DaytonaSandboxClientOptions", (), "daytona"),
         ("agents.extensions.sandbox.runloop", "RunloopSandboxClientOptions", (), "runloop"),
+        ("agents.extensions.sandbox.sailbox", "SailboxSandboxClientOptions", (), "sailbox"),
         ("agents.extensions.sandbox.vercel", "VercelSandboxClientOptions", (), "vercel"),
     ],
 )
@@ -845,6 +897,11 @@ def test_optional_sandbox_client_options_json_round_trip_preserves_type(
             "agents.extensions.sandbox.runloop",
             "RunloopSandboxSessionState",
             {"devbox_id": "devbox-123"},
+        ),
+        (
+            "agents.extensions.sandbox.sailbox",
+            "SailboxSandboxSessionState",
+            {"sailbox_id": "sb_123"},
         ),
         (
             "agents.extensions.sandbox.vercel",
