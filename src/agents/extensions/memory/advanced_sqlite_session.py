@@ -153,6 +153,9 @@ class AdvancedSQLiteSession(SQLiteSession):
                     except Exception as cleanup_error:
                         conn.rollback()
                         self._logger.error(f"Failed to cleanup orphaned messages: {cleanup_error}")
+                    raise RuntimeError(
+                        f"Failed to persist structure metadata for session {self.session_id}"
+                    ) from e
 
         await asyncio.to_thread(_add_items_sync)
 
