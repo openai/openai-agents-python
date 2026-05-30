@@ -786,14 +786,23 @@ class AdvancedSQLiteSession(SQLiteSession):
 
                     structure_deleted = cursor.rowcount
 
+                    # Drop messages that only this branch referenced. The helper
+                    # is scoped to ``self.session_id`` and removes only rows
+                    # without any ``message_structure`` reference, so it keeps
+                    # messages that the main branch or other branches still
+                    # share via ``_copy_messages_to_new_branch`` (#3346).
+                    orphaned_deleted = self._cleanup_orphaned_messages_sync(conn)
+
                     conn.commit()
 
-                    return usage_deleted, structure_deleted
+                    return usage_deleted, structure_deleted, orphaned_deleted
 
-        usage_deleted, structure_deleted = await asyncio.to_thread(_delete_sync)
+        usage_deleted, structure_deleted, orphaned_deleted = await asyncio.to_thread(_delete_sync)
 
         self._logger.info(
-            f"Deleted branch '{branch_id}': {structure_deleted} message entries, {usage_deleted} usage entries"  # noqa: E501
+            f"Deleted branch '{branch_id}': {structure_deleted} message entries, "
+            f"{orphaned_deleted} orphaned messages, "
+            f"{usage_deleted} usage entries"
         )
 
     async def list_branches(self) -> list[dict[str, Any]]:
