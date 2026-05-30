@@ -694,6 +694,55 @@ async def test_branch_deletion_with_force():
     session.close()
 
 
+async def test_delete_branch_removes_branch_only_messages():
+    session_id = "delete_branch_orphans_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    await session.add_items(
+        [
+            {"role": "user", "content": "Main question"},
+            {"role": "assistant", "content": "Main answer"},
+        ]
+    )
+    await session.create_branch_from_turn(1, "branch_only")
+    await session.add_items(
+        [
+            {"role": "user", "content": "Branch-only question"},
+            {"role": "assistant", "content": "Branch-only answer"},
+        ]
+    )
+
+    await session.delete_branch("branch_only", force=True)
+
+    with session._locked_connection() as conn:
+        message_rows = conn.execute(
+            f"""
+            SELECT message_data
+            FROM {session.messages_table}
+            WHERE session_id = ?
+            ORDER BY id
+            """,
+            (session.session_id,),
+        ).fetchall()
+        structure_rows = conn.execute(
+            """
+            SELECT branch_id, message_id
+            FROM message_structure
+            WHERE session_id = ?
+            ORDER BY message_id
+            """,
+            (session.session_id,),
+        ).fetchall()
+
+    assert [json.loads(row[0])["content"] for row in message_rows] == [
+        "Main question",
+        "Main answer",
+    ]
+    assert {row[0] for row in structure_rows} == {"main"}
+
+    session.close()
+
+
 async def test_get_items_with_parameters():
     """Test get_items with new parameters (include_inactive, branch_id)."""
     session_id = "get_items_params_test"
