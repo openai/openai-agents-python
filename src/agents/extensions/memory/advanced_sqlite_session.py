@@ -133,26 +133,15 @@ class AdvancedSQLiteSession(SQLiteSession):
         def _add_items_sync():
             """Synchronous helper to add items and structure metadata together."""
             with self._locked_connection() as conn:
-                # Keep both writes in one critical section so message IDs and metadata stay aligned.
-                self._insert_items(conn, items)
-                conn.commit()
                 try:
+                    # Keep both writes in one transaction so metadata failures do not leave orphans.
+                    self._insert_items(conn, items)
                     self._insert_structure_metadata(conn, items)
                     conn.commit()
-                except Exception as e:
+                except Exception:
                     conn.rollback()
-                    self._logger.error(
-                        f"Failed to add structure metadata for session {self.session_id}: {e}"
-                    )
-                    try:
-                        deleted_count = self._cleanup_orphaned_messages_sync(conn)
-                        if deleted_count:
-                            conn.commit()
-                        else:
-                            conn.rollback()
-                    except Exception as cleanup_error:
-                        conn.rollback()
-                        self._logger.error(f"Failed to cleanup orphaned messages: {cleanup_error}")
+                    self._logger.exception("Failed to add items for session %s", self.session_id)
+                    raise
 
         await asyncio.to_thread(_add_items_sync)
 
@@ -367,16 +356,16 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         try:
             await asyncio.to_thread(_add_structure_sync)
-        except Exception as e:
-            self._logger.error(
-                f"Failed to add structure metadata for session {self.session_id}: {e}"
+        except Exception:
+            self._logger.exception(
+                "Failed to add structure metadata for session %s", self.session_id
             )
-            # Try to clean up any orphaned messages to maintain consistency
+            # Try to clean up any orphaned messages to maintain consistency.
             try:
                 await self._cleanup_orphaned_messages()
-            except Exception as cleanup_error:
-                self._logger.error(f"Failed to cleanup orphaned messages: {cleanup_error}")
-            # Don't re-raise - structure metadata is supplementary
+            except Exception:
+                self._logger.exception("Failed to cleanup orphaned messages")
+            raise
 
     def _insert_structure_metadata(
         self,
@@ -469,8 +458,8 @@ class AdvancedSQLiteSession(SQLiteSession):
     async def _cleanup_orphaned_messages(self) -> int:
         """Remove messages that exist in the configured message table but not in message_structure.
 
-        This can happen if _add_structure_metadata fails after super().add_items() succeeds.
-        Used for maintaining data consistency.
+        This can happen for rows written by older or non-atomic structure metadata paths.
+        `add_items()` writes message rows and structure metadata in a single transaction.
         """
 
         def _cleanup_sync():
