@@ -31,7 +31,9 @@ The Agents SDK includes built-in tracing, collecting a comprehensive record of e
 By default, the SDK traces the following:
 
 -   The entire `Runner.{run, run_sync, run_streamed}()` is wrapped in a `trace()`.
+-   Each `Runner` invocation is wrapped in `task_span()`.
 -   Each time an agent runs, it is wrapped in `agent_span()`
+-   Each agent loop turn is wrapped in `turn_span()`.
 -   LLM generations are wrapped in `generation_span()`
 -   Function tool calls are each wrapped in `function_span()`
 -   Guardrails are wrapped in `guardrail_span()`
@@ -43,6 +45,26 @@ By default, the SDK traces the following:
 By default, the trace is named "Agent workflow". You can set this name if you use `trace`, or you can configure the name and other properties with the [`RunConfig`][agents.run.RunConfig].
 
 In addition, you can set up [custom trace processors](#custom-tracing-processors) to push traces to other destinations (as a replacement, or secondary destination).
+
+### Trace hierarchy
+
+For `Runner` workflows, the default hierarchy is:
+
+```text
+trace
+`-- task span: one Runner invocation
+    `-- agent span: one active agent segment
+        `-- turn span: one model/tool loop turn
+            |-- response or generation span
+            |-- function/tool spans
+            `-- handoff spans
+```
+
+Guardrail span parentage depends on the run path and when the guardrail executes. For example, streamed input guardrails can start before a turn span exists, while output guardrails run after the final turn span has finished. Use each guardrail span's `parent_id` to determine whether it belongs to a turn span or directly to an agent or task span.
+
+The `task` and `turn` spans are exported as custom spans. In a custom `TraceProcessor`, identify them with `span.span_data.type`, which is set to `"task"` or `"turn"` respectively. If you are working with the exported payload, read `span.export()["span_data"]["data"]["sdk_span_type"]`. The `turn` span also includes the `turn` number and `agent_name` in its exported data. Use each span's `parent_id` to reconstruct which turn, agent segment, and top-level runner task a child span belongs to.
+
+If a run hands off to another agent, the SDK finishes the current agent span and starts a new agent span under the same task span. This keeps the trace grouped by the top-level runner invocation while still showing which agent owned each turn.
 
 ## Long-running workers and immediate exports
 
