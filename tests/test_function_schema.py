@@ -885,3 +885,13 @@ def test_function_with_annotated_field_multiple_constraints():
 
     with pytest.raises(ValidationError):  # zero factor
         fs.params_pydantic_model(**{"score": 50, "factor": 0.0})
+
+
+def test_pydantic_reserved_param_name_raises_user_error():
+    """Parameters named 'model_config' (or other Pydantic reserved names) must raise UserError."""
+
+    def func_with_reserved(model_config: str) -> str:
+        return model_config
+
+    with pytest.raises(UserError, match="reserved by Pydantic"):
+        function_schema(func_with_reserved)

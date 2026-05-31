@@ -318,7 +318,19 @@ def function_schema(
     #   field_name -> (type_annotation, default_value_or_Field(...))
     fields: dict[str, Any] = {}
 
+    # Pydantic's create_model() treats certain names as model-level configuration
+    # keys rather than fields (e.g. 'model_config', 'model_fields').  Passing
+    # a FieldInfo for those names causes a TypeError deep inside Pydantic, so
+    # we reject them early with a clear message.
+    _PYDANTIC_RESERVED_NAMES = {"model_config", "model_fields", "model_computed_fields"}
+
     for name, param in filtered_params:
+        if name in _PYDANTIC_RESERVED_NAMES:
+            raise UserError(
+                f"Function '{func.__name__}' has a parameter named '{name}', which is reserved "
+                f"by Pydantic and cannot be used as a tool parameter name. "
+                f"Please rename the parameter."
+            )
         ann = type_hints.get(name, param.annotation)
         default = param.default
 
