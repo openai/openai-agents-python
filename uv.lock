@@ -2440,7 +2440,6 @@ dependencies = [
     { name = "openai" },
     { name = "pydantic" },
     { name = "requests" },
-    { name = "types-requests" },
     { name = "typing-extensions" },
     { name = "websockets" },
 ]
@@ -2545,6 +2544,7 @@ dev = [
     { name = "testcontainers" },
     { name = "textual" },
     { name = "types-pynput" },
+    { name = "types-requests" },
     { name = "websockets" },
 ]
 
@@ -2578,7 +2578,6 @@ requires-dist = [
     { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0" },
     { name = "temporalio", marker = "extra == 'temporal'", specifier = "==1.26.0" },
     { name = "textual", marker = "extra == 'temporal'", specifier = ">=8.2.3,<8.3" },
-    { name = "types-requests", specifier = ">=2.0,<3" },
     { name = "typing-extensions", specifier = ">=4.12.2,<5" },
     { name = "vercel", marker = "extra == 'vercel'", specifier = ">=0.5.6,<0.6" },
     { name = "websockets", specifier = ">=15.0,<17" },
@@ -2619,6 +2618,7 @@ dev = [
     { name = "testcontainers", specifier = "==4.12.0" },
     { name = "textual" },
     { name = "types-pynput" },
+    { name = "types-requests", specifier = ">=2.0,<3" },
     { name = "websockets" },
 ]
 
