@@ -6,6 +6,7 @@ approval plumbing, and payload coercion. Action classes live in tool_actions.py.
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import functools
 import inspect
@@ -65,6 +66,7 @@ from ..tool import (
     ComputerTool,
     ComputerToolSafetyCheckData,
     FunctionTool,
+    FunctionToolCustomDataContext,
     FunctionToolResult,
     ShellActionRequest,
     ShellCallData,
@@ -87,6 +89,7 @@ from ..tool_guardrails import (
 from ..tracing import Span, SpanError, function_span, get_current_trace
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
+from ..util._custom_data import maybe_extract_custom_data, merge_custom_data
 from ..util._tool_errors import get_trace_tool_error
 from ..util._types import MaybeAwaitable
 from ._asyncio_progress import get_function_tool_task_progress_deadline
@@ -1380,6 +1383,7 @@ class _FunctionToolBatchExecutor:
         self.task_states: dict[asyncio.Task[Any], _FunctionToolTaskState] = {}
         self.teardown_cancelled_tasks: set[asyncio.Task[Any]] = set()
         self.results_by_tool_run: dict[int, Any] = {}
+        self.custom_data_by_tool_run: dict[int, dict[str, Any]] = {}
         self.pending_tasks: set[asyncio.Task[Any]] = set()
         self.propagating_failure: BaseException | None = None
         self.available_function_tools: list[FunctionTool] = []
@@ -1791,6 +1795,19 @@ class _FunctionToolBatchExecutor:
             real_result=real_result,
             tool_output_guardrail_results=self.tool_output_guardrail_results,
         )
+        raw_output_item = ItemHelpers.tool_call_output_item(tool_call, final_result)
+        extracted_custom_data = await maybe_extract_custom_data(
+            func_tool.custom_data_extractor,
+            FunctionToolCustomDataContext(
+                tool_context=tool_context,
+                tool=func_tool,
+                output=final_result,
+                raw_item=copy.deepcopy(raw_output_item),
+            ),
+        )
+        custom_data = merge_custom_data(tool_context._custom_data, extracted_custom_data)
+        if custom_data:
+            self.custom_data_by_tool_run[id(task_state.tool_run)] = custom_data
 
         await asyncio.gather(
             self.hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result),
@@ -1898,6 +1915,7 @@ class _FunctionToolBatchExecutor:
                     raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
                     agent=self.public_agent,
                     tool_origin=get_function_tool_origin(tool_run.function_tool),
+                    custom_data=self.custom_data_by_tool_run.get(id(tool_run)),
                 )
             else:
                 # Skip tool output until nested interruptions are resolved.
