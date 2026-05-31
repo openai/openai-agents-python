@@ -373,8 +373,10 @@ class ToolCallItem(RunItemBase[Any]):
     def call_id(self) -> str | None:
         """Return the call identifier from the raw item, if available."""
         if isinstance(self.raw_item, dict):
-            return self.raw_item.get("call_id") or self.raw_item.get("id")
-        return getattr(self.raw_item, "call_id", None) or getattr(self.raw_item, "id", None)
+            cid = self.raw_item.get("call_id") or self.raw_item.get("id")
+        else:
+            cid = getattr(self.raw_item, "call_id", None) or getattr(self.raw_item, "id", None)
+        return str(cid) if cid is not None else None
 
 
 ToolCallOutputTypes: TypeAlias = (
@@ -408,8 +410,9 @@ class ToolCallOutputItem(RunItemBase[Any]):
         """Return the call identifier from the raw item, if available."""
         if isinstance(self.raw_item, dict):
             cid = self.raw_item.get("call_id") or self.raw_item.get("id")
-            return str(cid) if cid is not None else None
-        return getattr(self.raw_item, "call_id", None) or getattr(self.raw_item, "id", None)
+        else:
+            cid = getattr(self.raw_item, "call_id", None) or getattr(self.raw_item, "id", None)
+        return str(cid) if cid is not None else None
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts the tool output into an input item for the next model turn.
