@@ -178,6 +178,31 @@ class TestSandboxApplyPatchTool:
         assert session.rm_users == ["sandbox-user"]
 
     @pytest.mark.asyncio
+    async def test_editor_runs_move_cleanup_as_bound_user(self) -> None:
+        session = UserRecordingApplyPatchSession()
+        session.files[Path("/workspace/existing.txt")] = b"old\n"
+        tool = SandboxApplyPatchTool(session=session, user=User(name="sandbox-user"))
+
+        await cast(
+            Awaitable[ApplyPatchResult],
+            tool.editor.update_file(
+                ApplyPatchOperation(
+                    type="update_file",
+                    path="existing.txt",
+                    diff="@@\n-old\n+new\n",
+                    move_to="renamed.txt",
+                )
+            ),
+        )
+
+        # Renaming writes the new file and removes the original; both must run
+        # as the editor's bound user, not the default sandbox user.
+        assert session.write_users == ["sandbox-user"]
+        assert session.rm_users == ["sandbox-user"]
+        assert Path("/workspace/existing.txt") not in session.files
+        assert Path("/workspace/renamed.txt") in session.files
+
+    @pytest.mark.asyncio
     async def test_custom_tool_input_create_update_move_delete(self) -> None:
         session = ApplyPatchSession()
         tool = SandboxApplyPatchTool(session=session)
