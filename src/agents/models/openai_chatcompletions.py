@@ -5,7 +5,7 @@ import time
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
-from openai import AsyncOpenAI, AsyncStream, Omit, omit
+from openai import AsyncOpenAI, AsyncStream, NotGiven, Omit, omit
 from openai.types import ChatModel
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice
@@ -44,6 +44,20 @@ from .reasoning_content_replay import ShouldReplayReasoningContent
 
 if TYPE_CHECKING:
     from ..model_settings import ModelSettings
+
+
+def _is_openai_omitted_value(value: Any) -> bool:
+    return isinstance(value, Omit | NotGiven)
+
+
+# Keys whose first-class create_kwargs entry is reserved by the SDK and must
+# never be overridden via ModelSettings.extra_args, even when the SDK passes
+# the value as an OpenAI omit sentinel. ``stream`` is the canonical example:
+# get_response() pins it to ``omit`` and then expects a non-streaming
+# ChatCompletion, so allowing extra_args to flip it to True would cause the
+# OpenAI client to return an async stream that the non-streaming code path
+# cannot consume.
+_RESERVED_CHAT_COMPLETIONS_KEYS = frozenset({"stream"})
 
 
 class OpenAIChatCompletionsModel(Model):
@@ -500,8 +514,15 @@ class OpenAIChatCompletionsModel(Model):
             "extra_body": model_settings.extra_body,
             "metadata": self._non_null_or_omit(model_settings.metadata),
         }
+        extra_args = model_settings.extra_args or {}
         duplicate_extra_arg_keys = sorted(
-            set(create_kwargs).intersection(model_settings.extra_args or {})
+            k
+            for k in extra_args
+            if k in create_kwargs
+            and (
+                k in _RESERVED_CHAT_COMPLETIONS_KEYS
+                or not _is_openai_omitted_value(create_kwargs[k])
+            )
         )
         if duplicate_extra_arg_keys:
             if len(duplicate_extra_arg_keys) == 1:
@@ -513,7 +534,7 @@ class OpenAIChatCompletionsModel(Model):
             raise TypeError(
                 f"chat.completions.create() got multiple values for keyword arguments {keys}"
             )
-        create_kwargs.update(model_settings.extra_args or {})
+        create_kwargs.update(extra_args)
 
         ret = await self._get_client().chat.completions.create(**create_kwargs)
 
