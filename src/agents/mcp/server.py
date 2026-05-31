@@ -1183,7 +1183,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
 
 
 class MCPServerSseParams(TypedDict):
-    """Mirrors the params in`mcp.client.sse.sse_client`."""
+    """Mirrors the params in `mcp.client.sse.sse_client`."""
 
     url: str
     """The URL of the server."""
@@ -1309,7 +1309,7 @@ class MCPServerSse(_MCPServerWithClientSession):
 
 
 class MCPServerStreamableHttpParams(TypedDict):
-    """Mirrors the params in`mcp.client.streamable_http.streamablehttp_client`."""
+    """Mirrors the params in `mcp.client.streamable_http.streamablehttp_client`."""
 
     url: str
     """The URL of the server."""
