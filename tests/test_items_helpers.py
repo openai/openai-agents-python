@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import weakref
+from types import SimpleNamespace
 from typing import Any, cast
 
 from openai.types.responses.computer_action import Click as BatchedClick, Type as BatchedType
@@ -321,6 +322,60 @@ def test_tool_call_output_item_preserves_function_output_structure() -> None:
     assert isinstance(payload, dict)
     assert payload["type"] == "function_call_output"
     assert payload["output"] == raw_item["output"]
+
+
+def test_tool_call_item_call_id_coerces_to_str() -> None:
+    agent = Agent(name="tester")
+
+    # Dict raw item with a string call_id.
+    dict_call = ResponseFunctionToolCallParam(
+        id="f1",
+        arguments="{}",
+        call_id="c1",
+        name="func",
+        type="function_call",
+    )
+    assert ToolCallItem(agent=agent, raw_item=cast(Any, dict_call)).call_id == "c1"
+
+    # Object raw item with a non-string id falls back to a string.
+    object_call = ResponseFunctionToolCall(
+        id="f2",
+        arguments="{}",
+        call_id="c2",
+        name="func",
+        type="function_call",
+    )
+    item = ToolCallItem(agent=agent, raw_item=object_call)
+    call_id = item.call_id
+    assert call_id == "c2"
+    assert isinstance(call_id, str)
+
+
+def test_tool_call_item_call_id_missing_returns_none() -> None:
+    agent = Agent(name="tester")
+    raw_item = cast(Any, {"type": "function_call"})
+    assert ToolCallItem(agent=agent, raw_item=raw_item).call_id is None
+
+
+def test_tool_call_output_item_call_id_coerces_to_str() -> None:
+    agent = Agent(name="tester")
+
+    # Dict raw item with a string call_id.
+    dict_raw = {
+        "type": "function_call_output",
+        "call_id": "call-keep",
+        "output": "value",
+    }
+    dict_item = ToolCallOutputItem(agent=agent, raw_item=cast(Any, dict_raw), output="value")
+    assert dict_item.call_id == "call-keep"
+
+    # Object raw item whose call_id is a non-string value is coerced to str so the
+    # `str | None` return annotation is honored on both branches.
+    object_raw = cast(Any, SimpleNamespace(call_id=123))
+    object_item = ToolCallOutputItem(agent=agent, raw_item=object_raw, output="value")
+    call_id = object_item.call_id
+    assert call_id == "123"
+    assert isinstance(call_id, str)
 
 
 def test_tool_call_output_item_constructs_function_call_output_dict():
