@@ -1463,8 +1463,9 @@ async def test_execute_function_tool_calls_eager_task_factory_tracks_state_safel
     ]
     loop = asyncio.get_running_loop()
     previous_task_factory = loop.get_task_factory()
-    eager_task_factory = cast(Any, asyncio.eager_task_factory)
-    loop.set_task_factory(eager_task_factory)
+    eager_task_factory = getattr(asyncio, "eager_task_factory", None)
+    assert eager_task_factory is not None
+    loop.set_task_factory(cast(Any, eager_task_factory))
 
     try:
         (

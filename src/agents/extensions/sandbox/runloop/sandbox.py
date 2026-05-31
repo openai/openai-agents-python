@@ -22,7 +22,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
@@ -71,9 +71,9 @@ _RUNLOOP_SANDBOX_SNAPSHOT_MAGIC = b"RUNLOOP_SANDBOX_SNAPSHOT_V1\n"
 
 logger = logging.getLogger(__name__)
 
-RunloopAfterIdle = _RunloopSdkAfterIdle
-RunloopLaunchParameters = _RunloopSdkLaunchParameters
-RunloopUserParameters = _RunloopSdkUserParameters
+RunloopAfterIdle: TypeAlias = _RunloopSdkAfterIdle
+RunloopLaunchParameters: TypeAlias = _RunloopSdkLaunchParameters
+RunloopUserParameters: TypeAlias = _RunloopSdkUserParameters
 
 
 @dataclass(frozen=True)
@@ -1387,7 +1387,7 @@ def _runloop_launch_parameters_payload(
     launch_parameters: RunloopLaunchParameters | None,
     user_parameters: RunloopUserParameters | None,
 ) -> dict[str, object] | None:
-    payload = (
+    payload: dict[str, object] = (
         launch_parameters.to_dict(mode="json", exclude_none=True, exclude_defaults=True)
         if launch_parameters is not None
         else {}
