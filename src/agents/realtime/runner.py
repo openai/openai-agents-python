@@ -38,7 +38,6 @@ class RealtimeRunner:
 
         Args:
             starting_agent: The agent to start the session with.
-            context: The context to use for the session.
             model: The model to use. If not provided, will use a default OpenAI realtime model.
             config: Override parameters to use for the entire run.
         """
