@@ -239,7 +239,7 @@ class _ResponseCreateSequencer:
                 for version in self._pending_request_versions
                 if version < next_manual_version
             }
-        return max(eligible_versions)
+        return max(eligible_versions, default=request_version)
 
     def set_ongoing_response_for_test(self, value: bool) -> None:
         self._ongoing_response = value
