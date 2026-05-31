@@ -1825,6 +1825,55 @@ async def test_prepare_input_with_session_prefers_latest_function_call_output():
 
 
 @pytest.mark.asyncio
+async def test_prepare_input_with_session_strips_reasoning_item_ids_from_history():
+    reasoning_item = cast(
+        TResponseInputItem,
+        {
+            "type": "reasoning",
+            "id": "rs_test",
+            "summary": [{"type": "summary_text", "text": "thinking"}],
+        },
+    )
+    session = SimpleListSession(history=[reasoning_item])
+
+    prepared_input, session_items = await prepare_input_with_session("hello", session, None)
+
+    assert isinstance(prepared_input, list)
+    assert len(session_items) == 1
+    assert cast(dict[str, Any], session_items[0]).get("role") == "user"
+    prepared_reasoning = [
+        cast(dict[str, Any], item)
+        for item in prepared_input
+        if isinstance(item, dict) and item.get("type") == "reasoning"
+    ]
+    assert len(prepared_reasoning) == 1
+    assert prepared_reasoning[0].get("summary") == [{"type": "summary_text", "text": "thinking"}]
+    assert "id" not in prepared_reasoning[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reasoning_item",
+    [
+        {"type": "reasoning", "id": "rs_missing_summary"},
+        {"type": "reasoning", "id": "rs_empty_summary", "summary": []},
+    ],
+)
+async def test_prepare_input_with_session_drops_reasoning_items_without_summary(
+    reasoning_item: dict[str, Any],
+):
+    session = SimpleListSession(history=[cast(TResponseInputItem, reasoning_item)])
+
+    prepared_input, session_items = await prepare_input_with_session("hello", session, None)
+
+    assert isinstance(prepared_input, list)
+    assert len(session_items) == 1
+    assert not any(
+        isinstance(item, dict) and item.get("type") == "reasoning" for item in prepared_input
+    )
+
+
+@pytest.mark.asyncio
 async def test_prepare_input_with_session_drops_orphan_function_calls():
     orphan_call = cast(
         TResponseInputItem,
