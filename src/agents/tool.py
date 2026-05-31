@@ -300,7 +300,7 @@ class FunctionTool:
     1. The tool run context.
     2. The arguments from the LLM, as a JSON string.
 
-    You must return a one of the structured tool output types (e.g. ToolOutputText, ToolOutputImage,
+    You must return one of the structured tool output types (e.g. ToolOutputText, ToolOutputImage,
     ToolOutputFileContent) or a string representation of the tool output, or a list of them,
     or something we can call `str()` on.
     In case of errors, you can either raise an Exception (which will cause the run to fail) or
@@ -882,7 +882,7 @@ class ImageGenerationTool:
     """A tool that allows the LLM to generate images."""
 
     tool_config: ImageGeneration
-    """The tool config, which image generation settings."""
+    """The tool config, which includes image generation settings."""
 
     @property
     def name(self):
