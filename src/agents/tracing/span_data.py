@@ -405,7 +405,7 @@ class SpeechGroupSpanData(SpanData):
     Represents a Speech Group Span in the trace.
     """
 
-    __slots__ = "input"
+    __slots__ = ("input",)
 
     def __init__(
         self,
