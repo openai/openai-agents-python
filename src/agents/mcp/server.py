@@ -257,7 +257,7 @@ class MCPServer(abc.ABC):
         self.tool_meta_resolver = tool_meta_resolver
 
     @abc.abstractmethod
-    async def connect(self):
+    async def connect(self) -> None:
         """Connect to the server. For example, this might mean spawning a subprocess or
         opening a network connection. The server is expected to remain connected until
         `cleanup()` is called.
@@ -271,7 +271,7 @@ class MCPServer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def cleanup(self):
+    async def cleanup(self) -> None:
         """Cleanup the server. For example, this might mean closing a subprocess or
         closing a network connection.
         """
@@ -703,7 +703,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def __aexit__(self, exc_type, exc_value, traceback):
         await self.cleanup()
 
-    def invalidate_tools_cache(self):
+    def invalidate_tools_cache(self) -> None:
         """Invalidate the tools cache."""
         self._cache_dirty = True
 
