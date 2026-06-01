@@ -885,3 +885,13 @@ def test_function_with_annotated_field_multiple_constraints():
 
     with pytest.raises(ValidationError):  # zero factor
         fs.params_pydantic_model(**{"score": 50, "factor": 0.0})
+
+
+def test_pydantic_protected_namespace_param_raises_user_error():
+    # Parameters named after Pydantic's protected BaseModel methods must raise UserError,
+    # not an opaque ValueError from inside Pydantic's create_model().
+    def func_with_model_validate(model_validate: str, query: str) -> str:
+        return query
+
+    with pytest.raises(UserError, match="model_validate"):
+        function_schema(func_with_model_validate, use_docstring_info=False)

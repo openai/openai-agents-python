@@ -404,6 +404,21 @@ def function_schema(
                 )
 
     # 3. Dynamically build a Pydantic model
+    # Pydantic raises ValueError for field names that match built-in BaseModel methods in a
+    # protected namespace (e.g. model_dump, model_validate).  Catch these early.
+    _PYDANTIC_PROTECTED_NAMES = {
+        "model_dump",
+        "model_dump_json",
+        "model_validate",
+        "model_validate_json",
+        "model_validate_strings",
+    }
+    colliding = _PYDANTIC_PROTECTED_NAMES.intersection(fields)
+    if colliding:
+        raise UserError(
+            f"Function '{func_name}' has parameter(s) {sorted(colliding)} whose name(s) conflict "
+            "with Pydantic BaseModel built-in methods. Rename the parameter(s) to avoid this."
+        )
     dynamic_model = create_model(f"{func_name}_args", __base__=BaseModel, **fields)
 
     # 4. Build JSON schema from that model
