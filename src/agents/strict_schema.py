@@ -156,7 +156,13 @@ def resolve_ref(*, root: dict[str, object], ref: str) -> object:
     path = ref[2:].split("/")
     resolved = root
     for key in path:
-        value = resolved[key]
+        try:
+            value = resolved[key]
+        except KeyError:
+            raise ValueError(
+                f"Could not resolve $ref {ref!r}: key {key!r} not found. "
+                f"Make sure the referenced path exists in the schema."
+            )
         assert is_dict(value), (
             f"encountered non-dictionary entry while resolving {ref} - {resolved}"
         )

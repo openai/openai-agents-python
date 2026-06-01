@@ -145,6 +145,17 @@ def test_invalid_ref_format():
         ensure_strict_json_schema(schema)
 
 
+def test_resolve_ref_raises_valueerror_for_missing_path():
+    # A $ref with sibling keys (triggers unraveling) pointing to a missing path
+    # must raise ValueError, not KeyError.
+    schema = {
+        "type": "object",
+        "properties": {"data": {"$ref": "#/$defs/SomeType", "description": "x"}},
+    }
+    with pytest.raises(ValueError, match="Could not resolve"):
+        ensure_strict_json_schema(schema)
+
+
 def test_chained_ref_with_sibling_keys_is_resolved():
     # When a $ref points to a definition that is itself just a $ref (a chained alias),
     # and the original $ref has sibling keys (like "description"), the chain must be
