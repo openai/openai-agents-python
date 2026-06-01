@@ -28,7 +28,7 @@ from typing import Any, Literal
 from urllib.parse import quote, urlparse
 
 import aiohttp
-from pydantic import Field as PydanticField
+from pydantic import Field as PydanticField, model_validator
 
 from ....sandbox.errors import (
     ConfigurationError,
@@ -332,6 +332,13 @@ class CloudflareSandboxSessionState(SandboxSessionState):
     sandbox_id: str
     exposed_port_names: dict[int, str] = PydanticField(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _include_named_exposed_ports(self) -> CloudflareSandboxSessionState:
+        self.exposed_ports = tuple(
+            dict.fromkeys((*self.exposed_ports, *self.exposed_port_names.keys()))
+        )
+        return self
+
 
 @dataclass
 class _CloudflarePtyProcessEntry:
@@ -431,7 +438,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
 
     async def _resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
         http = self._session()
-        url = self._url(f"exposed-port/{port}")
+        url = self._url(f"tunnel/{port}")
         request_kwargs: dict[str, object] = {"timeout": self._request_timeout()}
         name = self.state.exposed_port_names.get(port)
         if name is not None:
@@ -1467,16 +1474,13 @@ class CloudflareSandboxClient(BaseSandboxClient[CloudflareSandboxClientOptions])
 
         session_id = uuid.uuid4()
         snapshot_instance = resolve_snapshot(snapshot, str(session_id))
-        exposed_ports = tuple(
-            dict.fromkeys((*options.exposed_ports, *options.exposed_port_names.keys()))
-        )
         state = CloudflareSandboxSessionState(
             session_id=session_id,
             manifest=manifest,
             snapshot=snapshot_instance,
             worker_url=options.worker_url.rstrip("/"),
             sandbox_id=sandbox_id,
-            exposed_ports=exposed_ports,
+            exposed_ports=options.exposed_ports,
             exposed_port_names=dict(options.exposed_port_names),
         )
         inner = CloudflareSandboxSession(

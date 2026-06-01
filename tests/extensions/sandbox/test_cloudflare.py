@@ -208,12 +208,14 @@ def _make_state(
     sandbox_id: str = "abc123",
     manifest: Manifest | None = None,
     exposed_ports: tuple[int, ...] = (),
+    exposed_port_names: dict[int, str] | None = None,
 ) -> CloudflareSandboxSessionState:
     return CloudflareSandboxSessionState(
         session_id=uuid.uuid4(),
         manifest=manifest or Manifest(),
         snapshot=NoopSnapshot(id="snapshot"),
         exposed_ports=exposed_ports,
+        exposed_port_names=exposed_port_names or {},
         worker_url=worker_url,
         sandbox_id=sandbox_id,
     )
@@ -1208,11 +1210,18 @@ async def test_cloudflare_persist_rejects_truncated_streamed_archive_payload() -
         await sess.persist_workspace()
 
 
+def test_cloudflare_state_exposes_named_ports() -> None:
+    state = _make_state(exposed_ports=(8080,), exposed_port_names={9090: "app"})
+
+    assert state.exposed_ports == (8080, 9090)
+    assert state.exposed_port_names == {9090: "app"}
+
+
 @pytest.mark.asyncio
 async def test_cloudflare_resolve_exposed_port_without_name() -> None:
     fake_http = _FakeHttp(
         {
-            "POST /exposed-port/8080": _FakeResponse(
+            "POST /tunnel/8080": _FakeResponse(
                 status=200,
                 json_body={
                     "id": "quick-abc123",
@@ -1233,7 +1242,7 @@ async def test_cloudflare_resolve_exposed_port_without_name() -> None:
     assert endpoint.tls is True
     assert endpoint.query == ""
     assert fake_http.calls[-1]["method"] == "POST"
-    assert fake_http.calls[-1]["url"] == f"{_WORKER_URL}/v1/sandbox/abc123/exposed-port/8080"
+    assert fake_http.calls[-1]["url"] == f"{_WORKER_URL}/v1/sandbox/abc123/tunnel/8080"
     assert "json" not in fake_http.calls[-1]
 
 
@@ -1241,7 +1250,7 @@ async def test_cloudflare_resolve_exposed_port_without_name() -> None:
 async def test_cloudflare_resolve_exposed_port_with_name() -> None:
     fake_http = _FakeHttp(
         {
-            "POST /exposed-port/9090": _FakeResponse(
+            "POST /tunnel/9090": _FakeResponse(
                 status=200,
                 json_body={
                     "id": "11111111-2222-3333-4444-555555555555",
@@ -1254,8 +1263,7 @@ async def test_cloudflare_resolve_exposed_port_with_name() -> None:
             )
         }
     )
-    state = _make_state(exposed_ports=(9090,))
-    state.exposed_port_names = {9090: "app"}
+    state = _make_state(exposed_port_names={9090: "app"})
     sess = _make_session(state=state, fake_http=fake_http)
 
     endpoint = await sess.resolve_exposed_port(9090)
@@ -1268,9 +1276,9 @@ async def test_cloudflare_resolve_exposed_port_with_name() -> None:
 async def test_cloudflare_resolve_exposed_port_maps_provider_errors() -> None:
     fake_http = _FakeHttp(
         {
-            "POST /exposed-port/8080": _FakeResponse(
+            "POST /tunnel/8080": _FakeResponse(
                 status=502,
-                json_body={"error": "exposed port failed", "code": "exposed_port_error"},
+                json_body={"error": "tunnel failed", "code": "tunnel_error"},
             )
         }
     )
@@ -1281,13 +1289,13 @@ async def test_cloudflare_resolve_exposed_port_maps_provider_errors() -> None:
 
     assert exc_info.value.context["backend"] == "cloudflare"
     assert exc_info.value.context["http_status"] == 502
-    assert "exposed port failed" in str(exc_info.value.context["provider_error"])
+    assert "tunnel failed" in str(exc_info.value.context["provider_error"])
 
 
 @pytest.mark.asyncio
 async def test_cloudflare_resolve_exposed_port_rejects_malformed_response() -> None:
     fake_http = _FakeHttp(
-        {"POST /exposed-port/8080": _FakeResponse(status=200, json_body={"url": "not-a-url"})}
+        {"POST /tunnel/8080": _FakeResponse(status=200, json_body={"url": "not-a-url"})}
     )
     sess = _make_session(state=_make_state(exposed_ports=(8080,)), fake_http=fake_http)
 
