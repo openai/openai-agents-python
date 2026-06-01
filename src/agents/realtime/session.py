@@ -192,6 +192,11 @@ class RealtimeSession(RealtimeModelListener):
 
         self._guardrail_tasks: set[asyncio.Task[Any]] = set()
         self._tool_call_tasks: set[asyncio.Task[Any]] = set()
+        # Background tasks that emit events from done-callbacks. asyncio only
+        # holds a weak reference to a task, so we keep a strong reference here
+        # until it completes to avoid the event being dropped if the task is
+        # garbage-collected mid-run.
+        self._event_tasks: set[asyncio.Task[Any]] = set()
         self._async_tool_calls: bool = bool(self._run_config.get("async_tool_calls", True))
 
     @property
@@ -1140,12 +1145,10 @@ class RealtimeSession(RealtimeModelListener):
             exception = task.exception()
             if exception:
                 # Create an exception event instead of raising
-                asyncio.create_task(
-                    self._put_event(
-                        RealtimeError(
-                            info=self._event_info,
-                            error={"message": f"Guardrail task failed: {str(exception)}"},
-                        )
+                self._emit_event_soon(
+                    RealtimeError(
+                        info=self._event_info,
+                        error={"message": f"Guardrail task failed: {str(exception)}"},
                     )
                 )
 
@@ -1190,17 +1193,14 @@ class RealtimeSession(RealtimeModelListener):
                 exception.call_id,
                 exc_info=exception,
             )
-            asyncio.create_task(
-                self._put_event(
-                    RealtimeError(
-                        info=self._event_info,
-                        error={
-                            "message": (
-                                "Tool output send failed; cached output will be retried: "
-                                f"{exception}"
-                            )
-                        },
-                    )
+            self._emit_event_soon(
+                RealtimeError(
+                    info=self._event_info,
+                    error={
+                        "message": (
+                            f"Tool output send failed; cached output will be retried: {exception}"
+                        )
+                    },
                 )
             )
             return
@@ -1210,12 +1210,10 @@ class RealtimeSession(RealtimeModelListener):
         if self._stored_exception is None:
             self._stored_exception = exception
 
-        asyncio.create_task(
-            self._put_event(
-                RealtimeError(
-                    info=self._event_info,
-                    error={"message": f"Tool call task failed: {exception}"},
-                )
+        self._emit_event_soon(
+            RealtimeError(
+                info=self._event_info,
+                error={"message": f"Tool call task failed: {exception}"},
             )
         )
 
@@ -1224,6 +1222,22 @@ class RealtimeSession(RealtimeModelListener):
             if not task.done():
                 task.cancel()
         self._tool_call_tasks.clear()
+
+    def _emit_event_soon(self, event: RealtimeSessionEvent) -> None:
+        """Schedule an event to be put on the queue without blocking the caller.
+
+        A strong reference to the task is retained until it completes so the
+        event is not dropped if the task would otherwise be garbage-collected.
+        """
+        task = asyncio.create_task(self._put_event(event))
+        self._event_tasks.add(task)
+        task.add_done_callback(self._event_tasks.discard)
+
+    def _cleanup_event_tasks(self) -> None:
+        for task in self._event_tasks:
+            if not task.done():
+                task.cancel()
+        self._event_tasks.clear()
 
     def _wake_event_iterators(self) -> None:
         for _ in range(self._event_iterator_waiters):
@@ -1238,6 +1252,7 @@ class RealtimeSession(RealtimeModelListener):
         # Cancel and cleanup guardrail tasks
         self._cleanup_guardrail_tasks()
         self._cleanup_tool_call_tasks()
+        self._cleanup_event_tasks()
 
         # Remove ourselves as a listener
         self._model.remove_listener(self)
