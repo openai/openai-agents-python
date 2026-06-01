@@ -276,6 +276,7 @@ class MCPUtil:
                 run_context,
                 agent,
                 failure_error_function=failure_error_function,
+                reserved_tool_names=reserved_tool_names,
             )
             server_tool_names = {tool.name for tool in server_tools}
             duplicate_tool_names = sorted(server_tool_names & tool_names)
