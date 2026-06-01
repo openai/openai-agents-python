@@ -145,6 +145,20 @@ def test_invalid_ref_format():
         ensure_strict_json_schema(schema)
 
 
+def test_missing_ref_path_raises_clear_value_error():
+    schema = {
+        "type": "object",
+        "properties": {
+            "data": {"$ref": "#/$defs/SomeType", "description": "desc"},
+        },
+    }
+
+    with pytest.raises(
+        ValueError, match=r"Unable to resolve \$ref '#/\$defs/SomeType': missing key '\$defs'"
+    ):
+        ensure_strict_json_schema(schema)
+
+
 def test_chained_ref_with_sibling_keys_is_resolved():
     # When a $ref points to a definition that is itself just a $ref (a chained alias),
     # and the original $ref has sibling keys (like "description"), the chain must be

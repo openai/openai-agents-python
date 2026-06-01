@@ -18,6 +18,14 @@ from .run_context import RunContextWrapper
 from .strict_schema import ensure_strict_json_schema
 from .tool_context import ToolContext
 
+_PYDANTIC_PROTECTED_FIELD_NAMES = {
+    "model_dump",
+    "model_dump_json",
+    "model_validate",
+    "model_validate_json",
+    "model_validate_strings",
+}
+
 
 @dataclass
 class FuncSchema:
@@ -319,6 +327,12 @@ def function_schema(
     fields: dict[str, Any] = {}
 
     for name, param in filtered_params:
+        if name in _PYDANTIC_PROTECTED_FIELD_NAMES:
+            raise UserError(
+                f"Function parameter {name!r} conflicts with a reserved Pydantic BaseModel "
+                "method name. Rename the parameter before using it as a function tool."
+            )
+
         ann = type_hints.get(name, param.annotation)
         default = param.default
 

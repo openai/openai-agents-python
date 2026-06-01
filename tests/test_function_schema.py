@@ -399,6 +399,25 @@ def test_run_context_in_non_first_position_raises_value_error():
         function_schema(func, use_docstring_info=False)
 
 
+@pytest.mark.parametrize(
+    "param_name",
+    [
+        "model_dump",
+        "model_dump_json",
+        "model_validate",
+        "model_validate_json",
+        "model_validate_strings",
+    ],
+)
+def test_pydantic_protected_parameter_names_raise_user_error(param_name: str) -> None:
+    code = f"def protected_param({param_name}: str, query: str) -> str:\n    return query"
+    namespace: dict[str, Any] = {}
+    exec(code, namespace)
+
+    with pytest.raises(UserError, match=f"Function parameter '{param_name}' conflicts"):
+        function_schema(namespace["protected_param"], use_docstring_info=False)
+
+
 def test_var_positional_tuple_annotation():
     # When a function has a var-positional parameter annotated with a tuple type,
     # function_schema() should convert it into a field with type List[<tuple-element>].
