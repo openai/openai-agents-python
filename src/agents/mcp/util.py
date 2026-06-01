@@ -277,7 +277,17 @@ class MCPUtil:
                 agent,
                 failure_error_function=failure_error_function,
             )
-            server_tool_names = {tool.name for tool in server_tools}
+            server_tool_name_counts = Counter(tool.name for tool in server_tools)
+            intra_server_duplicate_tool_names = sorted(
+                name for name, count in server_tool_name_counts.items() if count > 1
+            )
+            if intra_server_duplicate_tool_names:
+                raise UserError(
+                    "Duplicate tool names found within MCP server "
+                    f"'{server.name}': {', '.join(intra_server_duplicate_tool_names)}"
+                )
+
+            server_tool_names = set(server_tool_name_counts)
             duplicate_tool_names = sorted(server_tool_names & tool_names)
             if duplicate_tool_names:
                 raise UserError(
