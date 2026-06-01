@@ -3,7 +3,7 @@ from typing import Any, Generic
 from typing_extensions import TypeVar
 
 from .agent import Agent, AgentBase
-from .items import ModelResponse, TResponseInputItem
+from .items import ModelResponse, ToolCallItem, TResponseInputItem
 from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .tool import Tool
 
@@ -102,6 +102,24 @@ class RunHooksBase(Generic[TContext, TAgent]):
         """
         pass
 
+    async def on_tool_call_sealed(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        tool_call: ToolCallItem,
+    ) -> None:
+        """Called during streaming when a tool call's arguments are sealed and ready.
+
+        This hook fires when the LLM has finished producing a tool call during streaming, before
+        the full response is complete and before the tool is invoked. It carries the sealed
+        ``ToolCallItem`` with ``call_id``, ``tool_name``, and ``arguments``.
+
+        The default runner does not act on this hook — it is provided so that consumers can
+        implement eager dispatch or early tool preparation without changing the SDK's execution
+        flow. For callers that do nothing with this hook, existing behavior is unchanged.
+        """
+        pass
+
 
 class AgentHooksBase(Generic[TContext, TAgent]):
     """A class that receives callbacks on various lifecycle events for a specific agent. You can
@@ -177,6 +195,24 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         Simple tool outputs are typically ``str`` values. Function tools may also return
         structured tool output objects or any value the SDK can stringify before sending it to
         the model.
+        """
+        pass
+
+    async def on_tool_call_sealed(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        tool_call: ToolCallItem,
+    ) -> None:
+        """Called during streaming when a tool call's arguments are sealed and ready.
+
+        This hook fires when the LLM has finished producing a tool call during streaming, before
+        the full response is complete and before the tool is invoked. It carries the sealed
+        ``ToolCallItem`` with ``call_id``, ``tool_name``, and ``arguments``.
+
+        The default runner does not act on this hook — it is provided so that consumers can
+        implement eager dispatch or early tool preparation without changing the SDK's execution
+        flow. For callers that do nothing with this hook, existing behavior is unchanged.
         """
         pass
 

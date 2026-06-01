@@ -5,7 +5,7 @@ from typing import Any, cast
 import pytest
 
 from agents.agent import Agent
-from agents.items import ItemHelpers, ModelResponse, TResponseInputItem
+from agents.items import ItemHelpers, ModelResponse, ToolCallItem, TResponseInputItem
 from agents.lifecycle import AgentHooks, RunHooks
 from agents.models.interface import Model
 from agents.run import Runner
@@ -27,10 +27,12 @@ class RunHooksForTests(RunHooks):
     def __init__(self):
         self.events: dict[str, int] = defaultdict(int)
         self.tool_context_ids: list[str] = []
+        self.last_sealed_tool_call: ToolCallItem | None = None
 
     def reset(self):
         self.events.clear()
         self.tool_context_ids.clear()
+        self.last_sealed_tool_call = None
 
     async def on_agent_start(
         self, context: AgentHookContext[TContext], agent: Agent[TContext]
@@ -65,6 +67,15 @@ class RunHooksForTests(RunHooks):
         self.events["on_tool_end"] += 1
         if isinstance(context, ToolContext):
             self.tool_context_ids.append(context.tool_call_id)
+
+    async def on_tool_call_sealed(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: Agent[TContext],
+        tool_call: ToolCallItem,
+    ) -> None:
+        self.events["on_tool_call_sealed"] += 1
+        self.last_sealed_tool_call = tool_call
 
     async def on_llm_start(
         self,
@@ -152,6 +163,30 @@ async def test_streamed_run_hooks_with_llm():
         "on_llm_end": 1,
         "on_agent_end": 1,
     }
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_hooks_tool_call_sealed():
+    """Verify that on_tool_call_sealed fires during streaming when a tool call is sealed."""
+    hooks = RunHooksForTests()
+    model = FakeModel()
+    agent = Agent(
+        name="A",
+        model=model,
+        tools=[get_function_tool("f", "res")],
+        handoffs=[],
+    )
+    # Simulate a streaming response with a tool call
+    model.set_next_output([get_function_tool_call("f", '{"key": "val"}')])
+    stream = Runner.run_streamed(agent, input="hello", hooks=hooks)
+
+    async for _event in stream.stream_events():
+        pass
+
+    assert hooks.events["on_tool_call_sealed"] == 1
+    assert hooks.last_sealed_tool_call is not None
+    assert hooks.last_sealed_tool_call.tool_name == "f"
+    assert hooks.last_sealed_tool_call.call_id is not None
 
 
 # test_async_run_hooks_with_agent_hooks_with_llm

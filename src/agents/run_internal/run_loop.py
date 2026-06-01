@@ -1612,6 +1612,16 @@ async def run_single_turn_streamed(
                     streamed_result._event_queue.put_nowait(
                         RunItemStreamEvent(item=tool_item, name="tool_called")
                     )
+                    await asyncio.gather(
+                        (
+                            public_agent.hooks.on_tool_call_sealed(
+                                context_wrapper, public_agent, tool_item
+                            )
+                            if public_agent.hooks
+                            else _coro.noop_coroutine()
+                        ),
+                        hooks.on_tool_call_sealed(context_wrapper, public_agent, tool_item),
+                    )
 
             elif isinstance(output_item, ResponseReasoningItem):
                 reasoning_id: str | None = getattr(output_item, "id", None)
