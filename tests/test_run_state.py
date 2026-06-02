@@ -2520,6 +2520,40 @@ class TestDeserializeHelpers:
         assert restored_item.target_agent is third
         assert restored._output_guardrail_results[0].agent is third
 
+    @pytest.mark.asyncio
+    async def test_last_processed_handoff_restores_duplicate_target_by_identity(self):
+        """Duplicate-name handoff actions should restore to the serialized target agent."""
+        first = Agent(name="duplicate", instructions="safe")
+        second = Agent(name="duplicate", instructions="danger")
+        first_handoff = handoff(first)
+        second_handoff = handoff(second)
+        root = Agent(name="router", handoffs=[first_handoff, second_handoff])
+        first.handoffs = [root]
+        second.handoffs = [root]
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        state = make_state(root, context=context, original_input="route", max_turns=2)
+        state._last_processed_response = make_processed_response(
+            handoffs=[
+                ToolRunHandoff(
+                    tool_call=get_handoff_tool_call(first),
+                    handoff=first_handoff,
+                )
+            ]
+        )
+
+        json_data = state.to_json()
+        handoff_data = json_data["last_processed_response"]["handoffs"][0]["handoff"]
+        assert handoff_data["tool_name"] == "transfer_to_duplicate"
+        assert handoff_data["target_agent"] == {"name": "duplicate", "identity": "duplicate#2"}
+
+        restored = await RunState.from_json(root, json_data)
+
+        assert restored._last_processed_response is not None
+        restored_handoff = restored._last_processed_response.handoffs[0].handoff
+        assert restored_handoff is first_handoff
+        assert restored_handoff is not second_handoff
+
     async def test_model_response_serialization_roundtrip(self):
         """Test that model responses serialize and deserialize correctly."""
 
