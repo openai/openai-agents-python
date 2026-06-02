@@ -1,0 +1,4 @@
+interface:
+  display_name: "Examples Auto Run"
+  short_description: "Run examples in auto mode with logs and rerun helpers"
+  default_prompt: "Use $examples-auto-run to run the repo examples in auto mode, collect logs, and summarize any failures."

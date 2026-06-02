@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implementation Strategy"
+  short_description: "Choose a compatibility-aware implementation plan"
+  default_prompt: "Use $implementation-strategy to choose the implementation approach and compatibility boundary before editing runtime code."

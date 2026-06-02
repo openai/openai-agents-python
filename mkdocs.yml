@@ -1,0 +1,372 @@
+site_name: OpenAI Agents SDK
+theme:
+  name: material
+  features:
+    # Allows copying code blocks
+    - content.code.copy
+    # Allows selecting code blocks
+    - content.code.select
+    # Shows the current path in the sidebar
+    - navigation.path
+    # Shows sections in the sidebar
+    - navigation.sections
+    # Enables annotations in code blocks
+    - content.code.annotate
+  palette:
+    primary: black
+  logo: assets/logo.svg
+  favicon: images/favicon-platform.svg
+
+repo_name: openai-agents-python
+repo_url: https://github.com/openai/openai-agents-python
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: ["src/agents"]
+          selection:
+            docstring_style: google
+          options:
+            # Shows links to other members in signatures
+            signature_crossrefs: true
+            # Orders members by source order, rather than alphabetical
+            members_order: source
+            # Puts the signature on a separate line from the member name
+            separate_signature: true
+            # Shows type annotations in signatures
+            show_signature_annotations: true
+            # Makes the font sizes nicer
+            heading_level: 3
+            # Show inherited members
+            inherited_members: true
+  - i18n:
+      docs_structure: folder
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+          nav:
+            - Intro: index.md
+            - Quickstart: quickstart.md
+            - Configuration: config.md
+            - Documentation:
+                - Agents: agents.md
+                - Sandbox agents:
+                    - Quickstart: sandbox_agents.md
+                    - Concepts: sandbox/guide.md
+                    - Sandbox clients: sandbox/clients.md
+                    - Agent memory: sandbox/memory.md
+                - Models: models/index.md
+                - Tools: tools.md
+                - Guardrails: guardrails.md
+                - Running agents: running_agents.md
+                - Streaming: streaming.md
+                - Agent orchestration: multi_agent.md
+                - Handoffs: handoffs.md
+                - Results: results.md
+                - Human-in-the-loop: human_in_the_loop.md
+                - Sessions:
+                    - Overview: sessions/index.md
+                    - SQLAlchemy session: sessions/sqlalchemy_session.md
+                    - Advanced SQLite session: sessions/advanced_sqlite_session.md
+                    - Encrypted session: sessions/encrypted_session.md
+                - Context management: context.md
+                - Usage: usage.md
+                - Model context protocol (MCP): mcp.md
+                - Tracing: tracing.md
+                - Realtime agents:
+                    - Quickstart: realtime/quickstart.md
+                    - Transport: realtime/transport.md
+                    - Guide: realtime/guide.md
+                - Voice agents:
+                    - Quickstart: voice/quickstart.md
+                    - Pipeline: voice/pipeline.md
+                    - Tracing: voice/tracing.md
+                - Agent visualization: visualization.md
+                - REPL utility: repl.md
+                - Examples: examples.md
+                - Release process/changelog: release.md
+
+            - API Reference:
+                - Agents:
+                    - Agents module: ref/index.md
+                    - Agent: ref/agent.md
+                    - Runner: ref/run.md
+                    - Run config: ref/run_config.md
+                    - Run state: ref/run_state.md
+                    - Sandbox:
+                        - Overview: ref/sandbox.md
+                        - SandboxAgent: ref/sandbox/sandbox_agent.md
+                        - Manifest: ref/sandbox/manifest.md
+                        - Permissions: ref/sandbox/permissions.md
+                        - SnapshotSpec: ref/sandbox/snapshot.md
+                        - Workspace entries: ref/sandbox/entries.md
+                        - Capabilities:
+                            - Capabilities: ref/sandbox/capabilities/capabilities.md
+                            - Capability: ref/sandbox/capabilities/capability.md
+                            - Filesystem: ref/sandbox/capabilities/filesystem.md
+                            - Shell: ref/sandbox/capabilities/shell.md
+                            - Memory: ref/sandbox/capabilities/memory.md
+                            - Skills: ref/sandbox/capabilities/skills.md
+                            - Compaction: ref/sandbox/capabilities/compaction.md
+                        - Sandbox clients: ref/sandbox/session/sandbox_client.md
+                        - SandboxSession: ref/sandbox/session/sandbox_session.md
+                        - SandboxSessionState: ref/sandbox/session/sandbox_session_state.md
+                        - Unix local sandbox: ref/sandbox/sandboxes/unix_local.md
+                        - Docker sandbox: ref/sandbox/sandboxes/docker.md
+                    - Responses WebSocket session: ref/responses_websocket_session.md
+                    - Run error handlers: ref/run_error_handlers.md
+                    - Memory: ref/memory.md
+                    - REPL: ref/repl.md
+                    - Tools: ref/tool.md
+                    - Tool context: ref/tool_context.md
+                    - Results: ref/result.md
+                    - Streaming events: ref/stream_events.md
+                    - Handoffs: ref/handoffs.md
+                    - Lifecycle: ref/lifecycle.md
+                    - Items: ref/items.md
+                    - Run context: ref/run_context.md
+                    - Usage: ref/usage.md
+                    - Exceptions: ref/exceptions.md
+                    - Guardrails: ref/guardrail.md
+                    - Prompts: ref/prompts.md
+                    - Model settings: ref/model_settings.md
+                    - Strict schema: ref/strict_schema.md
+                    - Tool guardrails: ref/tool_guardrails.md
+                    - Computer: ref/computer.md
+                    - Agent output: ref/agent_output.md
+                    - Function schema: ref/function_schema.md
+                    - Model interface: ref/models/interface.md
+                    - OpenAI Chat Completions model: ref/models/openai_chatcompletions.md
+                    - OpenAI Responses model: ref/models/openai_responses.md
+                    - OpenAI provider: ref/models/openai_provider.md
+                    - Multi provider: ref/models/multi_provider.md
+                    - MCP servers: ref/mcp/server.md
+                    - MCP util: ref/mcp/util.md
+                    - MCP manager: ref/mcp/manager.md
+                - Tracing:
+                    - Tracing module: ref/tracing/index.md
+                    - Creating traces/spans: ref/tracing/create.md
+                    - Traces: ref/tracing/traces.md
+                    - Spans: ref/tracing/spans.md
+                    - Processor interface: ref/tracing/processor_interface.md
+                    - Processors: ref/tracing/processors.md
+                    - Scope: ref/tracing/scope.md
+                    - Setup: ref/tracing/setup.md
+                    - Span data: ref/tracing/span_data.md
+                    - Util: ref/tracing/util.md
+                - Realtime:
+                    - RealtimeAgent: ref/realtime/agent.md
+                    - RealtimeRunner: ref/realtime/runner.md
+                    - RealtimeSession: ref/realtime/session.md
+                    - Events: ref/realtime/events.md
+                    - Configuration: ref/realtime/config.md
+                    - Model: ref/realtime/model.md
+                - Voice:
+                    - Pipeline: ref/voice/pipeline.md
+                    - Workflow: ref/voice/workflow.md
+                    - Input: ref/voice/input.md
+                    - Result: ref/voice/result.md
+                    - Pipeline config: ref/voice/pipeline_config.md
+                    - Events: ref/voice/events.md
+                    - Exceptions: ref/voice/exceptions.md
+                    - Model: ref/voice/model.md
+                    - Utils: ref/voice/utils.md
+                    - OpenAI voice model provider: ref/voice/models/openai_provider.md
+                    - OpenAI STT: ref/voice/models/openai_stt.md
+                    - OpenAI TTS: ref/voice/models/openai_tts.md
+                - Extensions:
+                    - Handoff filters: ref/extensions/handoff_filters.md
+                    - Handoff prompt: ref/extensions/handoff_prompt.md
+                    - Third-party adapters:
+                        - Any-LLM model: ref/extensions/models/any_llm_model.md
+                        - Any-LLM provider: ref/extensions/models/any_llm_provider.md
+                        - LiteLLM model: ref/extensions/models/litellm_model.md
+                        - LiteLLM provider: ref/extensions/models/litellm_provider.md
+                    - Tool output trimmer: ref/extensions/tool_output_trimmer.md
+                    - SQLAlchemySession: ref/extensions/memory/sqlalchemy_session.md
+                    - Async SQLite session: ref/extensions/memory/async_sqlite_session.md
+                    - RedisSession: ref/extensions/memory/redis_session.md
+                    - MongoDBSession: ref/extensions/memory/mongodb_session.md
+                    - DaprSession: ref/extensions/memory/dapr_session.md
+                    - EncryptedSession: ref/extensions/memory/encrypt_session.md
+                    - AdvancedSQLiteSession: ref/extensions/memory/advanced_sqlite_session.md
+        - locale: ja
+          name: 日本語
+          build: true
+          nav:
+            - はじめに: index.md
+            - クイックスタート: quickstart.md
+            - config.md
+            - ドキュメント:
+                - agents.md
+                - Sandbox エージェント:
+                    - クイックスタート: sandbox_agents.md
+                    - 概念: sandbox/guide.md
+                    - Sandbox クライアント: sandbox/clients.md
+                    - エージェントメモリ: sandbox/memory.md
+                - モデル: models/index.md
+                - tools.md
+                - guardrails.md
+                - running_agents.md
+                - streaming.md
+                - multi_agent.md
+                - handoffs.md
+                - results.md
+                - human_in_the_loop.md
+                - セッション:
+                    - sessions/index.md
+                    - sessions/sqlalchemy_session.md
+                    - sessions/advanced_sqlite_session.md
+                    - sessions/encrypted_session.md
+                - context.md
+                - usage.md
+                - mcp.md
+                - tracing.md
+                - リアルタイムエージェント:
+                    - realtime/quickstart.md
+                    - realtime/guide.md
+                - 音声エージェント:
+                    - voice/quickstart.md
+                    - voice/pipeline.md
+                    - voice/tracing.md
+                - visualization.md
+                - repl.md
+                - コード例: examples.md
+                - release.md
+        - locale: ko
+          name: 한국어
+          build: true
+          nav:
+            - 소개: index.md
+            - 빠른 시작: quickstart.md
+            - config.md
+            - 문서:
+                - agents.md
+                - Sandbox 에이전트:
+                    - 빠른 시작: sandbox_agents.md
+                    - 개념: sandbox/guide.md
+                    - 샌드박스 클라이언트: sandbox/clients.md
+                    - 에이전트 메모리: sandbox/memory.md
+                - 모델: models/index.md
+                - tools.md
+                - guardrails.md
+                - running_agents.md
+                - streaming.md
+                - multi_agent.md
+                - handoffs.md
+                - results.md
+                - human_in_the_loop.md
+                - 세션:
+                    - sessions/index.md
+                    - sessions/sqlalchemy_session.md
+                    - sessions/advanced_sqlite_session.md
+                    - sessions/encrypted_session.md
+                - context.md
+                - usage.md
+                - mcp.md
+                - tracing.md
+                - 실시간 에이전트:
+                    - realtime/quickstart.md
+                    - realtime/guide.md
+                - 음성 에이전트:
+                    - voice/quickstart.md
+                    - voice/pipeline.md
+                    - voice/tracing.md
+                - visualization.md
+                - repl.md
+                - 코드 예제: examples.md
+                - release.md
+        - locale: zh
+          name: 简体中文
+          build: true
+          nav:
+            - 介绍: index.md
+            - 快速开始: quickstart.md
+            - config.md
+            - 文档:
+                - agents.md
+                - 沙盒智能体:
+                    - 快速入门: sandbox_agents.md
+                    - 概念: sandbox/guide.md
+                    - 沙箱客户端: sandbox/clients.md
+                    - 智能体记忆: sandbox/memory.md
+                - 模型: models/index.md
+                - tools.md
+                - guardrails.md
+                - running_agents.md
+                - streaming.md
+                - multi_agent.md
+                - handoffs.md
+                - results.md
+                - human_in_the_loop.md
+                - 会话:
+                    - sessions/index.md
+                    - sessions/sqlalchemy_session.md
+                    - sessions/advanced_sqlite_session.md
+                    - sessions/encrypted_session.md
+                - context.md
+                - usage.md
+                - mcp.md
+                - tracing.md
+                - 实时智能体:
+                    - realtime/quickstart.md
+                    - realtime/guide.md
+                - 语音智能体:
+                    - voice/quickstart.md
+                    - voice/pipeline.md
+                    - voice/tracing.md
+                - visualization.md
+                - repl.md
+                - 示例: examples.md
+                - release.md
+extra:
+  # Remove material generation message in footer
+  generator: false
+  language: en
+  alternate:
+    - name: English
+      link: /openai-agents-python/
+      lang: en
+    - name: 日本語
+      link: /openai-agents-python/ja/
+      lang: ja
+    - name: 한국어
+      link: /openai-agents-python/ko/
+      lang: ko
+    - name: 简体中文
+      link: /openai-agents-python/zh/
+      lang: zh
+
+markdown_extensions:
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+extra_css:
+  - stylesheets/extra.css
+
+watch:
+  - "src/agents"

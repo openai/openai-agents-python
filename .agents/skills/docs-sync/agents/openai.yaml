@@ -1,0 +1,4 @@
+interface:
+  display_name: "Docs Sync"
+  short_description: "Audit docs coverage and propose targeted updates"
+  default_prompt: "Use $docs-sync to audit the current branch against docs/ and propose targeted documentation updates."

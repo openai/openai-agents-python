@@ -1,0 +1,3 @@
+fastapi>=0.120.0
+openai>=2.2,<3
+uvicorn[standard]>=0.38.0

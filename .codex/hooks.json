@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run python \"$(git rev-parse --show-toplevel)/.codex/hooks/stop_repo_tidy.py\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

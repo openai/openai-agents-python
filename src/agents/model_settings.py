@@ -1,0 +1,263 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import fields, replace
+from typing import Annotated, Any, Literal, TypeAlias, cast
+
+from openai import Omit as _Omit
+from openai._types import Body, Query
+from openai.types.responses import ResponseIncludable
+from openai.types.responses.response_create_params import ContextManagement
+from openai.types.shared import Reasoning
+from pydantic import GetCoreSchemaHandler, TypeAdapter
+from pydantic.dataclasses import dataclass
+from pydantic_core import core_schema
+
+from .retry import (
+    ModelRetryBackoffInput,
+    ModelRetryBackoffSettings,
+    ModelRetrySettings,
+    _coerce_backoff_settings,
+)
+
+
+class _OmitTypeAnnotation:
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        _source_type: Any,
+        _handler: GetCoreSchemaHandler,
+    ) -> core_schema.CoreSchema:
+        def validate_from_none(value: None) -> _Omit:
+            return _Omit()
+
+        from_none_schema = core_schema.chain_schema(
+            [
+                core_schema.none_schema(),
+                core_schema.no_info_plain_validator_function(validate_from_none),
+            ]
+        )
+        return core_schema.json_or_python_schema(
+            json_schema=from_none_schema,
+            python_schema=core_schema.union_schema(
+                [
+                    # check if it's an instance first before doing any further work
+                    core_schema.is_instance_schema(_Omit),
+                    from_none_schema,
+                ]
+            ),
+            serialization=core_schema.plain_serializer_function_ser_schema(lambda instance: None),
+        )
+
+
+@dataclass
+class MCPToolChoice:
+    server_label: str
+    name: str
+
+
+Omit = Annotated[_Omit, _OmitTypeAnnotation]
+Headers: TypeAlias = Mapping[str, str | Omit]
+ToolChoice: TypeAlias = Literal["auto", "required", "none"] | str | MCPToolChoice | None
+
+_TRACEABLE_MODEL_SETTING_FIELDS = (
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "tool_choice",
+    "parallel_tool_calls",
+    "truncation",
+    "max_tokens",
+    "reasoning",
+    "verbosity",
+    "metadata",
+    "store",
+    "prompt_cache_retention",
+    "include_usage",
+    "response_include",
+    "top_logprobs",
+    "retry",
+    "context_management",
+)
+
+
+@dataclass
+class ModelSettings:
+    """Settings to use when calling an LLM.
+
+    This class holds optional model configuration parameters (e.g. temperature,
+    top_p, penalties, truncation, etc.).
+
+    Not all models/providers support all of these parameters, so please check the API documentation
+    for the specific model and provider you are using.
+    """
+
+    temperature: float | None = None
+    """The temperature to use when calling the model."""
+
+    top_p: float | None = None
+    """The top_p to use when calling the model."""
+
+    frequency_penalty: float | None = None
+    """The frequency penalty to use when calling the model."""
+
+    presence_penalty: float | None = None
+    """The presence penalty to use when calling the model."""
+
+    tool_choice: ToolChoice | None = None
+    """The tool choice to use when calling the model."""
+
+    parallel_tool_calls: bool | None = None
+    """Controls whether the model can make multiple parallel tool calls in a single turn.
+    If not provided (i.e., set to None), this behavior defers to the underlying
+    model provider's default. For most current providers (e.g., OpenAI), this typically
+    means parallel tool calls are enabled (True).
+    Set to True to explicitly enable parallel tool calls, or False to restrict the
+    model to at most one tool call per turn.
+    """
+
+    truncation: Literal["auto", "disabled"] | None = None
+    """The truncation strategy to use when calling the model.
+    See [Responses API documentation](https://platform.openai.com/docs/api-reference/responses/create#responses_create-truncation)
+    for more details.
+    """
+
+    max_tokens: int | None = None
+    """The maximum number of output tokens to generate."""
+
+    reasoning: Reasoning | None = None
+    """Configuration options for
+    [reasoning models](https://platform.openai.com/docs/guides/reasoning).
+    """
+
+    verbosity: Literal["low", "medium", "high"] | None = None
+    """Constrains the verbosity of the model's response.
+    """
+
+    metadata: dict[str, str] | None = None
+    """Metadata to include with the model response call."""
+
+    store: bool | None = None
+    """Whether to store the generated model response for later retrieval.
+    For Responses API: automatically enabled when not specified.
+    For Chat Completions API: disabled when not specified."""
+
+    prompt_cache_retention: Literal["in_memory", "24h"] | None = None
+    """The retention policy for the prompt cache. Set to `24h` to enable extended
+    prompt caching, which keeps cached prefixes active for longer, up to a maximum
+    of 24 hours.
+    [Learn more](https://platform.openai.com/docs/guides/prompt-caching#prompt-cache-retention)."""
+
+    include_usage: bool | None = None
+    """Whether to include usage chunk.
+    Only available for Chat Completions API."""
+
+    # TODO: revisit ResponseIncludable | str if ResponseIncludable covers more cases
+    # We've added str to support missing ones like
+    # "web_search_call.action.sources" etc.
+    response_include: list[ResponseIncludable | str] | None = None
+    """Additional output data to include in the model response.
+    [include parameter](https://platform.openai.com/docs/api-reference/responses/create#responses-create-include)"""
+
+    top_logprobs: int | None = None
+    """Number of top tokens to return logprobs for. Setting this will
+    automatically include ``"message.output_text.logprobs"`` in the response."""
+
+    extra_query: Query | None = None
+    """Additional query fields to provide with the request.
+    Defaults to None if not provided."""
+
+    extra_body: Body | None = None
+    """Additional body fields to provide with the request.
+    Defaults to None if not provided."""
+
+    extra_headers: Headers | None = None
+    """Additional headers to provide with the request.
+    Defaults to None if not provided."""
+
+    extra_args: dict[str, Any] | None = None
+    """Arbitrary keyword arguments to pass to the model API call.
+    These will be passed directly to the underlying model provider's API.
+    Use with caution as not all models support all parameters."""
+
+    retry: ModelRetrySettings | None = None
+    """Opt-in runner-managed retry settings for model calls."""
+
+    context_management: list[ContextManagement] | None = None
+    """Context management entries for OpenAI Responses API requests.
+
+    For example, use ``[{"type": "compaction", "compact_threshold": 200000}]``
+    to enable server-side compaction when the rendered context crosses a token threshold.
+    """
+
+    def resolve(self, override: ModelSettings | None) -> ModelSettings:
+        """Produce a new ModelSettings by overlaying any non-None values from the
+        override on top of this instance."""
+        if override is None:
+            return self
+
+        changes = {
+            field.name: getattr(override, field.name)
+            for field in fields(self)
+            if getattr(override, field.name) is not None
+        }
+
+        # Handle extra_args merging specially - merge dictionaries instead of replacing.
+        if self.extra_args is not None or override.extra_args is not None:
+            merged_args = {}
+            if self.extra_args:
+                merged_args.update(self.extra_args)
+            if override.extra_args:
+                merged_args.update(override.extra_args)
+            changes["extra_args"] = merged_args if merged_args else None
+
+        if self.retry is not None or override.retry is not None:
+            changes["retry"] = _merge_retry_settings(self.retry, override.retry)
+
+        return replace(self, **changes)
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return cast(dict[str, Any], TypeAdapter(ModelSettings).dump_python(self, mode="json"))
+
+    def to_traceable_dict(self) -> dict[str, Any]:
+        """Serialize settings for tracing without provider-specific request extras."""
+        payload = self.to_json_dict()
+        return {key: payload[key] for key in _TRACEABLE_MODEL_SETTING_FIELDS if key in payload}
+
+
+def _merge_retry_settings(
+    inherited: ModelRetrySettings | None,
+    override: ModelRetrySettings | None,
+) -> ModelRetrySettings | None:
+    if inherited is None:
+        return override
+    if override is None:
+        return inherited
+
+    merged_backoff = _merge_backoff_settings(inherited.backoff, override.backoff)
+    retry_changes = {
+        field.name: getattr(override, field.name)
+        for field in fields(inherited)
+        if field.name != "backoff" and getattr(override, field.name) is not None
+    }
+    return replace(inherited, **retry_changes, backoff=merged_backoff)
+
+
+def _merge_backoff_settings(
+    inherited: ModelRetryBackoffInput | None,
+    override: ModelRetryBackoffInput | None,
+) -> ModelRetryBackoffSettings | None:
+    inherited = _coerce_backoff_settings(inherited)
+    override = _coerce_backoff_settings(override)
+    if inherited is None:
+        return override
+    if override is None:
+        return inherited
+
+    changes = {
+        field.name: getattr(override, field.name)
+        for field in fields(inherited)
+        if getattr(override, field.name) is not None
+    }
+    return replace(inherited, **changes)

@@ -1,0 +1,102 @@
+"""
+Helpers for approval handling within the run loop. Keep only execution-time utilities that
+coordinate approval placeholders and normalization; public APIs should stay in run.py or
+peer modules.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any
+
+from openai.types.responses import ResponseFunctionToolCall
+
+from ..agent import Agent
+from ..items import ItemHelpers, RunItem, ToolApprovalItem, ToolCallOutputItem, TResponseInputItem
+from ..tool import ToolOrigin
+from .items import ReasoningItemIdPolicy, run_item_to_input_item
+
+# --------------------------
+# Public helpers
+# --------------------------
+
+
+def append_approval_error_output(
+    *,
+    generated_items: list[RunItem],
+    agent: Agent[Any],
+    tool_call: Any,
+    tool_name: str,
+    call_id: str | None,
+    message: str,
+    tool_origin: ToolOrigin | None = None,
+) -> None:
+    """Emit a synthetic tool output so users see why an approval failed."""
+    error_tool_call = _build_function_tool_call_for_approval_error(tool_call, tool_name, call_id)
+    generated_items.append(
+        ToolCallOutputItem(
+            output=message,
+            raw_item=ItemHelpers.tool_call_output_item(error_tool_call, message),
+            agent=agent,
+            tool_origin=tool_origin,
+        )
+    )
+
+
+def filter_tool_approvals(interruptions: Sequence[Any]) -> list[ToolApprovalItem]:
+    """Keep only approval items from a mixed interruption payload."""
+    return [item for item in interruptions if isinstance(item, ToolApprovalItem)]
+
+
+def approvals_from_step(step: Any) -> list[ToolApprovalItem]:
+    """Return approvals from a step that may or may not contain interruptions."""
+    interruptions = getattr(step, "interruptions", None)
+    if interruptions is None:
+        return []
+    return filter_tool_approvals(interruptions)
+
+
+def append_input_items_excluding_approvals(
+    base_input: list[TResponseInputItem],
+    items: Sequence[RunItem],
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+) -> None:
+    """Append tool outputs to model input while skipping approval placeholders."""
+    for item in items:
+        converted = run_item_to_input_item(item, reasoning_item_id_policy)
+        if converted is None:
+            continue
+        base_input.append(converted)
+
+
+# --------------------------
+# Private helpers
+# --------------------------
+
+
+def _build_function_tool_call_for_approval_error(
+    tool_call: Any, tool_name: str, call_id: str | None
+) -> ResponseFunctionToolCall:
+    """Coerce raw tool call payloads into a normalized function_call for approval errors."""
+    if isinstance(tool_call, ResponseFunctionToolCall):
+        return tool_call
+    namespace = None
+    if isinstance(tool_call, dict):
+        candidate = tool_call.get("namespace")
+        if isinstance(candidate, str) and candidate:
+            namespace = candidate
+    else:
+        candidate = getattr(tool_call, "namespace", None)
+        if isinstance(candidate, str) and candidate:
+            namespace = candidate
+
+    kwargs: dict[str, Any] = {
+        "type": "function_call",
+        "name": tool_name,
+        "call_id": call_id or "unknown",
+        "status": "completed",
+        "arguments": "{}",
+    }
+    if namespace is not None:
+        kwargs["namespace"] = namespace
+    return ResponseFunctionToolCall(**kwargs)

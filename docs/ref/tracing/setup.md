@@ -1,0 +1,3 @@
+# `Setup`
+
+::: agents.tracing.setup

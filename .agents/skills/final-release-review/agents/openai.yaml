@@ -1,0 +1,4 @@
+interface:
+  display_name: "Final Release Review"
+  short_description: "Audit a release candidate against the previous tag"
+  default_prompt: "Use $final-release-review to audit the release candidate diff against the previous release tag and call the ship/block gate."

@@ -1,0 +1,58 @@
+{
+  "records": [
+    {
+      "patient_id": "PAT-1001",
+      "name": "Maya Thompson",
+      "dob": "1985-02-14",
+      "phone": "555-0111",
+      "payer": "Blue Cross",
+      "member_id": "BCX-4439201",
+      "referral_id": "REF-44120"
+    },
+    {
+      "patient_id": "PAT-1002",
+      "name": "Victor Chen",
+      "dob": "1990-09-03",
+      "phone": "555-0122",
+      "payer": "UnitedHealthcare",
+      "member_id": "UHC-771032",
+      "referral_id": "REF-77100"
+    },
+    {
+      "patient_id": "PAT-1003",
+      "name": "Nora Patel",
+      "dob": "1978-11-20",
+      "phone": "555-0133",
+      "payer": "Aetna",
+      "member_id": "AET-562100",
+      "referral_id": "REF-88421"
+    },
+    {
+      "patient_id": "PAT-1004",
+      "name": "Luis Romero",
+      "dob": "1982-06-30",
+      "phone": "555-0144",
+      "payer": "Cigna",
+      "member_id": "CG-291001",
+      "referral_id": "REF-12880"
+    },
+    {
+      "patient_id": "PAT-1005",
+      "name": "Ella Brooks",
+      "dob": "1974-05-12",
+      "phone": "555-0155",
+      "payer": "Blue Cross",
+      "member_id": "BCX-8822009",
+      "referral_id": "REF-33002"
+    },
+    {
+      "patient_id": "PAT-1006",
+      "name": "Jordan Lee",
+      "dob": "1992-04-17",
+      "phone": "555-0134",
+      "payer": "Blue Cross",
+      "member_id": "BCX-9017710",
+      "referral_id": "REF-90171"
+    }
+  ]
+}

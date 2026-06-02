@@ -1,0 +1,3 @@
+# `Model`
+
+::: agents.realtime.model

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Runtime Behavior Probe"
+  short_description: "Plan and run runtime behavior probes"
+  default_prompt: "Use $runtime-behavior-probe to investigate actual runtime behavior with a validation matrix, explicit state controls, and a findings-first report."
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,4 @@
+interface:
+  display_name: "PR Draft Summary"
+  short_description: "Draft the repo-ready PR title and description"
+  default_prompt: "Use $pr-draft-summary to generate the PR-ready summary block, title, and draft description for the current changes."

@@ -1,0 +1,169 @@
+"""
+Tool-use tracking utilities. Hosts AgentToolUseTracker and helpers to serialize/deserialize
+its state plus lightweight tool-call type utilities. Internal use only.
+"""
+
+from __future__ import annotations
+
+from typing import Any, get_args, get_origin
+
+from .._tool_identity import get_function_tool_trace_name
+from ..agent import Agent
+from ..items import (
+    HandoffCallItem,
+    ToolCallItem,
+    ToolCallItemTypes,
+    ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
+)
+from ..run_state import (
+    _build_agent_identity_keys_by_id,
+    _build_agent_identity_map,
+    _build_agent_map,
+)
+from .run_steps import ProcessedResponse, ToolRunFunction
+
+__all__ = [
+    "AgentToolUseTracker",
+    "serialize_tool_use_tracker",
+    "hydrate_tool_use_tracker",
+    "get_tool_call_types",
+    "TOOL_CALL_TYPES",
+]
+
+_TOOL_USE_RESET_TRACKING_ITEM_TYPES = (
+    HandoffCallItem,
+    ToolCallItem,
+    ToolCallOutputItem,
+)
+
+_PROCESSED_RESPONSE_TOOL_ITEM_TYPES = (
+    HandoffCallItem,
+    ToolCallItem,
+    ToolCallOutputItem,
+    ToolSearchCallItem,
+    ToolSearchOutputItem,
+)
+
+
+class AgentToolUseTracker:
+    """Track which tools an agent has used to support model_settings resets."""
+
+    def __init__(self) -> None:
+        # Name-keyed map is used for serialization/hydration only.
+        self.agent_map: dict[str, set[str]] = {}
+        # Instance-keyed list is used for runtime checks.
+        self.agent_to_tools: list[tuple[Agent[Any], list[str]]] = []
+
+    def record_used_tools(self, agent: Agent[Any], tools: list[ToolRunFunction]) -> None:
+        tool_names = [
+            get_function_tool_trace_name(tool.function_tool) or tool.function_tool.name
+            for tool in tools
+        ]
+        self.add_tool_use(agent, tool_names)
+
+    def record_processed_response(
+        self, agent: Agent[Any], processed_response: ProcessedResponse
+    ) -> None:
+        """Track resettable tool usage from a processed model response."""
+        tool_name_iter = iter(processed_response.tools_used)
+        tool_names: list[str] = []
+        for item in processed_response.new_items:
+            if not isinstance(item, _PROCESSED_RESPONSE_TOOL_ITEM_TYPES):
+                continue
+            tool_name = next(tool_name_iter, None)
+            if tool_name is None:
+                break
+            if isinstance(item, _TOOL_USE_RESET_TRACKING_ITEM_TYPES):
+                tool_names.append(tool_name)
+
+        self.add_tool_use(agent, tool_names)
+
+    def add_tool_use(self, agent: Agent[Any], tool_names: list[str]) -> None:
+        """Maintain compatibility for callers that append tool usage directly."""
+        if not tool_names:
+            return
+
+        agent_name = getattr(agent, "name", agent.__class__.__name__)
+        names_set = self.agent_map.setdefault(agent_name, set())
+        names_set.update(tool_names)
+
+        existing = next((item for item in self.agent_to_tools if item[0] is agent), None)
+        if existing:
+            existing[1].extend(tool_names)
+        else:
+            self.agent_to_tools.append((agent, list(tool_names)))
+
+    def has_used_tools(self, agent: Agent[Any]) -> bool:
+        existing = next((item for item in self.agent_to_tools if item[0] is agent), None)
+        return bool(existing and existing[1])
+
+    def as_serializable(self) -> dict[str, list[str]]:
+        if self.agent_map:
+            return {name: sorted(tool_names) for name, tool_names in self.agent_map.items()}
+
+        snapshot: dict[str, set[str]] = {}
+        for agent, names in self.agent_to_tools:
+            agent_name = getattr(agent, "name", agent.__class__.__name__)
+            snapshot.setdefault(agent_name, set()).update(names)
+        return {name: sorted(tool_names) for name, tool_names in snapshot.items()}
+
+    @classmethod
+    def from_serializable(cls, data: dict[str, list[str]]) -> AgentToolUseTracker:
+        tracker = cls()
+        tracker.agent_map = {name: set(tools) for name, tools in data.items()}
+        return tracker
+
+
+def serialize_tool_use_tracker(
+    tool_use_tracker: AgentToolUseTracker,
+    *,
+    starting_agent: Agent[Any] | None = None,
+) -> dict[str, list[str]]:
+    """Convert the AgentToolUseTracker into a serializable snapshot."""
+    agent_identity_keys_by_id = (
+        _build_agent_identity_keys_by_id(starting_agent) if starting_agent is not None else None
+    )
+    snapshot: dict[str, list[str]] = {}
+    for agent, tool_names in tool_use_tracker.agent_to_tools:
+        agent_key = None
+        if agent_identity_keys_by_id is not None:
+            agent_key = agent_identity_keys_by_id.get(id(agent))
+        if agent_key is None:
+            agent_key = getattr(agent, "name", agent.__class__.__name__)
+        snapshot.setdefault(agent_key, []).extend(tool_names)
+    return snapshot
+
+
+def hydrate_tool_use_tracker(
+    tool_use_tracker: AgentToolUseTracker,
+    run_state: Any,
+    starting_agent: Agent[Any],
+) -> None:
+    """Seed a fresh AgentToolUseTracker using the snapshot stored on the RunState."""
+    snapshot = run_state.get_tool_use_tracker_snapshot()
+    if not snapshot:
+        return
+
+    agent_map = _build_agent_map(starting_agent)
+    agent_identity_map = _build_agent_identity_map(starting_agent)
+    for agent_name, tool_names in snapshot.items():
+        agent = agent_identity_map.get(agent_name) or agent_map.get(agent_name)
+        if agent is None:
+            continue
+        tool_use_tracker.add_tool_use(agent, list(tool_names))
+
+
+def get_tool_call_types() -> tuple[type, ...]:
+    """Return the concrete classes that represent tool call outputs."""
+    normalized_types: list[type] = []
+    for type_hint in get_args(ToolCallItemTypes):
+        origin = get_origin(type_hint)
+        candidate = origin or type_hint
+        if isinstance(candidate, type):
+            normalized_types.append(candidate)
+    return tuple(normalized_types)
+
+
+TOOL_CALL_TYPES: tuple[type, ...] = get_tool_call_types()

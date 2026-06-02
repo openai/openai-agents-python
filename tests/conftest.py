@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import sys
+
+import pytest
+
+from agents.models import _openai_shared
+from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+from agents.models.openai_responses import OpenAIResponsesModel
+from agents.run import set_default_agent_runner
+from agents.tracing.provider import DefaultTraceProvider
+from agents.tracing.setup import set_trace_provider
+
+from .testing_processor import SPAN_PROCESSOR_TESTING
+
+collect_ignore: list[str] = []
+
+if sys.platform == "win32":
+    collect_ignore.extend(
+        [
+            "test_example_workflows.py",
+            "test_run_state.py",
+            "sandbox/capabilities/test_filesystem_capability.py",
+            "sandbox/integration_tests/test_runner_pause_resume.py",
+            "sandbox/test_client_options.py",
+            "sandbox/test_exposed_ports.py",
+            "sandbox/test_extract.py",
+            "sandbox/test_memory.py",
+            "sandbox/test_runtime.py",
+            "sandbox/test_session_manager.py",
+            "sandbox/test_session_sinks.py",
+            "sandbox/test_snapshot.py",
+            "sandbox/test_unix_local.py",
+        ]
+    )
+
+
+# This fixture will run once before any tests are executed
+@pytest.fixture(scope="session", autouse=True)
+def setup_span_processor():
+    provider = DefaultTraceProvider()
+    provider.set_processors([SPAN_PROCESSOR_TESTING])
+    set_trace_provider(provider)
+    yield
+    provider.shutdown()
+
+
+# Ensure a default OpenAI API key is present for tests that construct clients
+# without explicitly configuring a key/client. Tests that need no key use
+# monkeypatch.delenv("OPENAI_API_KEY", ...) to remove it locally.
+@pytest.fixture(scope="session", autouse=True)
+def ensure_openai_api_key():
+    import os
+
+    if not os.environ.get("OPENAI_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = "test_key"
+
+
+# This fixture will run before each test
+@pytest.fixture(autouse=True)
+def clear_span_processor():
+    SPAN_PROCESSOR_TESTING.force_flush()
+    SPAN_PROCESSOR_TESTING.shutdown()
+    SPAN_PROCESSOR_TESTING.clear()
+
+
+# This fixture will run before each test
+@pytest.fixture(autouse=True)
+def clear_openai_settings():
+    _openai_shared._default_openai_key = None
+    _openai_shared._default_openai_client = None
+    _openai_shared._use_responses_by_default = True
+    _openai_shared.set_default_openai_responses_transport("http")
+
+
+@pytest.fixture(autouse=True)
+def clear_default_runner():
+    set_default_agent_runner(None)
+
+
+@pytest.fixture(autouse=True)
+def disable_real_model_clients(monkeypatch, request):
+    # If the test is marked to allow the method call, don't override it.
+    if request.node.get_closest_marker("allow_call_model_methods"):
+        return
+
+    def failing_version(*args, **kwargs):
+        pytest.fail("Real models should not be used in tests!")
+
+    monkeypatch.setattr(OpenAIResponsesModel, "get_response", failing_version)
+    monkeypatch.setattr(OpenAIResponsesModel, "stream_response", failing_version)
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "get_response", failing_version)
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "stream_response", failing_version)

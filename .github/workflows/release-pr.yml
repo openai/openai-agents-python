@@ -1,0 +1,143 @@
+name: Create release PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g., 0.6.6)"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          ref: main
+      - name: Setup uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # setup-uv v8.1.0; uv 0.11.14
+        with:
+          version: "0.11.14"
+          enable-cache: true
+      - name: Fetch tags
+        run: git fetch origin --tags --prune
+      - name: Ensure release branch does not exist
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          branch="release/v${RELEASE_VERSION}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "Branch $branch already exists on origin." >&2
+            exit 1
+          fi
+      - name: Update version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          version = os.environ["RELEASE_VERSION"]
+          if version.startswith("v"):
+              print("Version must not start with 'v' (use x.y.z...).", file=sys.stderr)
+              sys.exit(1)
+          if ".." in version:
+              print("Version contains consecutive dots (use x.y.z...).", file=sys.stderr)
+              sys.exit(1)
+          if not re.match(r"^\d+\.\d+(\.\d+)*([a-zA-Z0-9\.-]+)?$", version):
+              print(
+                  "Version must be semver-like (e.g., 0.6.6, 0.6.6-rc1, 0.6.6.dev1).",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          path = pathlib.Path("pyproject.toml")
+          text = path.read_text()
+          updated, count = re.subn(
+              r'(?m)^version\s*=\s*"[^\"]+"',
+              f'version = "{version}"',
+              text,
+          )
+          if count != 1:
+              print("Expected to update exactly one version line.", file=sys.stderr)
+              sys.exit(1)
+          if updated == text:
+              print("Version already set; no changes made.", file=sys.stderr)
+              sys.exit(1)
+          path.write_text(updated)
+          PY
+      - name: Sync dependencies
+        run: make sync
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Create release branch and commit
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          branch="release/v${RELEASE_VERSION}"
+          git checkout -b "$branch"
+          git add pyproject.toml uv.lock
+          if git diff --cached --quiet; then
+            echo "No changes to commit." >&2
+            exit 1
+          fi
+          git commit -m "Bump version to ${RELEASE_VERSION}"
+          git push --set-upstream origin "$branch"
+      - name: Build PR body
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          printf 'Release PR for %s.\n\nThe release readiness report will be prepared manually.\n' "$RELEASE_VERSION" > pr-body.md
+      - name: Create or update PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          head_branch="release/v${RELEASE_VERSION}"
+          milestone_name="$(python .github/scripts/select-release-milestone.py --version "$RELEASE_VERSION")"
+          pr_number="$(gh pr list --head "$head_branch" --base "main" --json number --jq '.[0].number // empty')"
+          if [ -z "$pr_number" ]; then
+            create_args=(
+              --title "Release ${RELEASE_VERSION}"
+              --body-file pr-body.md
+              --base "main"
+              --head "$head_branch"
+              --label "project"
+            )
+            if [ -n "$milestone_name" ]; then
+              create_args+=(--milestone "$milestone_name")
+            fi
+            if ! gh pr create "${create_args[@]}"; then
+              echo "PR create with label/milestone failed; retrying without them." >&2
+              gh pr create \
+                --title "Release ${RELEASE_VERSION}" \
+                --body-file pr-body.md \
+                --base "main" \
+                --head "$head_branch"
+            fi
+          else
+            edit_args=(
+              --title "Release ${RELEASE_VERSION}"
+              --body-file pr-body.md
+              --add-label "project"
+            )
+            if [ -n "$milestone_name" ]; then
+              edit_args+=(--milestone "$milestone_name")
+            fi
+            if ! gh pr edit "$pr_number" "${edit_args[@]}"; then
+              echo "PR edit with label/milestone failed; retrying without them." >&2
+              gh pr edit "$pr_number" --title "Release ${RELEASE_VERSION}" --body-file pr-body.md
+            fi
+          fi
