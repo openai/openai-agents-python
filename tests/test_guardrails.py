@@ -616,6 +616,56 @@ async def test_parallel_guardrail_trip_compat_mode_does_not_cancel_model_task():
 
 
 @pytest.mark.asyncio
+async def test_parallel_guardrail_non_tripwire_error_cancels_model_task():
+    # A parallel input guardrail that raises a non-tripwire exception must not leave the
+    # in-flight model task running. asyncio.gather does not cancel sibling awaitables when
+    # one fails, so the runner is responsible for cancelling the model task.
+    model_started = asyncio.Event()
+    model_cancelled = asyncio.Event()
+    model_finished = asyncio.Event()
+
+    class GuardrailBoom(RuntimeError):
+        pass
+
+    @input_guardrail(run_in_parallel=True)
+    async def raises_after_model_starts(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await asyncio.wait_for(model_started.wait(), timeout=1)
+        raise GuardrailBoom("guardrail failed")
+
+    model = FakeModel()
+    original_get_response = model.get_response
+
+    async def slow_get_response(*args, **kwargs):
+        model_started.set()
+        try:
+            await asyncio.sleep(0.02)
+            return await original_get_response(*args, **kwargs)
+        except asyncio.CancelledError:
+            model_cancelled.set()
+            raise
+        finally:
+            model_finished.set()
+
+    agent = Agent(
+        name="parallel_guardrail_error_agent",
+        instructions="Reply with 'hello'",
+        input_guardrails=[raises_after_model_starts],
+        model=model,
+    )
+    model.set_next_output([get_text_message("should_not_finish")])
+
+    with patch.object(model, "get_response", side_effect=slow_get_response):
+        with pytest.raises(GuardrailBoom):
+            await Runner.run(agent, "trigger guardrail")
+
+    await asyncio.wait_for(model_finished.wait(), timeout=1)
+    assert model_started.is_set() is True
+    assert model_cancelled.is_set() is True
+
+
+@pytest.mark.asyncio
 async def test_parallel_guardrail_may_not_prevent_tool_execution_streaming():
     tool_was_executed = False
     guardrail_executed = False

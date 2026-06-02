@@ -1243,6 +1243,17 @@ class AgentRunner:
                                         )
                                     )
                                     raise
+                                except Exception:
+                                    # A parallel input guardrail (or the model turn) raised a
+                                    # non-tripwire error. asyncio.gather does not cancel the
+                                    # sibling awaitables when one fails, so cancel the in-flight
+                                    # model task to avoid leaking it (mirrors the tripwire
+                                    # cleanup above).
+                                    if should_cancel_parallel_model_task_on_input_guardrail_trip():
+                                        if not model_task.done():
+                                            model_task.cancel()
+                                        await asyncio.gather(model_task, return_exceptions=True)
+                                    raise
                             else:
                                 turn_result = await model_task
 
