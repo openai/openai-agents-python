@@ -27,12 +27,12 @@ class RunHooksForTests(RunHooks):
     def __init__(self):
         self.events: dict[str, int] = defaultdict(int)
         self.tool_context_ids: list[str] = []
-        self.last_sealed_tool_call: ToolCallItem | None = None
+        self.sealed_tool_calls: list[ToolCallItem] = []
 
     def reset(self):
         self.events.clear()
         self.tool_context_ids.clear()
-        self.last_sealed_tool_call = None
+        self.sealed_tool_calls.clear()
 
     async def on_agent_start(
         self, context: AgentHookContext[TContext], agent: Agent[TContext]
@@ -75,7 +75,7 @@ class RunHooksForTests(RunHooks):
         tool_call: ToolCallItem,
     ) -> None:
         self.events["on_tool_call_sealed"] += 1
-        self.last_sealed_tool_call = tool_call
+        self.sealed_tool_calls.append(tool_call)
 
     async def on_llm_start(
         self,
@@ -184,9 +184,40 @@ async def test_streamed_run_hooks_tool_call_sealed():
         pass
 
     assert hooks.events["on_tool_call_sealed"] == 1
-    assert hooks.last_sealed_tool_call is not None
-    assert hooks.last_sealed_tool_call.tool_name == "f"
-    assert hooks.last_sealed_tool_call.call_id is not None
+    assert hooks.sealed_tool_calls[0].tool_name == "f"
+    assert hooks.sealed_tool_calls[0].call_id is not None
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_hooks_tool_call_sealed_multiple():
+    """Verify that on_tool_call_sealed fires once per sealed tool call in a multi-tool turn."""
+    hooks = RunHooksForTests()
+    model = FakeModel()
+    agent = Agent(
+        name="A",
+        model=model,
+        tools=[
+            get_function_tool("get_weather", "weather data"),
+            get_function_tool("get_time", "current time"),
+        ],
+        handoffs=[],
+    )
+    # Simulate a streaming response with two tool calls in the same turn
+    model.set_next_output([
+        get_function_tool_call("get_weather", '{"city": "Dallas"}', call_id="call_1"),
+        get_function_tool_call("get_time", '{"timezone": "CST"}', call_id="call_2"),
+    ])
+    stream = Runner.run_streamed(agent, input="hello", hooks=hooks)
+
+    async for _event in stream.stream_events():
+        pass
+
+    assert hooks.events["on_tool_call_sealed"] == 2
+    assert len(hooks.sealed_tool_calls) == 2
+    assert hooks.sealed_tool_calls[0].tool_name == "get_weather"
+    assert hooks.sealed_tool_calls[0].call_id == "call_1"
+    assert hooks.sealed_tool_calls[1].tool_name == "get_time"
+    assert hooks.sealed_tool_calls[1].call_id == "call_2"
 
 
 # test_async_run_hooks_with_agent_hooks_with_llm
