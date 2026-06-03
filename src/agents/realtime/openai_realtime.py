@@ -1632,6 +1632,10 @@ class _ConversionHelper:
                 # For backward-compatibility of assistant message items
                 c["type"] = "audio"
             content.append(c)
+        # Mirror the status the server reported for the item. Assistant messages are marked
+        # "completed" once the response is done, so falling back to a hardcoded "in_progress"
+        # would leave finished messages looking unfinished. Default to "in_progress" only when
+        # the server omits a status.
         return TypeAdapter(RealtimeMessageItem).validate_python(
             {
                 "item_id": item.id or "",
@@ -1639,7 +1643,7 @@ class _ConversionHelper:
                 "type": item.type,
                 "role": item.role,
                 "content": content,
-                "status": "in_progress",
+                "status": item.status or "in_progress",
             },
         )
 
