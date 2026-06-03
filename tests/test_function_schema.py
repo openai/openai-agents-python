@@ -134,6 +134,25 @@ def test_varargs_function():
     assert result2 == (7, (9.9,), False, {"some_key": "some_value"})
 
 
+@pytest.mark.parametrize("param_name", ["model_config", "model_dump", "model_validate"])
+def test_function_schema_supports_pydantic_reserved_param_names(param_name: str) -> None:
+    namespace: dict[str, Any] = {}
+    exec(
+        f"def reserved_name_tool({param_name}: str) -> str:\n"
+        f"    return {param_name}\n",
+        namespace,
+    )
+    func = namespace["reserved_name_tool"]
+
+    func_schema = function_schema(func)
+
+    assert func_schema.params_json_schema["properties"][param_name]["type"] == "string"
+    parsed = func_schema.params_pydantic_model(**{param_name: "value"})
+    args, kwargs_dict = func_schema.to_call_args(parsed)
+
+    assert func(*args, **kwargs_dict) == "value"
+
+
 class Foo(TypedDict):
     a: int
     b: str

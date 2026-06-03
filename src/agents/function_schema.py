@@ -10,7 +10,7 @@ from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
 
 # griffelib exposes the `griffe` package at runtime but currently does not ship typing markers.
 from griffe import Docstring, DocstringSectionKind  # type: ignore[import-untyped]
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, ConfigDict, Field, create_model
 from pydantic.fields import FieldInfo
 
 from .exceptions import UserError
@@ -40,6 +40,8 @@ class FuncSchema:
     strict_json_schema: bool = True
     """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
     as it increases the likelihood of correct JSON input."""
+    pydantic_field_name_map: dict[str, str] | None = None
+    """Maps function parameter names to the internal Pydantic field names used for validation."""
 
     def to_call_args(self, data: BaseModel) -> tuple[list[Any], dict[str, Any]]:
         """
@@ -56,7 +58,8 @@ class FuncSchema:
             if self.takes_context and idx == 0:
                 continue
 
-            value = getattr(data, name, None)
+            pydantic_field_name = (self.pydantic_field_name_map or {}).get(name, name)
+            value = getattr(data, pydantic_field_name, None)
             if param.kind == param.VAR_POSITIONAL:
                 # e.g. *args: extend positional args and mark that *args is now seen
                 positional_args.extend(value or [])
@@ -221,6 +224,28 @@ def _extract_field_info_from_metadata(metadata: tuple[Any, ...]) -> FieldInfo | 
     return None
 
 
+_PYDANTIC_PROTECTED_FIELD_PREFIXES = ("model_dump", "model_validate")
+
+
+def _requires_pydantic_alias(name: str) -> bool:
+    """Returns True when a parameter name cannot safely be used as a Pydantic field name."""
+
+    return name == "model_config" or any(
+        name.startswith(prefix) for prefix in _PYDANTIC_PROTECTED_FIELD_PREFIXES
+    )
+
+
+def _make_safe_pydantic_field_name(name: str, used_names: set[str]) -> str:
+    """Generates a unique internal Pydantic field name for aliased parameters."""
+
+    candidate = f"func_arg_{name}"
+    suffix = 1
+    while candidate in used_names:
+        suffix += 1
+        candidate = f"func_arg_{name}_{suffix}"
+    return candidate
+
+
 def function_schema(
     func: Callable[..., Any],
     docstring_style: DocstringStyle | None = None,
@@ -317,8 +342,18 @@ def function_schema(
     # We will collect field definitions for create_model as a dict:
     #   field_name -> (type_annotation, default_value_or_Field(...))
     fields: dict[str, Any] = {}
+    pydantic_field_name_map: dict[str, str] = {}
+    used_pydantic_field_names: set[str] = set()
 
     for name, param in filtered_params:
+        pydantic_field_name = (
+            _make_safe_pydantic_field_name(name, used_pydantic_field_names)
+            if _requires_pydantic_alias(name)
+            else name
+        )
+        pydantic_field_name_map[name] = pydantic_field_name
+        used_pydantic_field_names.add(pydantic_field_name)
+
         ann = type_hints.get(name, param.annotation)
         default = param.default
 
@@ -344,9 +379,9 @@ def function_schema(
                 ann = list[ann]  # type: ignore
 
             # Default factory to empty list
-            fields[name] = (
+            fields[pydantic_field_name] = (
                 ann,
-                Field(default_factory=list, description=field_description),
+                Field(default_factory=list, description=field_description, alias=name),
             )
 
         elif param.kind == param.VAR_KEYWORD:
@@ -362,9 +397,9 @@ def function_schema(
                 # e.g. def foo(**kwargs: int) -> Dict[str, int]
                 ann = dict[str, ann]  # type: ignore
 
-            fields[name] = (
+            fields[pydantic_field_name] = (
                 ann,
-                Field(default_factory=dict, description=field_description),
+                Field(default_factory=dict, description=field_description, alias=name),
             )
 
         else:
@@ -381,30 +416,39 @@ def function_schema(
                     merged = FieldInfo.merge_field_infos(merged, default=default)
                 elif isinstance(default, FieldInfo):
                     merged = FieldInfo.merge_field_infos(merged, default)
-                fields[name] = (ann, merged)
+                if pydantic_field_name != name:
+                    merged = FieldInfo.merge_field_infos(merged, alias=name)
+                fields[pydantic_field_name] = (ann, merged)
             elif default == inspect._empty:
                 # Required field
-                fields[name] = (
+                fields[pydantic_field_name] = (
                     ann,
-                    Field(..., description=field_description),
+                    Field(..., description=field_description, alias=name),
                 )
             elif isinstance(default, FieldInfo):
                 # Parameter with a default value that is a Field(...)
-                fields[name] = (
+                fields[pydantic_field_name] = (
                     ann,
                     FieldInfo.merge_field_infos(
-                        default, description=field_description or default.description
+                        default,
+                        description=field_description or default.description,
+                        alias=name,
                     ),
                 )
             else:
                 # Parameter with a default value
-                fields[name] = (
+                fields[pydantic_field_name] = (
                     ann,
-                    Field(default=default, description=field_description),
+                    Field(default=default, description=field_description, alias=name),
                 )
 
     # 3. Dynamically build a Pydantic model
-    dynamic_model = create_model(f"{func_name}_args", __base__=BaseModel, **fields)
+    dynamic_model = create_model(
+        f"{func_name}_args",
+        __base__=BaseModel,
+        __config__=ConfigDict(populate_by_name=True),
+        **fields,
+    )
 
     # 4. Build JSON schema from that model
     json_schema = dynamic_model.model_json_schema()
@@ -421,4 +465,5 @@ def function_schema(
         signature=sig,
         takes_context=takes_context,
         strict_json_schema=strict_json_schema,
+        pydantic_field_name_map=pydantic_field_name_map,
     )
