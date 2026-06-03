@@ -1367,6 +1367,9 @@ async def run_single_turn_streamed(
             streamed_result._model_input_items,
             reasoning_item_id_policy,
         )
+    model_settings = get_model_settings(execution_agent, run_config)
+    model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
+
 
     filtered = await maybe_filter_model_input(
         agent=public_agent,
@@ -1374,7 +1377,7 @@ async def run_single_turn_streamed(
         context_wrapper=context_wrapper,
         input_items=input,
         system_instructions=system_prompt,
-        response_format=model_settings.response_format,
+        response_format=None,
     )
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
@@ -1817,20 +1820,22 @@ async def get_new_response(
     """Call the model and return the raw response, handling retries and hooks."""
     public_agent = bindings.public_agent
     execution_agent = bindings.execution_agent
+
+    model = get_model(execution_agent, run_config)
+    model_settings = get_model_settings(execution_agent, run_config)
+    model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
+
     filtered = await maybe_filter_model_input(
         agent=public_agent,
         run_config=run_config,
         context_wrapper=context_wrapper,
         input_items=input,
         system_instructions=system_prompt,
-        response_format=model_settings.response_format,
+        response_format=None,
     )
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 
-    model = get_model(execution_agent, run_config)
-    model_settings = get_model_settings(execution_agent, run_config)
-    model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
     if server_conversation_tracker is not None:
         server_conversation_tracker.mark_input_as_sent(filtered.input)
