@@ -246,6 +246,12 @@ def _make_safe_pydantic_field_name(name: str, used_names: set[str]) -> str:
     return candidate
 
 
+def _with_field_alias(field_info: FieldInfo, alias: str) -> FieldInfo:
+    """Returns a copy of a field definition with an explicit validation/serialization alias."""
+
+    return FieldInfo.merge_field_infos(field_info, Field(alias=alias))
+
+
 def function_schema(
     func: Callable[..., Any],
     docstring_style: DocstringStyle | None = None,
@@ -343,7 +349,7 @@ def function_schema(
     #   field_name -> (type_annotation, default_value_or_Field(...))
     fields: dict[str, Any] = {}
     pydantic_field_name_map: dict[str, str] = {}
-    used_pydantic_field_names: set[str] = set()
+    used_pydantic_field_names = {name for name, _ in filtered_params}
 
     for name, param in filtered_params:
         pydantic_field_name = (
@@ -417,30 +423,33 @@ def function_schema(
                 elif isinstance(default, FieldInfo):
                     merged = FieldInfo.merge_field_infos(merged, default)
                 if pydantic_field_name != name:
-                    merged = FieldInfo.merge_field_infos(merged, alias=name)
+                    merged = _with_field_alias(merged, name)
                 fields[pydantic_field_name] = (ann, merged)
             elif default == inspect._empty:
                 # Required field
-                fields[pydantic_field_name] = (
-                    ann,
-                    Field(..., description=field_description, alias=name),
+                field = (
+                    Field(..., description=field_description, alias=name)
+                    if pydantic_field_name != name
+                    else Field(..., description=field_description)
                 )
+                fields[pydantic_field_name] = (ann, field)
             elif isinstance(default, FieldInfo):
                 # Parameter with a default value that is a Field(...)
-                fields[pydantic_field_name] = (
-                    ann,
-                    FieldInfo.merge_field_infos(
-                        default,
-                        description=field_description or default.description,
-                        alias=name,
-                    ),
+                field = FieldInfo.merge_field_infos(
+                    default,
+                    description=field_description or default.description,
                 )
+                if pydantic_field_name != name:
+                    field = _with_field_alias(field, name)
+                fields[pydantic_field_name] = (ann, field)
             else:
                 # Parameter with a default value
-                fields[pydantic_field_name] = (
-                    ann,
-                    Field(default=default, description=field_description, alias=name),
+                field = (
+                    Field(default=default, description=field_description, alias=name)
+                    if pydantic_field_name != name
+                    else Field(default=default, description=field_description)
                 )
+                fields[pydantic_field_name] = (ann, field)
 
     # 3. Dynamically build a Pydantic model
     dynamic_model = create_model(

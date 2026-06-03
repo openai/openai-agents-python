@@ -153,6 +153,40 @@ def test_function_schema_supports_pydantic_reserved_param_names(param_name: str)
     assert func(*args, **kwargs_dict) == "value"
 
 
+def test_function_schema_avoids_reserved_name_alias_collisions() -> None:
+    def collision_tool(model_dump: str, func_arg_model_dump: int) -> tuple[str, int]:
+        return model_dump, func_arg_model_dump
+
+    func_schema = function_schema(collision_tool)
+
+    properties = func_schema.params_json_schema["properties"]
+    assert set(properties) == {"model_dump", "func_arg_model_dump"}
+
+    parsed = func_schema.params_pydantic_model(
+        model_dump="value",
+        func_arg_model_dump=3,
+    )
+    args, kwargs_dict = func_schema.to_call_args(parsed)
+
+    assert collision_tool(*args, **kwargs_dict) == ("value", 3)
+
+
+def test_function_schema_preserves_field_alias_defaults() -> None:
+    def aliased_tool(city: str = Field(alias="location")) -> str:
+        return city
+
+    func_schema = function_schema(aliased_tool)
+
+    properties = func_schema.params_json_schema["properties"]
+    assert "location" in properties
+    assert "city" not in properties
+
+    parsed = func_schema.params_pydantic_model(location="Paris")
+    args, kwargs_dict = func_schema.to_call_args(parsed)
+
+    assert aliased_tool(*args, **kwargs_dict) == "Paris"
+
+
 class Foo(TypedDict):
     a: int
     b: str
