@@ -177,10 +177,14 @@ class _Reply(BaseModel):
 
 @pytest.mark.asyncio
 async def test_filter_can_override_output_schema_non_streamed() -> None:
-    """Regression test for #3563: filter can replace output_schema on non-streamed run."""
+    """Regression test for #3563: filter can replace output_schema on non-streamed run.
+
+    Verifies both that the model call receives the override schema and that the
+    response is parsed against it (not discarded after get_new_response returns).
+    """
     model = FakeModel()
     agent = Agent(name="test", model=model)
-    model.set_next_output([get_text_message("ok")])
+    model.set_next_output([get_text_message('{"answer": "hi"}')])
 
     override_schema = AgentOutputSchema(_Reply)
 
@@ -191,13 +195,15 @@ async def test_filter_can_override_output_schema_non_streamed() -> None:
             output_schema=override_schema,
         )
 
-    await Runner.run(
+    result = await Runner.run(
         agent,
         input="start",
         run_config=RunConfig(call_model_input_filter=filter_fn),
     )
 
     assert model.last_turn_args["output_schema"] is override_schema
+    assert isinstance(result.final_output, _Reply)
+    assert result.final_output.answer == "hi"
 
 
 @pytest.mark.asyncio

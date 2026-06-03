@@ -1762,7 +1762,7 @@ async def run_single_turn(
     else:
         input = _prepare_turn_input_items(original_input, generated_items, reasoning_item_id_policy)
 
-    new_response = await get_new_response(
+    new_response, output_schema = await get_new_response(
         bindings,
         system_prompt,
         input,
@@ -1813,8 +1813,8 @@ async def get_new_response(
     session: Session | None = None,
     session_items_to_rewind: list[TResponseInputItem] | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
-) -> ModelResponse:
-    """Call the model and return the raw response, handling retries and hooks."""
+) -> tuple[ModelResponse, AgentOutputSchemaBase | None]:
+    """Call the model and return the raw response and effective output schema after filtering."""
     public_agent = bindings.public_agent
     execution_agent = bindings.execution_agent
     filtered = await maybe_filter_model_input(
@@ -1921,4 +1921,4 @@ async def get_new_response(
         hooks.on_llm_end(context_wrapper, public_agent, new_response),
     )
 
-    return new_response
+    return new_response, output_schema

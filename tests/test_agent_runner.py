@@ -2449,7 +2449,8 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
         session_items_to_rewind=[],
     )
 
-    assert isinstance(result, ModelResponse)
+    response, _ = result
+    assert isinstance(response, ModelResponse)
     assert session.pop_calls == 0
 
 
@@ -2494,8 +2495,9 @@ async def test_get_new_response_uses_agent_retry_settings() -> None:
         session_items_to_rewind=[],
     )
 
-    assert isinstance(result, ModelResponse)
-    assert result.usage.requests == 2
+    response, _ = result
+    assert isinstance(response, ModelResponse)
+    assert response.usage.requests == 2
 
 
 @pytest.mark.asyncio
