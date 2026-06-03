@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Any, cast
 
 import pytest
+from pydantic import BaseModel
 
 from agents import Agent, RunConfig, Runner, TResponseInputItem, UserError
+from agents.agent_output import AgentOutputSchema
 from agents.run import CallModelData, ModelInputData
 
 from .fake_model import FakeModel
@@ -167,3 +169,107 @@ async def test_call_model_input_filter_prefers_latest_duplicate_outputs_streamed
     ]
     assert len(outputs) == 1
     assert outputs[0]["output"] == "new-value"
+
+
+class _Reply(BaseModel):
+    answer: str
+
+
+@pytest.mark.asyncio
+async def test_filter_can_override_output_schema_non_streamed() -> None:
+    """Regression test for #3563: filter can replace output_schema on non-streamed run."""
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    model.set_next_output([get_text_message("ok")])
+
+    override_schema = AgentOutputSchema(_Reply)
+
+    def filter_fn(data: CallModelData[Any]) -> ModelInputData:
+        return ModelInputData(
+            input=data.model_data.input,
+            instructions=data.model_data.instructions,
+            output_schema=override_schema,
+        )
+
+    await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(call_model_input_filter=filter_fn),
+    )
+
+    assert model.last_turn_args["output_schema"] is override_schema
+
+
+@pytest.mark.asyncio
+async def test_filter_can_override_output_schema_streamed() -> None:
+    """Regression test for #3563: filter can replace output_schema on streamed run."""
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    model.set_next_output([get_text_message('{"answer": "hi"}')])
+
+    override_schema = AgentOutputSchema(_Reply)
+
+    async def filter_fn(data: CallModelData[Any]) -> ModelInputData:
+        return ModelInputData(
+            input=data.model_data.input,
+            instructions=data.model_data.instructions,
+            output_schema=override_schema,
+        )
+
+    result = Runner.run_streamed(
+        agent,
+        input="start",
+        run_config=RunConfig(call_model_input_filter=filter_fn),
+    )
+    async for _ in result.stream_events():
+        pass
+
+    assert model.last_turn_args["output_schema"] is override_schema
+
+
+@pytest.mark.asyncio
+async def test_filter_receives_agent_output_schema() -> None:
+    """Filter should see the agent's output_schema in model_data so it can inspect or forward it."""
+    model = FakeModel()
+    agent = Agent(name="test", model=model, output_type=_Reply)
+    model.set_next_output([get_text_message('{"answer": "hi"}')])
+
+    observed: list[Any] = []
+
+    def filter_fn(data: CallModelData[Any]) -> ModelInputData:
+        observed.append(data.model_data.output_schema)
+        return data.model_data
+
+    await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(call_model_input_filter=filter_fn),
+    )
+
+    assert len(observed) == 1
+    assert observed[0] is not None
+    assert observed[0].name() == "_Reply"
+
+
+@pytest.mark.asyncio
+async def test_filter_not_setting_output_schema_preserves_agent_schema() -> None:
+    """A filter omitting output_schema must not clear the agent's schema."""
+    model = FakeModel()
+    agent = Agent(name="test", model=model, output_type=_Reply)
+    model.set_next_output([get_text_message('{"answer": "hi"}')])
+
+    def filter_fn(data: CallModelData[Any]) -> ModelInputData:
+        # Intentionally omit output_schema to confirm the agent schema is preserved.
+        return ModelInputData(
+            input=data.model_data.input,
+            instructions=data.model_data.instructions,
+        )
+
+    await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(call_model_input_filter=filter_fn),
+    )
+
+    assert model.last_turn_args["output_schema"] is not None
+    assert model.last_turn_args["output_schema"].name() == "_Reply"

@@ -1373,7 +1373,9 @@ async def run_single_turn_streamed(
         context_wrapper=context_wrapper,
         input_items=input,
         system_instructions=system_prompt,
+        output_schema=output_schema,
     )
+    output_schema = filtered.output_schema if filtered.output_schema is not None else output_schema
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
     hosted_mcp_tool_metadata = collect_mcp_list_tools_metadata(streamed_result._model_input_items)
@@ -1821,7 +1823,9 @@ async def get_new_response(
         context_wrapper=context_wrapper,
         input_items=input,
         system_instructions=system_prompt,
+        output_schema=output_schema,
     )
+    output_schema = filtered.output_schema if filtered.output_schema is not None else output_schema
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 

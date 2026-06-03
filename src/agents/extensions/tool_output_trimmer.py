@@ -152,7 +152,11 @@ class ToolOutputTrimmer:
                 f"saved ~{chars_saved} chars"
             )
 
-        return _ModelInputData(input=new_items, instructions=model_data.instructions)
+        return _ModelInputData(
+            input=new_items,
+            instructions=model_data.instructions,
+            output_schema=model_data.output_schema,
+        )
 
     def _find_recent_boundary(self, items: list[Any]) -> int:
         """Find the index separating 'old' items from 'recent' items.
