@@ -1370,6 +1370,16 @@ async def run_single_turn_streamed(
     model_settings = get_model_settings(execution_agent, run_config)
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
+    current_response_format: ResponseFormat | None = None
+    if output_schema and hasattr(output_schema, "is_plain_text") and not output_schema.is_plain_text():
+        current_response_format = cast(ResponseFormat, {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "final_output",
+                "strict": output_schema.is_strict_json_schema(),
+                "schema": output_schema.json_schema(),
+            },
+        })
 
     filtered = await maybe_filter_model_input(
         agent=public_agent,
@@ -1377,7 +1387,7 @@ async def run_single_turn_streamed(
         context_wrapper=context_wrapper,
         input_items=input,
         system_instructions=system_prompt,
-        response_format=None,
+        response_format=current_response_format,
     )
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
@@ -1476,6 +1486,7 @@ async def run_single_turn_streamed(
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
             prompt=prompt_config,
+            response_format=filtered.response_format,
         ),
         rewind=rewind_model_request,
         retry_settings=model_settings.retry,
@@ -1825,13 +1836,24 @@ async def get_new_response(
     model_settings = get_model_settings(execution_agent, run_config)
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
+    current_response_format: ResponseFormat | None = None
+    if output_schema and hasattr(output_schema, "is_plain_text") and not output_schema.is_plain_text():
+        current_response_format = cast(ResponseFormat, {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "final_output",
+                "strict": output_schema.is_strict_json_schema(),
+                "schema": output_schema.json_schema(),
+            },
+        })
+
     filtered = await maybe_filter_model_input(
         agent=public_agent,
         run_config=run_config,
         context_wrapper=context_wrapper,
         input_items=input,
         system_instructions=system_prompt,
-        response_format=None,
+        response_format=current_response_format,
     )
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
@@ -1901,6 +1923,7 @@ async def get_new_response(
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
             prompt=prompt_config,
+            response_format=filtered.response_format,
         ),
         rewind=rewind_model_request,
         retry_settings=model_settings.retry,
