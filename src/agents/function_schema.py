@@ -454,7 +454,6 @@ def function_schema(
     # 3. Dynamically build a Pydantic model
     dynamic_model = create_model(
         f"{func_name}_args",
-        __base__=BaseModel,
         __config__=ConfigDict(populate_by_name=True),
         **fields,
     )
