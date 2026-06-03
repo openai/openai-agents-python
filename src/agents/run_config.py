@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from .sandbox.session.sandbox_client import BaseSandboxClient
     from .sandbox.session.sandbox_session_state import SandboxSessionState
     from .sandbox.snapshot import SnapshotBase, SnapshotSpec
-
+from openai.types.chat.completion_create_params import ResponseFormat
 
 DEFAULT_MAX_TURNS = 10
 DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY = 4
@@ -50,6 +50,7 @@ class ModelInputData:
 
     input: list[TResponseInputItem]
     instructions: str | None
+    response_format: ResponseFormat | None = None
 
 
 @dataclass

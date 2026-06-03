@@ -18,6 +18,7 @@ from ..run_context import RunContextWrapper, TContext
 from ..tool import Tool
 from ..tracing import SpanError
 from ..util import _error_tracing
+from openai.types.chat import ResponseFormat
 
 __all__ = [
     "validate_run_hooks",
@@ -55,18 +56,24 @@ async def maybe_filter_model_input(
     context_wrapper: RunContextWrapper[TContext],
     input_items: list[TResponseInputItem],
     system_instructions: str | None,
+    response_format: ResponseFormat | None = None,
 ) -> ModelInputData:
     """Apply optional call_model_input_filter to modify model input."""
     effective_instructions = system_instructions
     effective_input: list[TResponseInputItem] = input_items
 
     if run_config.call_model_input_filter is None:
-        return ModelInputData(input=effective_input, instructions=effective_instructions)
+        return ModelInputData(
+            input=effective_input,
+            instructions=effective_instructions,
+            response_format=response_format,
+        )
 
     try:
         model_input = ModelInputData(
             input=effective_input.copy(),
             instructions=effective_instructions,
+            response_format=response_format,
         )
         filter_payload: CallModelData[TContext] = CallModelData(
             model_data=model_input,

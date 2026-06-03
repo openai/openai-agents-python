@@ -194,6 +194,7 @@ from .turn_resolution import (
     resolve_interrupted_turn,
     run_final_output_hooks,
 )
+from openai.types.chat.completion_create_params import ResponseFormat
 
 __all__ = [
     "extract_tool_call_id",
@@ -1373,6 +1374,7 @@ async def run_single_turn_streamed(
         context_wrapper=context_wrapper,
         input_items=input,
         system_instructions=system_prompt,
+        response_format=model_settings.response_format,
     )
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
@@ -1821,6 +1823,7 @@ async def get_new_response(
         context_wrapper=context_wrapper,
         input_items=input,
         system_instructions=system_prompt,
+        response_format=model_settings.response_format,
     )
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
