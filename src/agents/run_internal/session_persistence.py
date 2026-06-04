@@ -322,6 +322,11 @@ async def save_result_to_session(
     if is_openai_conversation_session and items_to_save:
         items_to_save = [_sanitize_openai_conversation_item(item) for item in items_to_save]
 
+    if is_openai_conversation_session:
+        items_to_save = [
+            item for item in items_to_save if not _is_unpersistable_for_openai_conversation(item)
+        ]
+
     serialized_to_save: list[str] = [
         _fingerprint_or_repr(item, ignore_ids_for_matching=ignore_ids_for_matching)
         for item in items_to_save
@@ -335,11 +340,6 @@ async def save_result_to_session(
         if serialized_to_save_counts.get(serialized, 0) > 0:
             serialized_to_save_counts[serialized] -= 1
             saved_run_items_count += 1
-
-    if is_openai_conversation_session:
-        items_to_save = [
-            item for item in items_to_save if not _is_unpersistable_for_openai_conversation(item)
-        ]
 
     if len(items_to_save) == 0:
         if run_state:
