@@ -185,12 +185,12 @@ def drop_orphaned_messages_after_consumed_reasoning(
     items: list[TResponseInputItem],
 ) -> list[TResponseInputItem]:
     """Drop message items that are orphaned because their preceding reasoning item was consumed
-    by a function call.
+    by a tool call.
 
     The Responses API requires every message item to be paired with its own reasoning item. When
-    an agent hands off via a function call, the reasoning item that immediately preceded the call
-    is considered consumed by that call. Any message item that follows (e.g. the handoff agent's
-    closing message) has no paired reasoning and causes a 400 from some providers:
+    any tool call (function_call, computer_call, shell_call, etc.) follows a reasoning item, that
+    reasoning item is considered consumed by the call. Any message item that follows (e.g. the
+    handoff agent's closing message) has no paired reasoning and causes a 400 from some providers:
     ``Item 'msg_...' of type 'message' was provided without its required 'reasoning' item``.
 
     The drop is scoped to the first message after the consuming call. Dropping resets the flag so
@@ -200,7 +200,7 @@ def drop_orphaned_messages_after_consumed_reasoning(
     without outputs and their preceding reasoning items.
     """
     fresh_reasoning = False  # True when the most-recent reasoning item is not yet consumed
-    consumed_by_call = False  # True after a function_call consumes the fresh reasoning
+    consumed_by_call = False  # True after any tool call consumes the fresh reasoning
     result: list[TResponseInputItem] = []
 
     for item in items:
@@ -213,7 +213,7 @@ def drop_orphaned_messages_after_consumed_reasoning(
             fresh_reasoning = True
             consumed_by_call = False
             result.append(item)
-        elif item_type in ("function_call", "computer_call"):
+        elif item_type in _TOOL_CALL_TO_OUTPUT_TYPE:
             if fresh_reasoning:
                 fresh_reasoning = False
                 consumed_by_call = True  # reasoning is now consumed by this call
