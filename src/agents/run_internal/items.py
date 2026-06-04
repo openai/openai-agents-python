@@ -192,11 +192,14 @@ def drop_orphaned_messages_after_consumed_reasoning(
     closing message) has no paired reasoning and causes a 400 from some providers:
     ``Item 'msg_...' of type 'message' was provided without its required 'reasoning' item``.
 
+    The drop is scoped to the first message after the consuming call. Dropping resets the flag so
+    that later turns whose assistant messages legitimately lack a reasoning item are not affected.
+
     This is the inverse of :func:`drop_orphan_function_calls`, which removes function calls
     without outputs and their preceding reasoning items.
     """
-    had_any_reasoning = False
     fresh_reasoning = False  # True when the most-recent reasoning item is not yet consumed
+    consumed_by_call = False  # True after a function_call consumes the fresh reasoning
     result: list[TResponseInputItem] = []
 
     for item in items:
@@ -206,16 +209,19 @@ def drop_orphaned_messages_after_consumed_reasoning(
         item_type = item.get("type")
 
         if item_type == "reasoning":
-            had_any_reasoning = True
             fresh_reasoning = True
+            consumed_by_call = False
             result.append(item)
         elif item_type in ("function_call", "computer_call"):
             if fresh_reasoning:
-                fresh_reasoning = False  # reasoning is consumed by this call
+                fresh_reasoning = False
+                consumed_by_call = True  # reasoning is now consumed by this call
             result.append(item)
         elif item_type == "message":
-            if had_any_reasoning and not fresh_reasoning:
-                pass  # orphaned — no paired reasoning available; drop to prevent API rejection
+            if consumed_by_call:
+                # Orphaned: reasoning was consumed by the preceding function_call.
+                # Reset so messages from subsequent turns without their own reasoning are kept.
+                consumed_by_call = False
             else:
                 result.append(item)
         else:

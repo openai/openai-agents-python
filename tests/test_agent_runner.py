@@ -1038,6 +1038,9 @@ async def test_handoff_drops_orphaned_message_after_consumed_reasoning() -> None
     When a model turn during a handoff emits [reasoning, function_call, message], the reasoning
     item is consumed by the function_call. The trailing message has no paired reasoning and some
     providers (e.g. Azure OpenAI) reject it with HTTP 400. Verify it is dropped from input[].
+
+    Also verifies that the drop is scoped to that one trailing message: the delegate agent's
+    subsequent response (which has no reasoning of its own) must NOT be dropped.
     """
     model = FakeModel()
     delegate = Agent(name="delegate", model=model)
@@ -1054,7 +1057,7 @@ async def test_handoff_drops_orphaned_message_after_consumed_reasoning() -> None
                 get_handoff_tool_call(delegate),
                 get_text_message("I'm transferring you now."),  # orphaned — no own reasoning
             ],
-            [get_text_message("done")],
+            [get_text_message("done")],  # delegate responds without reasoning — must be kept
         ]
     )
 
@@ -1073,6 +1076,8 @@ async def test_handoff_drops_orphaned_message_after_consumed_reasoning() -> None
         run_config=RunConfig(call_model_input_filter=capture_model_input),
     )
 
+    # delegate's "done" message must reach final_output — if the drop leaked into later turns
+    # it would be missing and the runner would stall or return a wrong value.
     assert result.final_output == "done"
     assert len(captured_inputs) >= 2
 
@@ -1080,6 +1085,7 @@ async def test_handoff_drops_orphaned_message_after_consumed_reasoning() -> None
     orphaned_messages = [
         item for item in second_input
         if item.get("type") == "message" and item.get("role") == "assistant"
+        and "transferring" in str(item.get("content", ""))
     ]
     assert not orphaned_messages, (
         "Message item emitted after a handoff function_call (which consumed the only reasoning "
