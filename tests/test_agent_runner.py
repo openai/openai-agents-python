@@ -1033,6 +1033,61 @@ async def test_nested_handoff_filters_reasoning_items_from_model_input():
 
 
 @pytest.mark.asyncio
+async def test_handoff_drops_orphaned_message_after_consumed_reasoning() -> None:
+    """
+    When a model turn during a handoff emits [reasoning, function_call, message], the reasoning
+    item is consumed by the function_call. The trailing message has no paired reasoning and some
+    providers (e.g. Azure OpenAI) reject it with HTTP 400. Verify it is dropped from input[].
+    """
+    model = FakeModel()
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                ResponseReasoningItem(
+                    id="rs_111",
+                    type="reasoning",
+                    summary=[Summary(text="Thinking about handoff.", type="summary_text")],
+                ),
+                get_handoff_tool_call(delegate),
+                get_text_message("I'm transferring you now."),  # orphaned — no own reasoning
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    captured_inputs: list[list[dict[str, Any]]] = []
+
+    def capture_model_input(data):
+        if isinstance(data.model_data.input, list):
+            captured_inputs.append(
+                [item for item in data.model_data.input if isinstance(item, dict)]
+            )
+        return data.model_data
+
+    result = await Runner.run(
+        triage,
+        input="user_message",
+        run_config=RunConfig(call_model_input_filter=capture_model_input),
+    )
+
+    assert result.final_output == "done"
+    assert len(captured_inputs) >= 2
+
+    second_input = captured_inputs[1]
+    orphaned_messages = [
+        item for item in second_input
+        if item.get("type") == "message" and item.get("role") == "assistant"
+    ]
+    assert not orphaned_messages, (
+        "Message item emitted after a handoff function_call (which consumed the only reasoning "
+        "item) must be dropped from input[] to prevent provider API rejection."
+    )
+
+
+@pytest.mark.asyncio
 async def test_resume_preserves_filtered_model_input_after_handoff():
     model = FakeModel()
 

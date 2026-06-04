@@ -37,6 +37,7 @@ __all__ = [
     "TOOL_CALL_SESSION_TITLE_KEY",
     "copy_input_items",
     "drop_orphan_function_calls",
+    "drop_orphaned_messages_after_consumed_reasoning",
     "ensure_input_item_format",
     "prepare_model_input_items",
     "run_item_to_input_item",
@@ -179,6 +180,50 @@ def _drop_reasoning_items_preceding_dropped_calls(
     return [entry for idx, entry in enumerate(items) if idx not in excluded]
 
 
+def drop_orphaned_messages_after_consumed_reasoning(
+    items: list[TResponseInputItem],
+) -> list[TResponseInputItem]:
+    """Drop message items that are orphaned because their preceding reasoning item was consumed
+    by a function call.
+
+    The Responses API requires every message item to be paired with its own reasoning item. When
+    an agent hands off via a function call, the reasoning item that immediately preceded the call
+    is considered consumed by that call. Any message item that follows (e.g. the handoff agent's
+    closing message) has no paired reasoning and causes a 400 from some providers:
+    ``Item 'msg_...' of type 'message' was provided without its required 'reasoning' item``.
+
+    This is the inverse of :func:`drop_orphan_function_calls`, which removes function calls
+    without outputs and their preceding reasoning items.
+    """
+    had_any_reasoning = False
+    fresh_reasoning = False  # True when the most-recent reasoning item is not yet consumed
+    result: list[TResponseInputItem] = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            result.append(item)
+            continue
+        item_type = item.get("type")
+
+        if item_type == "reasoning":
+            had_any_reasoning = True
+            fresh_reasoning = True
+            result.append(item)
+        elif item_type in ("function_call", "computer_call"):
+            if fresh_reasoning:
+                fresh_reasoning = False  # reasoning is consumed by this call
+            result.append(item)
+        elif item_type == "message":
+            if had_any_reasoning and not fresh_reasoning:
+                pass  # orphaned — no paired reasoning available; drop to prevent API rejection
+            else:
+                result.append(item)
+        else:
+            result.append(item)
+
+    return result
+
+
 def ensure_input_item_format(item: TResponseInputItem) -> TResponseInputItem:
     """Ensure a single item is normalized for model input."""
     coerced = _coerce_to_dict(item)
@@ -214,6 +259,7 @@ def prepare_model_input_items(
 
     normalized_generated_items = normalize_input_items_for_api(list(generated_items))
     filtered_generated_items = drop_orphan_function_calls(normalized_generated_items)
+    filtered_generated_items = drop_orphaned_messages_after_consumed_reasoning(filtered_generated_items)
     return normalized_caller_items + filtered_generated_items
 
 
