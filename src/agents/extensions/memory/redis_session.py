@@ -40,7 +40,7 @@ except ImportError as e:
     )
 
 from ...items import TResponseInputItem
-from ...memory.session import SessionABC
+from ...memory.session import SessionABC, is_session_input_item
 from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 
@@ -126,7 +126,10 @@ class RedisSession(SessionABC):
 
     async def _deserialize_item(self, item: str) -> TResponseInputItem:
         """Deserialize a JSON string to an item. Can be overridden by subclasses."""
-        return json.loads(item)  # type: ignore[no-any-return]  # json.loads returns Any but we know the structure
+        decoded = json.loads(item)
+        if not is_session_input_item(decoded):
+            raise TypeError("Decoded session item is not a response input item")
+        return decoded
 
     async def _get_next_id(self) -> int:
         """Get the next message ID using Redis INCR for atomic increment."""
@@ -178,7 +181,7 @@ class RedisSession(SessionABC):
                         msg_str = raw_msg  # Already a string
                     item = await self._deserialize_item(msg_str)
                     items.append(item)
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
                     # Skip corrupted messages
                     continue
 
@@ -242,7 +245,7 @@ class RedisSession(SessionABC):
                     else:
                         msg_str = raw_msg  # Already a string
                     return await self._deserialize_item(msg_str)
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
                     # Drop corrupted messages and keep looking for a valid item.
                     continue
 

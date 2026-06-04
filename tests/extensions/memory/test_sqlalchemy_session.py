@@ -211,6 +211,36 @@ async def test_pop_item_skips_corrupt_most_recent():
     assert await session.get_items() == []
 
 
+async def test_json_values_that_are_not_input_items_are_skipped():
+    """Rows whose JSON decodes to non-item values are skipped."""
+    session = SQLAlchemySession.from_url("non_item_json", url=DB_URL, create_tables=True)
+
+    valid_item: TResponseInputItem = {"role": "user", "content": "valid"}
+    await session.add_items([valid_item])
+
+    await session._ensure_tables()
+    async with session._session_factory() as sess:
+        async with sess.begin():
+            await sess.execute(
+                insert(session._messages),
+                [
+                    {
+                        "session_id": session.session_id,
+                        "message_data": json.dumps("not an input item"),
+                    },
+                    {
+                        "session_id": session.session_id,
+                        "message_data": json.dumps(["also", "not", "an", "item"]),
+                    },
+                    {"session_id": session.session_id, "message_data": json.dumps(123)},
+                ],
+            )
+
+    assert await session.get_items() == [valid_item]
+    assert await session.pop_item() == valid_item
+    assert await session.get_items() == []
+
+
 async def test_pop_item_returns_none_after_dropping_only_corrupt_rows():
     """pop_item removes corrupt rows and returns None when no valid items remain."""
     session = SQLAlchemySession.from_url("pop_only_corrupt", url=DB_URL, create_tables=True)

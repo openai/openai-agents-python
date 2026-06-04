@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from ..items import TResponseInputItem
-from .session import SessionABC
+from .session import SessionABC, is_session_input_item
 from .session_settings import SessionSettings, resolve_session_limit
 
 
@@ -245,7 +245,8 @@ class SQLiteSession(SessionABC):
                 for (message_data,) in rows:
                     try:
                         item = json.loads(message_data)
-                        items.append(item)
+                        if is_session_input_item(item):
+                            items.append(item)
                     except (json.JSONDecodeError, TypeError):
                         # Skip invalid JSON entries
                         continue
@@ -301,24 +302,26 @@ class SQLiteSession(SessionABC):
                     message_data = result[0]
                     try:
                         item = json.loads(message_data)
-                        return item
+                        if is_session_input_item(item):
+                            return item
                     except (json.JSONDecodeError, TypeError):
                         # Drop corrupted JSON entries and keep looking for a valid item.
-                        cursor = conn.execute(
-                            f"""
-                            DELETE FROM {self.messages_table}
-                            WHERE id = (
-                                SELECT id FROM {self.messages_table}
-                                WHERE session_id = ?
-                                ORDER BY id DESC
-                                LIMIT 1
-                            )
-                            RETURNING message_data
-                            """,
-                            (self.session_id,),
+                        pass
+                    cursor = conn.execute(
+                        f"""
+                        DELETE FROM {self.messages_table}
+                        WHERE id = (
+                            SELECT id FROM {self.messages_table}
+                            WHERE session_id = ?
+                            ORDER BY id DESC
+                            LIMIT 1
                         )
-                        result = cursor.fetchone()
-                        conn.commit()
+                        RETURNING message_data
+                        """,
+                        (self.session_id,),
+                    )
+                    result = cursor.fetchone()
+                    conn.commit()
 
                 return None
 

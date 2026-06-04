@@ -1,6 +1,7 @@
 """Tests for session memory functionality."""
 
 import asyncio
+import json
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -372,6 +373,58 @@ async def test_sqlite_session_pop_item_returns_none_after_dropping_only_corrupt_
             conn.commit()
 
         assert await session.pop_item() is None
+        assert await session.get_items() == []
+
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_get_items_skips_json_values_that_are_not_input_items():
+    """get_items skips JSON values that decode but are not response input items."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_get_non_item_json.db"
+        session = SQLiteSession("get_non_item_json", db_path)
+
+        valid_item: TResponseInputItem = {"role": "user", "content": "valid"}
+        await session.add_items([valid_item])
+
+        with session._locked_connection() as conn:
+            conn.executemany(
+                f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+                [
+                    (session.session_id, json.dumps("not an input item")),
+                    (session.session_id, json.dumps(["also", "not", "an", "input", "item"])),
+                    (session.session_id, json.dumps(123)),
+                ],
+            )
+            conn.commit()
+
+        assert await session.get_items() == [valid_item]
+
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_pop_item_skips_json_values_that_are_not_input_items():
+    """pop_item drops JSON values that decode but are not response input items."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_pop_non_item_json.db"
+        session = SQLiteSession("pop_non_item_json", db_path)
+
+        valid_item: TResponseInputItem = {"role": "user", "content": "valid"}
+        await session.add_items([valid_item])
+
+        with session._locked_connection() as conn:
+            conn.executemany(
+                f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+                [
+                    (session.session_id, json.dumps("not an input item")),
+                    (session.session_id, json.dumps(["also", "not", "an", "input", "item"])),
+                ],
+            )
+            conn.commit()
+
+        assert await session.pop_item() == valid_item
         assert await session.get_items() == []
 
         session.close()

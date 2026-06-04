@@ -5,12 +5,12 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import cast
 
 import aiosqlite
 
 from ...items import TResponseInputItem
 from ...memory import SessionABC
+from ...memory.session import is_session_input_item
 from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 
@@ -150,7 +150,8 @@ class AsyncSQLiteSession(SessionABC):
         for (message_data,) in rows:
             try:
                 item = json.loads(message_data)
-                items.append(item)
+                if is_session_input_item(item):
+                    items.append(item)
             except json.JSONDecodeError:
                 continue
 
@@ -220,24 +221,27 @@ class AsyncSQLiteSession(SessionABC):
             while result:
                 message_data = result[0]
                 try:
-                    return cast(TResponseInputItem, json.loads(message_data))
+                    item = json.loads(message_data)
+                    if is_session_input_item(item):
+                        return item
                 except (json.JSONDecodeError, TypeError):
-                    cursor = await conn.execute(
-                        f"""
-                        DELETE FROM {self.messages_table}
-                        WHERE id = (
-                            SELECT id FROM {self.messages_table}
-                            WHERE session_id = ?
-                            ORDER BY id DESC
-                            LIMIT 1
-                        )
-                        RETURNING message_data
-                        """,
-                        (self.session_id,),
+                    pass
+                cursor = await conn.execute(
+                    f"""
+                    DELETE FROM {self.messages_table}
+                    WHERE id = (
+                        SELECT id FROM {self.messages_table}
+                        WHERE session_id = ?
+                        ORDER BY id DESC
+                        LIMIT 1
                     )
-                    result = await cursor.fetchone()
-                    await cursor.close()
-                    await conn.commit()
+                    RETURNING message_data
+                    """,
+                    (self.session_id,),
+                )
+                result = await cursor.fetchone()
+                await cursor.close()
+                await conn.commit()
 
         return None
 

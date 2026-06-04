@@ -49,7 +49,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from ...items import TResponseInputItem
-from ...memory.session import SessionABC
+from ...memory.session import SessionABC, is_session_input_item
 from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 
@@ -249,7 +249,10 @@ class SQLAlchemySession(SessionABC):
 
     async def _deserialize_item(self, item: str) -> TResponseInputItem:
         """Deserialize a JSON string to an item. Can be overridden by subclasses."""
-        return json.loads(item)  # type: ignore[no-any-return]
+        decoded = json.loads(item)
+        if not is_session_input_item(decoded):
+            raise TypeError("Decoded session item is not a response input item")
+        return decoded
 
     # ------------------------------------------------------------------
     # Session protocol implementation
@@ -321,7 +324,7 @@ class SQLAlchemySession(SessionABC):
             for raw in rows:
                 try:
                     items.append(await self._deserialize_item(raw))
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, TypeError):
                     # Skip corrupted rows
                     continue
             return items

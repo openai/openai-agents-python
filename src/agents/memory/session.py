@@ -10,6 +10,11 @@ if TYPE_CHECKING:
     from .session_settings import SessionSettings
 
 
+def is_session_input_item(value: object) -> TypeGuard[TResponseInputItem]:
+    """Return whether a decoded session payload is shaped like a response input item."""
+    return isinstance(value, dict)
+
+
 @runtime_checkable
 class Session(Protocol):
     """Protocol for session implementations.

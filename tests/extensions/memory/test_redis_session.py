@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import cast
 
 import pytest
@@ -725,6 +726,8 @@ async def test_corrupted_data_handling():
         # Add invalid JSON directly using the typed Redis client
         await _safe_rpush(fake_redis, messages_key, "invalid json data")
         await _safe_rpush(fake_redis, messages_key, "{incomplete json")
+        await _safe_rpush(fake_redis, messages_key, json.dumps("not an input item"))
+        await _safe_rpush(fake_redis, messages_key, json.dumps(["also", "not", "an", "item"]))
 
         # get_items should skip corrupted data and return valid items
         items = await session.get_items()
@@ -740,7 +743,7 @@ async def test_corrupted_data_handling():
         assert items[0].get("content") == "valid message"
         assert items[1].get("content") == "valid after corruption"
 
-        # Test pop_item with corrupted data at the end.
+        # Test pop_item with corrupted and non-item JSON data at the end.
         await _safe_rpush(fake_redis, messages_key, "corrupted at end")
 
         # The corrupted item should be dropped and pop_item should keep looking

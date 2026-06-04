@@ -837,6 +837,25 @@ async def test_already_deserialized_messages(fake_dapr_client: FakeDaprClient):
     await session.close()
 
 
+async def test_non_item_json_values_are_skipped(fake_dapr_client: FakeDaprClient):
+    """JSON-valid values that are not response input items are skipped."""
+    session = await _create_test_session(fake_dapr_client, "non_item_json_test")
+
+    messages_list = [
+        {"role": "user", "content": "valid"},
+        "not an input item",
+        ["also", "not", "an", "item"],
+        json.dumps(123),
+    ]
+    fake_dapr_client._state[session._messages_key] = json.dumps(messages_list).encode("utf-8")
+
+    assert await session.get_items() == [{"role": "user", "content": "valid"}]
+    assert await session.pop_item() == {"role": "user", "content": "valid"}
+    assert await session.get_items() == []
+
+    await session.close()
+
+
 async def test_context_manager(fake_dapr_client: FakeDaprClient):
     """Test that DaprSession works as an async context manager."""
     # Test that the context manager enters and exits properly

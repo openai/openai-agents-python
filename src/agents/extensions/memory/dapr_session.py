@@ -44,7 +44,7 @@ except ImportError as e:
 
 from ...items import TResponseInputItem
 from ...logger import logger
-from ...memory.session import SessionABC
+from ...memory.session import SessionABC, is_session_input_item
 from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 # Type alias for consistency levels
@@ -180,7 +180,10 @@ class DaprSession(SessionABC):
 
     async def _deserialize_item(self, item: str) -> TResponseInputItem:
         """Deserialize a JSON string to an item. Can be overridden by subclasses."""
-        return json.loads(item)  # type: ignore[no-any-return]
+        decoded = json.loads(item)
+        if not is_session_input_item(decoded):
+            raise TypeError("Decoded session item is not a response input item")
+        return decoded
 
     def _decode_messages(self, data: bytes | None, *, strict: bool = False) -> list[Any]:
         if not data:
@@ -284,7 +287,8 @@ class DaprSession(SessionABC):
                         item = await self._deserialize_item(msg)
                     else:
                         item = msg
-                    items.append(item)
+                    if is_session_input_item(item):
+                        items.append(item)
                 except (json.JSONDecodeError, TypeError):
                     continue
             return items
@@ -381,8 +385,11 @@ class DaprSession(SessionABC):
                         raise
                 try:
                     if isinstance(last_item, str):
-                        return await self._deserialize_item(last_item)
-                    return last_item  # type: ignore[no-any-return]
+                        item = await self._deserialize_item(last_item)
+                    else:
+                        item = last_item
+                    if is_session_input_item(item):
+                        return item
                 except (json.JSONDecodeError, TypeError):
                     continue
 

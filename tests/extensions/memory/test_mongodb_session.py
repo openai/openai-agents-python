@@ -8,6 +8,7 @@ dependency-free while exercising the full session logic.
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 from collections import defaultdict
@@ -539,6 +540,31 @@ async def test_non_string_message_data_is_skipped(session: MongoDBSession) -> No
     assert items[0].get("content") == "valid"
 
 
+async def test_json_values_that_are_not_input_items_are_skipped(session: MongoDBSession) -> None:
+    """Documents whose JSON decodes to non-item values are silently skipped."""
+    await session.add_items([{"role": "user", "content": "valid"}])
+
+    for seq, payload in enumerate(
+        [
+            json.dumps("not an input item"),
+            json.dumps(["also", "not", "an", "item"]),
+            json.dumps(123),
+        ],
+        start=10,
+    ):
+        bad_doc = {
+            "_id": FakeObjectId(),
+            "session_id": session.session_id,
+            "seq": seq,
+            "message_data": payload,
+        }
+        session._messages._docs[id(bad_doc["_id"])] = bad_doc
+
+    items = await session.get_items()
+    assert len(items) == 1
+    assert items[0].get("content") == "valid"
+
+
 async def test_pop_item_skips_corrupt_most_recent(session: MongoDBSession) -> None:
     """pop_item must skip a corrupt most-recent document and return the next valid one."""
     await session.add_items([{"role": "user", "content": "valid"}])
@@ -551,6 +577,13 @@ async def test_pop_item_skips_corrupt_most_recent(session: MongoDBSession) -> No
         "message_data": "not valid json {{{",
     }
     session._messages._docs[id(bad_doc["_id"])] = bad_doc
+    non_item_doc = {
+        "_id": FakeObjectId(),
+        "session_id": session.session_id,
+        "seq": 1000,
+        "message_data": json.dumps("not an input item"),
+    }
+    session._messages._docs[id(non_item_doc["_id"])] = non_item_doc
 
     popped = await session.pop_item()
     assert popped is not None

@@ -119,6 +119,56 @@ async def test_async_sqlite_session_pop_item_returns_none_after_dropping_only_co
         await session.close()
 
 
+async def test_async_sqlite_session_get_items_skips_json_values_that_are_not_input_items():
+    """get_items skips JSON values that decode but are not response input items."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "async_get_non_item_json.db"
+        session = AsyncSQLiteSession("async_get_non_item_json", db_path)
+
+        valid_item: TResponseInputItem = {"role": "user", "content": "valid"}
+        await session.add_items([valid_item])
+
+        conn = await session._get_connection()
+        await conn.executemany(
+            f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+            [
+                (session.session_id, json.dumps("not an input item")),
+                (session.session_id, json.dumps(["also", "not", "an", "input", "item"])),
+                (session.session_id, json.dumps(123)),
+            ],
+        )
+        await conn.commit()
+
+        assert await session.get_items() == [valid_item]
+
+        await session.close()
+
+
+async def test_async_sqlite_session_pop_item_skips_json_values_that_are_not_input_items():
+    """pop_item drops JSON values that decode but are not response input items."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "async_pop_non_item_json.db"
+        session = AsyncSQLiteSession("async_pop_non_item_json", db_path)
+
+        valid_item: TResponseInputItem = {"role": "user", "content": "valid"}
+        await session.add_items([valid_item])
+
+        conn = await session._get_connection()
+        await conn.executemany(
+            f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
+            [
+                (session.session_id, json.dumps("not an input item")),
+                (session.session_id, json.dumps(["also", "not", "an", "input", "item"])),
+            ],
+        )
+        await conn.commit()
+
+        assert await session.pop_item() == valid_item
+        assert await session.get_items() == []
+
+        await session.close()
+
+
 async def test_async_sqlite_session_get_items_limit():
     """Test AsyncSQLiteSession get_items limit handling."""
     with tempfile.TemporaryDirectory() as temp_dir:
