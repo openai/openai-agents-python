@@ -298,6 +298,39 @@ async def test_handoff_span_is_sibling_not_child_of_initial_span():
 
 
 @pytest.mark.asyncio
+async def test_aenter_failure_finishes_span():
+    """If __aenter__ raises after the span is started, the span must still be finished.
+
+    Python does not call __aexit__ when __aenter__ raises, so the except BaseException
+    block in __aenter__ is the only cleanup path. Verify no unfinished span is leaked.
+    """
+
+    class _FailingConnectModel(_FakeRealtimeModel):
+        async def connect(self, options: Any) -> None:
+            raise RuntimeError("simulated connection failure")
+
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(
+        model=_FailingConnectModel(),
+        agent=agent,
+        context=None,
+        run_config={},
+    )
+
+    with trace("test"):
+        with pytest.raises(RuntimeError):
+            async with session:
+                pass
+
+    spans = SPAN_PROCESSOR_TESTING.get_ordered_spans()
+    agent_spans = [s for s in spans if isinstance(s.span_data, AgentSpanData)]
+    assert len(agent_spans) == 1, f"Expected 1 agent span, got {len(agent_spans)}"
+    assert agent_spans[0].ended_at is not None, (
+        "Agent span must be finished (not leaked) when __aenter__ raises."
+    )
+
+
+@pytest.mark.asyncio
 async def test_span_tool_metadata_reflects_model_config_override():
     """model_config.initial_model_settings tool override must be reflected in span metadata.
 

@@ -1326,10 +1326,10 @@ class RealtimeSession(RealtimeModelListener):
     def _make_agent_span(self, agent: RealtimeAgent) -> Span[AgentSpanData]:
         """Create a new agent span for the given agent, respecting tracing_disabled.
 
-        Both tool names and handoff names are intentionally omitted here. Callers must
-        update span_data.tools via get_all_tools() and span_data.handoffs via
-        _get_handoffs() asynchronously to reflect only what is actually sent to the model
-        (respects is_enabled on both tools and handoffs).
+        Tool and handoff names are intentionally omitted here. Callers must populate
+        span_data.tools and span_data.handoffs from the tuple returned by
+        _get_updated_model_settings_from_agent() so that metadata reflects what was
+        actually sent to the model (after is_enabled filtering and any model_config overrides).
         """
         disabled: bool = bool(self._run_config.get("tracing_disabled", False))
         return agent_span(name=agent.name, disabled=disabled)
