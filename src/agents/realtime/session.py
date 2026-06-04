@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import dataclasses
 import inspect
 import json
@@ -26,6 +27,7 @@ from ..run_context import RunContextWrapper, TContext
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, invoke_function_tool
 from ..tool_context import ToolContext
 from ..tracing import Span, agent_span
+from ..tracing.scope import Scope
 from ..tracing.span_data import AgentSpanData
 from ..util._approvals import evaluate_needs_approval_setting
 from .agent import RealtimeAgent
@@ -197,6 +199,9 @@ class RealtimeSession(RealtimeModelListener):
         self._tool_call_tasks: set[asyncio.Task[Any]] = set()
         self._async_tool_calls: bool = bool(self._run_config.get("async_tool_calls", True))
         self._current_agent_span: Span[AgentSpanData] | None = None
+        # Context-var token from the span created in __aenter__. Tracked here so _cleanup can
+        # reset it even if a handoff already called finish() on that span in a background task.
+        self._initial_span_token: contextvars.Token[Any] | None = None
 
     @property
     def model(self) -> RealtimeModel:
@@ -207,38 +212,53 @@ class RealtimeSession(RealtimeModelListener):
         """Start the session by connecting to the model. After this, you will be able to stream
         events from the model and send messages and audio to the model.
         """
-        # Start an agent span for the initial agent.
+        # Start an agent span for the initial agent. Use mark_as_current=False and manage
+        # the context-var token ourselves so _cleanup can reset it even when a handoff
+        # already called finish() on this span from a background task.
         self._current_agent_span = self._make_agent_span(self._current_agent)
-        self._current_agent_span.start(mark_as_current=True)
+        self._current_agent_span.start(mark_as_current=False)
+        self._initial_span_token = Scope.set_current_span(self._current_agent_span)
 
-        # Add ourselves as a listener
-        self._model.add_listener(self)
+        try:
+            # Add ourselves as a listener
+            self._model.add_listener(self)
 
-        model_config = self._model_config.copy()
-        model_config["initial_model_settings"] = await self._get_updated_model_settings_from_agent(
-            starting_settings=self._model_config.get("initial_model_settings", None),
-            agent=self._current_agent,
-        )
-
-        # Update span with the resolved tool list (includes MCP tools and respects is_enabled).
-        if self._current_agent_span is not None:
-            resolved_tools = await self._current_agent.get_all_tools(self._context_wrapper)
-            self._current_agent_span.span_data.tools = [
-                n for t in resolved_tools if (n := get_tool_trace_name_for_tool(t)) is not None
-            ] or None
-
-        # Connect to the model
-        await self._model.connect(model_config)
-
-        # Emit initial history update
-        await self._put_event(
-            RealtimeHistoryUpdated(
-                history=self._history,
-                info=self._event_info,
+            model_config = self._model_config.copy()
+            model_config[
+                "initial_model_settings"
+            ] = await self._get_updated_model_settings_from_agent(
+                starting_settings=self._model_config.get("initial_model_settings", None),
+                agent=self._current_agent,
             )
-        )
 
-        return self
+            # Update span with the resolved tool list (includes MCP tools and respects is_enabled).
+            if self._current_agent_span is not None:
+                resolved_tools = await self._current_agent.get_all_tools(self._context_wrapper)
+                self._current_agent_span.span_data.tools = [
+                    n for t in resolved_tools if (n := get_tool_trace_name_for_tool(t)) is not None
+                ] or None
+
+            # Connect to the model
+            await self._model.connect(model_config)
+
+            # Emit initial history update
+            await self._put_event(
+                RealtimeHistoryUpdated(
+                    history=self._history,
+                    info=self._event_info,
+                )
+            )
+
+            return self
+        except BaseException:
+            # __aexit__ is not called when __aenter__ raises, so clean up the span here.
+            if self._current_agent_span is not None:
+                self._current_agent_span.finish(reset_current=False)
+                self._current_agent_span = None
+            if self._initial_span_token is not None:
+                Scope.reset_current_span(self._initial_span_token)
+                self._initial_span_token = None
+            raise
 
     async def enter(self) -> RealtimeSession:
         """Enter the async context manager. We strongly recommend using the async context manager
@@ -1271,13 +1291,18 @@ class RealtimeSession(RealtimeModelListener):
             self._wake_event_iterators()
             return
 
-        # Finish the active agent span. Use reset_current=False because _cleanup may be called
-        # from a different asyncio context than the one that started the span (e.g. after a
-        # handoff that ran in a background task), and resetting a token across contexts raises
-        # ValueError.
+        # Finish the active agent span. Use reset_current=False because, after a handoff,
+        # the current span was started in a background task (mark_as_current=False) and has
+        # no token to reset. The context-var token for the *initial* span (created in
+        # __aenter__) is reset separately below.
         if self._current_agent_span is not None:
             self._current_agent_span.finish(reset_current=False)
             self._current_agent_span = None
+        # Reset the context-var token that __aenter__ stored. _cleanup is always called from
+        # __aexit__ (same task context as __aenter__), so this reset is always safe here.
+        if self._initial_span_token is not None:
+            Scope.reset_current_span(self._initial_span_token)
+            self._initial_span_token = None
 
         # Cancel and cleanup guardrail tasks
         self._cleanup_guardrail_tasks()
