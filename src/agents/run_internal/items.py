@@ -227,12 +227,11 @@ def drop_orphaned_messages_after_consumed_reasoning(
             consumed_by_call = False
             result.append(item)
         elif item_type == "message":
-            if consumed_by_call:
-                # Orphaned: reasoning was consumed by the preceding function_call and no
-                # function_call_output has reset the flag yet. Drop and reset.
-                consumed_by_call = False
-            else:
+            if not consumed_by_call:
                 result.append(item)
+            # else: orphaned — reasoning consumed by the preceding call; drop without resetting
+            # so that any further messages in the same turn are also dropped until a
+            # call-output item resets consumed_by_call.
         else:
             result.append(item)
 

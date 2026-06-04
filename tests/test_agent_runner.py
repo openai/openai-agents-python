@@ -405,6 +405,30 @@ def test_normalize_resumed_input_drops_orphaned_message_after_consumed_reasoning
     assert not message_items, "Orphaned assistant message must be dropped by normalize_resumed_input"
 
 
+def test_normalize_resumed_input_drops_multiple_orphaned_messages_in_same_turn():
+    """All orphaned messages before the call output must be dropped, not just the first one."""
+    raw_input: list[TResponseInputItem] = [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_1", "summary": []}),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call", "call_id": "fc_1", "name": "transfer_to_x", "arguments": "{}"},
+        ),
+        cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "msg one"}),
+        cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "msg two"}),
+        cast(TResponseInputItem, {"type": "function_call_output", "call_id": "fc_1", "output": "ok"}),
+    ]
+
+    normalized = normalize_resumed_input(raw_input)
+    assert isinstance(normalized, list)
+    assistant_messages = [
+        item for item in normalized
+        if isinstance(item, dict) and item.get("type") == "message" and item.get("role") == "assistant"
+    ]
+    assert not assistant_messages, (
+        "All orphaned assistant messages before the call output must be dropped, not just the first"
+    )
+
+
 @pytest.mark.asyncio
 async def test_server_conversation_tracker_drops_orphaned_message_after_consumed_reasoning():
     """The OAI server-conversation path must strip orphaned messages via Runner.run end-to-end."""
