@@ -665,7 +665,7 @@ class MCPUtil:
 
         # If structured content is requested and available, use it exclusively
         tool_output: ToolOutput
-        if server.use_structured_content and result.structuredContent:
+        if server.use_structured_content and result.structuredContent is not None:
             tool_output = json.dumps(result.structuredContent)
         else:
             tool_output_list: list[ToolOutputItem] = []
