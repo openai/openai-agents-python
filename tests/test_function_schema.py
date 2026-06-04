@@ -138,8 +138,7 @@ def test_varargs_function():
 def test_function_schema_supports_pydantic_reserved_param_names(param_name: str) -> None:
     namespace: dict[str, Any] = {}
     exec(
-        f"def reserved_name_tool({param_name}: str) -> str:\n"
-        f"    return {param_name}\n",
+        f"def reserved_name_tool({param_name}: str) -> str:\n    return {param_name}\n",
         namespace,
     )
     func = namespace["reserved_name_tool"]
