@@ -365,3 +365,38 @@ async def test_span_tool_metadata_reflects_model_config_override():
         f"model_config tool override must clear tools from span, "
         f"got: {agent_spans[0].span_data.tools}"
     )
+
+
+@pytest.mark.asyncio
+async def test_update_agent_finishes_old_span_and_starts_new_one():
+    """update_agent() must finish the outgoing span and emit a new span for the incoming agent.
+
+    Convention: update_agent() is the public API equivalent of a handoff. It must mirror
+    the handoff path: finish the current agent span, then create and start a new one for
+    the incoming agent. Without this, activity after the switch is attributed to the wrong
+    agent and no span is emitted for the new agent.
+    """
+    original = RealtimeAgent(name="original_agent")
+    replacement = RealtimeAgent(name="replacement_agent")
+    model = _FakeRealtimeModel()
+    session = _make_session(original, model)
+
+    with trace("test"):
+        async with session:
+            await session.update_agent(replacement)
+
+    spans = SPAN_PROCESSOR_TESTING.get_ordered_spans()
+    agent_spans = [s for s in spans if isinstance(s.span_data, AgentSpanData)]
+    assert len(agent_spans) == 2, (
+        f"Expected 2 agent spans (original + replacement), got {len(agent_spans)}"
+    )
+
+    names = {s.span_data.name for s in agent_spans}
+    assert names == {"original_agent", "replacement_agent"}, (
+        f"Expected spans for both agents, got: {names}"
+    )
+
+    original_span = next(s for s in agent_spans if s.span_data.name == "original_agent")
+    assert original_span.ended_at is not None, (
+        "Original agent span must be finished after update_agent()"
+    )

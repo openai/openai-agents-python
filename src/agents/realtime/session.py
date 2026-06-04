@@ -315,12 +315,30 @@ class RealtimeSession(RealtimeModelListener):
 
     async def update_agent(self, agent: RealtimeAgent) -> None:
         """Update the active agent for this session and apply its settings to the model."""
-        self._current_agent = agent
+        # Finish the outgoing agent span before switching agents, mirroring the handoff path.
+        if self._current_agent_span is not None:
+            self._current_agent_span.finish(reset_current=False)
 
-        updated_settings, _, _ = await self._get_updated_model_settings_from_agent(
+        self._current_agent = agent
+        self._current_agent_span = self._make_agent_span(self._current_agent)
+        self._current_agent_span.start(mark_as_current=False)
+
+        (
+            updated_settings,
+            resolved_tools,
+            enabled_handoffs,
+        ) = await self._get_updated_model_settings_from_agent(
             starting_settings=None,
             agent=self._current_agent,
         )
+
+        if not isinstance(self._current_agent_span, NoOpSpan):
+            self._current_agent_span.span_data.tools = [
+                n for t in resolved_tools if (n := get_tool_trace_name_for_tool(t)) is not None
+            ] or None
+            self._current_agent_span.span_data.handoffs = [
+                h.agent_name for h in enabled_handoffs
+            ] or None
 
         await self._model.send_event(
             RealtimeModelSendSessionUpdate(session_settings=updated_settings)
