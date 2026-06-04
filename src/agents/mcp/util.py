@@ -592,10 +592,11 @@ class MCPUtil:
             error_message = f"Invalid JSON input for tool {tool_name_for_display}"
             if _debug.DONT_LOG_TOOL_DATA:
                 logger.debug(error_message)
+                raise ModelBehaviorError(error_message) from None
             else:
                 error_message = f"{error_message}: {input_json}"
                 logger.debug(error_message)
-            raise ModelBehaviorError(error_message) from json_decode_error
+                raise ModelBehaviorError(error_message) from json_decode_error
 
         if not isinstance(json_data, dict):
             raise ModelBehaviorError(
