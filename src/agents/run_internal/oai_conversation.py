@@ -502,8 +502,8 @@ class OpenAIServerConversationTracker:
                 normalized_generated_items, prepared_generated_items, strict=False
             )
         }
-        filtered_generated_items = drop_orphan_function_calls(normalized_generated_items)
-        filtered_generated_items = drop_orphaned_messages_after_consumed_reasoning(filtered_generated_items)
+        filtered_generated_items = drop_orphaned_messages_after_consumed_reasoning(normalized_generated_items)
+        filtered_generated_items = drop_orphan_function_calls(filtered_generated_items)
         for item in filtered_generated_items:
             prepared_source_item = normalized_generated_sources.get(id(item))
             if prepared_source_item is not None:

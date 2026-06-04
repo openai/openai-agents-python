@@ -177,11 +177,11 @@ async def prepare_input_with_session(
             prune_history_indexes,
         )
     prepared_as_inputs = [ensure_input_item_format(item) for item in prepared_items_raw]
+    filtered = drop_orphaned_messages_after_consumed_reasoning(prepared_as_inputs)
     filtered = drop_orphan_function_calls(
-        prepared_as_inputs,
+        filtered,
         pruning_indexes=prune_history_indexes,
     )
-    filtered = drop_orphaned_messages_after_consumed_reasoning(filtered)
     normalized = normalize_input_items_for_api(filtered)
     deduplicated = deduplicate_input_items_preferring_latest(normalized)
 

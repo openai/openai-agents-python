@@ -429,6 +429,34 @@ def test_normalize_resumed_input_drops_multiple_orphaned_messages_in_same_turn()
     )
 
 
+def test_normalize_resumed_input_drops_orphaned_message_when_no_call_output():
+    """Orphaned message must be dropped even when the function_call has no matching output.
+
+    drop_orphan_function_calls() would remove the [reasoning, function_call] pair before
+    message-pruning runs if the order were reversed, leaving the orphaned message undetected.
+    Running message-pruning first ensures the message is dropped while the reasoning context
+    is still present, then drop_orphan_function_calls() cleans up the call pair.
+    """
+    raw_input: list[TResponseInputItem] = [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_1", "summary": []}),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call", "call_id": "fc_1", "name": "transfer_to_x", "arguments": "{}"},
+        ),
+        # no function_call_output — orphaned call AND orphaned message
+        cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "Transferring now."},
+        ),
+    ]
+
+    normalized = normalize_resumed_input(raw_input)
+    assert isinstance(normalized, list)
+    assert normalized == [], (
+        "Both the orphaned message and the call-without-output (+ its reasoning) must be dropped"
+    )
+
+
 @pytest.mark.asyncio
 async def test_server_conversation_tracker_drops_orphaned_message_after_consumed_reasoning():
     """The OAI server-conversation path must strip orphaned messages via Runner.run end-to-end."""

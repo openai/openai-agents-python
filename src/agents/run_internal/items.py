@@ -272,8 +272,8 @@ def prepare_model_input_items(
         return normalized_caller_items
 
     normalized_generated_items = normalize_input_items_for_api(list(generated_items))
-    filtered_generated_items = drop_orphan_function_calls(normalized_generated_items)
-    filtered_generated_items = drop_orphaned_messages_after_consumed_reasoning(filtered_generated_items)
+    filtered_generated_items = drop_orphaned_messages_after_consumed_reasoning(normalized_generated_items)
+    filtered_generated_items = drop_orphan_function_calls(filtered_generated_items)
     return normalized_caller_items + filtered_generated_items
 
 
@@ -283,8 +283,8 @@ def normalize_resumed_input(
     """Normalize resumed list inputs and drop orphan tool calls."""
     if isinstance(raw_input, list):
         normalized = normalize_input_items_for_api(raw_input)
-        filtered = drop_orphan_function_calls(normalized)
-        return drop_orphaned_messages_after_consumed_reasoning(filtered)
+        filtered = drop_orphaned_messages_after_consumed_reasoning(normalized)
+        return drop_orphan_function_calls(filtered)
     return raw_input
 
 
