@@ -2533,10 +2533,11 @@ class TestDeserializeHelpers:
 
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         state = make_state(root, context=context, original_input="route", max_turns=2)
+        tool_call = cast(ResponseFunctionToolCall, get_handoff_tool_call(first))
         state._last_processed_response = make_processed_response(
             handoffs=[
                 ToolRunHandoff(
-                    tool_call=get_handoff_tool_call(first),
+                    tool_call=tool_call,
                     handoff=first_handoff,
                 )
             ]
