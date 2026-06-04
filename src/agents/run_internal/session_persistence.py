@@ -29,6 +29,7 @@ from .items import (
     copy_input_items,
     deduplicate_input_items_preferring_latest,
     drop_orphan_function_calls,
+    drop_orphaned_messages_after_consumed_reasoning,
     ensure_input_item_format,
     fingerprint_input_item,
     normalize_input_items_for_api,
@@ -180,6 +181,7 @@ async def prepare_input_with_session(
         prepared_as_inputs,
         pruning_indexes=prune_history_indexes,
     )
+    filtered = drop_orphaned_messages_after_consumed_reasoning(filtered)
     normalized = normalize_input_items_for_api(filtered)
     deduplicated = deduplicate_input_items_preferring_latest(normalized)
 

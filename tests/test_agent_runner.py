@@ -1126,6 +1126,71 @@ async def test_handoff_without_trailing_message_keeps_delegate_response() -> Non
 
 
 @pytest.mark.asyncio
+async def test_session_history_drops_orphaned_message_on_next_run() -> None:
+    """
+    save_result_to_session() persists raw run items including any orphaned trailing message.
+    On the next Runner.run(..., session=session) the history is rebuilt via
+    prepare_input_with_session(), which must apply drop_orphaned_messages_after_consumed_reasoning()
+    so the re-sent history does not contain the orphaned message that would cause a provider 400.
+    """
+    model = FakeModel()
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+    session = SimpleListSession()
+
+    # First run: triage reasons, hands off, and emits an orphaned trailing message.
+    model.add_multiple_turn_outputs(
+        [
+            [
+                ResponseReasoningItem(
+                    id="rs_111",
+                    type="reasoning",
+                    summary=[Summary(text="Thinking about handoff.", type="summary_text")],
+                ),
+                get_handoff_tool_call(delegate),
+                get_text_message("I'm transferring you now."),  # orphaned
+            ],
+            [get_text_message("done")],
+        ]
+    )
+    first_result = await Runner.run(triage, input="user_message", session=session)
+    assert first_result.final_output == "done"
+
+    # Second run: history is loaded from session. Capture what the model receives.
+    model.set_next_output([get_text_message("second done")])
+    captured_inputs: list[list[dict[str, Any]]] = []
+
+    def capture(data):
+        if isinstance(data.model_data.input, list):
+            captured_inputs.append(
+                [item for item in data.model_data.input if isinstance(item, dict)]
+            )
+        return data.model_data
+
+    second_result = await Runner.run(
+        delegate,
+        input="follow-up",
+        session=session,
+        run_config=RunConfig(call_model_input_filter=capture),
+    )
+    assert second_result.final_output == "second done"
+
+    # The session-reconstructed history must not contain the orphaned trailing message.
+    assert captured_inputs, "call_model_input_filter must have fired"
+    first_captured = captured_inputs[0]
+    orphaned = [
+        item for item in first_captured
+        if item.get("type") == "message"
+        and item.get("role") == "assistant"
+        and "transferring" in str(item.get("content", ""))
+    ]
+    assert not orphaned, (
+        "Orphaned message saved to session must be filtered out when history is "
+        "replayed on the next run, to prevent provider 400 errors."
+    )
+
+
+@pytest.mark.asyncio
 async def test_resume_preserves_filtered_model_input_after_handoff():
     model = FakeModel()
 
