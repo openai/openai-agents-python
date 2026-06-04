@@ -29,6 +29,7 @@ _TOOL_CALL_TO_OUTPUT_TYPE: dict[str, str] = {
     "local_shell_call": "local_shell_call_output",
     "tool_search_call": "tool_search_output",
 }
+_CALL_OUTPUT_TYPES: frozenset[str] = frozenset(_TOOL_CALL_TO_OUTPUT_TYPE.values())
 
 __all__ = [
     "ReasoningItemIdPolicy",
@@ -217,11 +218,12 @@ def drop_orphaned_messages_after_consumed_reasoning(
                 fresh_reasoning = False
                 consumed_by_call = True  # reasoning is now consumed by this call
             result.append(item)
-        elif item_type == "function_call_output":
-            # The SDK appends the HandoffOutputItem after all model output items, so any
-            # orphaned message will already have been dropped by this point. Reset here so
-            # that turns with no trailing message do not bleed consumed_by_call into the
-            # next agent's responses.
+        elif item_type in _CALL_OUTPUT_TYPES:
+            # Any call output (function_call_output, computer_call_output, etc.) marks the
+            # end of its call sequence. The SDK appends call outputs after all model output
+            # items, so any orphaned message has already been dropped by this point. Reset
+            # here so that turns with no trailing message do not bleed consumed_by_call into
+            # the next agent's responses regardless of the call type.
             consumed_by_call = False
             result.append(item)
         elif item_type == "message":
