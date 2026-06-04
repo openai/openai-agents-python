@@ -221,6 +221,48 @@ async def test_disabled_handoff_excluded_from_span_metadata():
 
 
 @pytest.mark.asyncio
+async def test_cleanup_from_different_task_does_not_raise():
+    """_cleanup called from a task other than __aenter__'s task must not raise ValueError.
+
+    close() is public and __aiter__ also calls _cleanup when _stored_exception is set.
+    Both can run in a different asyncio task than __aenter__. Resetting a contextvars
+    token from a different task raises ValueError — this must be caught gracefully.
+    """
+    agent = RealtimeAgent(name="agent")
+    session = _make_session(agent)
+
+    with trace("test"):
+        await session.enter()  # open the session in this (main) task
+
+        # Call _cleanup from a background task — it gets a copied context, so the
+        # token stored by __aenter__ in the main task cannot be reset here; must not raise.
+        async def close_from_other_task() -> None:
+            await session._cleanup()
+
+        await asyncio.create_task(close_from_other_task())
+
+    assert session._closed is True
+
+
+@pytest.mark.asyncio
+async def test_span_context_clean_after_close_called_directly():
+    """Span context must be reset even when close() is called directly (no async with).
+
+    Method: enter via session.enter(), call close() directly, verify Scope is clean.
+    """
+    span_before = Scope.get_current_span()
+    agent = RealtimeAgent(name="agent")
+    session = _make_session(agent)
+
+    with trace("test"):
+        await session.enter()
+        await session.close()
+
+    span_after = Scope.get_current_span()
+    assert span_before is span_after, "Calling close() directly must still reset the span context."
+
+
+@pytest.mark.asyncio
 async def test_handoff_span_is_sibling_not_child_of_initial_span():
     """After a handoff the new agent span must be a sibling of the first, not its child.
 

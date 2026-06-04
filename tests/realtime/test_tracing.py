@@ -257,7 +257,7 @@ class TestRealtimeTracingIntegration:
         )
 
         # Test the _get_updated_model_settings_from_agent method directly
-        model_settings = await session._get_updated_model_settings_from_agent(
+        model_settings, _, _ = await session._get_updated_model_settings_from_agent(
             starting_settings=None, agent=agent
         )
 

@@ -2627,7 +2627,7 @@ class TestModelSettingsPrecedence:
             m.setattr("agents.realtime.session.RealtimeSession._get_handoffs", mock_get_handoffs)
 
             # Test the method directly
-            model_settings = await session._get_updated_model_settings_from_agent(
+            model_settings, _, _ = await session._get_updated_model_settings_from_agent(
                 starting_settings=model_config_initial_settings, agent=agent
             )
 
@@ -2677,7 +2677,7 @@ class TestModelSettingsPrecedence:
         with pytest.MonkeyPatch().context() as m:
             m.setattr("agents.realtime.session.RealtimeSession._get_handoffs", mock_get_handoffs)
 
-            model_settings = await session._get_updated_model_settings_from_agent(
+            model_settings, _, _ = await session._get_updated_model_settings_from_agent(
                 starting_settings=None,  # No initial settings
                 agent=agent,
             )
@@ -2723,7 +2723,7 @@ class TestModelSettingsPrecedence:
         with pytest.MonkeyPatch().context() as m:
             m.setattr("agents.realtime.session.RealtimeSession._get_handoffs", mock_get_handoffs)
 
-            model_settings = await session._get_updated_model_settings_from_agent(
+            model_settings, _, _ = await session._get_updated_model_settings_from_agent(
                 starting_settings=model_config_settings, agent=agent
             )
 
@@ -2770,7 +2770,7 @@ class TestModelSettingsPrecedence:
                 mock_get_handoffs,
             )
 
-            model_settings = await session._get_updated_model_settings_from_agent(
+            model_settings, _, _ = await session._get_updated_model_settings_from_agent(
                 starting_settings=None,
                 agent=agent,
             )
