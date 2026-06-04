@@ -14,6 +14,7 @@ from .._tool_identity import (
     FunctionToolLookupKey,
     get_function_tool_lookup_key_for_tool,
     get_function_tool_namespace,
+    get_tool_trace_name_for_tool,
 )
 from ..agent import Agent
 from ..exceptions import UserError
@@ -218,6 +219,13 @@ class RealtimeSession(RealtimeModelListener):
             starting_settings=self._model_config.get("initial_model_settings", None),
             agent=self._current_agent,
         )
+
+        # Update span with the resolved tool list (includes MCP tools and respects is_enabled).
+        if self._current_agent_span is not None:
+            resolved_tools = await self._current_agent.get_all_tools(self._context_wrapper)
+            self._current_agent_span.span_data.tools = [
+                n for t in resolved_tools if (n := get_tool_trace_name_for_tool(t)) is not None
+            ] or None
 
         # Connect to the model
         await self._model.connect(model_config)
@@ -822,21 +830,35 @@ class RealtimeSession(RealtimeModelListener):
                 # Store previous agent for event
                 previous_agent = agent
 
-                # Finish the span for the outgoing agent and start one for the new agent.
+                # Finish the span for the outgoing agent. Use reset_current=False because this
+                # runs inside an asyncio background task; resetting a token from a different
+                # context raises ValueError.
                 if self._current_agent_span is not None:
-                    self._current_agent_span.finish(reset_current=True)
+                    self._current_agent_span.finish(reset_current=False)
 
                 # Update current agent
                 self._current_agent = result
 
+                # Start a span for the new agent. Use mark_as_current=False for the same
+                # cross-context reason: _cleanup runs in the main task and cannot reset a
+                # token created here.
                 self._current_agent_span = self._make_agent_span(self._current_agent)
-                self._current_agent_span.start(mark_as_current=True)
+                self._current_agent_span.start(mark_as_current=False)
 
                 # Get updated model settings from new agent
                 updated_settings = await self._get_updated_model_settings_from_agent(
                     starting_settings=None,
                     agent=self._current_agent,
                 )
+
+                # Update span with the resolved tool list for the new agent.
+                if self._current_agent_span is not None:
+                    resolved_tools = await self._current_agent.get_all_tools(self._context_wrapper)
+                    self._current_agent_span.span_data.tools = [
+                        n
+                        for t in resolved_tools
+                        if (n := get_tool_trace_name_for_tool(t)) is not None
+                    ] or None
 
                 # Send handoff event
                 await self._put_event(
@@ -1249,9 +1271,12 @@ class RealtimeSession(RealtimeModelListener):
             self._wake_event_iterators()
             return
 
-        # Finish the active agent span.
+        # Finish the active agent span. Use reset_current=False because _cleanup may be called
+        # from a different asyncio context than the one that started the span (e.g. after a
+        # handoff that ran in a background task), and resetting a token across contexts raises
+        # ValueError.
         if self._current_agent_span is not None:
-            self._current_agent_span.finish(reset_current=True)
+            self._current_agent_span.finish(reset_current=False)
             self._current_agent_span = None
 
         # Cancel and cleanup guardrail tasks
@@ -1273,14 +1298,16 @@ class RealtimeSession(RealtimeModelListener):
         self._wake_event_iterators()
 
     def _make_agent_span(self, agent: RealtimeAgent) -> Span[AgentSpanData]:
-        """Create a new agent span for the given agent, respecting tracing_disabled."""
+        """Create a new agent span for the given agent, respecting tracing_disabled.
+
+        Tool names are intentionally omitted here; callers must update span_data.tools
+        asynchronously via get_all_tools() to include MCP tools and respect is_enabled.
+        """
         disabled: bool = bool(self._run_config.get("tracing_disabled", False))
         handoff_names = [h.agent_name if isinstance(h, Handoff) else h.name for h in agent.handoffs]
-        tool_names = [t.name for t in agent.tools if isinstance(t, FunctionTool)]
         return agent_span(
             name=agent.name,
             handoffs=handoff_names or None,
-            tools=tool_names or None,
             disabled=disabled,
         )
 
