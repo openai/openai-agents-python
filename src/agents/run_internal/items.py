@@ -284,7 +284,8 @@ def normalize_resumed_input(
     """Normalize resumed list inputs and drop orphan tool calls."""
     if isinstance(raw_input, list):
         normalized = normalize_input_items_for_api(raw_input)
-        return drop_orphan_function_calls(normalized)
+        filtered = drop_orphan_function_calls(normalized)
+        return drop_orphaned_messages_after_consumed_reasoning(filtered)
     return raw_input
 
 

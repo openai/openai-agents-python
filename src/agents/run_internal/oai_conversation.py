@@ -21,6 +21,7 @@ from ..models.fake_id import FAKE_RESPONSES_ID
 from .items import (
     ReasoningItemIdPolicy,
     drop_orphan_function_calls,
+    drop_orphaned_messages_after_consumed_reasoning,
     fingerprint_input_item,
     normalize_input_items_for_api,
     prepare_model_input_items,
@@ -502,6 +503,7 @@ class OpenAIServerConversationTracker:
             )
         }
         filtered_generated_items = drop_orphan_function_calls(normalized_generated_items)
+        filtered_generated_items = drop_orphaned_messages_after_consumed_reasoning(filtered_generated_items)
         for item in filtered_generated_items:
             prepared_source_item = normalized_generated_sources.get(id(item))
             if prepared_source_item is not None:

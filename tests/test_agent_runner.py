@@ -376,6 +376,82 @@ def test_normalize_resumed_input_drops_orphan_tool_search_calls():
     assert "paired_search" in call_ids
 
 
+def test_normalize_resumed_input_drops_orphaned_message_after_consumed_reasoning():
+    """normalize_resumed_input must strip messages orphaned by a consumed reasoning item.
+
+    The SDK appends tool outputs (function_call_output) after all model-emitted items, so the
+    orphaned message appears between the function_call and its output in the flat list.
+    """
+    raw_input: list[TResponseInputItem] = [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_1", "summary": []}),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call", "call_id": "fc_1", "name": "transfer_to_x", "arguments": "{}"},
+        ),
+        # message comes before function_call_output — model emits it, SDK appends the output after
+        cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "I'm handing off now."},
+        ),
+        cast(TResponseInputItem, {"type": "function_call_output", "call_id": "fc_1", "output": "ok"}),
+    ]
+
+    normalized = normalize_resumed_input(raw_input)
+    assert isinstance(normalized, list)
+    message_items = [
+        item for item in normalized
+        if isinstance(item, dict) and item.get("type") == "message" and item.get("role") == "assistant"
+    ]
+    assert not message_items, "Orphaned assistant message must be dropped by normalize_resumed_input"
+
+
+@pytest.mark.asyncio
+async def test_server_conversation_tracker_drops_orphaned_message_after_consumed_reasoning():
+    """The OAI server-conversation path must strip orphaned messages via Runner.run end-to-end."""
+    model = FakeModel()
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                ResponseReasoningItem(
+                    id="rs_111",
+                    type="reasoning",
+                    summary=[Summary(text="Deciding to hand off.", type="summary_text")],
+                ),
+                get_handoff_tool_call(delegate),
+                get_text_message("Transferring now."),  # orphaned — no own reasoning
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    captured: list[list[dict[str, Any]]] = []
+
+    def capture(data):
+        if isinstance(data.model_data.input, list):
+            captured.append([item for item in data.model_data.input if isinstance(item, dict)])
+        return data.model_data
+
+    run_result = await Runner.run(
+        triage,
+        input="hello",
+        run_config=RunConfig(call_model_input_filter=capture),
+    )
+    assert run_result.final_output == "done"
+    assert len(captured) >= 2
+
+    second_input = captured[1]
+    orphaned = [
+        item for item in second_input
+        if item.get("type") == "message"
+        and item.get("role") == "assistant"
+        and "Transferring" in str(item.get("content", ""))
+    ]
+    assert not orphaned, "Orphaned assistant message must be absent from the second model call."
+
+
 def test_normalize_resumed_input_preserves_hosted_tool_search_pair_without_call_ids():
     raw_input: list[TResponseInputItem] = [
         cast(
