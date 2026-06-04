@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import dataclasses
 import inspect
 import json
@@ -27,7 +26,6 @@ from ..run_context import RunContextWrapper, TContext
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, invoke_function_tool
 from ..tool_context import ToolContext
 from ..tracing import Span, agent_span
-from ..tracing.scope import Scope
 from ..tracing.span_data import AgentSpanData
 from ..tracing.spans import NoOpSpan
 from ..util._approvals import evaluate_needs_approval_setting
@@ -200,9 +198,6 @@ class RealtimeSession(RealtimeModelListener):
         self._tool_call_tasks: set[asyncio.Task[Any]] = set()
         self._async_tool_calls: bool = bool(self._run_config.get("async_tool_calls", True))
         self._current_agent_span: Span[AgentSpanData] | None = None
-        # Context-var token from the span created in __aenter__. Tracked here so _cleanup can
-        # reset it even if a handoff already called finish() on that span in a background task.
-        self._initial_span_token: contextvars.Token[Any] | None = None
 
     @property
     def model(self) -> RealtimeModel:
@@ -213,16 +208,14 @@ class RealtimeSession(RealtimeModelListener):
         """Start the session by connecting to the model. After this, you will be able to stream
         events from the model and send messages and audio to the model.
         """
-        # Start an agent span for the initial agent. Use mark_as_current=False and manage
-        # the context-var token ourselves so _cleanup can reset it even when a handoff
-        # already called finish() on this span from a background task.
+        # Create the agent span. Do not install it as the current ContextVar span:
+        # asyncio tasks inherit a snapshot of their parent's context, so a bg task
+        # cannot update the main task's context var. Installing the span would leave a
+        # stale (finished) span as "current" after any handoff that runs in a bg task.
+        # Agent spans are emitted as children of the enclosing trace without being set
+        # as current, which is correct and avoids all cross-task ContextVar management.
         self._current_agent_span = self._make_agent_span(self._current_agent)
         self._current_agent_span.start(mark_as_current=False)
-        # Only install the span as current when it is a real span. Setting a NoOpSpan as
-        # current poisons the context: provider.create_span() returns NoOpSpan for every
-        # child span when it detects a no-op parent (provider.py _is_noop_span check).
-        if not isinstance(self._current_agent_span, NoOpSpan):
-            self._initial_span_token = Scope.set_current_span(self._current_agent_span)
 
         try:
             # Add ourselves as a listener
@@ -239,8 +232,9 @@ class RealtimeSession(RealtimeModelListener):
             )
             model_config["initial_model_settings"] = initial_settings
 
-            # Reuse the tools/handoffs already resolved above — avoids a second call to
-            # get_all_tools()/get_handoffs() and ensures span metadata matches the model.
+            # Reuse the resolved tools/handoffs returned above — avoids a second call and
+            # ensures span metadata matches what was actually sent to the model, including
+            # any overrides applied by starting_settings.
             if not isinstance(self._current_agent_span, NoOpSpan):
                 self._current_agent_span.span_data.tools = [
                     n for t in resolved_tools if (n := get_tool_trace_name_for_tool(t)) is not None
@@ -266,9 +260,6 @@ class RealtimeSession(RealtimeModelListener):
             if self._current_agent_span is not None:
                 self._current_agent_span.finish(reset_current=False)
                 self._current_agent_span = None
-            if self._initial_span_token is not None:
-                Scope.reset_current_span(self._initial_span_token)
-                self._initial_span_token = None
             raise
 
     async def enter(self) -> RealtimeSession:
@@ -280,14 +271,6 @@ class RealtimeSession(RealtimeModelListener):
 
     async def __aexit__(self, _exc_type: Any, _exc_val: Any, _exc_tb: Any) -> None:
         """End the session."""
-        # Reset the initial span token here. __aexit__ is always invoked in the same
-        # asyncio task as __aenter__, so this reset is unconditionally safe. We do it
-        # here rather than relying solely on _cleanup because _cleanup is also reachable
-        # from close() and __aiter__, which may run in different tasks and would raise
-        # ValueError on ContextVar.reset().
-        if self._initial_span_token is not None:
-            Scope.reset_current_span(self._initial_span_token)
-            self._initial_span_token = None
         await self.close()
 
     async def __aiter__(self) -> AsyncIterator[RealtimeSessionEvent]:
@@ -878,17 +861,12 @@ class RealtimeSession(RealtimeModelListener):
                 # Update current agent
                 self._current_agent = result
 
-                # Create the incoming agent span with a clear current-span context so that
-                # its parent is the trace root, not the finished outgoing agent span.
-                # The outgoing span is still "current" in this background task context
-                # (finish(reset_current=False) does not reset the context var), so we must
-                # temporarily clear it before calling _make_agent_span() / agent_span() —
-                # provider.create_span() reads Scope.get_current_span() at creation time to
-                # determine parent_id.
-                _handoff_clear_token = Scope.set_current_span(None)
+                # Create the incoming agent span. Because we never install agent spans as
+                # current (see __aenter__), this background task's context already holds the
+                # trace root as the current span — provider.create_span() will parent the new
+                # span to the trace root, making it a sibling of the outgoing agent span.
                 self._current_agent_span = self._make_agent_span(self._current_agent)
                 self._current_agent_span.start(mark_as_current=False)
-                Scope.reset_current_span(_handoff_clear_token)
 
                 # Get updated model settings from new agent; reuse resolved tools and
                 # handoffs for span metadata to avoid a redundant second call.
@@ -1326,17 +1304,6 @@ class RealtimeSession(RealtimeModelListener):
         if self._current_agent_span is not None:
             self._current_agent_span.finish(reset_current=False)
             self._current_agent_span = None
-        # Reset the initial span's context-var token. __aexit__ handles this
-        # unconditionally (it runs in the same task as __aenter__). This fallback
-        # handles direct close() calls from the same task; if close() or __aiter__
-        # triggers _cleanup from a different task the ValueError is caught and the
-        # token is left for __aexit__ to reset.
-        if self._initial_span_token is not None:
-            try:
-                Scope.reset_current_span(self._initial_span_token)
-            except ValueError:
-                pass  # Cross-task call; __aexit__ will reset from the correct task.
-            self._initial_span_token = None
 
         # Cancel and cleanup guardrail tasks
         self._cleanup_guardrail_tasks()
@@ -1371,12 +1338,12 @@ class RealtimeSession(RealtimeModelListener):
         self,
         starting_settings: RealtimeSessionModelSettings | None,
         agent: RealtimeAgent,
-    ) -> tuple[RealtimeSessionModelSettings, list[Any], list[Handoff[Any, RealtimeAgent[Any]]]]:
-        """Return (settings, resolved_tools, enabled_handoffs).
+    ) -> tuple[RealtimeSessionModelSettings, list[Any], list[Any]]:
+        """Return (settings, final_tools, final_handoffs).
 
-        resolved_tools and enabled_handoffs are captured before starting_settings overrides
-        so callers can use them for span metadata without re-invoking get_all_tools() or
-        _get_handoffs() a second time.
+        final_tools and final_handoffs reflect the values in the returned settings after
+        starting_settings overrides are applied. Callers must use these for span metadata
+        to ensure the span reports exactly what was sent to the model.
         """
         # Start with the merged base settings from run and model configuration.
         updated_settings = self._base_model_settings.copy()
@@ -1393,7 +1360,7 @@ class RealtimeSession(RealtimeModelListener):
         updated_settings["tools"] = tools or []
         updated_settings["handoffs"] = handoffs or []
 
-        # Apply starting settings (from model config) next
+        # Apply starting_settings (from model config) — may override tools and handoffs.
         if starting_settings:
             updated_settings.update(starting_settings)
 
@@ -1401,7 +1368,10 @@ class RealtimeSession(RealtimeModelListener):
         if disable_tracing:
             updated_settings["tracing"] = None
 
-        return updated_settings, list(tools or []), list(handoffs or [])
+        # Return the final tools/handoffs AFTER overrides so span metadata matches the model.
+        final_tools = list(updated_settings.get("tools") or [])
+        final_handoffs = list(updated_settings.get("handoffs") or [])
+        return updated_settings, final_tools, final_handoffs
 
     @classmethod
     async def _get_handoffs(

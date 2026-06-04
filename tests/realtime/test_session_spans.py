@@ -173,25 +173,22 @@ async def test_tracing_disabled_creates_no_agent_spans():
 
 @pytest.mark.asyncio
 async def test_no_active_trace_does_not_poison_span_context():
-    """Without an outer trace(), the session must not install a NoOpSpan as current.
+    """Without an outer trace(), the session must not alter the ambient span context.
 
-    Convention: provider returns NoOpSpan when no active trace exists. Installing
-    a NoOpSpan as current would make every span created afterward also a NoOpSpan
-    (provider._is_noop_span check). The session must skip Scope.set_current_span()
-    for NoOpSpans so ambient context is unchanged after the session closes.
+    Convention: RealtimeSession never installs agent spans as the ContextVar current span,
+    so the context is always unchanged before and after the session regardless of whether
+    a real trace exists.
     """
     span_before = Scope.get_current_span()
     agent = RealtimeAgent(name="agent")
     session = _make_session(agent)
 
-    # Enter/exit WITHOUT any enclosing trace — span will be a NoOpSpan.
+    # Enter/exit WITHOUT any enclosing trace.
     async with session:
         pass
 
     span_after = Scope.get_current_span()
-    assert span_before is span_after, (
-        "Session must not permanently alter the current span context when no active trace exists."
-    )
+    assert span_before is span_after, "Session must not permanently alter the current span context."
 
 
 @pytest.mark.asyncio
@@ -222,20 +219,17 @@ async def test_disabled_handoff_excluded_from_span_metadata():
 
 @pytest.mark.asyncio
 async def test_cleanup_from_different_task_does_not_raise():
-    """_cleanup called from a task other than __aenter__'s task must not raise ValueError.
+    """_cleanup called from a different asyncio task must not raise and must close the session.
 
     close() is public and __aiter__ also calls _cleanup when _stored_exception is set.
-    Both can run in a different asyncio task than __aenter__. Resetting a contextvars
-    token from a different task raises ValueError — this must be caught gracefully.
+    Both can run in a different asyncio task than __aenter__.
     """
     agent = RealtimeAgent(name="agent")
     session = _make_session(agent)
 
     with trace("test"):
-        await session.enter()  # open the session in this (main) task
+        await session.enter()
 
-        # Call _cleanup from a background task — it gets a copied context, so the
-        # token stored by __aenter__ in the main task cannot be reset here; must not raise.
         async def close_from_other_task() -> None:
             await session._cleanup()
 
@@ -245,10 +239,11 @@ async def test_cleanup_from_different_task_does_not_raise():
 
 
 @pytest.mark.asyncio
-async def test_span_context_clean_after_close_called_directly():
-    """Span context must be reset even when close() is called directly (no async with).
+async def test_span_context_unchanged_after_close_called_directly():
+    """Ambient span context must be unchanged whether exited via async with or close().
 
-    Method: enter via session.enter(), call close() directly, verify Scope is clean.
+    Convention: RealtimeSession never installs agent spans as the ContextVar current span,
+    so close() has no context cleanup to perform; state before and after is identical.
     """
     span_before = Scope.get_current_span()
     agent = RealtimeAgent(name="agent")
@@ -259,7 +254,7 @@ async def test_span_context_clean_after_close_called_directly():
         await session.close()
 
     span_after = Scope.get_current_span()
-    assert span_before is span_after, "Calling close() directly must still reset the span context."
+    assert span_before is span_after, "Calling close() directly must not alter the span context."
 
 
 @pytest.mark.asyncio
@@ -299,4 +294,41 @@ async def test_handoff_span_is_sibling_not_child_of_initial_span():
     assert specialist_span.parent_id != router_span.span_id, (
         "Specialist span must not be a child of the router span. "
         f"specialist.parent_id={specialist_span.parent_id}, router.span_id={router_span.span_id}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_span_tool_metadata_reflects_model_config_override():
+    """model_config.initial_model_settings tool override must be reflected in span metadata.
+
+    Convention: span metadata must match what was actually sent to the model. When
+    initial_model_settings overrides tools (e.g. to empty), the span must show the
+    override — not the agent's default tool list.
+    """
+    from agents.tool import function_tool
+
+    @function_tool
+    def my_tool() -> str:
+        """A test tool."""
+        return "ok"
+
+    agent = RealtimeAgent(name="tool_agent", tools=[my_tool])
+    # model_config overrides tools with an empty list, wiping the agent's tool.
+    session = RealtimeSession(
+        model=_FakeRealtimeModel(),
+        agent=agent,
+        context=None,
+        model_config={"initial_model_settings": {"tools": []}},
+        run_config={},
+    )
+
+    with trace("test"):
+        async with session:
+            pass
+
+    spans = SPAN_PROCESSOR_TESTING.get_ordered_spans()
+    agent_spans = [s for s in spans if isinstance(s.span_data, AgentSpanData)]
+    assert agent_spans[0].span_data.tools is None, (
+        f"model_config tool override must clear tools from span, "
+        f"got: {agent_spans[0].span_data.tools}"
     )
