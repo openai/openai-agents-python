@@ -29,6 +29,7 @@ from ..tool_context import ToolContext
 from ..tracing import Span, agent_span
 from ..tracing.scope import Scope
 from ..tracing.span_data import AgentSpanData
+from ..tracing.spans import NoOpSpan
 from ..util._approvals import evaluate_needs_approval_setting
 from .agent import RealtimeAgent
 from .config import RealtimeRunConfig, RealtimeSessionModelSettings, RealtimeUserInput
@@ -217,7 +218,11 @@ class RealtimeSession(RealtimeModelListener):
         # already called finish() on this span from a background task.
         self._current_agent_span = self._make_agent_span(self._current_agent)
         self._current_agent_span.start(mark_as_current=False)
-        self._initial_span_token = Scope.set_current_span(self._current_agent_span)
+        # Only install the span as current when it is a real span. Setting a NoOpSpan as
+        # current poisons the context: provider.create_span() returns NoOpSpan for every
+        # child span when it detects a no-op parent (provider.py _is_noop_span check).
+        if not isinstance(self._current_agent_span, NoOpSpan):
+            self._initial_span_token = Scope.set_current_span(self._current_agent_span)
 
         try:
             # Add ourselves as a listener
@@ -231,11 +236,18 @@ class RealtimeSession(RealtimeModelListener):
                 agent=self._current_agent,
             )
 
-            # Update span with the resolved tool list (includes MCP tools and respects is_enabled).
-            if self._current_agent_span is not None:
+            # Update span metadata: tools (respects is_enabled, includes MCP) and
+            # handoffs (filtered by _get_handoffs to exclude disabled ones).
+            if not isinstance(self._current_agent_span, NoOpSpan):
                 resolved_tools = await self._current_agent.get_all_tools(self._context_wrapper)
                 self._current_agent_span.span_data.tools = [
                     n for t in resolved_tools if (n := get_tool_trace_name_for_tool(t)) is not None
+                ] or None
+                enabled_handoffs = await self._get_handoffs(
+                    self._current_agent, self._context_wrapper
+                )
+                self._current_agent_span.span_data.handoffs = [
+                    h.agent_name for h in enabled_handoffs
                 ] or None
 
             # Connect to the model
@@ -859,11 +871,17 @@ class RealtimeSession(RealtimeModelListener):
                 # Update current agent
                 self._current_agent = result
 
-                # Start a span for the new agent. Use mark_as_current=False for the same
-                # cross-context reason: _cleanup runs in the main task and cannot reset a
-                # token created here.
+                # Create the incoming agent span with a clear current-span context so that
+                # its parent is the trace root, not the finished outgoing agent span.
+                # The outgoing span is still "current" in this background task context
+                # (finish(reset_current=False) does not reset the context var), so we must
+                # temporarily clear it before calling _make_agent_span() / agent_span() —
+                # provider.create_span() reads Scope.get_current_span() at creation time to
+                # determine parent_id.
+                _handoff_clear_token = Scope.set_current_span(None)
                 self._current_agent_span = self._make_agent_span(self._current_agent)
                 self._current_agent_span.start(mark_as_current=False)
+                Scope.reset_current_span(_handoff_clear_token)
 
                 # Get updated model settings from new agent
                 updated_settings = await self._get_updated_model_settings_from_agent(
@@ -871,13 +889,19 @@ class RealtimeSession(RealtimeModelListener):
                     agent=self._current_agent,
                 )
 
-                # Update span with the resolved tool list for the new agent.
-                if self._current_agent_span is not None:
+                # Update span metadata: tools and filtered handoffs.
+                if not isinstance(self._current_agent_span, NoOpSpan):
                     resolved_tools = await self._current_agent.get_all_tools(self._context_wrapper)
                     self._current_agent_span.span_data.tools = [
                         n
                         for t in resolved_tools
                         if (n := get_tool_trace_name_for_tool(t)) is not None
+                    ] or None
+                    enabled_handoffs = await self._get_handoffs(
+                        self._current_agent, self._context_wrapper
+                    )
+                    self._current_agent_span.span_data.handoffs = [
+                        h.agent_name for h in enabled_handoffs
                     ] or None
 
                 # Send handoff event
@@ -1325,16 +1349,13 @@ class RealtimeSession(RealtimeModelListener):
     def _make_agent_span(self, agent: RealtimeAgent) -> Span[AgentSpanData]:
         """Create a new agent span for the given agent, respecting tracing_disabled.
 
-        Tool names are intentionally omitted here; callers must update span_data.tools
-        asynchronously via get_all_tools() to include MCP tools and respect is_enabled.
+        Both tool names and handoff names are intentionally omitted here. Callers must
+        update span_data.tools via get_all_tools() and span_data.handoffs via
+        _get_handoffs() asynchronously to reflect only what is actually sent to the model
+        (respects is_enabled on both tools and handoffs).
         """
         disabled: bool = bool(self._run_config.get("tracing_disabled", False))
-        handoff_names = [h.agent_name if isinstance(h, Handoff) else h.name for h in agent.handoffs]
-        return agent_span(
-            name=agent.name,
-            handoffs=handoff_names or None,
-            disabled=disabled,
-        )
+        return agent_span(name=agent.name, disabled=disabled)
 
     async def _get_updated_model_settings_from_agent(
         self,

@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
 
 from agents.realtime.agent import RealtimeAgent
 from agents.realtime.model import RealtimeModel, RealtimeModelConfig, RealtimeModelListener
-from agents.realtime.model_events import RealtimeModelEvent
+from agents.realtime.model_events import RealtimeModelEvent, RealtimeModelToolCallEvent
 from agents.realtime.session import RealtimeSession
 from agents.tracing import trace
+from agents.tracing.scope import Scope
 from agents.tracing.span_data import AgentSpanData
 from tests.testing_processor import SPAN_PROCESSOR_TESTING
 
@@ -167,3 +169,92 @@ async def test_tracing_disabled_creates_no_agent_spans():
     spans = SPAN_PROCESSOR_TESTING.get_ordered_spans()
     agent_spans = [s for s in spans if isinstance(s.span_data, AgentSpanData)]
     assert len(agent_spans) == 0, f"Expected 0 agent spans, got {len(agent_spans)}"
+
+
+@pytest.mark.asyncio
+async def test_no_active_trace_does_not_poison_span_context():
+    """Without an outer trace(), the session must not install a NoOpSpan as current.
+
+    Convention: provider returns NoOpSpan when no active trace exists. Installing
+    a NoOpSpan as current would make every span created afterward also a NoOpSpan
+    (provider._is_noop_span check). The session must skip Scope.set_current_span()
+    for NoOpSpans so ambient context is unchanged after the session closes.
+    """
+    span_before = Scope.get_current_span()
+    agent = RealtimeAgent(name="agent")
+    session = _make_session(agent)
+
+    # Enter/exit WITHOUT any enclosing trace — span will be a NoOpSpan.
+    async with session:
+        pass
+
+    span_after = Scope.get_current_span()
+    assert span_before is span_after, (
+        "Session must not permanently alter the current span context when no active trace exists."
+    )
+
+
+@pytest.mark.asyncio
+async def test_disabled_handoff_excluded_from_span_metadata():
+    """Handoffs with is_enabled=False must not appear in span handoff metadata.
+
+    Convention: span metadata must reflect what was actually sent to the model.
+    _get_handoffs() filters by is_enabled; raw agent.handoffs must not be used.
+    """
+    from agents.realtime.handoffs import realtime_handoff
+
+    specialist = RealtimeAgent(name="specialist")
+    disabled_handoff = realtime_handoff(specialist, is_enabled=False)
+    agent = RealtimeAgent(name="router", handoffs=[disabled_handoff])
+    session = _make_session(agent)
+
+    with trace("test"):
+        async with session:
+            pass
+
+    spans = SPAN_PROCESSOR_TESTING.get_ordered_spans()
+    agent_spans = [s for s in spans if isinstance(s.span_data, AgentSpanData)]
+    assert agent_spans[0].span_data.handoffs is None, (
+        f"Disabled handoff should not appear in span metadata, "
+        f"got: {agent_spans[0].span_data.handoffs}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_handoff_span_is_sibling_not_child_of_initial_span():
+    """After a handoff the new agent span must be a sibling of the first, not its child.
+
+    Convention: the incoming agent span's parent_id must not equal the outgoing agent
+    span's span_id. Both should be direct children of the trace root (parent_id=None).
+    """
+    specialist = RealtimeAgent(name="specialist")
+    router = RealtimeAgent(name="router", handoffs=[specialist])
+    model = _FakeRealtimeModel()
+    session = _make_session(router, model)
+
+    with trace("test"):
+        async with session:
+            # Fire the handoff tool call that the model would send.
+            await model.dispatch(
+                RealtimeModelToolCallEvent(
+                    name="transfer_to_specialist",
+                    call_id="call_001",
+                    arguments="{}",
+                )
+            )
+            # Let the background task spawned by async_tool_calls complete.
+            await asyncio.sleep(0.05)
+
+    spans = SPAN_PROCESSOR_TESTING.get_ordered_spans()
+    agent_spans = [s for s in spans if isinstance(s.span_data, AgentSpanData)]
+    assert len(agent_spans) == 2, (
+        f"Expected 2 agent spans (router + specialist), got {len(agent_spans)}"
+    )
+
+    router_span = next(s for s in agent_spans if s.span_data.name == "router")
+    specialist_span = next(s for s in agent_spans if s.span_data.name == "specialist")
+
+    assert specialist_span.parent_id != router_span.span_id, (
+        "Specialist span must not be a child of the router span. "
+        f"specialist.parent_id={specialist_span.parent_id}, router.span_id={router_span.span_id}"
+    )
