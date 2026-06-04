@@ -81,7 +81,7 @@ from .memory import (
     SessionSettings,
     is_openai_responses_compaction_aware_session,
 )
-from .model_settings import ModelSettings
+from .model_settings import MCPToolChoice, ModelSettings
 from .models.interface import Model, ModelProvider, ModelTracing
 from .models.multi_provider import MultiProvider
 from .models.openai_agent_registration import OpenAIAgentRegistrationConfig
@@ -187,6 +187,7 @@ from .tool import (
     resolve_computer,
     tool_namespace,
 )
+from .tool_context import ToolContext
 from .tool_guardrails import (
     ToolGuardrailFunctionOutput,
     ToolInputGuardrail,
@@ -242,7 +243,7 @@ from .tracing import (
     transcription_span,
     turn_span,
 )
-from .usage import Usage
+from .usage import RequestUsage, Usage
 from .version import __version__
 
 if TYPE_CHECKING:
@@ -348,6 +349,7 @@ __all__ = [
     "ModelProvider",
     "ModelTracing",
     "ModelSettings",
+    "MCPToolChoice",
     "ModelRetryAdvice",
     "ModelRetryAdviceRequest",
     "ModelRetryBackoffSettings",
@@ -436,6 +438,7 @@ __all__ = [
     "AgentHookContext",
     "RunContextWrapper",
     "TContext",
+    "ToolContext",
     "RunErrorDetails",
     "RunErrorData",
     "RunErrorHandler",
@@ -511,6 +514,7 @@ __all__ = [
     "tool_namespace",
     "resolve_computer",
     "dispose_resolved_computers",
+    "RequestUsage",
     "Usage",
     "add_trace_processor",
     "agent_span",
