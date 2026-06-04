@@ -89,9 +89,11 @@ class FakeRealtimeModel(RealtimeModel):
 def fake_agent():
     """Create a fake agent for testing."""
     agent = Mock()
+    agent.name = "fake_agent"
     agent.get_all_tools = AsyncMock(return_value=[])
     agent.get_system_prompt = AsyncMock(return_value="test instructions")
     agent.handoffs = []
+    agent.tools = []
     return agent
 
 

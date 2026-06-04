@@ -24,6 +24,8 @@ from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, invoke_function_tool
 from ..tool_context import ToolContext
+from ..tracing import Span, agent_span
+from ..tracing.span_data import AgentSpanData
 from ..util._approvals import evaluate_needs_approval_setting
 from .agent import RealtimeAgent
 from .config import RealtimeRunConfig, RealtimeSessionModelSettings, RealtimeUserInput
@@ -193,6 +195,7 @@ class RealtimeSession(RealtimeModelListener):
         self._guardrail_tasks: set[asyncio.Task[Any]] = set()
         self._tool_call_tasks: set[asyncio.Task[Any]] = set()
         self._async_tool_calls: bool = bool(self._run_config.get("async_tool_calls", True))
+        self._current_agent_span: Span[AgentSpanData] | None = None
 
     @property
     def model(self) -> RealtimeModel:
@@ -203,6 +206,10 @@ class RealtimeSession(RealtimeModelListener):
         """Start the session by connecting to the model. After this, you will be able to stream
         events from the model and send messages and audio to the model.
         """
+        # Start an agent span for the initial agent.
+        self._current_agent_span = self._make_agent_span(self._current_agent)
+        self._current_agent_span.start(mark_as_current=True)
+
         # Add ourselves as a listener
         self._model.add_listener(self)
 
@@ -815,8 +822,15 @@ class RealtimeSession(RealtimeModelListener):
                 # Store previous agent for event
                 previous_agent = agent
 
+                # Finish the span for the outgoing agent and start one for the new agent.
+                if self._current_agent_span is not None:
+                    self._current_agent_span.finish(reset_current=True)
+
                 # Update current agent
                 self._current_agent = result
+
+                self._current_agent_span = self._make_agent_span(self._current_agent)
+                self._current_agent_span.start(mark_as_current=True)
 
                 # Get updated model settings from new agent
                 updated_settings = await self._get_updated_model_settings_from_agent(
@@ -1235,6 +1249,11 @@ class RealtimeSession(RealtimeModelListener):
             self._wake_event_iterators()
             return
 
+        # Finish the active agent span.
+        if self._current_agent_span is not None:
+            self._current_agent_span.finish(reset_current=True)
+            self._current_agent_span = None
+
         # Cancel and cleanup guardrail tasks
         self._cleanup_guardrail_tasks()
         self._cleanup_tool_call_tasks()
@@ -1252,6 +1271,18 @@ class RealtimeSession(RealtimeModelListener):
         # Mark as closed
         self._closed = True
         self._wake_event_iterators()
+
+    def _make_agent_span(self, agent: RealtimeAgent) -> Span[AgentSpanData]:
+        """Create a new agent span for the given agent, respecting tracing_disabled."""
+        disabled: bool = bool(self._run_config.get("tracing_disabled", False))
+        handoff_names = [h.agent_name if isinstance(h, Handoff) else h.name for h in agent.handoffs]
+        tool_names = [t.name for t in agent.tools if isinstance(t, FunctionTool)]
+        return agent_span(
+            name=agent.name,
+            handoffs=handoff_names or None,
+            tools=tool_names or None,
+            disabled=disabled,
+        )
 
     async def _get_updated_model_settings_from_agent(
         self,

@@ -325,9 +325,11 @@ class MockRealtimeModel(RealtimeModel):
 @pytest.fixture
 def mock_agent():
     agent = Mock(spec=RealtimeAgent)
+    agent.name = "mock_agent"
     agent.get_all_tools = AsyncMock(return_value=[])
 
     type(agent).handoffs = PropertyMock(return_value=[])
+    type(agent).tools = PropertyMock(return_value=[])
     type(agent).output_guardrails = PropertyMock(return_value=[])
     return agent
 
@@ -2463,9 +2465,11 @@ class TestModelSettingsIntegration:
 
         # Create agent with specific settings
         agent = Mock(spec=RealtimeAgent)
+        agent.name = "test_agent"
         agent.get_system_prompt = AsyncMock(return_value="Test agent instructions")
         agent.get_all_tools = AsyncMock(return_value=[{"type": "function", "name": "test_tool"}])
         agent.handoffs = []
+        agent.tools = []
 
         session = RealtimeSession(mock_model, agent, None)
 
@@ -2492,9 +2496,11 @@ class TestModelSettingsIntegration:
         mock_model.add_listener = Mock()
 
         agent = Mock(spec=RealtimeAgent)
+        agent.name = "test_agent"
         agent.get_system_prompt = AsyncMock(return_value="Agent instructions")
         agent.get_all_tools = AsyncMock(return_value=[{"type": "function", "name": "agent_tool"}])
         agent.handoffs = []
+        agent.tools = []
 
         # Provide model config with settings
         model_config: RealtimeModelConfig = {
@@ -2530,8 +2536,10 @@ class TestModelSettingsIntegration:
 
         # Create agent with handoffs
         agent = Mock(spec=RealtimeAgent)
+        agent.name = "test_agent"
         agent.get_system_prompt = AsyncMock(return_value="Agent with handoffs")
         agent.get_all_tools = AsyncMock(return_value=[])
+        agent.tools = []
 
         # Create a mock handoff
         handoff_agent = Mock(spec=RealtimeAgent)
