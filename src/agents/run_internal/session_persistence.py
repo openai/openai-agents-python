@@ -345,6 +345,12 @@ async def save_result_to_session(
             serialized_to_save_counts[serialized] -= 1
             saved_run_items_count += 1
 
+    returned_count = (
+        new_run_items_raw_count
+        if is_openai_conversation_session and run_state is None
+        else saved_run_items_count
+    )
+
     if len(items_to_save) == 0:
         if run_state:
             run_state._current_turn_persisted_item_count = (
