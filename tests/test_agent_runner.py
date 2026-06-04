@@ -1094,6 +1094,38 @@ async def test_handoff_drops_orphaned_message_after_consumed_reasoning() -> None
 
 
 @pytest.mark.asyncio
+async def test_handoff_without_trailing_message_keeps_delegate_response() -> None:
+    """
+    When the handoff turn emits only [reasoning, function_call] with NO trailing message,
+    consumed_by_call must not leak into the next turn and silently drop the delegate's reply.
+    """
+    model = FakeModel()
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                ResponseReasoningItem(
+                    id="rs_111",
+                    type="reasoning",
+                    summary=[Summary(text="Deciding to hand off.", type="summary_text")],
+                ),
+                get_handoff_tool_call(delegate),
+                # no trailing message — the common case
+            ],
+            [get_text_message("delegate reply")],
+        ]
+    )
+
+    result = await Runner.run(triage, input="user_message")
+
+    assert result.final_output == "delegate reply", (
+        "Delegate response must not be dropped when the handoff turn has no trailing message."
+    )
+
+
+@pytest.mark.asyncio
 async def test_resume_preserves_filtered_model_input_after_handoff():
     model = FakeModel()
 

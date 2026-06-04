@@ -217,10 +217,17 @@ def drop_orphaned_messages_after_consumed_reasoning(
                 fresh_reasoning = False
                 consumed_by_call = True  # reasoning is now consumed by this call
             result.append(item)
+        elif item_type == "function_call_output":
+            # The SDK appends the HandoffOutputItem after all model output items, so any
+            # orphaned message will already have been dropped by this point. Reset here so
+            # that turns with no trailing message do not bleed consumed_by_call into the
+            # next agent's responses.
+            consumed_by_call = False
+            result.append(item)
         elif item_type == "message":
             if consumed_by_call:
-                # Orphaned: reasoning was consumed by the preceding function_call.
-                # Reset so messages from subsequent turns without their own reasoning are kept.
+                # Orphaned: reasoning was consumed by the preceding function_call and no
+                # function_call_output has reset the flag yet. Drop and reset.
                 consumed_by_call = False
             else:
                 result.append(item)
