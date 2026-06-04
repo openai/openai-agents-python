@@ -280,6 +280,10 @@ async def save_result_to_session(
         if missing_outputs:
             new_run_items = missing_outputs + new_run_items
 
+    # Raw retry offset: count the run items we consumed from this turn,
+    # not just the subset that was actually persisted.
+    new_run_items_raw_count = len(new_run_items)
+
     input_list: list[TResponseInputItem] = []
     if original_input:
         input_list = normalize_input_items_for_api(
@@ -343,13 +347,17 @@ async def save_result_to_session(
 
     if len(items_to_save) == 0:
         if run_state:
-            run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
+            run_state._current_turn_persisted_item_count = (
+                already_persisted + saved_run_items_count
+            )
         return saved_run_items_count
 
     await session.add_items(items_to_save)
 
     if run_state:
-        run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
+        run_state._current_turn_persisted_item_count = (
+            already_persisted + saved_run_items_count
+        )
 
     if response_id and is_openai_responses_compaction_aware_session(session):
         has_local_tool_outputs = any(
