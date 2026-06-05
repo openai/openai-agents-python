@@ -329,6 +329,14 @@ class RunConfig:
       the run continue.
     """
 
+    max_model_retries: int = 0
+    """Maximum number of automatic retries when the model produces a malformed response that
+    triggers a ``ModelBehaviorError`` (e.g. invalid tool call JSON, nonexistent tool, etc.).
+
+    On each retry, the error message is fed back to the model as a synthetic user message so
+    the model can self-correct. Defaults to 0 (no retry).
+    """
+
 
 class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
