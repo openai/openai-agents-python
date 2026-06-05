@@ -70,6 +70,7 @@ from ....sandbox.util.retry import (
     TRANSIENT_HTTP_STATUS_CODES,
     exception_chain_contains_type,
     exception_chain_has_status_code,
+    iter_exception_chain,
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
@@ -117,6 +118,75 @@ def _modal_provider_error_detail(error: BaseException) -> str | None:
     return type(error).__name__
 
 
+def _modal_exception_types(*names: str) -> tuple[type[BaseException], ...]:
+    exception_module = getattr(modal, "exception", None)
+    if exception_module is None:
+        try:
+            from modal import exception as exception_module
+        except Exception:
+            return ()
+
+    exceptions: list[type[BaseException]] = []
+    for name in names:
+        value = getattr(exception_module, name, None)
+        if isinstance(value, type) and issubclass(value, BaseException):
+            exceptions.append(value)
+    return tuple(exceptions)
+
+
+def _modal_retryable_error_types() -> tuple[type[BaseException], ...]:
+    return _modal_exception_types(
+        "ConnectionError",
+        "InternalError",
+        "InternalFailure",
+        "ServiceError",
+    )
+
+
+def _modal_non_retryable_error_types() -> tuple[type[BaseException], ...]:
+    return _modal_exception_types(
+        "AlreadyExistsError",
+        "AuthError",
+        "ConflictError",
+        "InvalidError",
+        "LogsFetchError",
+        "NotFoundError",
+        "PermissionDeniedError",
+        "RequestSizeError",
+        "SandboxFilesystemDirectoryNotEmptyError",
+        "SandboxFilesystemFileTooLargeError",
+        "SandboxFilesystemIsADirectoryError",
+        "SandboxFilesystemNotADirectoryError",
+        "SandboxFilesystemNotFoundError",
+        "SandboxFilesystemPathAlreadyExistsError",
+        "SandboxFilesystemPermissionError",
+        "UnimplementedError",
+        "VersionError",
+    )
+
+
+def _modal_exec_timeout_error_types() -> tuple[type[BaseException], ...]:
+    return _modal_exception_types("ExecTimeoutError")
+
+
+def _modal_provider_retryability(error: BaseException) -> tuple[bool | None, str | None]:
+    non_retryable_types = _modal_non_retryable_error_types()
+    retryable_types = _modal_retryable_error_types()
+
+    for candidate in iter_exception_chain(error):
+        if non_retryable_types and isinstance(candidate, non_retryable_types):
+            return False, type(candidate).__name__
+
+        if retryable_types and isinstance(candidate, retryable_types):
+            return True, type(candidate).__name__
+
+        status = getattr(candidate, "status_code", None) or getattr(candidate, "status", None)
+        if isinstance(status, int) and status in TRANSIENT_HTTP_STATUS_CODES:
+            return True, "transient_http_status"
+
+    return None, None
+
+
 def _modal_exec_transport_error(
     *,
     command: tuple[str | Path, ...],
@@ -124,15 +194,26 @@ def _modal_exec_transport_error(
 ) -> ExecTransportError:
     detail = _modal_provider_error_detail(cause)
     context: dict[str, object] = {"backend": "modal"}
+    retryable, reason = _modal_provider_retryability(cause)
+    if reason is not None:
+        context["reason"] = reason
     if detail:
         context["provider_error"] = detail
     status = getattr(cause, "status_code", None) or getattr(cause, "status", None)
     if isinstance(status, int):
         context["http_status"] = status
+        if retryable is None and status in TRANSIENT_HTTP_STATUS_CODES:
+            retryable = True
     message = "Modal exec failed"
     if detail:
         message = f"{message}: {detail}"
-    return ExecTransportError(command=command, context=context, cause=cause, message=message)
+    return ExecTransportError(
+        command=command,
+        context=context,
+        cause=cause,
+        message=message,
+        retryable=retryable,
+    )
 
 
 @asynccontextmanager
@@ -707,6 +788,8 @@ class ModalSandboxSession(BaseSandboxSession):
         except ExecTimeoutError:
             raise
         except Exception as e:
+            if exception_chain_contains_type(e, _modal_exec_timeout_error_types()):
+                raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
             raise _modal_exec_transport_error(command=command, cause=e) from e
 
     def supports_pty(self) -> bool:
@@ -767,6 +850,8 @@ class ModalSandboxSession(BaseSandboxSession):
         except Exception as e:
             if entry is not None and not registered:
                 await self._terminate_pty_entry(entry)
+            if exception_chain_contains_type(e, _modal_exec_timeout_error_types()):
+                raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
             raise _modal_exec_transport_error(command=command, cause=e) from e
 
         if pruned_entry is not None:
@@ -1546,7 +1631,8 @@ class ModalSandboxSession(BaseSandboxSession):
 
     @retry_async(
         retry_if=lambda exc, self: (
-            exception_chain_contains_type(exc, (ExecTransportError,))
+            isinstance(exc, ExecTransportError)
+            and exc.retryable is not False
             or exception_chain_has_status_code(exc, TRANSIENT_HTTP_STATUS_CODES)
         )
     )
@@ -1580,6 +1666,7 @@ class ModalSandboxSession(BaseSandboxSession):
                         "exit_code": out.exit_code,
                         "stderr": out.stderr.decode("utf-8", "replace"),
                     },
+                    retryable=False,
                 )
             return io.BytesIO(out.stdout)
         except WorkspaceArchiveReadError:

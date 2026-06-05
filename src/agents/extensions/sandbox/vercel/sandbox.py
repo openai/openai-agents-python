@@ -23,13 +23,7 @@ from urllib.parse import urlsplit
 
 import httpx
 from pydantic import TypeAdapter, field_serializer, field_validator
-from vercel.sandbox import (
-    AsyncSandbox,
-    NetworkPolicy,
-    Resources,
-    SandboxStatus,
-    SnapshotSource,
-)
+from vercel import sandbox as vercel_sandbox
 
 from ....sandbox.errors import (
     ConfigurationError,
@@ -62,6 +56,12 @@ from ....sandbox.util.retry import (
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tarfile
 from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 
+AsyncSandbox = vercel_sandbox.AsyncSandbox
+NetworkPolicy = vercel_sandbox.NetworkPolicy
+Resources = vercel_sandbox.Resources
+SandboxStatus = vercel_sandbox.SandboxStatus
+SnapshotSource = vercel_sandbox.SnapshotSource
+
 WorkspacePersistenceMode = Literal["tar", "snapshot"]
 
 _WORKSPACE_PERSISTENCE_TAR: WorkspacePersistenceMode = "tar"
@@ -78,6 +78,30 @@ _VERCEL_TRANSIENT_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
     httpx.NetworkError,
     httpx.ProtocolError,
 )
+_VERCEL_RETRYABLE_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
+    vercel_sandbox.SandboxRateLimitError,
+    vercel_sandbox.SandboxServerError,
+)
+_VERCEL_NON_RETRYABLE_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
+    vercel_sandbox.SandboxAuthError,
+    vercel_sandbox.SandboxNotFoundError,
+    vercel_sandbox.SandboxPermissionError,
+    vercel_sandbox.SandboxValidationError,
+)
+_VERCEL_HTTP_STATUS_RETRYABLE: dict[int, bool] = {
+    400: False,
+    401: False,
+    403: False,
+    404: False,
+    408: True,
+    425: True,
+    422: False,
+    429: True,
+    500: True,
+    502: True,
+    503: True,
+    504: True,
+}
 
 # Sandbox status values from which the sandbox can still transition to RUNNING.
 # Only "pending" qualifies: a freshly created sandbox transitions PENDING -> RUNNING.
@@ -86,18 +110,25 @@ _VERCEL_TRANSIENT_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
 _VERCEL_TRANSIENT_SANDBOX_STATUSES: frozenset[str] = frozenset({"pending"})
 
 
-def _is_transient_create_error(exc: BaseException) -> bool:
-    if exception_chain_has_status_code(exc, {408, 425, 429, 500, 502, 503, 504}):
+def _vercel_provider_retryability(exc: BaseException) -> bool | None:
+    if exception_chain_contains_type(exc, _VERCEL_RETRYABLE_PROVIDER_ERRORS):
         return True
+    if exception_chain_contains_type(exc, _VERCEL_NON_RETRYABLE_PROVIDER_ERRORS):
+        return False
+    if exception_chain_contains_type(exc, _VERCEL_TRANSIENT_TRANSPORT_ERRORS):
+        return True
+    for status_code, retryable in _VERCEL_HTTP_STATUS_RETRYABLE.items():
+        if exception_chain_has_status_code(exc, {status_code}):
+            return retryable
+    return None
 
-    return exception_chain_contains_type(exc, _VERCEL_TRANSIENT_TRANSPORT_ERRORS)
+
+def _is_transient_create_error(exc: BaseException) -> bool:
+    return _vercel_provider_retryability(exc) is True
 
 
 def _is_transient_write_error(exc: BaseException) -> bool:
-    if exception_chain_has_status_code(exc, {408, 425, 429, 500, 502, 503, 504}):
-        return True
-
-    return exception_chain_contains_type(exc, _VERCEL_TRANSIENT_TRANSPORT_ERRORS)
+    return _vercel_provider_retryability(exc) is True
 
 
 @retry_async(retry_if=lambda exc, **_kwargs: _is_transient_create_error(exc))
@@ -314,7 +345,11 @@ class VercelSandboxSession(BaseSandboxSession):
             sandbox = await self._ensure_sandbox()
             finished = await sandbox.run_command("mkdir", ["-p", "--", root.as_posix()])
         except Exception as exc:
-            raise WorkspaceStartError(path=posix_path_as_path(root), cause=exc) from exc
+            raise WorkspaceStartError(
+                path=posix_path_as_path(root),
+                cause=exc,
+                retryable=_vercel_provider_retryability(exc),
+            ) from exc
 
         if finished.exit_code != 0:
             raise WorkspaceStartError(
@@ -445,10 +480,15 @@ class VercelSandboxSession(BaseSandboxSession):
         except ExecTimeoutError:
             raise
         except Exception as exc:
+            context: dict[str, object] = {
+                "backend": "vercel",
+                "sandbox_id": self.state.sandbox_id,
+            }
             raise ExecTransportError(
                 command=normalized,
-                context={"backend": "vercel", "sandbox_id": self.state.sandbox_id},
+                context=context,
                 cause=exc,
+                retryable=_vercel_provider_retryability(exc),
             ) from exc
 
     async def _resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
@@ -462,6 +502,7 @@ class VercelSandboxSession(BaseSandboxSession):
                 reason="backend_unavailable",
                 context={"backend": "vercel", "sandbox_id": self.state.sandbox_id},
                 cause=exc,
+                retryable=_vercel_provider_retryability(exc),
             ) from exc
 
         parsed = urlsplit(domain)
@@ -489,7 +530,11 @@ class VercelSandboxSession(BaseSandboxSession):
         try:
             payload = await sandbox.read_file(sandbox_path_str(normalized_path))
         except Exception as exc:
-            raise WorkspaceArchiveReadError(path=normalized_path, cause=exc) from exc
+            raise WorkspaceArchiveReadError(
+                path=normalized_path,
+                cause=exc,
+                retryable=_vercel_provider_retryability(exc),
+            ) from exc
         if payload is None:
             raise WorkspaceReadNotFoundError(path=normalized_path)
         return io.BytesIO(payload)
@@ -518,7 +563,11 @@ class VercelSandboxSession(BaseSandboxSession):
                 [{"path": sandbox_path_str(normalized_path), "content": bytes(payload)}]
             )
         except Exception as exc:
-            raise WorkspaceArchiveWriteError(path=normalized_path, cause=exc) from exc
+            raise WorkspaceArchiveWriteError(
+                path=normalized_path,
+                cause=exc,
+                retryable=_vercel_provider_retryability(exc),
+            ) from exc
 
     async def persist_workspace(self) -> io.IOBase:
         return await with_ephemeral_mounts_removed(
@@ -536,7 +585,11 @@ class VercelSandboxSession(BaseSandboxSession):
             try:
                 snapshot = await sandbox.snapshot(expiration=self.state.snapshot_expiration_ms)
             except Exception as exc:
-                raise WorkspaceArchiveReadError(path=root, cause=exc) from exc
+                raise WorkspaceArchiveReadError(
+                    path=root,
+                    cause=exc,
+                    retryable=_vercel_provider_retryability(exc),
+                ) from exc
             return io.BytesIO(_encode_snapshot_ref(snapshot_id=snapshot.snapshot_id))
 
         root = self._workspace_root_path()
@@ -572,7 +625,11 @@ class VercelSandboxSession(BaseSandboxSession):
         except WorkspaceArchiveReadError:
             raise
         except Exception as exc:
-            raise WorkspaceArchiveReadError(path=root, cause=exc) from exc
+            raise WorkspaceArchiveReadError(
+                path=root,
+                cause=exc,
+                retryable=_vercel_provider_retryability(exc),
+            ) from exc
         finally:
             try:
                 await sandbox.run_command(
@@ -612,6 +669,7 @@ class VercelSandboxSession(BaseSandboxSession):
                 raise WorkspaceArchiveWriteError(
                     path=self._workspace_root_path(),
                     cause=exc,
+                    retryable=_vercel_provider_retryability(exc),
                 ) from exc
             return
 
@@ -638,7 +696,11 @@ class VercelSandboxSession(BaseSandboxSession):
         except WorkspaceArchiveWriteError:
             raise
         except Exception as exc:
-            raise WorkspaceArchiveWriteError(path=root, cause=exc) from exc
+            raise WorkspaceArchiveWriteError(
+                path=root,
+                cause=exc,
+                retryable=_vercel_provider_retryability(exc),
+            ) from exc
         finally:
             try:
                 await sandbox.run_command(

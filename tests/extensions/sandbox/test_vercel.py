@@ -55,6 +55,48 @@ class SnapshotSource(BaseModel):
     snapshot_id: str
 
 
+class _FakeVercelSandboxError(Exception):
+    pass
+
+
+class _FakeVercelAPIError(_FakeVercelSandboxError):
+    def __init__(self, message: str, *, status_code: int, data: object | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.response = types.SimpleNamespace(status_code=status_code)
+        self.data = data
+
+
+class _FakeVercelSandboxAuthError(_FakeVercelAPIError):
+    def __init__(self, message: str = "auth failed", *, data: object | None = None) -> None:
+        super().__init__(message, status_code=401, data=data)
+
+
+class _FakeVercelSandboxNotFoundError(_FakeVercelAPIError):
+    def __init__(self, message: str = "not found", *, data: object | None = None) -> None:
+        super().__init__(message, status_code=404, data=data)
+
+
+class _FakeVercelSandboxPermissionError(_FakeVercelAPIError):
+    def __init__(self, message: str = "permission denied", *, data: object | None = None) -> None:
+        super().__init__(message, status_code=403, data=data)
+
+
+class _FakeVercelSandboxRateLimitError(_FakeVercelAPIError):
+    def __init__(self, message: str = "rate limited", *, data: object | None = None) -> None:
+        super().__init__(message, status_code=429, data=data)
+
+
+class _FakeVercelSandboxServerError(_FakeVercelAPIError):
+    def __init__(self, message: str = "server error", *, data: object | None = None) -> None:
+        super().__init__(message, status_code=500, data=data)
+
+
+class _FakeVercelSandboxValidationError(_FakeVercelSandboxError):
+    def __init__(self, message: str = "validation failed") -> None:
+        super().__init__(message)
+
+
 class _MemorySnapshot(SnapshotBase):
     type: Literal["test-vercel-memory"] = "test-vercel-memory"
     payload: bytes = b""
@@ -371,8 +413,15 @@ def _load_vercel_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     fake_vercel_sandbox.NetworkPolicyRule = NetworkPolicyRule
     fake_vercel_sandbox.NetworkPolicySubnets = NetworkPolicySubnets
     fake_vercel_sandbox.Resources = Resources
+    fake_vercel_sandbox.SandboxAuthError = _FakeVercelSandboxAuthError
+    fake_vercel_sandbox.SandboxNotFoundError = _FakeVercelSandboxNotFoundError
+    fake_vercel_sandbox.SandboxPermissionError = _FakeVercelSandboxPermissionError
+    fake_vercel_sandbox.SandboxRateLimitError = _FakeVercelSandboxRateLimitError
+    fake_vercel_sandbox.SandboxServerError = _FakeVercelSandboxServerError
     fake_vercel_sandbox.SandboxStatus = types.SimpleNamespace(RUNNING="running")
+    fake_vercel_sandbox.SandboxValidationError = _FakeVercelSandboxValidationError
     fake_vercel_sandbox.SnapshotSource = SnapshotSource
+    cast(Any, fake_vercel).sandbox = fake_vercel_sandbox
 
     monkeypatch.setitem(sys.modules, "vercel", fake_vercel)
     monkeypatch.setitem(sys.modules, "vercel.sandbox", fake_vercel_sandbox)
@@ -539,6 +588,112 @@ async def test_vercel_exec_read_write_and_port_resolution(monkeypatch: pytest.Mo
         tls=True,
     )
     assert payload.read() == b"payload"
+
+
+@pytest.mark.asyncio
+async def test_vercel_exec_marks_typed_not_found_non_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    state = vercel_module.VercelSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000120",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sandbox-exec-missing",
+    )
+    sandbox = _FakeAsyncSandbox(sandbox_id="sandbox-exec-missing")
+    session = vercel_module.VercelSandboxSession.from_state(state, sandbox=sandbox)
+
+    async def _raise_not_found(*args: object, **kwargs: object) -> object:
+        _ = (args, kwargs)
+        raise vercel_module.vercel_sandbox.SandboxNotFoundError("sandbox missing")
+
+    monkeypatch.setattr(sandbox, "run_command", _raise_not_found)
+
+    with pytest.raises(vercel_module.ExecTransportError) as exc_info:
+        await session.exec("pwd", shell=False)
+
+    assert exc_info.value.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_vercel_exec_marks_typed_rate_limit_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    state = vercel_module.VercelSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000121",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sandbox-exec-rate-limit",
+    )
+    sandbox = _FakeAsyncSandbox(sandbox_id="sandbox-exec-rate-limit")
+    session = vercel_module.VercelSandboxSession.from_state(state, sandbox=sandbox)
+
+    async def _raise_rate_limit(*args: object, **kwargs: object) -> object:
+        _ = (args, kwargs)
+        raise vercel_module.vercel_sandbox.SandboxRateLimitError("rate limited")
+
+    monkeypatch.setattr(sandbox, "run_command", _raise_rate_limit)
+
+    with pytest.raises(vercel_module.ExecTransportError) as exc_info:
+        await session.exec("pwd", shell=False)
+
+    assert exc_info.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_vercel_write_marks_typed_validation_error_non_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+    monkeypatch.setattr("agents.sandbox.util.retry.asyncio.sleep", _noop_sleep)
+
+    state = vercel_module.VercelSandboxSessionState(
+        session_id="00000000-0000-0000-0000-000000000122",
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id="sandbox-write-validation",
+    )
+    sandbox = _FakeAsyncSandbox(sandbox_id="sandbox-write-validation")
+    sandbox.write_failures = [vercel_module.vercel_sandbox.SandboxValidationError("invalid write")]
+    session = vercel_module.VercelSandboxSession.from_state(state, sandbox=sandbox)
+
+    with pytest.raises(vercel_module.WorkspaceArchiveWriteError) as exc_info:
+        await session.write(Path("hello.txt"), io.BytesIO(b"world"))
+
+    assert len(sandbox.write_files_calls) == 1
+    assert exc_info.value.retryable is False
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_retryable"),
+    [
+        (400, False),
+        (401, False),
+        (403, False),
+        (404, False),
+        (408, True),
+        (425, True),
+        (422, False),
+        (429, True),
+        (500, True),
+        (502, True),
+        (503, True),
+        (504, True),
+    ],
+)
+def test_vercel_retryability_status_table(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    expected_retryable: bool,
+) -> None:
+    vercel_module = _load_vercel_module(monkeypatch)
+
+    class FakeStatusError(Exception):
+        status_code = status
+
+    assert vercel_module._vercel_provider_retryability(FakeStatusError()) is expected_retryable
 
 
 @pytest.mark.asyncio
