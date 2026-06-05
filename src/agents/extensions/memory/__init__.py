@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from .mongodb_session import MongoDBSession
     from .redis_session import RedisSession
     from .sqlalchemy_session import SQLAlchemySession
+    from .valkey_session import ValkeySession
 
 __all__: list[str] = [
     "AdvancedSQLiteSession",
@@ -36,6 +37,7 @@ __all__: list[str] = [
     "MongoDBSession",
     "RedisSession",
     "SQLAlchemySession",
+    "ValkeySession",
 ]
 
 _LAZY_EXPORTS: dict[str, tuple[str, tuple[str, str] | None]] = {
@@ -48,6 +50,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, tuple[str, str] | None]] = {
     "DAPR_CONSISTENCY_EVENTUAL": (".dapr_session", ("dapr", "dapr")),
     "DAPR_CONSISTENCY_STRONG": (".dapr_session", ("dapr", "dapr")),
     "MongoDBSession": (".mongodb_session", ("mongodb", "mongodb")),
+    "ValkeySession": (".valkey_session", ("valkey-glide", "valkey")),
 }
 
 
