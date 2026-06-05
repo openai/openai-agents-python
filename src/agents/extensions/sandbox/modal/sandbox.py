@@ -40,6 +40,7 @@ from ....sandbox.errors import (
     ExecTransportError,
     ExposedPortUnavailableError,
     MountConfigError,
+    SandboxError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
@@ -185,6 +186,17 @@ def _modal_provider_retryability(error: BaseException) -> tuple[bool | None, str
             return True, "transient_http_status"
 
     return None, None
+
+
+def _modal_tar_persist_retryable(exc: BaseException) -> bool:
+    for candidate in iter_exception_chain(exc):
+        if isinstance(candidate, SandboxError) and candidate.retryable is False:
+            return False
+
+    if exception_chain_contains_type(exc, (ExecTransportError,)):
+        return True
+
+    return exception_chain_has_status_code(exc, TRANSIENT_HTTP_STATUS_CODES)
 
 
 def _modal_exec_transport_error(
@@ -1629,13 +1641,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 continue
         return skip
 
-    @retry_async(
-        retry_if=lambda exc, self: (
-            isinstance(exc, ExecTransportError)
-            and exc.retryable is not False
-            or exception_chain_has_status_code(exc, TRANSIENT_HTTP_STATUS_CODES)
-        )
-    )
+    @retry_async(retry_if=lambda exc, self: _modal_tar_persist_retryable(exc))
     async def _persist_workspace_via_tar(self) -> io.IOBase:
         # Existing tar implementation extracted so snapshot_filesystem mode can fall back cleanly.
         root = self._workspace_root_path()

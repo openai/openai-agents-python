@@ -2543,6 +2543,87 @@ async def test_modal_tar_persist_uses_resolved_mount_paths_for_excludes(
 
 
 @pytest.mark.asyncio
+async def test_modal_tar_persist_retries_wrapped_exec_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=None)
+    commands: list[list[str]] = []
+
+    async def _fake_exec(
+        *command: object,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: object | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        rendered = [str(part) for part in command]
+        commands.append(rendered)
+        if len(commands) == 1:
+            raise modal_module.ExecTransportError(
+                command=tuple(rendered),
+                message="modal transport failed",
+            )
+        return ExecResult(stdout=b"tar-bytes", stderr=b"", exit_code=0)
+
+    monkeypatch.setattr(session, "exec", _fake_exec)
+
+    archive = await session.persist_workspace()
+
+    assert archive.read() == b"tar-bytes"
+    assert commands == [
+        ["tar", "cf", "-", "-C", "/workspace", "."],
+        ["tar", "cf", "-", "-C", "/workspace", "."],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_modal_tar_persist_does_not_retry_wrapped_non_retryable_exec_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=None)
+    commands: list[list[str]] = []
+
+    async def _fake_exec(
+        *command: object,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: object | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        rendered = [str(part) for part in command]
+        commands.append(rendered)
+        raise modal_module.ExecTransportError(
+            command=tuple(rendered),
+            message="modal transport failed permanently",
+            retryable=False,
+        )
+
+    monkeypatch.setattr(session, "exec", _fake_exec)
+
+    with pytest.raises(WorkspaceArchiveReadError) as exc_info:
+        await session.persist_workspace()
+
+    assert str(exc_info.value) == "failed to read archive for path: /workspace"
+    assert isinstance(exc_info.value.cause, modal_module.ExecTransportError)
+    assert str(exc_info.value.cause) == "modal transport failed permanently"
+    assert commands == [["tar", "cf", "-", "-C", "/workspace", "."]]
+
+
+@pytest.mark.asyncio
 async def test_modal_snapshot_filesystem_rejects_escaping_mount_paths_before_exec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
