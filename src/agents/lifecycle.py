@@ -67,6 +67,26 @@ class RunHooksBase(Generic[TContext, TAgent]):
         """Called when a handoff occurs."""
         pass
 
+    async def on_turn_end(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: Agent[TContext],
+        current_turn: int,
+    ) -> None:
+        """Called at the end of each turn, before the next turn begins.
+
+        This fires after all tool calls in the current turn have been executed
+        and their results processed, but before the next model call. It is
+        useful for logging, state tracking, dynamic instruction updates, and
+        context compaction between turns.
+
+        Args:
+            context: The run context wrapper, including usage and approvals.
+            agent: The agent that was active during this turn.
+            current_turn: The turn number that just completed (1-based).
+        """
+        pass
+
     async def on_tool_start(
         self,
         context: RunContextWrapper[TContext],
@@ -143,6 +163,26 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     ) -> None:
         """Called when the agent is being handed off to. The `source` is the agent that is handing
         off to this agent."""
+        pass
+
+    async def on_turn_end(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        current_turn: int,
+    ) -> None:
+        """Called at the end of each turn for this agent, before the next turn begins.
+
+        This fires after all tool calls in the current turn have been executed
+        and their results processed, but before the next model call. It is
+        useful for logging, state tracking, dynamic instruction updates, and
+        context compaction between turns.
+
+        Args:
+            context: The run context wrapper, including usage and approvals.
+            agent: This agent instance.
+            current_turn: The turn number that just completed (1-based).
+        """
         pass
 
     async def on_tool_start(

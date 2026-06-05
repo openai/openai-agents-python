@@ -62,6 +62,24 @@ class CallModelData(Generic[TContext]):
 
 
 CallModelInputFilter = Callable[[CallModelData[Any]], MaybeAwaitable[ModelInputData]]
+
+
+@dataclass
+class TurnEndData(Generic[TContext]):
+    """Data passed to ``RunConfig.on_turn_end`` after each turn completes."""
+
+    agent: Agent[TContext]
+    """The agent that was active during the just-completed turn."""
+
+    context: RunContextWrapper[TContext]
+    """The run context wrapper for the current execution."""
+
+    current_turn: int
+    """The turn number that just completed (1-based)."""
+
+
+OnTurnEndCallback = Callable[[TurnEndData[Any]], MaybeAwaitable[None]]
+
 ReasoningItemIdPolicy = Literal["preserve", "omit"]
 ToolNotFoundBehavior = Literal["raise_error", "return_error_to_model"]
 
@@ -297,6 +315,17 @@ class RunConfig:
     For example, you can use this to add a system prompt to the input.
     """
 
+    on_turn_end: OnTurnEndCallback | None = None
+    """
+    Optional callback that is invoked after each turn completes and all tool calls in that turn
+    have been executed. It fires before the next turn begins, giving applications a hook to
+    inspect or react to state changes between turns.
+
+    This is useful for logging, state tracking, dynamic instruction updates, and context
+    compaction in long-running workflows. If a handoff occurred during the turn, the callback
+    receives the *new* agent (the target of the handoff).
+    """
+
     tool_error_formatter: ToolErrorFormatter | None = None
     """Optional callback that formats tool error messages returned to the model.
 
@@ -366,9 +395,11 @@ __all__ = [
     "CallModelData",
     "CallModelInputFilter",
     "ModelInputData",
+    "OnTurnEndCallback",
     "ReasoningItemIdPolicy",
     "RunConfig",
     "RunOptions",
+    "TurnEndData",
     "SandboxArchiveLimits",
     "SandboxConcurrencyLimits",
     "SandboxRunConfig",

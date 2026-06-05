@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import warnings
 from typing import cast
 
@@ -35,6 +36,7 @@ from .run_config import (
     CallModelData,
     CallModelInputFilter,
     ModelInputData,
+    OnTurnEndCallback,
     ReasoningItemIdPolicy,
     RunConfig,
     RunOptions,
@@ -42,6 +44,7 @@ from .run_config import (
     ToolErrorFormatterArgs,
     ToolExecutionConfig,
     ToolNotFoundBehavior,
+    TurnEndData,
 )
 from .run_context import RunContextWrapper, TContext
 from .run_error_handlers import RunErrorHandlers
@@ -122,7 +125,7 @@ from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
 from .tracing.context import TraceCtxManager, create_trace_for_run
 from .tracing.span_data import AgentSpanData, TaskSpanData
-from .util import _error_tracing
+from .util import _coro, _error_tracing
 
 DEFAULT_AGENT_RUNNER: AgentRunner = None  # type: ignore
 # the value is set at the end of the module
@@ -137,15 +140,49 @@ __all__ = [
     "ModelInputData",
     "CallModelData",
     "CallModelInputFilter",
+    "OnTurnEndCallback",
     "ReasoningItemIdPolicy",
     "ToolExecutionConfig",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "ToolNotFoundBehavior",
+    "TurnEndData",
     "DEFAULT_MAX_TURNS",
     "set_default_agent_runner",
     "get_default_agent_runner",
 ]
+
+
+async def _invoke_on_turn_end(
+    *,
+    hooks: RunHooks[Any] | None,
+    run_config: RunConfig | None,
+    agent: Agent[Any],
+    context_wrapper: RunContextWrapper[Any],
+    current_turn: int,
+) -> None:
+    """Invoke on_turn_end callbacks from hooks and run_config.
+
+    Called after each turn completes and before the next turn begins. This
+    fires for handoffs and run-again steps (not for interruptions or final
+    outputs, which end the run).
+    """
+    if hooks is not None:
+        tasks = []
+        tasks.append(hooks.on_turn_end(context_wrapper, agent, current_turn))
+        if agent.hooks is not None:
+            tasks.append(agent.hooks.on_turn_end(context_wrapper, agent, current_turn))
+        await asyncio.gather(*tasks)
+
+    if run_config is not None and run_config.on_turn_end is not None:
+        turn_end_data = TurnEndData(
+            agent=agent,
+            context=context_wrapper,
+            current_turn=current_turn,
+        )
+        result = run_config.on_turn_end(turn_end_data)
+        if inspect.isawaitable(result):
+            await result
 
 
 def set_default_agent_runner(runner: AgentRunner | None) -> None:
@@ -946,6 +983,13 @@ class AgentRunner:
                                 return _finalize_result(result)
 
                             if isinstance(turn_result.next_step, NextStepRunAgain):
+                                await _invoke_on_turn_end(
+                                    hooks=hooks,
+                                    run_config=run_config,
+                                    agent=current_agent,
+                                    context_wrapper=context_wrapper,
+                                    current_turn=current_turn,
+                                )
                                 continue
 
                             append_model_response_if_new(
@@ -1020,6 +1064,13 @@ class AgentRunner:
                                     current_span.finish(reset_current=True)
                                 current_span = None
                                 should_run_agent_start_hooks = True
+                                await _invoke_on_turn_end(
+                                    hooks=hooks,
+                                    run_config=run_config,
+                                    agent=current_agent,
+                                    context_wrapper=context_wrapper,
+                                    current_turn=current_turn,
+                                )
                                 continue
 
                             continue
@@ -1480,6 +1531,13 @@ class AgentRunner:
                             current_span.finish(reset_current=True)
                             current_span = None
                             should_run_agent_start_hooks = True
+                            await _invoke_on_turn_end(
+                                hooks=hooks,
+                                run_config=run_config,
+                                agent=current_agent,
+                                context_wrapper=context_wrapper,
+                                current_turn=current_turn,
+                            )
                         elif isinstance(turn_result.next_step, NextStepRunAgain):
                             await save_turn_items_if_needed(
                                 session=session,
@@ -1489,6 +1547,13 @@ class AgentRunner:
                                 items=session_items_for_turn(turn_result),
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
+                            )
+                            await _invoke_on_turn_end(
+                                hooks=hooks,
+                                run_config=run_config,
+                                agent=current_agent,
+                                context_wrapper=context_wrapper,
+                                current_turn=current_turn,
                             )
                             continue
                         else:

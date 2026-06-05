@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses as _dc
+import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar, cast
@@ -63,7 +64,7 @@ from ..models._response_terminal import (
     response_terminal_failure_error,
 )
 from ..result import RunResultStreaming
-from ..run_config import ReasoningItemIdPolicy, RunConfig
+from ..run_config import ReasoningItemIdPolicy, RunConfig, TurnEndData
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
 from ..run_state import RunState
@@ -432,6 +433,37 @@ async def _finalize_streamed_interruption(
         interruptions=interruptions,
         processed_response=processed_response,
     )
+
+
+async def _invoke_on_turn_end(
+    *,
+    hooks: RunHooks[Any] | None,
+    run_config: RunConfig | None,
+    agent: Agent[Any],
+    context_wrapper: RunContextWrapper[Any],
+    current_turn: int,
+) -> None:
+    """Invoke on_turn_end callbacks from hooks and run_config.
+
+    Called after each turn completes in the streaming loop and before the next
+    turn begins. Fires for handoffs and run-again steps.
+    """
+    if hooks is not None:
+        tasks = []
+        tasks.append(hooks.on_turn_end(context_wrapper, agent, current_turn))
+        if agent.hooks is not None:
+            tasks.append(agent.hooks.on_turn_end(context_wrapper, agent, current_turn))
+        await asyncio.gather(*tasks)
+
+    if run_config is not None and run_config.on_turn_end is not None:
+        turn_end_data = TurnEndData(
+            agent=agent,
+            context=context_wrapper,
+            current_turn=current_turn,
+        )
+        result = run_config.on_turn_end(turn_end_data)
+        if inspect.isawaitable(result):
+            await result
 
 
 T = TypeVar("T")
@@ -812,6 +844,13 @@ async def start_streaming(
                             AgentUpdatedStreamEvent(new_agent=current_agent)
                         )
                         run_state._current_step = NextStepRunAgain()  # type: ignore[assignment]
+                        await _invoke_on_turn_end(
+                            hooks=hooks,
+                            run_config=run_config,
+                            agent=current_agent,
+                            context_wrapper=context_wrapper,
+                            current_turn=current_turn,
+                        )
                         continue
 
                     if isinstance(turn_result.next_step, NextStepFinalOutput):
@@ -835,6 +874,13 @@ async def start_streaming(
                             store_setting,
                         )
                         run_state._current_step = NextStepRunAgain()  # type: ignore[assignment]
+                        await _invoke_on_turn_end(
+                            hooks=hooks,
+                            run_config=run_config,
+                            agent=current_agent,
+                            context_wrapper=context_wrapper,
+                            current_turn=current_turn,
+                        )
                         continue
 
                     run_state._current_step = None
@@ -1106,6 +1152,14 @@ async def start_streaming(
                     if streamed_result._state is not None:
                         streamed_result._state._current_step = NextStepRunAgain()
 
+                    await _invoke_on_turn_end(
+                        hooks=hooks,
+                        run_config=run_config,
+                        agent=current_agent,
+                        context_wrapper=context_wrapper,
+                        current_turn=current_turn,
+                    )
+
                     if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]
                         streamed_result.is_complete = True
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
@@ -1156,6 +1210,14 @@ async def start_streaming(
                         turn_session_items,
                         turn_result.model_response.response_id,
                         store_setting,
+                    )
+
+                    await _invoke_on_turn_end(
+                        hooks=hooks,
+                        run_config=run_config,
+                        agent=current_agent,
+                        context_wrapper=context_wrapper,
+                        current_turn=current_turn,
                     )
 
                     if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]

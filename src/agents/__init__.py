@@ -108,6 +108,7 @@ from .retry import (
     retry_policies,
 )
 from .run import (
+    OnTurnEndCallback,
     ReasoningItemIdPolicy,
     RunConfig,
     Runner,
@@ -115,6 +116,7 @@ from .run import (
     ToolErrorFormatterArgs,
     ToolExecutionConfig,
     ToolNotFoundBehavior,
+    TurnEndData,
 )
 from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .run_error_handlers import (
@@ -447,8 +449,10 @@ __all__ = [
     "RunResultStreaming",
     "ResponsesWebSocketSession",
     "RunConfig",
+    "OnTurnEndCallback",
     "ReasoningItemIdPolicy",
     "ToolExecutionConfig",
+    "TurnEndData",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "ToolNotFoundBehavior",
