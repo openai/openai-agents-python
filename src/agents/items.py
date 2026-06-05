@@ -403,6 +403,10 @@ class ToolCallOutputItem(RunItemBase[Any]):
     tool_origin: ToolOrigin | None = None
     """Optional metadata describing the source of a function-tool-backed item."""
 
+    mcp_meta: dict[str, Any] | None = None
+    """Optional metadata from the ``_meta`` field of an MCP tool call response, when the
+    tool was invoked through an MCP server."""
+
     @property
     def call_id(self) -> str | None:
         """Return the call identifier from the raw item, if available."""

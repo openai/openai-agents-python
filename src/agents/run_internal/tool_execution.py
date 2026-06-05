@@ -184,6 +184,7 @@ class _FunctionToolTaskState:
     order: int
     invoke_task: asyncio.Task[Any] | None = None
     in_post_invoke_phase: bool = False
+    mcp_response_meta: dict[str, Any] | None = None
 
 
 def _background_cleanup_task_exception_message(exc: BaseException) -> str | None:
@@ -1784,6 +1785,12 @@ class _FunctionToolBatchExecutor:
 
         task_state.in_post_invoke_phase = True
 
+        # Capture MCP response meta from the tool context so it can be attached
+        # to the ToolCallOutputItem downstream.
+        mcp_meta = getattr(tool_context, "_mcp_response_meta", None)
+        if mcp_meta is not None:
+            task_state.mcp_response_meta = mcp_meta
+
         final_result = await _execute_tool_output_guardrails(
             func_tool=func_tool,
             tool_context=tool_context,
@@ -1875,6 +1882,15 @@ class _FunctionToolBatchExecutor:
 
     def _build_function_tool_results(self) -> list[FunctionToolResult]:
         function_tool_results: list[FunctionToolResult] = []
+
+        # Build a lookup from tool_run id to MCP response _meta (set by
+        # invoke_mcp_tool on the ToolContext, then copied to the task state).
+        mcp_meta_by_tool_run: dict[int, dict[str, Any] | None] = {
+            id(state.tool_run): state.mcp_response_meta
+            for state in self.task_states.values()
+            if state.mcp_response_meta is not None
+        }
+
         for tool_run in self.tool_runs:
             result = self.results_by_tool_run[id(tool_run)]
             if isinstance(result, FunctionToolResult):
@@ -1898,6 +1914,7 @@ class _FunctionToolBatchExecutor:
                     raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
                     agent=self.public_agent,
                     tool_origin=get_function_tool_origin(tool_run.function_tool),
+                    mcp_meta=mcp_meta_by_tool_run.get(id(tool_run)),
                 )
             else:
                 # Skip tool output until nested interruptions are resolved.

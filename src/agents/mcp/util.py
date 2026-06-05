@@ -703,4 +703,10 @@ class MCPUtil:
                     f"Current span is not a FunctionSpanData, skipping tool output: {current_span}"
                 )
 
+        # Expose ``_meta`` from the MCP response so callers can access it via
+        # ``ToolCallOutputItem.mcp_meta``.
+        response_meta = getattr(result, "_meta", None)
+        if response_meta and isinstance(response_meta, dict) and isinstance(context, ToolContext):
+            context._mcp_response_meta = copy.deepcopy(response_meta)
+
         return tool_output

@@ -57,6 +57,10 @@ class ToolContext(RunContextWrapper[TContext]):
     run_config: RunConfig | None = None
     """The active run config for this tool call, when available."""
 
+    _mcp_response_meta: dict[str, Any] | None = None
+    """Internal: stores ``_meta`` from the MCP ``CallToolResult`` after an MCP tool
+    invocation.  Consumers should read ``ToolCallOutputItem.mcp_meta`` instead."""
+
     def __init__(
         self,
         context: TContext,
