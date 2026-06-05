@@ -668,6 +668,7 @@ async def start_streaming(
         raise
 
     try:
+        handoff_chain: list[Agent[Any]] = []
         while True:
             all_input_guardrails = (
                 starting_agent.input_guardrails + (run_config.input_guardrails or [])
@@ -801,7 +802,10 @@ async def start_streaming(
                         break
 
                     if isinstance(turn_result.next_step, NextStepHandoff):
-                        current_agent = turn_result.next_step.new_agent
+                        next_step = turn_result.next_step
+                        if next_step.auto_handoff_back and next_step.originating_agent is not None:
+                            handoff_chain.append(next_step.originating_agent)
+                        current_agent = next_step.new_agent
                         if run_state is not None:
                             run_state._current_agent = current_agent
                         if current_span:
@@ -815,6 +819,29 @@ async def start_streaming(
                         continue
 
                     if isinstance(turn_result.next_step, NextStepFinalOutput):
+                        if handoff_chain:
+                            parent_agent = handoff_chain.pop()
+                            child_output_text = format_final_output_text(
+                                current_agent, turn_result.next_step.output
+                            )
+                            back_msg = create_message_output_item(
+                                current_agent, child_output_text
+                            )
+                            turn_session_items.append(back_msg)
+                            streamed_result.new_items.append(back_msg)
+                            current_agent = parent_agent
+                            if run_state is not None:
+                                run_state._current_agent = current_agent
+                            streamed_result._event_queue.put_nowait(
+                                AgentUpdatedStreamEvent(new_agent=current_agent)
+                            )
+                            await _save_resumed_items(
+                                list(turn_session_items),
+                                turn_result.model_response.response_id,
+                                store_setting,
+                            )
+                            run_state._current_step = NextStepRunAgain()  # type: ignore[assignment]
+                            continue
                         await _finalize_streamed_final_output(
                             streamed_result=streamed_result,
                             agent=current_agent,
@@ -1089,12 +1116,15 @@ async def start_streaming(
                     server_conversation_tracker.track_server_items(turn_result.model_response)
 
                 if isinstance(turn_result.next_step, NextStepHandoff):
+                    next_step = turn_result.next_step
+                    if next_step.auto_handoff_back and next_step.originating_agent is not None:
+                        handoff_chain.append(next_step.originating_agent)
                     await _save_stream_items_without_count(
                         turn_session_items,
                         turn_result.model_response.response_id,
                         store_setting,
                     )
-                    current_agent = turn_result.next_step.new_agent
+                    current_agent = next_step.new_agent
                     if run_state is not None:
                         run_state._current_agent = current_agent
                     current_span.finish(reset_current=True)
@@ -1111,6 +1141,28 @@ async def start_streaming(
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                         break
                 elif isinstance(turn_result.next_step, NextStepFinalOutput):
+                    if handoff_chain:
+                        parent_agent = handoff_chain.pop()
+                        child_output_text = format_final_output_text(
+                            current_agent, turn_result.next_step.output
+                        )
+                        back_msg = create_message_output_item(
+                            current_agent, child_output_text
+                        )
+                        turn_session_items.append(back_msg)
+                        streamed_result.new_items.append(back_msg)
+                        current_agent = parent_agent
+                        if run_state is not None:
+                            run_state._current_agent = current_agent
+                        streamed_result._event_queue.put_nowait(
+                            AgentUpdatedStreamEvent(new_agent=current_agent)
+                        )
+                        await _save_stream_items_with_count(
+                            turn_session_items,
+                            turn_result.model_response.response_id,
+                            store_setting,
+                        )
+                        continue
                     await _finalize_streamed_final_output(
                         streamed_result=streamed_result,
                         agent=current_agent,

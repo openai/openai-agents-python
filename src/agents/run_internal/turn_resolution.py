@@ -584,7 +584,11 @@ async def execute_handoffs(
         model_response=new_response,
         pre_step_items=pre_step_items,
         new_step_items=new_step_items,
-        next_step=NextStepHandoff(new_agent),
+        next_step=NextStepHandoff(
+            new_agent,
+            auto_handoff_back=handoff.auto_handoff_back,
+            originating_agent=public_agent if handoff.auto_handoff_back else None,
+        ),
         tool_input_guardrail_results=list(tool_input_guardrail_results or []),
         tool_output_guardrail_results=list(tool_output_guardrail_results or []),
         session_step_items=session_step_items,

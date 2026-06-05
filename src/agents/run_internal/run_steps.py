@@ -154,6 +154,13 @@ class ProcessedResponse:
 @dataclass
 class NextStepHandoff:
     new_agent: Agent[Any]
+    auto_handoff_back: bool = False
+    """Whether the new agent should automatically handoff back to the originating agent when it
+    finishes its task."""
+
+    originating_agent: Agent[Any] | None = None
+    """The agent that initiated the handoff. When auto_handoff_back is True, control will return
+    to this agent after the new agent completes its task."""
 
 
 @dataclass

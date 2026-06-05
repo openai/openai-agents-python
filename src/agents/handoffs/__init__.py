@@ -160,6 +160,16 @@ class Handoff(Generic[TContext, TAgent]):
     context or state.
     """
 
+    auto_handoff_back: bool = False
+    """Whether the target agent should automatically handoff back to the originating agent when it
+    finishes its task.
+
+    When True, after the child agent completes its work (produces a final output), control
+    automatically returns to the agent that initiated the handoff. This enables orchestration
+    patterns where a main orchestrator agent delegates to specialist agents and expects results
+    back without needing explicit circular handoff configurations.
+    """
+
     _agent_ref: weakref.ReferenceType[AgentBase[Any]] | None = field(
         default=None, init=False, repr=False
     )
@@ -188,6 +198,7 @@ def handoff(
     tool_description_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
+    auto_handoff_back: bool = False,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext, Agent[TContext]]: ...
 
@@ -202,6 +213,7 @@ def handoff(
     tool_name_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
+    auto_handoff_back: bool = False,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext, Agent[TContext]]: ...
 
@@ -215,6 +227,7 @@ def handoff(
     tool_name_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
+    auto_handoff_back: bool = False,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext, Agent[TContext]]: ...
 
@@ -227,6 +240,7 @@ def handoff(
     input_type: type[THandoffInput] | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
+    auto_handoff_back: bool = False,
     is_enabled: bool
     | Callable[[RunContextWrapper[Any], Agent[TContext]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext, Agent[TContext]]:
@@ -247,6 +261,9 @@ def handoff(
         input_filter: A function that filters the inputs that are passed to the next agent.
         nest_handoff_history: Optional override for the RunConfig-level ``nest_handoff_history``
             flag. If ``None`` we fall back to the run's configuration.
+        auto_handoff_back: Whether the target agent should automatically handoff back to the
+            originating agent when it finishes its task. Useful for orchestration patterns where a
+            main agent delegates to specialist agents and expects results back.
         is_enabled: Whether the handoff is enabled. Can be a bool or a callable that takes the run
             context and agent and returns whether the handoff is enabled. Disabled handoffs are
             hidden from the LLM at runtime.
@@ -327,6 +344,7 @@ def handoff(
         input_filter=input_filter,
         nest_handoff_history=nest_handoff_history,
         agent_name=agent.name,
+        auto_handoff_back=auto_handoff_back,
         is_enabled=_is_enabled if callable(is_enabled) else is_enabled,
     )
     handoff_obj._agent_ref = weakref.ref(agent)

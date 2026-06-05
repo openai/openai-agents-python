@@ -765,6 +765,7 @@ class AgentRunner:
                 raise
 
             try:
+                handoff_chain: list[Agent[Any]] = []
                 while True:
                     resuming_turn = is_resumed_state
                     all_input_guardrails = (
@@ -959,6 +960,20 @@ class AgentRunner:
                             )
 
                             if isinstance(turn_result.next_step, NextStepFinalOutput):
+                                if handoff_chain:
+                                    parent_agent = handoff_chain.pop()
+                                    child_output_text = format_final_output_text(
+                                        current_agent, turn_result.next_step.output
+                                    )
+                                    back_msg = create_message_output_item(
+                                        current_agent, child_output_text
+                                    )
+                                    generated_items.append(back_msg)
+                                    session_items.append(back_msg)
+                                    current_agent = cast(Agent[TContext], parent_agent)
+                                    if run_state is not None:
+                                        run_state._current_agent = current_agent
+                                    continue
                                 output_guardrail_results = await run_output_guardrails(
                                     current_agent.output_guardrails
                                     + (run_config.output_guardrails or []),
@@ -1009,8 +1024,11 @@ class AgentRunner:
                                 result._original_input = copy_input_items(original_input)
                                 return _finalize_result(result)
                             elif isinstance(turn_result.next_step, NextStepHandoff):
+                                next_step = turn_result.next_step
+                                if next_step.auto_handoff_back and next_step.originating_agent is not None:
+                                    handoff_chain.append(next_step.originating_agent)
                                 current_agent = cast(
-                                    Agent[TContext], turn_result.next_step.new_agent
+                                    Agent[TContext], next_step.new_agent
                                 )
                                 if run_state is not None:
                                     run_state._current_agent = current_agent
@@ -1365,6 +1383,20 @@ class AgentRunner:
 
                     try:
                         if isinstance(turn_result.next_step, NextStepFinalOutput):
+                            if handoff_chain:
+                                parent_agent = handoff_chain.pop()
+                                child_output_text = format_final_output_text(
+                                    current_agent, turn_result.next_step.output
+                                )
+                                back_msg = create_message_output_item(
+                                    current_agent, child_output_text
+                                )
+                                generated_items.append(back_msg)
+                                session_items.append(back_msg)
+                                current_agent = cast(Agent[TContext], parent_agent)
+                                if run_state is not None:
+                                    run_state._current_agent = current_agent
+                                continue
                             output_guardrail_results = await run_output_guardrails(
                                 current_agent.output_guardrails
                                 + (run_config.output_guardrails or []),
@@ -1470,7 +1502,10 @@ class AgentRunner:
                             )
                             return _finalize_result(result)
                         elif isinstance(turn_result.next_step, NextStepHandoff):
-                            current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
+                            next_step = turn_result.next_step
+                            if next_step.auto_handoff_back and next_step.originating_agent is not None:
+                                handoff_chain.append(next_step.originating_agent)
+                            current_agent = cast(Agent[TContext], next_step.new_agent)
                             if run_state is not None:
                                 run_state._current_agent = current_agent
                             # Next agent starts with the nested/filtered input.
