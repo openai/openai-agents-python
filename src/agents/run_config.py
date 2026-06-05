@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -201,12 +202,57 @@ class SandboxRunConfig:
 
 
 @dataclass
+class RunInterruptSignal:
+    """Signal that can be used to request graceful interruption of an active agent run.
+
+    Pass an instance of this class as ``RunConfig.interrupt_signal``, then call
+    ``interrupt()`` from any thread or task to request that the run complete its
+    current turn and return partial results instead of continuing to the next turn.
+
+    Example usage::
+
+        interrupt = RunInterruptSignal()
+
+        async def main():
+            task = asyncio.create_task(Runner.run(agent, "input", run_config=RunConfig(interrupt_signal=interrupt)))
+            await asyncio.sleep(2)
+            interrupt.interrupt()  # Signal the run to wrap up gracefully
+            result = await task
+    """
+
+    _event: asyncio.Event = field(default_factory=asyncio.Event)
+    """Internal asyncio.Event used to signal interruption."""
+
+    def interrupt(self) -> None:
+        """Request the agent run to gracefully interrupt after the current turn.
+
+        Thread-safe: can be called from any thread or asyncio task.
+        """
+        # asyncio.Event.set() is thread-safe in Python 3.8+
+        self._event.set()
+
+    @property
+    def is_interrupted(self) -> bool:
+        """Return True if an interruption has been requested."""
+        return self._event.is_set()
+
+    def clear(self) -> None:
+        """Reset the interrupt signal so the same instance can be reused."""
+        self._event.clear()
+
+
+@dataclass
 class RunConfig:
     """Configures settings for the entire agent run."""
 
     model: str | Model | None = None
     """The model to use for the entire agent run. If set, will override the model set on every
     agent. The model_provider passed in below must be able to resolve this model name.
+    """
+
+    interrupt_signal: RunInterruptSignal | None = None
+    """Optional signal that can be set from outside the run to request graceful interruption.
+    When set, the agent loop will complete the current turn and return partial results.
     """
 
     model_provider: ModelProvider = field(default_factory=MultiProvider)
@@ -368,6 +414,7 @@ __all__ = [
     "ModelInputData",
     "ReasoningItemIdPolicy",
     "RunConfig",
+    "RunInterruptSignal",
     "RunOptions",
     "SandboxArchiveLimits",
     "SandboxConcurrencyLimits",

@@ -669,6 +669,15 @@ async def start_streaming(
 
     try:
         while True:
+            # Check for external interrupt request before starting a new streaming turn.
+            if run_config.interrupt_signal and run_config.interrupt_signal.is_interrupted:
+                logger.debug(
+                    "Streaming run interrupted via RunInterruptSignal at turn %s", current_turn
+                )
+                streamed_result.interrupted = True
+                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                return
+
             all_input_guardrails = (
                 starting_agent.input_guardrails + (run_config.input_guardrails or [])
                 if current_turn == 0 and not is_resumed_state

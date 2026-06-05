@@ -37,6 +37,7 @@ from .run_config import (
     ModelInputData,
     ReasoningItemIdPolicy,
     RunConfig,
+    RunInterruptSignal,
     RunOptions,
     ToolErrorFormatter,
     ToolErrorFormatterArgs,
@@ -131,6 +132,7 @@ __all__ = [
     "AgentRunner",
     "Runner",
     "RunConfig",
+    "RunInterruptSignal",
     "RunOptions",
     "RunState",
     "RunContextWrapper",
@@ -766,6 +768,37 @@ class AgentRunner:
 
             try:
                 while True:
+                    # Check for external interrupt request before starting a new turn.
+                    if run_config.interrupt_signal and run_config.interrupt_signal.is_interrupted:
+                        logger.debug(
+                            "Run interrupted via RunInterruptSignal at turn %s", current_turn
+                        )
+                        output_guardrail_results: list[OutputGuardrailResult] = []
+                        result = RunResult(
+                            input=copy_input_items(original_input),
+                            new_items=list(session_items),
+                            raw_responses=list(model_responses),
+                            final_output=None,
+                            _last_agent=current_agent,
+                            input_guardrail_results=list(input_guardrail_results),
+                            output_guardrail_results=output_guardrail_results,
+                            tool_input_guardrail_results=list(tool_input_guardrail_results),
+                            tool_output_guardrail_results=list(tool_output_guardrail_results),
+                            context_wrapper=context_wrapper,
+                            interruptions=[],
+                            interrupted=True,
+                            max_turns=max_turns,
+                        )
+                        result._current_turn = current_turn
+                        result._model_input_items = list(generated_items)
+                        result._replay_from_model_input_items = list(generated_items) != list(
+                            session_items
+                        )
+                        if run_state is not None:
+                            result._trace_state = run_state._trace_state
+                        result._original_input = copy_input_items(original_input)
+                        return _finalize_result(result)
+
                     resuming_turn = is_resumed_state
                     all_input_guardrails = (
                         starting_agent.input_guardrails + (run_config.input_guardrails or [])

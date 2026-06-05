@@ -367,6 +367,11 @@ class RunResult(RunResultBase):
     interruptions: list[ToolApprovalItem] = field(default_factory=list)
     """Pending tool approval requests (interruptions) for this run."""
 
+    interrupted: bool = False
+    """Whether the run was interrupted via ``RunInterruptSignal`` before reaching a natural
+    final output. When True, ``final_output`` may be ``None`` and the result contains the
+    partial state accumulated up to the point of interruption."""
+
     def __post_init__(self) -> None:
         self._last_agent_ref = weakref.ref(self._last_agent)
 
@@ -498,6 +503,9 @@ class RunResultStreaming(RunResultBase):
     """The last processed model response. This is needed for resuming from interruptions."""
     interruptions: list[ToolApprovalItem] = field(default_factory=list)
     """Pending tool approval requests (interruptions) for this run."""
+    interrupted: bool = False
+    """Whether the run was interrupted via ``RunInterruptSignal`` before reaching a natural
+    final output. When True, ``final_output`` may be ``None`` and ``is_complete`` is True."""
     _waiting_on_event_queue: bool = field(default=False, repr=False)
 
     _current_turn_persisted_item_count: int = 0
@@ -673,6 +681,7 @@ class RunResultStreaming(RunResultBase):
         """
         # Store the cancel mode for the background task to check
         self._cancel_mode = mode
+        self.interrupted = True
 
         if mode == "immediate":
             # Existing behavior - immediate shutdown

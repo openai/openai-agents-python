@@ -110,6 +110,7 @@ from .retry import (
 from .run import (
     ReasoningItemIdPolicy,
     RunConfig,
+    RunInterruptSignal,
     Runner,
     ToolErrorFormatter,
     ToolErrorFormatterArgs,
@@ -447,6 +448,7 @@ __all__ = [
     "RunResultStreaming",
     "ResponsesWebSocketSession",
     "RunConfig",
+    "RunInterruptSignal",
     "ReasoningItemIdPolicy",
     "ToolExecutionConfig",
     "ToolErrorFormatter",
