@@ -34,6 +34,7 @@ from .items import (
     normalize_input_items_for_api,
     run_item_to_input_item,
     strip_internal_input_item_metadata,
+    strip_stale_reasoning_item_ids,
 )
 from .oai_conversation import OpenAIServerConversationTracker
 from .run_steps import SingleStepResult
@@ -90,6 +91,11 @@ async def prepare_input_with_session(
     converted_history = [
         strip_internal_input_item_metadata(ensure_input_item_format(item)) for item in history
     ]
+
+    # When items come from a local session (not server-managed Conversations),
+    # strip reasoning item IDs to prevent stale-server-ID 404s.
+    if not is_openai_conversation_session:
+        converted_history = strip_stale_reasoning_item_ids(converted_history)
 
     new_input_list = [
         ensure_input_item_format(item) for item in ItemHelpers.input_to_new_input_list(input)

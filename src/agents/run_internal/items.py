@@ -305,6 +305,37 @@ def strip_internal_input_item_metadata(item: TResponseInputItem) -> TResponseInp
     return cast(TResponseInputItem, cleaned)
 
 
+def strip_stale_reasoning_item_ids(
+    items: list[TResponseInputItem],
+) -> list[TResponseInputItem]:
+    """Strip the ``id`` field from reasoning items in a list of input items.
+
+    Reasoning item IDs reference server-side content that only exists during the
+    original API interaction. When reasoning items are stored in a local session
+    (SQLite, file-based, etc.) and later replayed, the server no longer recognises
+    those IDs and returns a 404. Removing the ID lets the server treat the item as a
+    fresh, untracked reasoning annotation.
+
+    This is intentionally NOT applied for ``OpenAIConversationsSession``, where the
+    server itself manages item identity.
+
+    Args:
+        items: A list of input items, potentially containing reasoning items.
+
+    Returns:
+        The same list with reasoning item IDs removed where present.
+    """
+    result: list[TResponseInputItem] = []
+    for item in items:
+        if isinstance(item, dict) and item.get("type") == "reasoning" and "id" in item:
+            sanitized = dict(item)
+            sanitized.pop("id")
+            result.append(cast(TResponseInputItem, sanitized))
+        else:
+            result.append(item)
+    return result
+
+
 def _should_omit_reasoning_item_ids(reasoning_item_id_policy: ReasoningItemIdPolicy | None) -> bool:
     return reasoning_item_id_policy == "omit"
 
