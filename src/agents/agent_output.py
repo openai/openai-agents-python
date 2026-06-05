@@ -168,6 +168,60 @@ class AgentOutputSchema(AgentOutputSchemaBase):
         return _type_to_str(self.output_type)
 
 
+class _ResponseFormatOutputSchema(AgentOutputSchemaBase):
+    """An ``AgentOutputSchemaBase`` that wraps a raw ``response_format`` dict.
+
+    This is used internally to allow ``CallModelInputFilter`` callbacks to
+    dynamically override the response format before a model call.
+    """
+
+    def __init__(self, response_format: dict[str, Any]):
+        self._response_format = response_format
+
+    def is_plain_text(self) -> bool:
+        if not isinstance(self._response_format, dict):
+            return True
+        return self._response_format.get("type") == "text"
+
+    def is_strict_json_schema(self) -> bool:
+        if not isinstance(self._response_format, dict):
+            return False
+        js = self._response_format.get("json_schema")
+        if isinstance(js, dict):
+            return bool(js.get("strict", False))
+        return False
+
+    def json_schema(self) -> dict[str, Any]:
+        if not isinstance(self._response_format, dict):
+            return {}
+        js = self._response_format.get("json_schema")
+        if isinstance(js, dict):
+            schema = js.get("schema")
+            if isinstance(schema, dict):
+                return schema
+        return {}
+
+    def name(self) -> str:
+        if not isinstance(self._response_format, dict):
+            return "final_output"
+        js = self._response_format.get("json_schema")
+        if isinstance(js, dict):
+            name = js.get("name")
+            if isinstance(name, str):
+                return name
+        return "final_output"
+
+    def validate_json(self, json_str: str) -> Any:
+        import json
+
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            raise ModelBehaviorError(
+                f"Failed to parse JSON output: {e}"
+            ) from e
+
+
 def _is_subclass_of_base_model_or_dict(t: Any) -> bool:
     # If it's a generic alias, 'origin' will be the actual type, e.g. 'list'
     origin = get_origin(t)

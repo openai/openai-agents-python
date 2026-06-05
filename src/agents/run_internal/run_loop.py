@@ -29,7 +29,7 @@ from .._tool_identity import (
     get_tool_trace_name_for_tool,
 )
 from ..agent import Agent
-from ..agent_output import AgentOutputSchemaBase
+from ..agent_output import AgentOutputSchemaBase, _ResponseFormatOutputSchema
 from ..exceptions import (
     AgentsException,
     InputGuardrailTripwireTriggered,
@@ -1376,6 +1376,8 @@ async def run_single_turn_streamed(
     )
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
+    if filtered.response_format is not None:
+        output_schema = _ResponseFormatOutputSchema(filtered.response_format)
     hosted_mcp_tool_metadata = collect_mcp_list_tools_metadata(streamed_result._model_input_items)
     if isinstance(filtered.input, list):
         hosted_mcp_tool_metadata.update(collect_mcp_list_tools_metadata(filtered.input))
@@ -1760,7 +1762,7 @@ async def run_single_turn(
     else:
         input = _prepare_turn_input_items(original_input, generated_items, reasoning_item_id_policy)
 
-    new_response = await get_new_response(
+    new_response, output_schema = await get_new_response(
         bindings,
         system_prompt,
         input,
@@ -1811,8 +1813,8 @@ async def get_new_response(
     session: Session | None = None,
     session_items_to_rewind: list[TResponseInputItem] | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
-) -> ModelResponse:
-    """Call the model and return the raw response, handling retries and hooks."""
+) -> tuple[ModelResponse, AgentOutputSchemaBase | None]:
+    """Call the model and return the raw response and (possibly updated) output schema."""
     public_agent = bindings.public_agent
     execution_agent = bindings.execution_agent
     filtered = await maybe_filter_model_input(
@@ -1824,6 +1826,8 @@ async def get_new_response(
     )
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
+    if filtered.response_format is not None:
+        output_schema = _ResponseFormatOutputSchema(filtered.response_format)
 
     model = get_model(execution_agent, run_config)
     model_settings = get_model_settings(execution_agent, run_config)
@@ -1917,4 +1921,4 @@ async def get_new_response(
         hooks.on_llm_end(context_wrapper, public_agent, new_response),
     )
 
-    return new_response
+    return new_response, output_schema

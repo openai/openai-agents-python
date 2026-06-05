@@ -50,6 +50,7 @@ class ModelInputData:
 
     input: list[TResponseInputItem]
     instructions: str | None
+    response_format: Any | None = None
 
 
 @dataclass
