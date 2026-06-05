@@ -735,6 +735,7 @@ class OpenAIResponsesModel(Model):
         list_input = ItemHelpers.input_to_new_input_list(input)
         list_input = _to_dump_compatible(list_input)
         list_input = self._remove_openai_responses_api_incompatible_fields(list_input)
+        list_input = self._sanitize_reasoning_item_followers(list_input)
 
         if model_settings.parallel_tool_calls and tools:
             parallel_tool_calls: bool | Omit = True
@@ -915,6 +916,70 @@ class OpenAIResponsesModel(Model):
             del item["provider_data"]
 
         return item
+
+    def _sanitize_reasoning_item_followers(self, list_input: list[Any]) -> list[Any]:
+        """Strip IDs from reasoning items whose required following item is missing or
+        is a hosted tool call type (e.g. code_interpreter_call, web_search_call,
+        file_search_call, image_generation_call, computer_call) that the API may
+        reject as a valid reasoning follower.
+
+        This prevents 400 errors like:
+        ``Item 'rs_...' of type 'reasoning' was provided without its required
+        following item.``
+        """
+        # Quick check: if there are no reasoning items, return unchanged.
+        has_reasoning = any(
+            isinstance(item, dict) and item.get("type") == "reasoning" for item in list_input
+        )
+        if not has_reasoning:
+            return list_input
+
+        # Hosted tool call types whose outputs are embedded in the call itself.
+        # These are handled by the API directly and may not be recognized as valid
+        # followers for reasoning items in all contexts.
+        hosted_tool_call_types = frozenset(
+            {
+                "code_interpreter_call",
+                "web_search_call",
+                "file_search_call",
+                "image_generation_call",
+                "computer_call",
+            }
+        )
+
+        result = list(list_input)
+        for i in range(len(result)):
+            item = result[i]
+            if not isinstance(item, dict) or item.get("type") != "reasoning":
+                continue
+            if "id" not in item:
+                continue
+
+            # Find the next non-reasoning item
+            next_item = None
+            for j in range(i + 1, len(result)):
+                candidate = result[j]
+                if isinstance(candidate, dict) and candidate.get("type") == "reasoning":
+                    continue
+                next_item = candidate
+                break
+
+            should_strip = False
+            if next_item is None:
+                # Reasoning item is the last item — no follower at all.
+                # The API will reject this.
+                should_strip = True
+            elif isinstance(next_item, dict) and next_item.get("type") in hosted_tool_call_types:
+                # Reasoning item is followed by a hosted tool call.
+                # These are valid API followers but stripping the ID
+                # prevents edge-case rejections (e.g. during handoffs).
+                should_strip = True
+
+            if should_strip:
+                result[i] = dict(item)
+                result[i].pop("id", None)
+
+        return result
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
