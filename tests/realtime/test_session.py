@@ -1159,6 +1159,57 @@ class TestToolCallExecution:
         assert len(mock_model.sent_tool_outputs) == 1
 
     @pytest.mark.asyncio
+    async def test_async_function_tool_failure_preserved_when_error_output_send_fails(
+        self, mock_agent
+    ):
+        class FailingToolOutputModel(MockRealtimeModel):
+            async def send_event(self, event):
+                if isinstance(event, RealtimeModelSendToolOutput):
+                    raise RuntimeError("send failed")
+                await super().send_event(event)
+
+        async def failing_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            raise ValueError("tool failed")
+
+        function_tool = FunctionTool(
+            name="failing_tool",
+            description="fails",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=failing_tool,
+        )
+        mock_agent.get_all_tools.return_value = [function_tool]
+        mock_model = FailingToolOutputModel()
+        session = RealtimeSession(mock_model, mock_agent, None)
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="failing_tool",
+            call_id="call_failure_output_send_fails",
+            arguments="{}",
+        )
+
+        await session.on_event(tool_call_event)
+        tool_call_tasks = list(session._tool_call_tasks)
+        assert len(tool_call_tasks) == 1
+        task_results = await asyncio.gather(*tool_call_tasks, return_exceptions=True)
+        await asyncio.sleep(0)
+
+        assert len(task_results) == 1
+        assert isinstance(task_results[0], RuntimeError)
+        assert "send failed" in str(task_results[0])
+        assert isinstance(session._stored_exception, ValueError)
+        assert str(session._stored_exception) == "tool failed"
+        assert tool_call_event.call_id in session._pending_tool_outputs
+        assert len(mock_model.sent_tool_outputs) == 0
+
+        errors = []
+        while not session._event_queue.empty():
+            event = session._event_queue.get_nowait()
+            if isinstance(event, RealtimeError):
+                errors.append(event.error["message"])
+
+        assert any("cached output will be retried" in message for message in errors)
+        assert any("Tool call task failed: tool failed" in message for message in errors)
+
+    @pytest.mark.asyncio
     async def test_function_tool_timeout_returns_result_message(self, mock_model, mock_agent):
         async def invoke_slow_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
             await asyncio.sleep(0.2)
@@ -1459,6 +1510,55 @@ class TestToolCallExecution:
         assert sent_call == tool_call_event
         assert start_response is True
         assert "handoff failed" in sent_output
+
+    @pytest.mark.asyncio
+    async def test_handoff_failure_preserved_when_error_output_send_fails(self):
+        class FailingToolOutputModel(MockRealtimeModel):
+            async def send_event(self, event):
+                if isinstance(event, RealtimeModelSendToolOutput):
+                    raise RuntimeError("send failed")
+                await super().send_event(event)
+
+        handoff = Handoff(
+            tool_name="transfer_to_broken_agent",
+            tool_description="broken handoff",
+            input_json_schema={},
+            on_invoke_handoff=AsyncMock(side_effect=RuntimeError("handoff failed")),
+            input_filter=None,
+            agent_name="broken_agent",
+            is_enabled=True,
+        )
+        agent = RealtimeAgent(name="agent", handoffs=[handoff])
+        mock_model = FailingToolOutputModel()
+        session = RealtimeSession(mock_model, agent, None)
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="transfer_to_broken_agent",
+            call_id="call_handoff_failure_output_send_fails",
+            arguments="{}",
+        )
+
+        await session.on_event(tool_call_event)
+        tool_call_tasks = list(session._tool_call_tasks)
+        assert len(tool_call_tasks) == 1
+        task_results = await asyncio.gather(*tool_call_tasks, return_exceptions=True)
+        await asyncio.sleep(0)
+
+        assert len(task_results) == 1
+        assert isinstance(task_results[0], RuntimeError)
+        assert "send failed" in str(task_results[0])
+        assert isinstance(session._stored_exception, RuntimeError)
+        assert str(session._stored_exception) == "handoff failed"
+        assert tool_call_event.call_id in session._pending_tool_outputs
+        assert len(mock_model.sent_tool_outputs) == 0
+
+        errors = []
+        while not session._event_queue.empty():
+            event = session._event_queue.get_nowait()
+            if isinstance(event, RealtimeError):
+                errors.append(event.error["message"])
+
+        assert any("cached output will be retried" in message for message in errors)
+        assert any("Tool call task failed: handoff failed" in message for message in errors)
 
     @pytest.mark.asyncio
     async def test_handoff_session_update_preserves_custom_voice(self, mock_model):

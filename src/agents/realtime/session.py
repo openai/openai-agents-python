@@ -120,9 +120,15 @@ class _PendingToolOutput:
 
 
 class _PendingToolOutputSendError(RuntimeError):
-    def __init__(self, call_id: str, cause: BaseException) -> None:
+    def __init__(
+        self,
+        call_id: str,
+        cause: BaseException,
+        original_error: BaseException | None = None,
+    ) -> None:
         super().__init__(str(cause))
         self.call_id = call_id
+        self.original_error = original_error
 
 
 class RealtimeSession(RealtimeModelListener):
@@ -737,20 +743,24 @@ class RealtimeSession(RealtimeModelListener):
         if output is None:
             return False
 
-        await self._send_tool_output_completion(
-            _PendingToolOutput(
-                tool_call=event,
-                output=output,
-                start_response=True,
-                tool_end_event=RealtimeToolEnd(
-                    info=self._event_info,
-                    tool=tool,
+        try:
+            await self._send_tool_output_completion(
+                _PendingToolOutput(
+                    tool_call=event,
                     output=output,
-                    agent=agent,
-                    arguments=event.arguments,
-                ),
+                    start_response=True,
+                    tool_end_event=RealtimeToolEnd(
+                        info=self._event_info,
+                        tool=tool,
+                        output=output,
+                        agent=agent,
+                        arguments=event.arguments,
+                    ),
+                )
             )
-        )
+        except _PendingToolOutputSendError as send_error:
+            send_error.original_error = error
+            raise
         return True
 
     async def _send_handoff_failure_output(
@@ -760,13 +770,17 @@ class RealtimeSession(RealtimeModelListener):
         tool_context: ToolContext[Any],
         error: Exception,
     ) -> None:
-        await self._send_tool_output_completion(
-            _PendingToolOutput(
-                tool_call=event,
-                output=default_tool_error_function(tool_context, error),
-                start_response=True,
+        try:
+            await self._send_tool_output_completion(
+                _PendingToolOutput(
+                    tool_call=event,
+                    output=default_tool_error_function(tool_context, error),
+                    start_response=True,
+                )
             )
-        )
+        except _PendingToolOutputSendError as send_error:
+            send_error.original_error = error
+            raise
 
     async def _handle_tool_call(
         self,
@@ -1277,6 +1291,19 @@ class RealtimeSession(RealtimeModelListener):
                     )
                 )
             )
+            original_error = exception.original_error
+            if original_error is not None:
+                logger.exception("Realtime tool call task failed", exc_info=original_error)
+                if self._stored_exception is None:
+                    self._stored_exception = original_error
+                asyncio.create_task(
+                    self._put_event(
+                        RealtimeError(
+                            info=self._event_info,
+                            error={"message": f"Tool call task failed: {original_error}"},
+                        )
+                    )
+                )
             return
 
         logger.exception("Realtime tool call task failed", exc_info=exception)
