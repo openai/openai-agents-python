@@ -186,6 +186,7 @@ async def test_streamed_run_hooks_tool_call_sealed():
     assert hooks.events["on_tool_call_sealed"] == 1
     assert hooks.sealed_tool_calls[0].tool_name == "f"
     assert hooks.sealed_tool_calls[0].call_id is not None
+    assert hooks.sealed_tool_calls[0].arguments == '{"key": "val"}'
 
 
 @pytest.mark.asyncio
@@ -216,8 +217,10 @@ async def test_streamed_run_hooks_tool_call_sealed_multiple():
     assert len(hooks.sealed_tool_calls) == 2
     assert hooks.sealed_tool_calls[0].tool_name == "get_weather"
     assert hooks.sealed_tool_calls[0].call_id == "call_1"
+    assert hooks.sealed_tool_calls[0].arguments == '{"city": "Dallas"}'
     assert hooks.sealed_tool_calls[1].tool_name == "get_time"
     assert hooks.sealed_tool_calls[1].call_id == "call_2"
+    assert hooks.sealed_tool_calls[1].arguments == '{"timezone": "CST"}'
 
 
 # test_async_run_hooks_with_agent_hooks_with_llm
