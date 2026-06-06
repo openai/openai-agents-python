@@ -22,6 +22,7 @@ from agents.memory.openai_responses_compaction_session import (
     is_openai_model_name,
     select_compaction_candidate_items,
 )
+from agents.run_context import RunContextWrapper
 from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
@@ -510,7 +511,12 @@ class TestOpenAIResponsesCompactionSession:
                 self.add_calls = 0
                 self.clear_calls = 0
 
-            async def add_items(self, items: list[TResponseInputItem]) -> None:
+            async def add_items(
+                self,
+                items: list[TResponseInputItem],
+                *,
+                wrapper: RunContextWrapper[Any] | None = None,
+            ) -> None:
                 self.add_calls += 1
                 if self.add_calls == 1:
                     await super().add_items(items[:1])
@@ -566,12 +572,22 @@ class TestOpenAIResponsesCompactionSession:
                 self.add_calls = 0
                 self.clear_calls = 0
 
-            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            async def get_items(
+                self,
+                limit: int | None = None,
+                *,
+                wrapper: RunContextWrapper[Any] | None = None,
+            ) -> list[TResponseInputItem]:
                 if limit is None and self.session_settings is not None:
                     limit = self.session_settings.limit
                 return await super().get_items(limit)
 
-            async def add_items(self, items: list[TResponseInputItem]) -> None:
+            async def add_items(
+                self,
+                items: list[TResponseInputItem],
+                *,
+                wrapper: RunContextWrapper[Any] | None = None,
+            ) -> None:
                 self.add_calls += 1
                 if self.add_calls == 1:
                     await super().add_items(items[:1])
@@ -624,7 +640,12 @@ class TestOpenAIResponsesCompactionSession:
                 self.add_calls = 0
                 self.clear_calls = 0
 
-            async def add_items(self, items: list[TResponseInputItem]) -> None:
+            async def add_items(
+                self,
+                items: list[TResponseInputItem],
+                *,
+                wrapper: RunContextWrapper[Any] | None = None,
+            ) -> None:
                 self.add_calls += 1
                 await super().add_items(items)
 
@@ -674,7 +695,12 @@ class TestOpenAIResponsesCompactionSession:
                 self.add_calls = 0
                 self.clear_calls = 0
 
-            async def add_items(self, items: list[TResponseInputItem]) -> None:
+            async def add_items(
+                self,
+                items: list[TResponseInputItem],
+                *,
+                wrapper: RunContextWrapper[Any] | None = None,
+            ) -> None:
                 self.add_calls += 1
                 await super().add_items(items)
 
@@ -725,7 +751,12 @@ class TestOpenAIResponsesCompactionSession:
                 self.add_calls = 0
                 self.clear_calls = 0
 
-            async def add_items(self, items: list[TResponseInputItem]) -> None:
+            async def add_items(
+                self,
+                items: list[TResponseInputItem],
+                *,
+                wrapper: RunContextWrapper[Any] | None = None,
+            ) -> None:
                 self.add_calls += 1
                 if self.add_calls == 1:
                     await super().add_items(items[:1])

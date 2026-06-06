@@ -8,12 +8,14 @@ from openai import AsyncOpenAI
 
 from ..items import TResponseInputItem
 from ..models._openai_shared import get_default_openai_client
+from ..run_context import RunContextWrapper
 from ..run_internal.items import normalize_input_items_for_api
 from .openai_conversations_session import OpenAIConversationsSession
 from .session import (
     OpenAIResponsesCompactionArgs,
     OpenAIResponsesCompactionAwareSession,
     SessionABC,
+    session_method_accepts_wrapper,
 )
 
 if TYPE_CHECKING:
@@ -233,7 +235,18 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             f"candidates={len(self._compaction_candidate_items)})"
         )
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
+        # Forward the wrapper only when the underlying session opts in, so wrapping older
+        # custom sessions keeps working unchanged.
+        if wrapper is not None and session_method_accepts_wrapper(
+            self.underlying_session.get_items
+        ):
+            return await self.underlying_session.get_items(limit, wrapper=wrapper)
         return await self.underlying_session.get_items(limit)
 
     async def _get_all_underlying_session_items(self) -> list[TResponseInputItem]:
@@ -331,8 +344,18 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     def _clear_deferred_compaction(self) -> None:
         self._deferred_response_id = None
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
-        await self.underlying_session.add_items(items)
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        if wrapper is not None and session_method_accepts_wrapper(
+            self.underlying_session.add_items
+        ):
+            await self.underlying_session.add_items(items, wrapper=wrapper)
+        else:
+            await self.underlying_session.add_items(items)
         if self._compaction_candidate_items is not None:
             new_items = _normalize_compaction_session_items(items)
             new_candidates = select_compaction_candidate_items(new_items)

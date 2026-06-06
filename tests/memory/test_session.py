@@ -4,10 +4,12 @@ import asyncio
 import sqlite3
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from agents import Agent, RunConfig, Runner, SQLiteSession, TResponseInputItem
+from agents.run_context import RunContextWrapper
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 
@@ -640,7 +642,11 @@ async def test_session_add_items_exception_propagates_in_streamed():
     """
     session = SQLiteSession("test_exception_session")
 
-    async def _failing_add_items(_items):
+    async def _failing_add_items(
+        items: list[TResponseInputItem],
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         raise RuntimeError("Simulated session.add_items failure")
 
     session.add_items = _failing_add_items  # type: ignore[method-assign]

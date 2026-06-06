@@ -37,8 +37,9 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from typing_extensions import TypedDict
 
 from ...items import TResponseInputItem
-from ...memory.session import SessionABC
+from ...memory.session import SessionABC, session_method_accepts_wrapper
 from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...run_context import RunContextWrapper
 
 
 class EncryptedEnvelope(TypedDict):
@@ -180,12 +181,28 @@ class EncryptedSession(SessionABC):
                 valid_items.append(item)
         return valid_items
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def _get_underlying_items(
+        self, limit: int | None, wrapper: RunContextWrapper[Any] | None
+    ) -> list[TResponseInputItem]:
+        # Forward the wrapper only when the underlying session opts in, so wrapping older
+        # custom sessions keeps working unchanged.
+        if wrapper is not None and session_method_accepts_wrapper(
+            self.underlying_session.get_items
+        ):
+            return await self.underlying_session.get_items(limit, wrapper=wrapper)
+        return await self.underlying_session.get_items(limit)
+
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         effective_limit = resolve_session_limit(limit, self.session_settings)
         if effective_limit is not None and effective_limit > 0:
             window = effective_limit
             while True:
-                encrypted_items = await self.underlying_session.get_items(window)
+                encrypted_items = await self._get_underlying_items(window, wrapper)
                 valid_items = self._unwrap_valid_items(encrypted_items)
                 if len(valid_items) >= effective_limit:
                     return valid_items[-effective_limit:]
@@ -193,11 +210,23 @@ class EncryptedSession(SessionABC):
                     return valid_items
                 window *= 2
 
-        encrypted_items = await self.underlying_session.get_items(limit)
+        encrypted_items = await self._get_underlying_items(limit, wrapper)
         return self._unwrap_valid_items(encrypted_items)
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         wrapped: list[EncryptedEnvelope] = [self._wrap(it) for it in items]
+        if wrapper is not None and session_method_accepts_wrapper(
+            self.underlying_session.add_items
+        ):
+            await self.underlying_session.add_items(
+                cast(list[TResponseInputItem], wrapped), wrapper=wrapper
+            )
+            return
         await self.underlying_session.add_items(cast(list[TResponseInputItem], wrapped))
 
     async def pop_item(self) -> TResponseInputItem | None:

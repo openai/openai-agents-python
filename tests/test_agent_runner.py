@@ -7,7 +7,7 @@ import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import ANY, call, patch
 
 import httpx
 import pytest
@@ -2252,12 +2252,22 @@ async def test_prepare_input_with_openai_conversation_strips_assistant_history_i
         def __init__(self, history: list[TResponseInputItem]) -> None:
             self.history = history
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self,
+            limit: int | None = None,
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> list[TResponseInputItem]:
             if limit is None:
                 return list(self.history)
             return self.history[-limit:]
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(
+            self,
+            items: list[TResponseInputItem],
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> None:
             self.history.extend(items)
 
         async def pop_item(self) -> TResponseInputItem | None:
@@ -2356,12 +2366,22 @@ async def test_prepare_input_with_openai_conversation_callback_matches_assistant
         def __init__(self, history: list[TResponseInputItem]) -> None:
             self.history = history
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self,
+            limit: int | None = None,
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> list[TResponseInputItem]:
             if limit is None:
                 return list(self.history)
             return self.history[-limit:]
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(
+            self,
+            items: list[TResponseInputItem],
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> None:
             self.history.extend(items)
 
         async def pop_item(self) -> TResponseInputItem | None:
@@ -2409,12 +2429,22 @@ async def test_prepare_input_with_openai_conversation_callback_keeps_user_ids_di
         def __init__(self, history: list[TResponseInputItem]) -> None:
             self.history = history
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self,
+            limit: int | None = None,
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> list[TResponseInputItem]:
             if limit is None:
                 return list(self.history)
             return self.history[-limit:]
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(
+            self,
+            items: list[TResponseInputItem],
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> None:
             self.history.extend(items)
 
         async def pop_item(self) -> TResponseInputItem | None:
@@ -2494,7 +2524,12 @@ async def test_wait_for_session_cleanup_retries_after_get_items_error(
             super().__init__()
             self.get_items_calls = 0
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self,
+            limit: int | None = None,
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> list[TResponseInputItem]:
             self.get_items_calls += 1
             if self.get_items_calls == 1:
                 raise RuntimeError("temporary failure")
@@ -2849,10 +2884,20 @@ async def test_save_result_to_session_counts_sanitized_openai_items() -> None:
         async def _get_session_id(self) -> str:
             return "conv_test"
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(
+            self,
+            items: list[TResponseInputItem],
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> None:
             self.saved_items.extend(items)
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self,
+            limit: int | None = None,
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> list[TResponseInputItem]:
             return []
 
         async def pop_item(self) -> TResponseInputItem | None:
@@ -2936,10 +2981,20 @@ async def test_save_result_to_openai_conversation_preserves_reasoning_id_when_po
         async def _get_session_id(self) -> str:
             return "conv_test"
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(
+            self,
+            items: list[TResponseInputItem],
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> None:
             self.saved_items.extend(items)
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self,
+            limit: int | None = None,
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> list[TResponseInputItem]:
             return []
 
         async def pop_item(self) -> TResponseInputItem | None:
@@ -2991,10 +3046,20 @@ async def test_save_result_to_openai_conversation_drops_unpersistable_reasoning_
         async def _get_session_id(self) -> str:
             return "conv_test"
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(
+            self,
+            items: list[TResponseInputItem],
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> None:
             self.saved_items.extend(items)
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self,
+            limit: int | None = None,
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> list[TResponseInputItem]:
             return []
 
         async def pop_item(self) -> TResponseInputItem | None:
@@ -3037,10 +3102,20 @@ async def test_save_result_to_openai_conversation_keeps_reasoning_encrypted_cont
         async def _get_session_id(self) -> str:
             return "conv_test"
 
-        async def add_items(self, items: list[TResponseInputItem]) -> None:
+        async def add_items(
+            self,
+            items: list[TResponseInputItem],
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> None:
             self.saved_items.extend(items)
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self,
+            limit: int | None = None,
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> list[TResponseInputItem]:
             return []
 
         async def pop_item(self) -> TResponseInputItem | None:
@@ -4658,15 +4733,17 @@ async def test_session_add_items_called_multiple_times_for_multi_turn_completion
                 },
             ]
 
+            # The runner passes the run context wrapper to sessions that accept it, and the
+            # patched mock accepts any kwargs, so expect the wrapper keyword argument too.
             expected_calls = [
                 # First call is the initial input
-                (([expected_items[0]],),),
+                call([expected_items[0]], wrapper=ANY),
                 # Second call is the first tool call and its result
-                (([expected_items[1], expected_items[2]],),),
+                call([expected_items[1], expected_items[2]], wrapper=ANY),
                 # Third call is the second tool call and its result
-                (([expected_items[3], expected_items[4]],),),
+                call([expected_items[3], expected_items[4]], wrapper=ANY),
                 # Fourth call is the final output
-                (([expected_items[5]],),),
+                call([expected_items[5]], wrapper=ANY),
             ]
             assert mock_add_items.call_args_list == expected_calls
             assert result.final_output == "Summary: Echoed foo and bar"

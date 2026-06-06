@@ -51,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
 from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...run_context import RunContextWrapper
 
 
 class SQLAlchemySession(SessionABC):
@@ -274,7 +275,12 @@ class SQLAlchemySession(SessionABC):
         finally:
             self._init_lock.release()
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -326,7 +332,12 @@ class SQLAlchemySession(SessionABC):
                     continue
             return items
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self,
+        items: list[TResponseInputItem],
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:

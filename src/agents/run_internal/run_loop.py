@@ -143,6 +143,7 @@ from .run_steps import (
     ToolRunShellCall,
 )
 from .session_persistence import (
+    _session_get_items,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     resumed_turn_items,
@@ -322,6 +323,7 @@ async def _save_resumed_stream_items(
         response_id=response_id,
         reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
         store=store,
+        wrapper=streamed_result.context_wrapper,
     )
     if run_state is not None:
         run_state._current_turn_persisted_item_count = (
@@ -353,6 +355,7 @@ async def _save_stream_items(
         run_state,
         response_id=response_id,
         store=store,
+        wrapper=streamed_result.context_wrapper,
     )
     if update_persisted_count and streamed_result._state is not None:
         streamed_result._current_turn_persisted_item_count = (
@@ -575,7 +578,7 @@ async def start_streaming(
             session_items: list[TResponseInputItem] | None = None
             if session is not None:
                 try:
-                    session_items = await session.get_items()
+                    session_items = await _session_get_items(session, wrapper=context_wrapper)
                 except Exception:
                     session_items = None
             server_conversation_tracker.hydrate_from_state(
@@ -603,6 +606,7 @@ async def start_streaming(
                 run_config.session_settings,
                 include_history_in_prepared_input=not server_manages_conversation,
                 preserve_dropped_new_items=True,
+                wrapper=context_wrapper,
             )
             streamed_result.input = prepared_input
             streamed_result._original_input = copy_input_items(prepared_input)
@@ -706,6 +710,7 @@ async def start_streaming(
                                 store=current_agent.model_settings.resolve(
                                     run_config.model_settings
                                 ).store,
+                                wrapper=context_wrapper,
                             )
                         )
                         raise InputGuardrailTripwireTriggered(result)
@@ -978,6 +983,7 @@ async def start_streaming(
                                     store=current_agent.model_settings.resolve(
                                         run_config.model_settings
                                     ).store,
+                                    wrapper=context_wrapper,
                                 )
                             )
                             raise InputGuardrailTripwireTriggered(result)
@@ -1420,7 +1426,13 @@ async def run_single_turn_streamed(
             )
         ]
         if input_items_to_save:
-            await save_result_to_session(session, input_items_to_save, [], streamed_result._state)
+            await save_result_to_session(
+                session,
+                input_items_to_save,
+                [],
+                streamed_result._state,
+                wrapper=context_wrapper,
+            )
 
     previous_response_id = (
         server_conversation_tracker.previous_response_id
