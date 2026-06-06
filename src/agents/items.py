@@ -376,6 +376,13 @@ class ToolCallItem(RunItemBase[Any]):
             return self.raw_item.get("call_id") or self.raw_item.get("id")
         return getattr(self.raw_item, "call_id", None) or getattr(self.raw_item, "id", None)
 
+    @property
+    def arguments(self) -> str | None:
+        """Return the sealed arguments of the tool call, if available."""
+        if isinstance(self.raw_item, dict):
+            return self.raw_item.get("arguments")
+        return getattr(self.raw_item, "arguments", None)
+
 
 ToolCallOutputTypes: TypeAlias = (
     FunctionCallOutput
