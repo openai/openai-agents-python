@@ -457,6 +457,36 @@ def test_normalize_resumed_input_drops_orphaned_message_when_no_call_output():
     )
 
 
+def test_normalize_resumed_input_preserves_user_message_after_orphaned_call():
+    """User messages must never be dropped even when consumed_by_call is True.
+
+    If a session is interrupted after [reasoning, function_call] (no output yet) and the user
+    resumes by appending a new user message, the pruning must not silently discard that message.
+    Only assistant messages can be orphaned in this context; user/system messages are always kept.
+    """
+    raw_input: list[TResponseInputItem] = [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_1", "summary": []}),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call", "call_id": "fc_1", "name": "transfer_to_x", "arguments": "{}"},
+        ),
+        # no function_call_output — orphaned call; user then resumes with a new message
+        cast(
+            TResponseInputItem,
+            {"type": "message", "role": "user", "content": "Actually, cancel that."},
+        ),
+    ]
+
+    normalized = normalize_resumed_input(raw_input)
+    assert isinstance(normalized, list)
+    user_messages = [
+        item for item in normalized
+        if isinstance(item, dict) and item.get("role") == "user"
+    ]
+    assert len(user_messages) == 1, "User message must be preserved after orphaned call pruning"
+    assert cast(dict[str, Any], user_messages[0])["content"] == "Actually, cancel that."
+
+
 @pytest.mark.asyncio
 async def test_server_conversation_tracker_drops_orphaned_message_after_consumed_reasoning():
     """The OAI server-conversation path must strip orphaned messages via Runner.run end-to-end."""

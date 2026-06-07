@@ -227,11 +227,11 @@ def drop_orphaned_messages_after_consumed_reasoning(
             consumed_by_call = False
             result.append(item)
         elif item_type == "message":
-            if not consumed_by_call:
+            if not consumed_by_call or item.get("role") != "assistant":
                 result.append(item)
-            # else: orphaned — reasoning consumed by the preceding call; drop without resetting
-            # so that any further messages in the same turn are also dropped until a
-            # call-output item resets consumed_by_call.
+            # else: orphaned assistant message — reasoning consumed by the preceding call; drop
+            # without resetting so that any further assistant messages in the same turn are also
+            # dropped until a call-output item resets consumed_by_call.
         else:
             result.append(item)
 
