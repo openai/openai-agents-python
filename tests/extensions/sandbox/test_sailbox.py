@@ -1432,7 +1432,24 @@ def test_exec_includes_sorted_manifest_environment() -> None:
     asyncio.run(session.exec("printf ok"))
 
     assert sailbox.exec_commands[-1] == (
-        "cd /workspace && env ALPHA=1 ZED='two words' sh -lc 'printf ok'",
+        "cd /workspace && env ALPHA=1 'ZED=two words' sh -lc 'printf ok'",
+        None,
+    )
+
+
+def test_exec_quotes_complete_manifest_environment_assignments() -> None:
+    sailbox = _FakeSailbox()
+    state = _state(sailbox)
+    state.manifest = Manifest(
+        root="/workspace",
+        environment=Environment(value={"BAD; touch /tmp/pwned #": "safe value"}),
+    )
+    session = SailboxSandboxSession.from_state(state, sailbox=sailbox)
+
+    asyncio.run(session.exec("printf ok"))
+
+    assert sailbox.exec_commands[-1] == (
+        "cd /workspace && env 'BAD; touch /tmp/pwned #=safe value' sh -lc 'printf ok'",
         None,
     )
 

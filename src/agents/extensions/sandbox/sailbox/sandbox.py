@@ -460,7 +460,7 @@ class SailboxSandboxSession(BaseSandboxSession):
         parts = ["cd", shlex.quote(self.state.manifest.root), "&&"]
         if env:
             parts.append("env")
-            parts.extend(f"{key}={shlex.quote(value)}" for key, value in sorted(env.items()))
+            parts.extend(shlex.quote(f"{key}={value}") for key, value in sorted(env.items()))
         parts.append(shlex.join(command))
         return " ".join(parts)
 
