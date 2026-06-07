@@ -1408,14 +1408,14 @@ def test_exec_custom_shell_prefix_is_respected() -> None:
     assert sailbox.exec_commands[-1] == ("cd /workspace && bash -lc 'printf ok'", None)
 
 
-def test_exec_user_wraps_command_with_sudo() -> None:
-    sailbox = _FakeSailbox()
+def test_exec_user_wraps_command_with_runuser_without_sudo() -> None:
+    sailbox = _NoSudoSailbox()
     session = _session(sailbox)
 
     asyncio.run(session.exec("id", shell=False, user="sandbox-user"))
 
     assert sailbox.exec_commands[-1] == (
-        "cd /workspace && sudo -u sandbox-user -- id",
+        "cd /workspace && runuser -u sandbox-user -- id",
         None,
     )
 

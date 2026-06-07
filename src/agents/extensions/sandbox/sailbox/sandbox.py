@@ -430,6 +430,31 @@ class SailboxSandboxSession(BaseSandboxSession):
             exit_code=result.returncode,
         )
 
+    def _prepare_exec_command(
+        self,
+        *command: str | Path,
+        shell: bool | list[str],
+        user: str | User | None,
+    ) -> list[str]:
+        sanitized_command = [str(c) for c in command]
+
+        if shell:
+            joined = (
+                sanitized_command[0]
+                if len(sanitized_command) == 1
+                else shlex.join(sanitized_command)
+            )
+            if isinstance(shell, list):
+                sanitized_command = shell + [joined]
+            else:
+                sanitized_command = ["sh", "-lc", joined]
+
+        if user:
+            user_name = user.name if isinstance(user, User) else user
+            sanitized_command = ["runuser", "-u", user_name, "--"] + sanitized_command
+
+        return sanitized_command
+
     async def _shell_command(self, command: tuple[str, ...]) -> str:
         env = await self.state.manifest.environment.resolve()
         parts = ["cd", shlex.quote(self.state.manifest.root), "&&"]
