@@ -177,10 +177,20 @@ async def prepare_input_with_session(
             prune_history_indexes,
         )
     prepared_as_inputs = [ensure_input_item_format(item) for item in prepared_items_raw]
+    # Snapshot which prepared items are history items by object identity before the filtering
+    # pass. drop_orphaned_messages_after_consumed_reasoning may remove items and shift positions,
+    # so prune_history_indexes (built from pre-filter offsets) would be wrong for the subsequent
+    # drop_orphan_function_calls call. Rebuild the index set from surviving item identities.
+    history_ids_in_prepared = {
+        id(prepared_as_inputs[i]) for i in prune_history_indexes if i < len(prepared_as_inputs)
+    }
     filtered = drop_orphaned_messages_after_consumed_reasoning(prepared_as_inputs)
+    adjusted_prune_indexes = {
+        idx for idx, item in enumerate(filtered) if id(item) in history_ids_in_prepared
+    }
     filtered = drop_orphan_function_calls(
         filtered,
-        pruning_indexes=prune_history_indexes,
+        pruning_indexes=adjusted_prune_indexes,
     )
     normalized = normalize_input_items_for_api(filtered)
     deduplicated = deduplicate_input_items_preferring_latest(normalized)

@@ -2263,6 +2263,44 @@ def test_ensure_api_input_item_preserves_object_output():
 
 
 @pytest.mark.asyncio
+async def test_prepare_input_with_session_prune_indexes_survive_message_drop():
+    """prune_history_indexes must be rebuilt after drop_orphaned_messages_after_consumed_reasoning.
+
+    If the first filtering pass removes items, the positional indexes shift. Without rebuilding,
+    drop_orphan_function_calls may target the wrong items — potentially dropping new user input
+    that slid into a formerly-history index slot, or missing an orphaned history call.
+    """
+    history: list[TResponseInputItem] = [
+        # history turn: reasoning consumed by function_call, trailing assistant message is orphaned
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_1", "summary": []}),
+        cast(TResponseInputItem, {"type": "function_call", "call_id": "fc_hist", "name": "fn", "arguments": "{}"}),
+        cast(TResponseInputItem, {"type": "function_call_output", "call_id": "fc_hist", "output": "done"}),
+        cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "ok"}),
+        # second orphaned call with no output — should be pruned as a history item
+        cast(TResponseInputItem, {"type": "function_call", "call_id": "fc_orphan", "name": "fn2", "arguments": "{}"}),
+    ]
+    session = SimpleListSession(history=history)
+
+    # New input is a plain user message — must survive regardless of the shifted index
+    prepared, _ = await prepare_input_with_session("follow-up", session, None)
+
+    assert isinstance(prepared, list)
+    prepared_list = cast(list[dict[str, Any]], prepared)
+
+    types = [item.get("type") or item.get("role") for item in prepared_list]
+
+    # The orphaned history call (fc_orphan) must be removed
+    call_ids = [item.get("call_id") for item in prepared_list]
+    assert "fc_orphan" not in call_ids, "Orphaned history call must be pruned"
+
+    # The new user message must be preserved
+    user_messages = [item for item in prepared_list if item.get("role") == "user"]
+    assert any(
+        item.get("content") == "follow-up" for item in user_messages
+    ), f"New user message must survive pruning; got types={types}"
+
+
+@pytest.mark.asyncio
 async def test_prepare_input_with_session_uses_sync_callback():
     history_item = cast(TResponseInputItem, {"role": "user", "content": "hi"})
     session = SimpleListSession(history=[history_item])
