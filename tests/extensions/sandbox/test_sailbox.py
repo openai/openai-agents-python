@@ -759,16 +759,23 @@ def test_client_resume_recreates_sailbox_when_reconnect_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     created: list[dict[str, object]] = []
+    find_calls: list[dict[str, object]] = []
     replacement = _FakeSailbox("sb-recreated")
+    state_app = App(id="app_state", name="agents", created_at=2)
 
     def fake_connect(_sailbox_id: str) -> _FakeSailbox:
         raise LookupError("missing")
+
+    def fake_find(**kwargs: object) -> App:
+        find_calls.append(kwargs)
+        return state_app
 
     def fake_create(**kwargs: object) -> _FakeSailbox:
         created.append(kwargs)
         return replacement
 
     monkeypatch.setattr(_sailbox_sandbox_module, "_connect_sailbox", fake_connect)
+    monkeypatch.setattr(_sailbox_sandbox_module.App, "find", staticmethod(fake_find))
     monkeypatch.setattr(
         _sailbox_sandbox_module.Sailbox,
         "create",
@@ -789,7 +796,8 @@ def test_client_resume_recreates_sailbox_when_reconnect_fails(
     assert inner.state.sailbox_id == "sb-recreated"
     assert inner.state.workspace_root_ready is False
     assert inner._workspace_state_preserved_on_start() is False
-    assert created[0]["app"] == app
+    assert find_calls == [{"name": "agents", "mint_if_missing": True}]
+    assert created[0]["app"] == state_app
     assert created[0]["image"] is Image.debian_amd64
 
 
@@ -957,6 +965,16 @@ def test_client_resolve_options_falls_back_to_client_app() -> None:
 
     assert options.app == app
     assert options.app_name == "client-app"
+
+
+def test_client_resolve_options_can_clear_client_app_with_explicit_none() -> None:
+    app = App(id="app_client", name="client", created_at=1)
+    client = SailboxSandboxClient(app=app, app_name="client-app")
+
+    options = client._resolve_options(SailboxSandboxClientOptions(app=None, app_name="other-app"))
+
+    assert options.app is None
+    assert options.app_name == "other-app"
 
 
 def test_resolve_app_returns_explicit_app_without_lookup(monkeypatch: pytest.MonkeyPatch) -> None:

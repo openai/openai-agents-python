@@ -907,6 +907,7 @@ class SailboxSandboxClient(BaseSandboxClient[SailboxSandboxClientOptions | None]
 
         options = self._resolve_options(
             SailboxSandboxClientOptions(
+                app=None if state.app_name else self._app,
                 app_name=state.app_name or self._app_name,
                 image=state.image,
                 image_build_timeout=state.image_build_timeout,
@@ -958,7 +959,7 @@ class SailboxSandboxClient(BaseSandboxClient[SailboxSandboxClientOptions | None]
                 pause_on_exit=self._pause_on_exit,
             )
         return SailboxSandboxClientOptions(
-            app=optional_option_or_default("app", self._app),
+            app=option_or_default("app", self._app),
             app_name=optional_option_or_default("app_name", self._app_name),
             image=optional_option_or_default("image", self._image) or Image.debian_arm64,
             name_prefix=option_or_default("name_prefix", self._name_prefix),
