@@ -120,9 +120,7 @@ async def main(
     stream_result = Runner.run_streamed(agent, question, run_config=run_config)
     saw_text_delta = False
     async for event in stream_result.stream_events():
-        if event.type == "raw_response_event" and isinstance(
-            event.data, ResponseTextDeltaEvent
-        ):
+        if event.type == "raw_response_event" and isinstance(event.data, ResponseTextDeltaEvent):
             if not saw_text_delta:
                 print("assistant> ", end="", flush=True)
                 saw_text_delta = True

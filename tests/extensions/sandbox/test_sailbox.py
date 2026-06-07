@@ -1,3 +1,4 @@
+# mypy: disable-error-code="arg-type,comparison-overlap,assignment,attr-defined,operator"
 from __future__ import annotations
 
 import asyncio
@@ -31,7 +32,7 @@ from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.session import BaseSandboxClientOptions, SandboxSession, SandboxSessionState
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
-from agents.sandbox.types import ExecResult
+from agents.sandbox.types import ExecResult, User
 
 
 @dataclass
@@ -89,6 +90,18 @@ class _SdkSailbox:
 
 
 def _install_fake_sail_sdk() -> None:
+    for module_name in list(sys.modules):
+        if module_name == "sail" or module_name.startswith("sail."):
+            sys.modules.pop(module_name, None)
+    sys.modules.pop("agents.extensions.sandbox.sailbox.sandbox", None)
+    sys.modules.pop("agents.extensions.sandbox.sailbox", None)
+    sandbox_extensions_module = sys.modules.get("agents.extensions.sandbox")
+    if sandbox_extensions_module is not None:
+        try:
+            delattr(sandbox_extensions_module, "sailbox")
+        except AttributeError:
+            pass
+
     sail_module = types.ModuleType("sail")
     app_module = types.ModuleType("sail.app")
     image_module = types.ModuleType("sail.image")
@@ -103,8 +116,15 @@ def _install_fake_sail_sdk() -> None:
     cast(Any, image_module).ImageDefinition = ImageDefinition
     cast(Any, image_pb2_module).ImageSpec = _FakeImageSpec
     cast(Any, sailbox_module).Sailbox = _SdkSailbox
+    cast(Any, sail_module).app = app_module
+    cast(Any, sail_module).image = image_module
+    cast(Any, sail_module).pb = sail_pb_module
+    cast(Any, sail_module).sailbox = sailbox_module
+    cast(Any, sail_pb_module).image = sail_pb_image_module
+    cast(Any, sail_pb_image_module).v1 = sail_pb_image_v1_module
+    cast(Any, sail_pb_image_v1_module).image_pb2 = image_pb2_module
 
-    sys.modules.setdefault("sail", sail_module)
+    sys.modules["sail"] = sail_module
     sys.modules["sail.app"] = app_module
     sys.modules["sail.image"] = image_module
     sys.modules["sail.pb"] = sail_pb_module
@@ -117,12 +137,24 @@ def _install_fake_sail_sdk() -> None:
 _install_fake_sail_sdk()
 
 
+import agents.extensions.sandbox as _sandbox_extensions_module  # noqa: E402
+import agents.extensions.sandbox.sailbox as _sailbox_package_module  # noqa: E402
 from agents.extensions.sandbox.sailbox.sandbox import (  # noqa: E402
     SailboxSandboxClient,
     SailboxSandboxClientOptions,
     SailboxSandboxSession,
     SailboxSandboxSessionState,
 )
+
+_sailbox_sandbox_module = sys.modules["agents.extensions.sandbox.sailbox.sandbox"]
+_sandbox_extensions_module.sailbox = _sailbox_package_module
+BaseSandboxClientOptions._subclass_registry["sailbox"] = SailboxSandboxClientOptions
+
+
+@pytest.fixture(autouse=True)
+def _restore_sailbox_test_import_bindings() -> None:
+    _sandbox_extensions_module.sailbox = _sailbox_package_module
+    BaseSandboxClientOptions._subclass_registry["sailbox"] = SailboxSandboxClientOptions
 
 
 def test_sailbox_package_re_exports_backend_symbols() -> None:
@@ -377,7 +409,8 @@ def test_client_create_creates_sailbox(monkeypatch: pytest.MonkeyPatch) -> None:
         return fake_sailbox
 
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.create",
+        _sailbox_sandbox_module.Sailbox,
+        "create",
         staticmethod(fake_create),
     )
 
@@ -708,7 +741,8 @@ def test_client_resume_reconnects_existing_sailbox(
         return fake_sailbox
 
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox._connect_sailbox",
+        _sailbox_sandbox_module,
+        "_connect_sailbox",
         fake_connect,
     )
 
@@ -734,9 +768,10 @@ def test_client_resume_recreates_sailbox_when_reconnect_fails(
         created.append(kwargs)
         return replacement
 
-    monkeypatch.setattr("agents.extensions.sandbox.sailbox.sandbox._connect_sailbox", fake_connect)
+    monkeypatch.setattr(_sailbox_sandbox_module, "_connect_sailbox", fake_connect)
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.create",
+        _sailbox_sandbox_module.Sailbox,
+        "create",
         staticmethod(fake_create),
     )
 
@@ -766,7 +801,8 @@ def test_client_create_failure_includes_provider_error(
         raise RuntimeError("quota exceeded")
 
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.create",
+        _sailbox_sandbox_module.Sailbox,
+        "create",
         staticmethod(fake_create),
     )
 
@@ -931,7 +967,7 @@ def test_resolve_app_returns_explicit_app_without_lookup(monkeypatch: pytest.Mon
         _ = kwargs
         raise AssertionError("App.find should not be called")
 
-    monkeypatch.setattr("agents.extensions.sandbox.sailbox.sandbox.App.find", fail_find)
+    monkeypatch.setattr(_sailbox_sandbox_module.App, "find", staticmethod(fail_find))
 
     resolved = asyncio.run(client._resolve_app(SailboxSandboxClientOptions(app=app)))
 
@@ -946,7 +982,7 @@ def test_resolve_app_finds_and_mints_by_name(monkeypatch: pytest.MonkeyPatch) ->
         calls.append(kwargs)
         return App(id="app_found", name=cast(str, kwargs["name"]), created_at=1)
 
-    monkeypatch.setattr("agents.extensions.sandbox.sailbox.sandbox.App.find", fake_find)
+    monkeypatch.setattr(_sailbox_sandbox_module.App, "find", staticmethod(fake_find))
 
     resolved = asyncio.run(
         client._resolve_app(SailboxSandboxClientOptions(app=None, app_name="agents"))
@@ -967,7 +1003,8 @@ def test_create_without_manifest_uses_default_manifest(monkeypatch: pytest.Monke
     fake_sailbox = _FakeSailbox("sb-default-manifest")
 
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.create",
+        _sailbox_sandbox_module.Sailbox,
+        "create",
         staticmethod(lambda **kwargs: fake_sailbox),
     )
 
@@ -990,7 +1027,8 @@ def test_create_passes_resource_options_and_generated_name(
         return fake_sailbox
 
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.create",
+        _sailbox_sandbox_module.Sailbox,
+        "create",
         staticmethod(fake_create),
     )
     app = App(id="app_test", name="agents", created_at=1)
@@ -1027,7 +1065,8 @@ def test_create_failure_context_includes_http_status(monkeypatch: pytest.MonkeyP
         raise _StatusError("forbidden", status_code=403)
 
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.create",
+        _sailbox_sandbox_module.Sailbox,
+        "create",
         staticmethod(fake_create),
     )
 
@@ -1039,6 +1078,31 @@ def test_create_failure_context_includes_http_status(monkeypatch: pytest.MonkeyP
     assert exc_info.value.context["backend"] == "sailbox"
     assert exc_info.value.context["http_status"] == 403
     assert exc_info.value.context["provider_error"] == "HTTP 403: forbidden"
+
+
+def test_create_wraps_app_resolution_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_find(**kwargs: object) -> App:
+        _ = kwargs
+        raise PermissionError("Invalid API key")
+
+    def fail_create(**kwargs: object) -> _FakeSailbox:
+        _ = kwargs
+        raise AssertionError("Sailbox.create should not be called")
+
+    monkeypatch.setattr(_sailbox_sandbox_module.App, "find", staticmethod(fake_find))
+    monkeypatch.setattr(
+        _sailbox_sandbox_module.Sailbox,
+        "create",
+        staticmethod(fail_create),
+    )
+
+    with pytest.raises(WorkspaceStartError) as exc_info:
+        asyncio.run(SailboxSandboxClient(app=None, app_name="agents").create())
+
+    assert exc_info.value.context["backend"] == "sailbox"
+    assert exc_info.value.context["reason"] == "resolve_app_failed"
+    assert exc_info.value.context["provider_error"] == "PermissionError: Invalid API key"
+    assert "Sailbox app resolution failed: PermissionError: Invalid API key" in str(exc_info.value)
 
 
 def test_resume_rejects_wrong_state_type() -> None:
@@ -1098,7 +1162,8 @@ def test_running_rechecks_backend_status(monkeypatch: pytest.MonkeyPatch) -> Non
         return types.SimpleNamespace(status="running")
 
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.get",
+        _sailbox_sandbox_module.Sailbox,
+        "get",
         staticmethod(fake_get),
     )
     sailbox = _FakeSailbox("sb-running")
@@ -1112,7 +1177,8 @@ def test_running_rechecks_backend_status(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_running_returns_false_when_backend_is_paused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.get",
+        _sailbox_sandbox_module.Sailbox,
+        "get",
         staticmethod(lambda sailbox_id: types.SimpleNamespace(status="paused")),
     )
     sailbox = _FakeSailbox("sb-paused")
@@ -1130,7 +1196,8 @@ def test_running_returns_false_when_backend_is_missing(monkeypatch: pytest.Monke
         raise LookupError("missing")
 
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.get",
+        _sailbox_sandbox_module.Sailbox,
+        "get",
         staticmethod(fake_get),
     )
     sailbox = _FakeSailbox("sb-missing")
@@ -1146,7 +1213,8 @@ def test_running_returns_false_on_status_lookup_failure(monkeypatch: pytest.Monk
         raise RuntimeError("status unavailable")
 
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox.Sailbox.get",
+        _sailbox_sandbox_module.Sailbox,
+        "get",
         staticmethod(fake_get),
     )
     sailbox = _FakeSailbox("sb-unavailable")
@@ -1216,7 +1284,8 @@ def test_ensure_backend_started_connects_existing_sailbox(
     connected = _FakeSailbox("sb-connect")
 
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox._connect_sailbox",
+        _sailbox_sandbox_module,
+        "_connect_sailbox",
         lambda sailbox_id: connected,
     )
 
@@ -1234,7 +1303,8 @@ def test_ensure_backend_started_resumes_reconnected_paused_sailbox(
     connected.status = "paused"
 
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox._connect_sailbox",
+        _sailbox_sandbox_module,
+        "_connect_sailbox",
         lambda sailbox_id: connected,
     )
 
@@ -1251,7 +1321,8 @@ def test_ensure_backend_started_connect_failure_maps_start_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox._connect_sailbox",
+        _sailbox_sandbox_module,
+        "_connect_sailbox",
         lambda sailbox_id: (_ for _ in ()).throw(RuntimeError("gone")),
     )
 
@@ -1403,7 +1474,9 @@ def test_exec_wait_failure_maps_transport_error() -> None:
         asyncio.run(session.exec("printf ok"))
 
     assert exc_info.value.context["backend"] == "sailbox"
-    assert "wait failed" in exc_info.value.context["provider_error"]
+    provider_error = exc_info.value.context["provider_error"]
+    assert isinstance(provider_error, str)
+    assert "wait failed" in provider_error
 
 
 async def _validate_direct_path(
@@ -1499,7 +1572,7 @@ def test_write_with_user_stages_then_writes_through_user_exec(
     assert "/workspace/notes.txt" not in sailbox.files
     assert len(sailbox.exec_commands) == 2
     assert sailbox.exec_commands[0][0].startswith("runuser -u app -- sh -lc")
-    assert "cat \"$tmp\" > \"$target\"" in sailbox.exec_commands[0][0]
+    assert 'cat "$tmp" > "$target"' in sailbox.exec_commands[0][0]
     assert temp_paths[0] in sailbox.exec_commands[0][0]
     assert "/workspace/notes.txt" in sailbox.exec_commands[0][0]
     assert temp_paths[0] in sailbox.exec_commands[1][0]
@@ -1771,7 +1844,8 @@ def test_client_delete_reconnects_and_terminates_without_live_handle(
         return sailbox
 
     monkeypatch.setattr(
-        "agents.extensions.sandbox.sailbox.sandbox._connect_sailbox",
+        _sailbox_sandbox_module,
+        "_connect_sailbox",
         fake_connect,
     )
 
@@ -1802,7 +1876,7 @@ def test_client_delete_rejects_non_sailbox_session() -> None:
             _ = (command, timeout)
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
 
-        async def read(self, path: Path, *, user: str | None = None) -> io.IOBase:
+        async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
             _ = (path, user)
             return io.BytesIO()
 
@@ -1811,7 +1885,7 @@ def test_client_delete_rejects_non_sailbox_session() -> None:
             path: Path,
             data: io.IOBase,
             *,
-            user: str | None = None,
+            user: str | User | None = None,
         ) -> None:
             _ = (path, data, user)
 

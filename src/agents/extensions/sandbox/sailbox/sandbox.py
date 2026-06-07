@@ -142,7 +142,8 @@ def _deserialize_sail_image(image: object) -> object:
         try:
             from sail.pb.image.v1 import image_pb2
 
-            spec = image_pb2.ImageSpec()
+            image_spec_cls = cast(Any, image_pb2).ImageSpec
+            spec = image_spec_cls()
             spec.ParseFromString(base64.b64decode(raw_spec))
             return ImageDefinition(spec, _image_id=image_id)
         except Exception:
@@ -151,7 +152,8 @@ def _deserialize_sail_image(image: object) -> object:
         try:
             from sail.pb.image.v1 import image_pb2
 
-            return ImageDefinition(image_pb2.ImageSpec(), _image_id=image)
+            image_spec_cls = cast(Any, image_pb2).ImageSpec
+            return ImageDefinition(image_spec_cls(), _image_id=image)
         except Exception:
             return None
     return image
@@ -320,7 +322,7 @@ class SailboxSandboxSession(BaseSandboxSession):
                 message=_sailbox_error_message("Sailbox resume failed", exc),
             ) from exc
         if resumed is not None:
-            sailbox = cast(Sailbox, resumed)
+            sailbox = resumed
         self._set_sailbox(sailbox)
 
     async def _ensure_backend_started(self) -> None:
@@ -935,9 +937,7 @@ class SailboxSandboxClient(BaseSandboxClient[SailboxSandboxClientOptions | None]
             app_name=optional_option_or_default("app_name", self._app_name),
             image=optional_option_or_default("image", self._image) or Image.debian_arm64,
             name_prefix=option_or_default("name_prefix", self._name_prefix),
-            image_build_timeout=option_or_default(
-                "image_build_timeout", self._image_build_timeout
-            ),
+            image_build_timeout=option_or_default("image_build_timeout", self._image_build_timeout),
             memory_mib=option_or_default("memory_mib", self._memory_mib),
             cpu=option_or_default("cpu", self._cpu),
             disk_gib=option_or_default("disk_gib", self._disk_gib),
@@ -961,7 +961,18 @@ class SailboxSandboxClient(BaseSandboxClient[SailboxSandboxClientOptions | None]
         session_id: uuid.UUID,
         options: SailboxSandboxClientOptions,
     ) -> Sailbox:
-        app = await self._resolve_app(options)
+        try:
+            app = await self._resolve_app(options)
+        except Exception as exc:
+            raise WorkspaceStartError(
+                path=Path(options.name_prefix),
+                context=_sailbox_error_context(
+                    cause=exc,
+                    extra={"reason": "resolve_app_failed"},
+                ),
+                cause=exc,
+                message=_sailbox_error_message("Sailbox app resolution failed", exc),
+            ) from exc
         image = options.image or self._image or Image.debian_arm64
         name = f"{options.name_prefix}-{session_id.hex[:12]}"
         try:
