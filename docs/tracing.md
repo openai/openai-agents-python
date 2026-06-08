@@ -105,7 +105,7 @@ from agents import Agent, Runner, trace
 async def main():
     agent = Agent(name="Joke generator", instructions="Tell funny jokes.")
 
-    with trace("Joke workflow"): # (1)!
+    with trace("Joke workflow"): # (1)
         first_result = await Runner.run(agent, "Tell me a joke")
         second_result = await Runner.run(agent, f"Rate this joke: {first_result.final_output}")
         print(f"Joke: {first_result.final_output}")
@@ -137,7 +137,7 @@ The `generation_span()` stores the inputs/outputs of the LLM generation, and `fu
 
 Similarly, Audio spans include base64-encoded PCM data for input and output audio by default. You can disable capturing this audio data by configuring [`VoicePipelineConfig.trace_include_sensitive_audio_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_audio_data].
 
-By default, `trace_include_sensitive_data` is `True`. You can set the default without code by exporting the `OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA` environment variable to `true/1` or `false/0` before running your app.
+By default, `trace_include_sensitive_data` is `True`. You can set the default without code by setting the `OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA` environment variable to `true/1` or `false/0` before running your app.
 
 ## Custom tracing processors
 
@@ -188,7 +188,7 @@ await Runner.run(
 ```
 
 ## Additional notes
-- View free traces at Openai Traces dashboard.
+- View free traces at the [OpenAI Traces dashboard](https://platform.openai.com/logs?api=traces).
 
 
 ## Ecosystem integrations
