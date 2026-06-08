@@ -14,8 +14,8 @@ pip install "openai-agents[viz]"
 
 You can generate an agent visualization using the `draw_graph` function. This function creates a directed graph where:
 
-- **Agents** are represented as yellow boxes.
-- **MCP servers** are represented as grey boxes.
+- **Agents** are represented as yellow rectangles.
+- **MCP servers** are represented as grey rectangles.
 - **Tools** are represented as green ellipses.
 - **Handoffs** are directed edges from one agent to another.
 
@@ -39,7 +39,7 @@ spanish_agent = Agent(
 
 english_agent = Agent(
     name="English agent",
-    instructions="You only speak English",
+    instructions="You only speak English.",
 )
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -83,7 +83,7 @@ The generated graph includes:
 - An **end node** (`__end__`) indicating where execution terminates.
 
 **Note:** MCP servers are rendered in recent versions of the
-`agents` package (verified in **v0.2.8**). If you don’t see MCP boxes
+`agents` package (verified in **v0.2.8**). If you don’t see MCP rectangles
 in your visualization, upgrade to the latest release.
 
 ## Customizing the graph
