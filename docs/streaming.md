@@ -8,7 +8,7 @@ Keep consuming `result.stream_events()` until the async iterator finishes. A str
 
 ## Raw response events
 
-[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] are raw events passed directly from the LLM. They are in OpenAI Responses API format, which means each event has a type (like `response.created`, `response.output_text.delta`, etc) and data. These events are useful if you want to stream response messages to the user as soon as they are generated.
+[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] objects are raw events passed directly from the LLM. They are in OpenAI Responses API format, which means each event has a type (like `response.created`, `response.output_text.delta`, etc) and data. These events are useful if you want to stream response messages to the user as soon as they are generated.
 
 Computer-tool raw events keep the same preview-vs-GA distinction as stored results. Preview flows stream `computer_call` items with one `action`, while `gpt-5.5` can stream `computer_call` items with batched `actions[]`. The higher-level [`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] surface does not add a special computer-only event name for this: both shapes still surface as `tool_called`, and the screenshot result comes back as `tool_output` wrapping a `computer_call_output` item.
 
@@ -67,7 +67,7 @@ If you are manually continuing from [`result.to_input_list(mode="normalized")`][
 
 ## Run item events and agent events
 
-[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent]s are higher level events. They inform you when an item has been fully generated. This allows you to push progress updates at the level of "message generated", "tool ran", etc, instead of each token. Similarly, [`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] gives you updates when the current agent changes (e.g. as the result of a handoff).
+[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] objects are higher level events. They inform you when an item has been fully generated. This allows you to push progress updates at the level of "message generated", "tool ran", etc, instead of each token. Similarly, [`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] objects give you updates when the current agent changes (e.g. as the result of a handoff).
 
 ### Run item event names
 
@@ -115,7 +115,7 @@ async def main():
     print("=== Run starting ===")
 
     async for event in result.stream_events():
-        # We'll ignore the raw responses event deltas
+        # We'll ignore the raw response event deltas
         if event.type == "raw_response_event":
             continue
         # When the agent updates, print that
