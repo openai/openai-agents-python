@@ -603,7 +603,7 @@ class RealtimeSession(RealtimeModelListener):
         agent: RealtimeAgent,
         tool_context: ToolContext[Any],
         error: BaseException,
-    ) -> None:
+    ) -> bool:
         formatter_error = error if isinstance(error, Exception) else Exception(str(error))
         output = await maybe_invoke_function_tool_failure_error_function(
             function_tool=tool,
@@ -611,7 +611,7 @@ class RealtimeSession(RealtimeModelListener):
             error=formatter_error,
         )
         if output is None:
-            return
+            return False
 
         await self._send_tool_output_completion(
             _PendingToolOutput(
@@ -627,6 +627,7 @@ class RealtimeSession(RealtimeModelListener):
                 ),
             )
         )
+        return True
 
     async def _send_failed_handoff_output(
         self,
@@ -634,7 +635,7 @@ class RealtimeSession(RealtimeModelListener):
         *,
         error: BaseException,
         tool_context: ToolContext[Any],
-    ) -> None:
+    ) -> bool:
         formatter_error = error if isinstance(error, Exception) else Exception(str(error))
         await self._send_tool_output_completion(
             _PendingToolOutput(
@@ -643,6 +644,7 @@ class RealtimeSession(RealtimeModelListener):
                 start_response=True,
             )
         )
+        return True
 
     async def _send_tool_output_completion(self, pending_output: _PendingToolOutput) -> None:
         call_id = pending_output.tool_call.call_id
@@ -835,7 +837,7 @@ class RealtimeSession(RealtimeModelListener):
                         arguments=event.arguments,
                     )
                 except Exception as exc:
-                    await self._send_failed_function_tool_output(
+                    mark_completed = await self._send_failed_function_tool_output(
                         event,
                         tool=func_tool,
                         agent=agent,
@@ -874,7 +876,7 @@ class RealtimeSession(RealtimeModelListener):
                 try:
                     result = await handoff.on_invoke_handoff(self._context_wrapper, event.arguments)
                 except Exception as exc:
-                    await self._send_failed_handoff_output(
+                    mark_completed = await self._send_failed_handoff_output(
                         event,
                         error=exc,
                         tool_context=tool_context,

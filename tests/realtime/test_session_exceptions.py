@@ -8,13 +8,17 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import websockets.exceptions
 
+from agents import FunctionTool
+from agents.realtime import RealtimeAgent, realtime_handoff
 from agents.realtime.events import RealtimeError
 from agents.realtime.model import RealtimeModel, RealtimeModelConfig, RealtimeModelListener
 from agents.realtime.model_events import (
     RealtimeModelErrorEvent,
     RealtimeModelEvent,
     RealtimeModelExceptionEvent,
+    RealtimeModelToolCallEvent,
 )
+from agents.realtime.model_inputs import RealtimeModelSendToolOutput
 from agents.realtime.session import RealtimeSession
 
 
@@ -24,6 +28,7 @@ class FakeRealtimeModel(RealtimeModel):
     def __init__(self):
         self._listeners: list[RealtimeModelListener] = []
         self._events_to_send: list[RealtimeModelEvent] = []
+        self.sent_events: list[Any] = []
         self._is_connected = False
         self._send_task: asyncio.Task[None] | None = None
 
@@ -74,7 +79,7 @@ class FakeRealtimeModel(RealtimeModel):
 
     async def send_event(self, event: Any) -> None:
         """Fake send event."""
-        pass
+        self.sent_events.append(event)
 
     async def send_tool_output(self, tool_call: Any, output: str, start_response: bool) -> None:
         """Fake send tool output."""
@@ -300,3 +305,82 @@ class TestSessionExceptions:
         error_events = [e for e in events_received if hasattr(e, "type") and e.type == "error"]
         assert len(error_events) >= 1
         assert isinstance(error_events[0], RealtimeError)
+
+    @pytest.mark.asyncio
+    async def test_failed_function_tool_output_marks_call_completed(
+        self, fake_model: FakeRealtimeModel
+    ):
+        """A duplicate failed tool call should not re-run after output is sent."""
+        calls = 0
+
+        async def failing_tool(_ctx: Any, _arguments: str) -> str:
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("boom")
+
+        tool = FunctionTool(
+            name="failing_tool",
+            description="Fails",
+            params_json_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            on_invoke_tool=failing_tool,
+            _failure_error_function=lambda _ctx, _exc: "handled failure",
+            _use_default_failure_error_function=False,
+        )
+
+        agent = RealtimeAgent(name="agent", tools=[tool])
+        session = RealtimeSession(fake_model, agent, None)
+        event = RealtimeModelToolCallEvent(
+            name="failing_tool",
+            call_id="call_failed",
+            arguments="{}",
+        )
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await session._handle_tool_call(event)
+        await session._handle_tool_call(event)
+
+        tool_outputs = [
+            event
+            for event in fake_model.sent_events
+            if isinstance(event, RealtimeModelSendToolOutput)
+        ]
+        assert calls == 1
+        assert len(tool_outputs) == 1
+        assert tool_outputs[0].output == "handled failure"
+        assert "call_failed" in session._completed_tool_call_ids
+
+    @pytest.mark.asyncio
+    async def test_failed_handoff_output_marks_call_completed(
+        self, fake_model: FakeRealtimeModel
+    ):
+        """A duplicate failed handoff call should not re-run after output is sent."""
+        calls = 0
+        target_agent = RealtimeAgent(name="target")
+
+        def on_handoff(_ctx: Any) -> None:
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("handoff boom")
+
+        handoff = realtime_handoff(target_agent, on_handoff=on_handoff)
+        agent = RealtimeAgent(name="agent", handoffs=[handoff])
+        session = RealtimeSession(fake_model, agent, None)
+        event = RealtimeModelToolCallEvent(
+            name=handoff.tool_name,
+            call_id="call_handoff_failed",
+            arguments="",
+        )
+
+        with pytest.raises(RuntimeError, match="handoff boom"):
+            await session._handle_tool_call(event)
+        await session._handle_tool_call(event)
+
+        tool_outputs = [
+            event
+            for event in fake_model.sent_events
+            if isinstance(event, RealtimeModelSendToolOutput)
+        ]
+        assert calls == 1
+        assert len(tool_outputs) == 1
+        assert "handoff boom" in tool_outputs[0].output
+        assert "call_handoff_failed" in session._completed_tool_call_ids
