@@ -611,7 +611,7 @@ class RealtimeSession(RealtimeModelListener):
             error=formatter_error,
         )
         if output is None:
-            output = default_tool_error_function(tool_context, formatter_error)
+            return
 
         await self._send_tool_output_completion(
             _PendingToolOutput(
@@ -834,7 +834,7 @@ class RealtimeSession(RealtimeModelListener):
                         context=tool_context,
                         arguments=event.arguments,
                     )
-                except BaseException as exc:
+                except Exception as exc:
                     await self._send_failed_function_tool_output(
                         event,
                         tool=func_tool,
@@ -873,7 +873,7 @@ class RealtimeSession(RealtimeModelListener):
                 # Execute the handoff to get the new agent
                 try:
                     result = await handoff.on_invoke_handoff(self._context_wrapper, event.arguments)
-                except BaseException as exc:
+                except Exception as exc:
                     await self._send_failed_handoff_output(
                         event,
                         error=exc,

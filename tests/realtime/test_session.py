@@ -1360,6 +1360,70 @@ class TestToolCallExecution:
         assert start_response is True
 
     @pytest.mark.asyncio
+    async def test_function_tool_failure_error_function_none_reraises_without_model_output(
+        self, mock_model, mock_agent
+    ):
+        async def fail_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            raise ValueError("tool failed")
+
+        failing_tool = FunctionTool(
+            name="failing_tool",
+            description="always fails",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=fail_tool,
+            _failure_error_function=None,
+            _use_default_failure_error_function=False,
+        )
+        mock_agent.get_all_tools.return_value = [failing_tool]
+
+        session = RealtimeSession(mock_model, mock_agent, None)
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="failing_tool",
+            call_id="call_fail_no_formatter",
+            arguments="{}",
+        )
+
+        with pytest.raises(ValueError, match="tool failed"):
+            await session._handle_tool_call(tool_call_event)
+
+        assert len(mock_model.sent_tool_outputs) == 0
+        assert session._event_queue.qsize() == 1
+        tool_start_event = await session._event_queue.get()
+        assert isinstance(tool_start_event, RealtimeToolStart)
+        assert tool_start_event.tool == failing_tool
+
+    @pytest.mark.asyncio
+    async def test_function_tool_cancelled_error_reraises_without_model_output(
+        self, mock_model, mock_agent
+    ):
+        async def cancel_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            raise asyncio.CancelledError()
+
+        cancelling_tool = FunctionTool(
+            name="cancelling_tool",
+            description="cancels",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=cancel_tool,
+        )
+        mock_agent.get_all_tools.return_value = [cancelling_tool]
+
+        session = RealtimeSession(mock_model, mock_agent, None)
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="cancelling_tool",
+            call_id="call_cancel",
+            arguments="{}",
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await session._handle_tool_call(tool_call_event)
+
+        assert len(mock_model.sent_tool_outputs) == 0
+        assert session._event_queue.qsize() == 1
+        tool_start_event = await session._event_queue.get()
+        assert isinstance(tool_start_event, RealtimeToolStart)
+        assert tool_start_event.tool == cancelling_tool
+
+    @pytest.mark.asyncio
     async def test_handoff_exception_sends_model_output_before_reraising(self, mock_model):
         target = RealtimeAgent(name="target")
 
