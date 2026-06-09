@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-05-25T17:16:20.953191Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -1524,6 +1524,20 @@ wheels = [
 ]
 
 [[package]]
+name = "islo"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f0/09/3ba67dc49b88f9fdb79fe6274719f43d7eb235c9a4bd9c7a99226995a88e/islo-0.3.1.tar.gz", hash = "sha256:0a03ad43682a7d7d93ce9baf1241cdfda6903813f6339471d85eaa0c2b3881cf", size = 70541, upload-time = "2026-05-15T06:28:05.965Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bf/b6/5601f834bb457782e4c1b00248d26a7c429ce45dad40bff068fd02e42edb/islo-0.3.1-py3-none-any.whl", hash = "sha256:32a8b40366bb04f682bfda2a0f2fa161e921572657ff31ac5eb32ac1e0144623", size = 112959, upload-time = "2026-05-15T06:28:04.411Z" },
+]
+
+[[package]]
 name = "jinja2"
 version = "3.1.6"
 source = { registry = "https://pypi.org/simple" }
@@ -2463,6 +2477,9 @@ e2b = [
 encrypt = [
     { name = "cryptography" },
 ]
+islo = [
+    { name = "islo" },
+]
 litellm = [
     { name = "litellm" },
 ]
@@ -2555,6 +2572,7 @@ requires-dist = [
     { name = "graphviz", marker = "extra == 'viz'", specifier = ">=0.17" },
     { name = "griffelib", specifier = ">=2,<3" },
     { name = "grpcio", marker = "extra == 'dapr'", specifier = ">=1.60.0" },
+    { name = "islo", marker = "extra == 'islo'", specifier = ">=0.3.1,<0.4" },
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.83.0" },
     { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.19.0,<2" },
     { name = "modal", marker = "extra == 'modal'", specifier = "==1.4.3" },
@@ -2575,7 +2593,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<17" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<17" },
 ]
-provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "docker", "blaxel", "daytona", "cloudflare", "e2b", "modal", "runloop", "vercel", "s3", "temporal"]
+provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "docker", "blaxel", "daytona", "cloudflare", "e2b", "islo", "modal", "runloop", "vercel", "s3", "temporal"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -7,7 +7,7 @@ They intentionally keep the flow simple:
 
 1. Build a tiny manifest in memory.
 2. Create a `SandboxAgent` that inspects that workspace through one shell tool.
-3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel, or Vercel.
+3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel, Vercel, or Islo.
 
 All of these examples require `OPENAI_API_KEY`, because they call the model through the normal
 `Runner` path. Each cloud backend also needs its own provider credentials.
@@ -162,6 +162,53 @@ Useful flags:
 Cloudflare sandboxes support native cloud bucket mounts through
 `CloudflareBucketMountStrategy` on `S3Mount`, `R2Mount`, and HMAC-authenticated
 `GCSMount`.
+
+## Islo
+
+### Setup
+
+Install the repo extra:
+
+```bash
+uv sync --extra islo
+```
+
+Export the required environment variables:
+
+```bash
+export OPENAI_API_KEY=...
+export ISLO_API_KEY=...
+```
+
+If you are using a non-default Islo control API endpoint, also export
+`ISLO_BASE_URL` or pass `--base-url`. Newer Islo SDK versions may also support
+`ISLO_COMPUTE_URL` or `--compute-url` for compute-plane traffic.
+
+### Run
+
+```bash
+uv run python examples/sandbox/extensions/islo_runner.py --stream
+```
+
+Useful flags:
+
+- `--workspace-persistence tar`
+- `--workspace-persistence snapshot`
+- `--base-url <control-api-url>`
+- `--compute-url <compute-api-url>` (requires Islo SDK support)
+- `--image <image>`
+- `--vcpus 4`
+- `--memory-mb 8192`
+- `--disk-gb 20`
+- `--snapshot-name <snapshot-name>`
+- `--pause-on-exit`
+
+The Islo example covers command execution, workspace materialization, and
+stop/resume persistence. Islo cloud bucket mounts are available through
+`IsloCloudBucketMountStrategy` on `S3Mount`, `R2Mount`, `GCSMount`,
+`AzureBlobMount`, and `BoxMount`. PTY and exposed-port URL resolution are
+intentionally not demonstrated until the Islo SDK exposes typed APIs for those
+features.
 
 ## What to expect
 

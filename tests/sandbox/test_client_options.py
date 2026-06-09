@@ -8,6 +8,7 @@ import pytest
 from agents.extensions.sandbox.cloudflare import CloudflareSandboxClientOptions
 from agents.extensions.sandbox.daytona import DaytonaSandboxClientOptions
 from agents.extensions.sandbox.e2b import E2BSandboxClientOptions
+from agents.extensions.sandbox.islo import IsloSandboxClientOptions
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 from agents.sandbox.sandboxes import DockerSandboxClientOptions, UnixLocalSandboxClientOptions
 from agents.sandbox.session import BaseSandboxClientOptions
@@ -69,6 +70,7 @@ def test_sandbox_client_options_exclude_unset_preserves_type_discriminator() -> 
         E2BSandboxClientOptions(sandbox_type="e2b", template="base"),
         DaytonaSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE),
         CloudflareSandboxClientOptions(worker_url="https://example.com"),
+        IsloSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE),
     ],
 )
 def test_sandbox_client_options_roundtrip_preserves_concrete_type(

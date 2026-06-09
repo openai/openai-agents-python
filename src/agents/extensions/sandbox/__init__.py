@@ -75,6 +75,21 @@ except Exception:  # pragma: no cover
     _HAS_CLOUDFLARE = False
 
 try:
+    from .islo import (
+        DEFAULT_ISLO_WORKSPACE_ROOT as DEFAULT_ISLO_WORKSPACE_ROOT,
+        IsloCloudBucketMountStrategy as IsloCloudBucketMountStrategy,
+        IsloSandboxClient as IsloSandboxClient,
+        IsloSandboxClientOptions as IsloSandboxClientOptions,
+        IsloSandboxSession as IsloSandboxSession,
+        IsloSandboxSessionState as IsloSandboxSessionState,
+        IsloSandboxTimeouts as IsloSandboxTimeouts,
+    )
+
+    _HAS_ISLO = True
+except Exception:  # pragma: no cover
+    _HAS_ISLO = False
+
+try:
     from .runloop import (
         DEFAULT_RUNLOOP_ROOT_WORKSPACE_ROOT as DEFAULT_RUNLOOP_ROOT_WORKSPACE_ROOT,
         DEFAULT_RUNLOOP_WORKSPACE_ROOT as DEFAULT_RUNLOOP_WORKSPACE_ROOT,
@@ -174,6 +189,19 @@ if _HAS_CLOUDFLARE:
             "CloudflareSandboxClientOptions",
             "CloudflareSandboxSession",
             "CloudflareSandboxSessionState",
+        ]
+    )
+
+if _HAS_ISLO:
+    __all__.extend(
+        [
+            "DEFAULT_ISLO_WORKSPACE_ROOT",
+            "IsloCloudBucketMountStrategy",
+            "IsloSandboxClient",
+            "IsloSandboxClientOptions",
+            "IsloSandboxSession",
+            "IsloSandboxSessionState",
+            "IsloSandboxTimeouts",
         ]
     )
 
