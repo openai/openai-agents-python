@@ -6,10 +6,6 @@ search:
 
 Realtime agents는 WebSocket 전송을 통한 OpenAI Realtime API 기반의 서버 측 저지연 에이전트입니다.
 
-!!! warning "베타 기능"
-
-    Realtime agents는 베타입니다. 구현을 개선하는 과정에서 일부 호환성이 깨지는 변경이 있을 수 있습니다.
-
 !!! note "Python SDK 범위"
 
     Python SDK는 브라우저 WebRTC 전송을 **제공하지 않습니다**. 이 페이지에서는 서버 측 WebSocket을 통한 Python 관리 실시간 세션만 다룹니다. 서버 측 오케스트레이션, 도구, 승인, 전화 통신 통합에는 이 SDK를 사용하세요. [Realtime 전송](transport.md)도 참조하세요.

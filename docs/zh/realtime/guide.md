@@ -6,10 +6,6 @@ search:
 
 本指南说明 OpenAI Agents SDK的Realtime层如何映射到 OpenAI Realtime API，以及 Python SDK 在其之上增加了哪些额外行为。
 
-!!! warning "Beta 功能"
-
-    Realtime 智能体处于 beta 阶段。随着我们改进实现，可能会出现一些破坏性变更。
-
 !!! note "从这里开始"
 
     如果你想使用默认的 Python 路径，请先阅读[快速入门](quickstart.md)。如果你正在决定你的应用应使用服务端 WebSocket 还是 SIP，请阅读 [Realtime 传输](transport.md)。浏览器 WebRTC 传输不属于 Python SDK 的一部分。

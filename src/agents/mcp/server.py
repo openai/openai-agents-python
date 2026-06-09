@@ -1072,7 +1072,7 @@ class MCPServerStdioParams(TypedDict):
     `['server.js', '--port', '8080']`."""
 
     env: NotRequired[dict[str, str]]
-    """The environment variables to set for the server. ."""
+    """The environment variables to set for the server."""
 
     cwd: NotRequired[str | Path]
     """The working directory to use when spawning the process."""
@@ -1183,7 +1183,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
 
 
 class MCPServerSseParams(TypedDict):
-    """Mirrors the params in`mcp.client.sse.sse_client`."""
+    """Mirrors the params in `mcp.client.sse.sse_client`."""
 
     url: str
     """The URL of the server."""
@@ -1309,7 +1309,7 @@ class MCPServerSse(_MCPServerWithClientSession):
 
 
 class MCPServerStreamableHttpParams(TypedDict):
-    """Mirrors the params in`mcp.client.streamable_http.streamablehttp_client`."""
+    """Mirrors the params in `mcp.client.streamable_http.streamablehttp_client`."""
 
     url: str
     """The URL of the server."""

@@ -39,6 +39,7 @@ __all__ = [
     "ToolRunLocalShellCall",
     "ToolRunShellCall",
     "ToolRunApplyPatchCall",
+    "ToolRunFunctionNotFound",
     "ProcessedResponse",
     "NextStepHandoff",
     "NextStepFinalOutput",
@@ -67,6 +68,12 @@ class ToolRunHandoff:
 class ToolRunFunction:
     tool_call: ResponseFunctionToolCall
     function_tool: FunctionTool
+
+
+@dataclass
+class ToolRunFunctionNotFound:
+    tool_call: ResponseFunctionToolCall
+    tool_name: str
 
 
 @dataclass
@@ -117,6 +124,9 @@ class ProcessedResponse:
     tools_used: list[str]  # Names of all tools used, including hosted tools
     mcp_approval_requests: list[ToolRunMCPApprovalRequest]  # Only requests with callbacks
     interruptions: list[ToolApprovalItem]  # Tool approval items awaiting user decision
+    function_tools_not_found: list[ToolRunFunctionNotFound] = dataclasses.field(
+        default_factory=list
+    )
     custom_tool_calls: list[ToolRunCustom] = dataclasses.field(default_factory=list)
 
     def has_tools_or_approvals_to_run(self) -> bool:
@@ -132,6 +142,7 @@ class ProcessedResponse:
                 self.shell_calls,
                 self.apply_patch_calls,
                 self.mcp_approval_requests,
+                self.function_tools_not_found,
             ]
         )
 

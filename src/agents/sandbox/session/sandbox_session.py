@@ -351,6 +351,9 @@ class SandboxSession(BaseSandboxSession):
             if isinstance(exc, SandboxError):
                 trace_data["error_code"] = exc.error_code
                 error_data["error_code"] = exc.error_code
+                if exc.retryable is not None:
+                    trace_data["error_retryable"] = exc.retryable
+                    error_data["error_retryable"] = exc.retryable
             span.set_error({"message": type(exc).__name__, "data": error_data})
             return
         if not ok:
@@ -477,6 +480,7 @@ class SandboxSession(BaseSandboxSession):
             event.error_message = str(exc)
             if isinstance(exc, SandboxError):
                 event.error_code = exc.error_code
+                event.error_retryable = exc.retryable
 
         # Preserve raw bytes so Instrumentation can apply per-op/per-sink policies later.
         # Decoding here would force one global formatting decision before sink-specific redaction

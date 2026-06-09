@@ -2,10 +2,6 @@
 
 Realtime agents in the Python SDK are server-side, low-latency agents built on the OpenAI Realtime API over WebSocket transport.
 
-!!! warning "Beta feature"
-
-    Realtime agents are in beta. Expect some breaking changes as we improve the implementation.
-
 !!! note "Python SDK boundary"
 
     The Python SDK does **not** provide a browser WebRTC transport. This page only covers Python-managed realtime sessions over server-side WebSockets. Use this SDK for server-side orchestration, tools, approvals, and telephony integrations. See also [Realtime transport](transport.md).

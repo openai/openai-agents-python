@@ -318,6 +318,24 @@ def _load_modal_module(
             _FakeConfig.override_calls.append((key, value))
             os.environ["MODAL_" + key.upper()] = value
 
+    class _FakeModalError(Exception):
+        pass
+
+    class _FakeModalConnectionError(_FakeModalError):
+        pass
+
+    class _FakeModalExecTimeoutError(TimeoutError):
+        pass
+
+    class _FakeModalInternalFailure(_FakeModalError):
+        pass
+
+    class _FakeModalInvalidError(_FakeModalError):
+        pass
+
+    class _FakeModalNotFoundError(_FakeModalError):
+        pass
+
     _FakeSandbox.create = staticmethod(_with_aio(_FakeSandbox._create))
     _FakeSandbox.from_id = staticmethod(_with_aio(_FakeSandbox._from_id))
     _FakeApp.lookup = staticmethod(_with_aio(_FakeApp._lookup))
@@ -329,6 +347,14 @@ def _load_modal_module(
     fake_modal.Secret = _FakeSecret
     fake_modal.CloudBucketMount = _FakeCloudBucketMount
 
+    fake_modal_exception: Any = types.ModuleType("modal.exception")
+    fake_modal_exception.ConnectionError = _FakeModalConnectionError
+    fake_modal_exception.ExecTimeoutError = _FakeModalExecTimeoutError
+    fake_modal_exception.InternalFailure = _FakeModalInternalFailure
+    fake_modal_exception.InvalidError = _FakeModalInvalidError
+    fake_modal_exception.NotFoundError = _FakeModalNotFoundError
+    fake_modal.exception = fake_modal_exception
+
     fake_modal_config: Any = types.ModuleType("modal.config")
     fake_modal_config.config = _FakeConfig
 
@@ -336,6 +362,7 @@ def _load_modal_module(
     fake_container_process.ContainerProcess = object
 
     monkeypatch.setitem(sys.modules, "modal", fake_modal)
+    monkeypatch.setitem(sys.modules, "modal.exception", fake_modal_exception)
     monkeypatch.setitem(sys.modules, "modal.config", fake_modal_config)
     monkeypatch.setitem(sys.modules, "modal.container_process", fake_container_process)
     sys.modules.pop("agents.extensions.sandbox.modal.sandbox", None)
@@ -2516,6 +2543,87 @@ async def test_modal_tar_persist_uses_resolved_mount_paths_for_excludes(
 
 
 @pytest.mark.asyncio
+async def test_modal_tar_persist_retries_wrapped_exec_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=None)
+    commands: list[list[str]] = []
+
+    async def _fake_exec(
+        *command: object,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: object | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        rendered = [str(part) for part in command]
+        commands.append(rendered)
+        if len(commands) == 1:
+            raise modal_module.ExecTransportError(
+                command=tuple(rendered),
+                message="modal transport failed",
+            )
+        return ExecResult(stdout=b"tar-bytes", stderr=b"", exit_code=0)
+
+    monkeypatch.setattr(session, "exec", _fake_exec)
+
+    archive = await session.persist_workspace()
+
+    assert archive.read() == b"tar-bytes"
+    assert commands == [
+        ["tar", "cf", "-", "-C", "/workspace", "."],
+        ["tar", "cf", "-", "-C", "/workspace", "."],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_modal_tar_persist_does_not_retry_wrapped_non_retryable_exec_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=None)
+    commands: list[list[str]] = []
+
+    async def _fake_exec(
+        *command: object,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: object | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        rendered = [str(part) for part in command]
+        commands.append(rendered)
+        raise modal_module.ExecTransportError(
+            command=tuple(rendered),
+            message="modal transport failed permanently",
+            retryable=False,
+        )
+
+    monkeypatch.setattr(session, "exec", _fake_exec)
+
+    with pytest.raises(WorkspaceArchiveReadError) as exc_info:
+        await session.persist_workspace()
+
+    assert str(exc_info.value) == "failed to read archive for path: /workspace"
+    assert isinstance(exc_info.value.cause, modal_module.ExecTransportError)
+    assert str(exc_info.value.cause) == "modal transport failed permanently"
+    assert commands == [["tar", "cf", "-", "-C", "/workspace", "."]]
+
+
+@pytest.mark.asyncio
 async def test_modal_snapshot_filesystem_rejects_escaping_mount_paths_before_exec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3299,6 +3407,72 @@ async def test_modal_pty_start_wraps_startup_failures(
 
 
 @pytest.mark.asyncio
+async def test_modal_pty_start_marks_typed_not_found_non_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _FailingSandbox:
+        object_id = "sb-fail"
+
+        def __init__(self) -> None:
+            self.exec = _with_aio(self._exec)
+
+        def _exec(self, *command: object, **kwargs: object) -> object:
+            _ = (command, kwargs)
+            raise modal_module.modal.exception.NotFoundError("sandbox not found")
+
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id="sb-fail",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=_FailingSandbox())
+
+    with pytest.raises(modal_module.ExecTransportError) as exc_info:
+        await session.pty_exec_start("python3", shell=False, tty=True)
+
+    assert exc_info.value.retryable is False
+    assert exc_info.value.context["backend"] == "modal"
+    assert exc_info.value.context["reason"] == "_FakeModalNotFoundError"
+    assert exc_info.value.context["provider_error"] == "_FakeModalNotFoundError: sandbox not found"
+
+
+@pytest.mark.asyncio
+async def test_modal_pty_start_marks_typed_internal_failure_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _FailingSandbox:
+        object_id = "sb-fail"
+
+        def __init__(self) -> None:
+            self.exec = _with_aio(self._exec)
+
+        def _exec(self, *command: object, **kwargs: object) -> object:
+            _ = (command, kwargs)
+            raise modal_module.modal.exception.InternalFailure("internal failure")
+
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id="sb-fail",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=_FailingSandbox())
+
+    with pytest.raises(modal_module.ExecTransportError) as exc_info:
+        await session.pty_exec_start("python3", shell=False, tty=True)
+
+    assert exc_info.value.retryable is True
+    assert exc_info.value.context["backend"] == "modal"
+    assert exc_info.value.context["reason"] == "_FakeModalInternalFailure"
+    assert exc_info.value.context["provider_error"] == "_FakeModalInternalFailure: internal failure"
+
+
+@pytest.mark.asyncio
 async def test_modal_start_wraps_exec_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3358,6 +3532,36 @@ async def test_modal_pty_start_maps_timeout_failures(
 
     with pytest.raises(modal_module.ExecTimeoutError):
         await session.pty_exec_start("python3", shell=False, tty=True, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_modal_pty_start_maps_modal_exec_timeout_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _TimeoutSandbox:
+        object_id = "sb-timeout"
+
+        def __init__(self) -> None:
+            self.exec = _with_aio(self._exec)
+
+        def _exec(self, *command: object, **kwargs: object) -> object:
+            _ = (command, kwargs)
+            raise modal_module.modal.exception.ExecTimeoutError("command timed out")
+
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id="sb-timeout",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=_TimeoutSandbox())
+
+    with pytest.raises(modal_module.ExecTimeoutError) as exc_info:
+        await session.pty_exec_start("python3", shell=False, tty=True, timeout=2.0)
+
+    assert exc_info.value.retryable is False
 
 
 @pytest.mark.asyncio

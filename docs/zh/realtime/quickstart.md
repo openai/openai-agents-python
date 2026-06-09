@@ -6,10 +6,6 @@ search:
 
 Python SDK 中的实时智能体是基于通过 WebSocket 传输的 OpenAI Realtime API 构建的服务端低延迟智能体。
 
-!!! warning "Beta 功能"
-
-    实时智能体目前处于 Beta 阶段。随着我们改进实现，预计可能会有一些破坏性变更。
-
 !!! note "Python SDK 边界"
 
     Python SDK **不**提供浏览器 WebRTC 传输。本页仅介绍通过服务端 WebSocket 由 Python 管理的实时会话。使用此 SDK 进行服务端编排、工具、审批和电话集成。另请参阅[实时传输](transport.md)。
