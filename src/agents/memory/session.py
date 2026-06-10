@@ -162,19 +162,8 @@ class OpenAIResponsesCompactionArgs(TypedDict, total=False):
 class OpenAIResponsesCompactionAwareSession(Session, Protocol):
     """Protocol for session implementations that support responses compaction."""
 
-    async def run_compaction(
-        self,
-        args: OpenAIResponsesCompactionArgs | None = None,
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
-    ) -> None:
-        """Run the compaction process for the session.
-
-        Args:
-            args: Optional compaction arguments.
-            wrapper: Optional run context wrapper for the current run. Implementations
-                may ignore this parameter.
-        """
+    async def run_compaction(self, args: OpenAIResponsesCompactionArgs | None = None) -> None:
+        """Run the compaction process for the session."""
         ...
 
 

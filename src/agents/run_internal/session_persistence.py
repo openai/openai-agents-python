@@ -398,10 +398,7 @@ async def save_result_to_session(
         if has_local_tool_outputs:
             defer_compaction = getattr(session, "_defer_compaction", None)
             if callable(defer_compaction):
-                if session_method_accepts_wrapper(defer_compaction):
-                    result = defer_compaction(response_id, store=store, wrapper=wrapper)
-                else:
-                    result = defer_compaction(response_id, store=store)
+                result = defer_compaction(response_id, store=store)
                 if inspect.isawaitable(result):
                     await result
             logger.debug(
@@ -427,10 +424,7 @@ async def save_result_to_session(
         }
         if store is not None:
             compaction_args["store"] = store
-        if session_method_accepts_wrapper(session.run_compaction):
-            await session.run_compaction(compaction_args, wrapper=wrapper)
-        else:
-            await session.run_compaction(compaction_args)
+        await session.run_compaction(compaction_args)
 
     return saved_run_items_count
 

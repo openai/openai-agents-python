@@ -414,8 +414,13 @@ async def test_encrypted_session_does_not_break_legacy_underlying_session():
 
 
 @pytest.mark.asyncio
-async def test_compaction_session_forwards_wrapper_to_underlying_session():
-    """OpenAIResponsesCompactionSession forwards the wrapper to opted-in underlying sessions."""
+async def test_compaction_session_accepts_but_does_not_forward_wrapper():
+    """OpenAIResponsesCompactionSession accepts the wrapper but does not forward it.
+
+    The decorator rewrites history via clear_session + add_items during compaction, which
+    cannot be scoped consistently through the get_items/add_items wrapper contract, so it
+    deliberately operates on the underlying session's default scope.
+    """
     from agents.memory.openai_responses_compaction_session import (
         OpenAIResponsesCompactionSession,
     )
@@ -425,39 +430,14 @@ async def test_compaction_session_forwards_wrapper_to_underlying_session():
     wrapper = RunContextWrapper(context=UserInfo())
     items: list[TResponseInputItem] = [{"role": "user", "content": "hello"}]
 
+    # Accepting the keyword-only wrapper keeps it protocol-compatible and still works.
     await session.add_items(items, wrapper=wrapper)
     retrieved = await session.get_items(wrapper=wrapper)
 
-    assert underlying.add_items_wrappers == [wrapper]
-    assert underlying.get_items_wrappers == [wrapper]
     assert len(retrieved) == 1
-
-
-@pytest.mark.asyncio
-async def test_compaction_run_compaction_forwards_wrapper_to_underlying_reads():
-    """run_compaction forwards the wrapper to the underlying session's history reads."""
-    from agents.memory.openai_responses_compaction_session import (
-        OpenAIResponsesCompactionSession,
-    )
-
-    underlying = ContextAwareSession()
-    await underlying.add_items([{"role": "user", "content": "hello"}])
-    underlying.get_items_wrappers.clear()
-
-    # Decline actual compaction so no OpenAI client call is made; only the candidate
-    # read path (which forwards the wrapper) runs.
-    session = OpenAIResponsesCompactionSession(
-        "compaction-run",
-        underlying,
-        should_trigger_compaction=lambda _info: False,
-    )
-    wrapper = RunContextWrapper(context=UserInfo())
-
-    await session.run_compaction({"response_id": "resp_1"}, wrapper=wrapper)
-
-    assert len(underlying.get_items_wrappers) > 0
-    for received in underlying.get_items_wrappers:
-        assert received is wrapper
+    # The wrapper is intentionally not propagated to the underlying session.
+    assert underlying.add_items_wrappers == [None]
+    assert underlying.get_items_wrappers == [None]
 
 
 @pytest.mark.asyncio

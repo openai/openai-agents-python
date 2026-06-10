@@ -15,7 +15,6 @@ from .session import (
     OpenAIResponsesCompactionArgs,
     OpenAIResponsesCompactionAwareSession,
     SessionABC,
-    session_method_accepts_wrapper,
 )
 
 if TYPE_CHECKING:
@@ -159,12 +158,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             return "input"
         return _resolve_compaction_mode(mode, response_id=response_id, store=store)
 
-    async def run_compaction(
-        self,
-        args: OpenAIResponsesCompactionArgs | None = None,
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
-    ) -> None:
+    async def run_compaction(self, args: OpenAIResponsesCompactionArgs | None = None) -> None:
         """Run compaction using responses.compact API."""
         if args and args.get("response_id"):
             self._response_id = args["response_id"]
@@ -189,9 +183,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 "when using previous_response_id compaction."
             )
 
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates(
-            wrapper=wrapper
-        )
+        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
 
         force = args.get("force", False) if args else False
         should_compact = force or self.should_trigger_compaction(
@@ -227,11 +219,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             _normalize_compaction_output_items(compacted.output or [])
         )
 
-        previous_items = await self._get_all_underlying_session_items(wrapper=wrapper)
+        previous_items = await self._get_all_underlying_session_items()
         await self._replace_underlying_session_items(
             output_items=output_items,
             previous_items=previous_items,
-            wrapper=wrapper,
         )
 
         self._compaction_candidate_items = select_compaction_candidate_items(output_items)
@@ -243,79 +234,48 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             f"candidates={len(self._compaction_candidate_items)})"
         )
 
-    async def _underlying_get_items(
-        self,
-        limit: int | None = None,
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
-    ) -> list[TResponseInputItem]:
-        # Forward the wrapper only when the underlying session opts in, so wrapping older
-        # custom sessions keeps working unchanged.
-        if wrapper is not None and session_method_accepts_wrapper(
-            self.underlying_session.get_items
-        ):
-            return await self.underlying_session.get_items(limit, wrapper=wrapper)
-        return await self.underlying_session.get_items(limit)
-
-    async def _underlying_add_items(
-        self,
-        items: list[TResponseInputItem],
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
-    ) -> None:
-        if wrapper is not None and session_method_accepts_wrapper(
-            self.underlying_session.add_items
-        ):
-            await self.underlying_session.add_items(items, wrapper=wrapper)
-            return
-        await self.underlying_session.add_items(items)
-
     async def get_items(
         self,
         limit: int | None = None,
         *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> list[TResponseInputItem]:
-        return await self._underlying_get_items(limit, wrapper=wrapper)
+        # This decorator rewrites history via clear_session + add_items during compaction,
+        # which cannot be scoped consistently through a wrapper under the get_items/add_items
+        # contract, so it does not forward the run context to the underlying session.
+        return await self.underlying_session.get_items(limit)
 
-    async def _get_all_underlying_session_items(
-        self, *, wrapper: RunContextWrapper[Any] | None = None
-    ) -> list[TResponseInputItem]:
-        return await self._underlying_get_items(_ALL_SESSION_ITEMS_LIMIT, wrapper=wrapper)
+    async def _get_all_underlying_session_items(self) -> list[TResponseInputItem]:
+        return await self.underlying_session.get_items(limit=_ALL_SESSION_ITEMS_LIMIT)
 
     async def _replace_underlying_session_items(
         self,
         *,
         output_items: list[TResponseInputItem],
         previous_items: list[TResponseInputItem],
-        wrapper: RunContextWrapper[Any] | None = None,
     ) -> None:
         try:
             await self.underlying_session.clear_session()
         except Exception as clear_error:
             await self._restore_underlying_session_items_after_failed_clear(
-                previous_items, clear_error, wrapper=wrapper
+                previous_items, clear_error
             )
             raise
 
         try:
             if output_items:
-                await self._underlying_add_items(output_items, wrapper=wrapper)
+                await self.underlying_session.add_items(output_items)
         except Exception as replacement_error:
-            await self._restore_underlying_session_items(
-                previous_items, replacement_error, wrapper=wrapper
-            )
+            await self._restore_underlying_session_items(previous_items, replacement_error)
             raise
 
     async def _restore_underlying_session_items_after_failed_clear(
         self,
         previous_items: list[TResponseInputItem],
         clear_error: Exception,
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
     ) -> None:
         try:
-            current_items = await self._get_all_underlying_session_items(wrapper=wrapper)
+            current_items = await self._get_all_underlying_session_items()
         except Exception:
             logger.warning(
                 "Failed to inspect session history after compaction replacement clear failed.",
@@ -327,7 +287,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             return
 
         await self._restore_underlying_session_items(
-            previous_items, clear_error, clear_existing_items=False, wrapper=wrapper
+            previous_items, clear_error, clear_existing_items=False
         )
 
     async def _restore_underlying_session_items(
@@ -336,13 +296,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         replacement_error: Exception,
         *,
         clear_existing_items: bool = True,
-        wrapper: RunContextWrapper[Any] | None = None,
     ) -> None:
         try:
             if clear_existing_items:
                 await self.underlying_session.clear_session()
             if previous_items:
-                await self._underlying_add_items(list(previous_items), wrapper=wrapper)
+                await self.underlying_session.add_items(list(previous_items))
         except Exception:
             logger.warning(
                 "Failed to restore session history after compaction replacement failed.",
@@ -355,18 +314,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             replacement_error,
         )
 
-    async def _defer_compaction(
-        self,
-        response_id: str,
-        store: bool | None = None,
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
-    ) -> None:
+    async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         if self._deferred_response_id is not None:
             return
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates(
-            wrapper=wrapper
-        )
+        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
         resolved_mode = self._resolve_compaction_mode_for_response(
             response_id=response_id,
             store=store,
@@ -395,7 +346,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> None:
-        await self._underlying_add_items(items, wrapper=wrapper)
+        # See get_items: this decorator does not forward the run context to the underlying
+        # session, so history rewrites during compaction stay internally consistent.
+        await self.underlying_session.add_items(items)
         if self._compaction_candidate_items is not None:
             new_items = _normalize_compaction_session_items(items)
             new_candidates = select_compaction_candidate_items(new_items)
@@ -419,16 +372,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def _ensure_compaction_candidates(
         self,
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
     ) -> tuple[list[TResponseInputItem], list[TResponseInputItem]]:
         """Lazy-load and cache compaction candidates."""
         if self._compaction_candidate_items is not None and self._session_items is not None:
             return (self._compaction_candidate_items[:], self._session_items[:])
 
-        history = _normalize_compaction_session_items(
-            await self._underlying_get_items(wrapper=wrapper)
-        )
+        history = _normalize_compaction_session_items(await self.underlying_session.get_items())
         candidates = select_compaction_candidate_items(history)
         self._compaction_candidate_items = candidates
         self._session_items = history

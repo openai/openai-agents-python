@@ -726,6 +726,8 @@ class ContextAwareSession(SessionABC):
 
 The `wrapper` parameter may be `None`, for example when session methods are called directly rather than through the runner, so implementations should always handle that case. Sessions that accept `**kwargs` on these methods also receive the wrapper through them.
 
+Wrapping a context-aware session in `OpenAIResponsesCompactionSession` is not supported for run-context scoping: that decorator rewrites history by clearing and replacing the underlying store during compaction, which cannot be scoped consistently through the `get_items`/`add_items` wrapper, so it does not forward the run context to the underlying session. Transparent wrappers such as `EncryptedSession` do forward the wrapper to underlying sessions that opt in.
+
 ## Community session implementations
 
 The community has developed additional session implementations:
