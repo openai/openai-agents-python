@@ -244,6 +244,9 @@ class _FakeE2BCommands:
         self.next_result = _FakeE2BResult()
         self.background_calls: list[dict[str, object]] = []
         self.background_error: BaseException | None = None
+        self.background_stdout: bytes | str | None = "started\n"
+        self.background_exit_code = 0
+        self.background_wait_event: asyncio.Event | None = None
 
     async def run(
         self,
@@ -273,18 +276,18 @@ class _FakeE2BCommands:
                     "background": background,
                 }
             )
-            if callable(on_stdout):
-                result = on_stdout("started\n")
+            if callable(on_stdout) and self.background_stdout is not None:
+                result = on_stdout(self.background_stdout)
                 if inspect.isawaitable(result):
                     await result
 
-            class _Handle:
-                exit_code = 0
-
-                async def kill(self) -> None:
-                    return None
-
-            return cast(_FakeE2BResult, _Handle())
+            return cast(
+                _FakeE2BResult,
+                _FakeE2BBackgroundHandle(
+                    exit_code=self.background_exit_code,
+                    wait_event=self.background_wait_event,
+                ),
+            )
 
         self.calls.append(
             {
@@ -322,14 +325,47 @@ class _FakeE2BCommands:
         return result
 
 
+class _FakeE2BBackgroundHandle:
+    def __init__(
+        self,
+        *,
+        exit_code: int,
+        wait_event: asyncio.Event | None = None,
+    ) -> None:
+        self.exit_code: int | None = exit_code if wait_event is None else None
+        self._final_exit_code = exit_code
+        self._wait_event = wait_event
+
+    async def wait(self) -> None:
+        if self._wait_event is not None:
+            await self._wait_event.wait()
+        self.exit_code = self._final_exit_code
+
+    async def kill(self) -> None:
+        self.exit_code = 0
+        if self._wait_event is not None:
+            self._wait_event.set()
+
+
 class _FakeE2BPtyHandle:
     def __init__(self) -> None:
         self.pid = "pty-123"
         self.exit_code: int | None = None
         self.stdin_payloads: list[bytes] = []
+        self._final_exit_code = 0
+        self._done = asyncio.Event()
+
+    async def wait(self) -> None:
+        await self._done.wait()
+        self.exit_code = self._final_exit_code
 
     async def kill(self) -> None:
-        self.exit_code = 0
+        self.finish(0)
+
+    def finish(self, exit_code: int) -> None:
+        self._final_exit_code = exit_code
+        self.exit_code = exit_code
+        self._done.set()
 
 
 class _FakeE2BPty:
@@ -338,6 +374,7 @@ class _FakeE2BPty:
         self.on_data: object | None = None
         self.create_error: BaseException | None = None
         self.send_stdin_error: BaseException | None = None
+        self.stdin_outputs: list[bytes] = [b">>> ", b"10\n"]
 
     async def create(
         self,
@@ -364,8 +401,8 @@ class _FakeE2BPty:
         if self.send_stdin_error is not None:
             raise self.send_stdin_error
         self.handle.stdin_payloads.append(data)
-        if callable(self.on_data):
-            payload = b">>> " if len(self.handle.stdin_payloads) == 1 else b"10\n"
+        if callable(self.on_data) and self.stdin_outputs:
+            payload = self.stdin_outputs.pop(0)
             result = self.on_data(payload)
             if inspect.isawaitable(result):
                 await result
@@ -1849,6 +1886,69 @@ async def test_e2b_pty_start_non_tty_uses_commands_run_in_background() -> None:
             "background": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_e2b_pty_start_non_tty_wakes_when_process_exits_without_output() -> None:
+    sandbox = _FakeE2BSandbox()
+    sandbox.commands.background_stdout = None
+    sandbox.commands.background_exit_code = 7
+    sandbox.commands.background_wait_event = asyncio.Event()
+    state = E2BSandboxSessionState(
+        session_id=uuid.uuid4(),
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=sandbox.sandbox_id,
+        workspace_root_ready=True,
+    )
+    session = E2BSandboxSession.from_state(state, sandbox=sandbox)
+
+    task = asyncio.create_task(
+        session.pty_exec_start("python3", shell=False, tty=False, yield_time_s=5.0)
+    )
+    await asyncio.sleep(0.01)
+    assert not task.done()
+
+    sandbox.commands.background_wait_event.set()
+    update = await asyncio.wait_for(task, timeout=0.5)
+
+    assert update.process_id is None
+    assert update.output == b""
+    assert update.exit_code == 7
+
+
+@pytest.mark.asyncio
+async def test_e2b_pty_write_stdin_wakes_when_process_exits_without_output() -> None:
+    sandbox = _FakeE2BSandbox()
+    sandbox.pty.stdin_outputs = [b">>> "]
+    state = E2BSandboxSessionState(
+        session_id=uuid.uuid4(),
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=sandbox.sandbox_id,
+        workspace_root_ready=True,
+    )
+    session = E2BSandboxSession.from_state(state, sandbox=sandbox)
+
+    started = await session.pty_exec_start("python3", shell=False, tty=True, yield_time_s=0.01)
+    assert started.process_id is not None
+
+    task = asyncio.create_task(
+        session.pty_write_stdin(
+            session_id=started.process_id,
+            chars="raise SystemExit(9)\n",
+            yield_time_s=5.0,
+        )
+    )
+    await asyncio.sleep(0.01)
+    assert not task.done()
+
+    sandbox.pty.handle.finish(9)
+    update = await asyncio.wait_for(task, timeout=0.5)
+
+    assert update.process_id is None
+    assert update.output == b""
+    assert update.exit_code == 9
 
 
 @pytest.mark.asyncio
