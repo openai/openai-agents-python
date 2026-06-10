@@ -686,6 +686,8 @@ class _E2BPtyProcessEntry:
     output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     output_notify: asyncio.Event = field(default_factory=asyncio.Event)
     last_used: float = field(default_factory=time.monotonic)
+    done: bool = False
+    exit_code: int | None = None
 
 
 @dataclass(frozen=True)
@@ -982,6 +984,7 @@ class E2BSandboxSession(BaseSandboxSession):
                     on_data=_append_output,
                 )
                 entry.handle = handle
+                asyncio.create_task(self._run_pty_waiter(entry))
                 await self._sandbox.pty.send_stdin(
                     cast(Any, handle).pid,
                     f"{command_text}\n".encode(),
@@ -999,6 +1002,7 @@ class E2BSandboxSession(BaseSandboxSession):
                     on_stderr=_append_output,
                 )
                 entry.handle = handle
+                asyncio.create_task(self._run_pty_waiter(entry))
             async with self._pty_lock:
                 process_id = allocate_pty_process_id(self._reserved_pty_process_ids)
                 self._reserved_pty_process_ids.add(process_id)
@@ -1043,6 +1047,24 @@ class E2BSandboxSession(BaseSandboxSession):
             output=output,
             original_token_count=original_token_count,
         )
+
+    async def _run_pty_waiter(self, entry: _E2BPtyProcessEntry) -> None:
+        wait = getattr(entry.handle, "wait", None)
+        if not callable(wait):
+            return
+
+        try:
+            result = wait()
+            if inspect.isawaitable(result):
+                await result
+            exit_code = getattr(entry.handle, "exit_code", None)
+            if exit_code is not None:
+                entry.exit_code = int(exit_code)
+        except Exception:
+            pass
+        finally:
+            entry.done = True
+            entry.output_notify.set()
 
     async def pty_write_stdin(
         self,
@@ -1195,7 +1217,7 @@ class E2BSandboxSession(BaseSandboxSession):
             if time.monotonic() >= deadline:
                 break
 
-            if self._entry_exit_code(entry) is not None:
+            if self._entry_done(entry):
                 async with entry.output_lock:
                     while entry.output_chunks:
                         output.extend(entry.output_chunks.popleft())
@@ -1226,7 +1248,7 @@ class E2BSandboxSession(BaseSandboxSession):
         exit_code = self._entry_exit_code(entry)
         live_process_id: int | None = process_id
 
-        if exit_code is not None:
+        if self._entry_done(entry):
             async with self._pty_lock:
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
@@ -1246,7 +1268,7 @@ class E2BSandboxSession(BaseSandboxSession):
             return None
 
         meta: list[tuple[int, float, bool]] = [
-            (process_id, entry.last_used, self._entry_exit_code(entry) is not None)
+            (process_id, entry.last_used, self._entry_done(entry))
             for process_id, entry in self._pty_processes.items()
         ]
         process_id = process_id_to_prune_from_meta(meta)
@@ -1257,6 +1279,8 @@ class E2BSandboxSession(BaseSandboxSession):
         return self._pty_processes.pop(process_id, None)
 
     def _entry_exit_code(self, entry: _E2BPtyProcessEntry) -> int | None:
+        if entry.exit_code is not None:
+            return entry.exit_code
         value = getattr(entry.handle, "exit_code", None)
         if value is None:
             return None
@@ -1264,6 +1288,9 @@ class E2BSandboxSession(BaseSandboxSession):
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    def _entry_done(self, entry: _E2BPtyProcessEntry) -> bool:
+        return entry.done or self._entry_exit_code(entry) is not None
 
     async def _terminate_pty_entry(self, entry: _E2BPtyProcessEntry) -> None:
         kill = getattr(entry.handle, "kill", None)
