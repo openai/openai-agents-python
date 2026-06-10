@@ -30,12 +30,21 @@ def build_signed_openai_client(
     client_config: OCIClientConfig,
     *,
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    project_id: str | None = None,
 ) -> AsyncOpenAI:
     """Build an `AsyncOpenAI` client wired to an OCI Generative AI regional endpoint.
 
     The returned client signs every request with the resolved OCI credentials and
     routes it to the region's OpenAI-compatible base URL. The `api_key` placeholder is
     never sent; the signer strips bearer auth before signing.
+
+    Args:
+        client_config: Resolved OCI credentials and routing information.
+        request_timeout: Per-request timeout in seconds.
+        project_id: Optional OCI Generative AI project OCID
+            (`ocid1.generativeaiproject...`), sent as the `OpenAI-Project` header.
+            Projects scope response/conversation retention and memory settings on the
+            Responses endpoint.
     """
     http_client = httpx.AsyncClient(
         auth=OCIRequestSigner(
@@ -48,6 +57,7 @@ def build_signed_openai_client(
     return AsyncOpenAI(
         base_url=oci_openai_base_url(client_config.region),
         api_key="oci-request-signing",
+        project=project_id,
         http_client=http_client,
     )
 
@@ -79,6 +89,7 @@ class OCIChatCompletionsModel(OpenAIChatCompletionsModel):
         compartment_id: str | None = None,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
         openai_client: AsyncOpenAI | None = None,
+        project_id: str | None = None,
     ) -> None:
         owns_openai_client = openai_client is None
         if openai_client is None:
@@ -90,7 +101,7 @@ class OCIChatCompletionsModel(OpenAIChatCompletionsModel):
                 compartment_id=compartment_id,
             )
             openai_client = build_signed_openai_client(
-                client_config, request_timeout=request_timeout
+                client_config, request_timeout=request_timeout, project_id=project_id
             )
         super().__init__(model, openai_client)
         self._owns_openai_client = owns_openai_client
@@ -131,6 +142,7 @@ class OCIResponsesModel(OpenAIResponsesModel):
         compartment_id: str | None = None,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
         openai_client: AsyncOpenAI | None = None,
+        project_id: str | None = None,
     ) -> None:
         owns_openai_client = openai_client is None
         if openai_client is None:
@@ -142,7 +154,7 @@ class OCIResponsesModel(OpenAIResponsesModel):
                 compartment_id=compartment_id,
             )
             openai_client = build_signed_openai_client(
-                client_config, request_timeout=request_timeout
+                client_config, request_timeout=request_timeout, project_id=project_id
             )
         super().__init__(model, openai_client)
         self._owns_openai_client = owns_openai_client

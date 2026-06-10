@@ -48,6 +48,7 @@ class OCIProvider(ModelProvider):
         region: str | None = None,
         compartment_id: str | None = None,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        project_id: str | None = None,
     ) -> None:
         self._auth_type = auth_type
         self._profile = profile
@@ -55,6 +56,7 @@ class OCIProvider(ModelProvider):
         self._region = region
         self._compartment_id = compartment_id
         self._request_timeout = request_timeout
+        self._project_id = project_id
         self._client_config: OCIClientConfig | None = None
         self._openai_client: AsyncOpenAI | None = None
 
@@ -70,7 +72,9 @@ class OCIProvider(ModelProvider):
                     compartment_id=self._compartment_id,
                 )
             self._openai_client = build_signed_openai_client(
-                self._client_config, request_timeout=self._request_timeout
+                self._client_config,
+                request_timeout=self._request_timeout,
+                project_id=self._project_id,
             )
         return self._openai_client
 
