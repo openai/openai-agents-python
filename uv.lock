@@ -2506,6 +2506,21 @@ wheels = [
 ]
 
 [[package]]
+name = "oci-openai"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "oci" },
+    { name = "openai" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f7/93/c395a92c8019dec50bd5760a9fcfd718cedb416824f8ebba0b26568ab6f4/oci_openai-1.1.0.tar.gz", hash = "sha256:1819ef7d17c1fdbe05c5c0653301fdca0d2fa99f6f8b1b7bd7667da9704d62a1", size = 199961, upload-time = "2026-02-03T05:15:12.486Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/28/a5/48aa98c4b68f3cc55bf74ef7a8d691d230ff09d5fab521e17ffd8b155ac4/oci_openai-1.1.0-py3-none-any.whl", hash = "sha256:a028ee3e1a1b1ad4e0495b10ef70b81b5e6cd50e7f13cf485a112762641a9160", size = 11449, upload-time = "2026-02-03T05:15:10.957Z" },
+]
+
+[[package]]
 name = "openai"
 version = "2.36.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2576,7 +2591,7 @@ mongodb = [
     { name = "pymongo" },
 ]
 oci = [
-    { name = "oci" },
+    { name = "oci-openai" },
 ]
 realtime = [
     { name = "websockets" },
@@ -2665,7 +2680,7 @@ requires-dist = [
     { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.19.0,<2" },
     { name = "modal", marker = "extra == 'modal'", specifier = "==1.4.3" },
     { name = "numpy", marker = "python_full_version >= '3.10' and extra == 'voice'", specifier = ">=2.2.0,<3" },
-    { name = "oci", marker = "extra == 'oci'", specifier = ">=2.150.0" },
+    { name = "oci-openai", marker = "extra == 'oci'", specifier = ">=1.1.0" },
     { name = "openai", specifier = ">=2.36.0,<3" },
     { name = "pydantic", specifier = ">=2.12.2,<3" },
     { name = "pymongo", marker = "extra == 'mongodb'", specifier = ">=4.14" },

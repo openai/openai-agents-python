@@ -19,7 +19,6 @@ from agents.extensions.models.oci_model import (
     OCIChatCompletionsModel,
     OCIResponsesModel,
 )
-from agents.extensions.models.oci_signer import OCIRequestSigner, oci_openai_base_url
 
 COMPARTMENT_ID = "ocid1.compartment.oc1..testcompartment"
 REGION = "us-chicago-1"
@@ -38,9 +37,16 @@ def get_weather(city: str) -> str:
     return f"The weather in {city} is sunny."
 
 
-class FakeSigner:
-    def do_request_sign(self, prepared: Any) -> None:
-        prepared.headers["authorization"] = "Signature integration-test"
+OCI_BASE_URL = f"https://inference.generativeai.{REGION}.oci.oraclecloud.com/openai/v1"
+
+
+class FakeOciAuth(httpx.Auth):
+    """Sets the headers the oci-openai auth and client attach on real requests."""
+
+    def auth_flow(self, request: httpx.Request) -> Any:
+        request.headers["authorization"] = "Signature integration-test"
+        request.headers["opc-compartment-id"] = COMPARTMENT_ID
+        yield request
 
 
 def _signed_openai_client(replies: list[dict[str, Any]], seen: list[httpx.Request]) -> AsyncOpenAI:
@@ -50,10 +56,10 @@ def _signed_openai_client(replies: list[dict[str, Any]], seen: list[httpx.Reques
 
     http_client = httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
-        auth=OCIRequestSigner(FakeSigner(), compartment_id=COMPARTMENT_ID),
+        auth=FakeOciAuth(),
     )
     return AsyncOpenAI(
-        base_url=oci_openai_base_url(REGION),
+        base_url=OCI_BASE_URL,
         api_key="oci-request-signing",
         http_client=http_client,
     )
@@ -163,18 +169,7 @@ async def test_agent_run_over_responses_transport() -> None:
 
 
 async def test_project_id_is_sent_as_openai_project_header() -> None:
-    from agents.extensions.models.oci_model import build_signed_openai_client
-    from agents.extensions.models.oci_signer import OCIClientConfig
-
     project_id = "ocid1.generativeaiproject.oc1..testproject"
-
-    # The builder propagates project_id onto the OpenAI client.
-    client_config = OCIClientConfig(
-        signer=FakeSigner(), config={}, region=REGION, compartment_id=COMPARTMENT_ID
-    )
-    built = build_signed_openai_client(client_config, project_id=project_id)
-    assert built.project == project_id
-    await built.close()
 
     # On the wire, the project lands as the OpenAI-Project header next to the
     # signature and compartment headers.
@@ -185,12 +180,12 @@ async def test_project_id_is_sent_as_openai_project_header() -> None:
         return httpx.Response(200, json=_responses_reply(text="Hello.", response_id="resp_1"))
 
     openai_client = AsyncOpenAI(
-        base_url=oci_openai_base_url(REGION),
+        base_url=OCI_BASE_URL,
         api_key="oci-request-signing",
         project=project_id,
         http_client=httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
-            auth=OCIRequestSigner(FakeSigner(), compartment_id=COMPARTMENT_ID),
+            auth=FakeOciAuth(),
         ),
     )
     model = OCIResponsesModel("openai.gpt-5", openai_client=openai_client)
@@ -237,12 +232,12 @@ async def test_chat_completions_transport_streams_signed_requests() -> None:
 
     http_client = httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
-        auth=OCIRequestSigner(FakeSigner(), compartment_id=COMPARTMENT_ID),
+        auth=FakeOciAuth(),
     )
     model = OCIChatCompletionsModel(
         "openai.gpt-4o",
         openai_client=AsyncOpenAI(
-            base_url=oci_openai_base_url(REGION),
+            base_url=OCI_BASE_URL,
             api_key="oci-request-signing",
             http_client=http_client,
         ),

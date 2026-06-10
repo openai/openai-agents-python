@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Generator
 from typing import Any
 
 import httpx
@@ -7,110 +8,90 @@ import pytest
 
 from agents.exceptions import UserError
 from agents.extensions.models.oci_provider import OCIProvider
-from agents.extensions.models.oci_signer import (
-    OCIClientConfig,
-    OCIRequestSigner,
-    oci_openai_base_url,
-)
 
 COMPARTMENT_ID = "ocid1.compartment.oc1..testcompartment"
+PROJECT_ID = "ocid1.generativeaiproject.oc1..testproject"
 
 
-class FakeSigner:
-    """Stands in for an OCI signer; records what it signed."""
+class FakeOciAuth(httpx.Auth):
+    """Stands in for the oci-openai auth implementations."""
 
-    def __init__(self, signature: str = "Signature test") -> None:
-        self.signature = signature
-        self.signed_bodies: list[Any] = []
-
-    def do_request_sign(self, prepared: Any) -> None:
-        self.signed_bodies.append(prepared.body)
-        prepared.headers["authorization"] = self.signature
-        prepared.headers["date"] = "Mon, 01 Jan 2026 00:00:00 GMT"
+    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+        request.headers["authorization"] = "Signature test"
+        yield request
 
 
-def _drive_auth_flow(signer: OCIRequestSigner, request: httpx.Request) -> httpx.Request:
-    flow = signer.auth_flow(request)
-    return next(flow)
+class FakeAsyncOpenAI:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
 
 
-def test_endpoint_construction() -> None:
-    assert (
-        oci_openai_base_url("us-chicago-1")
-        == "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com/openai/v1"
+def test_builder_constructs_signed_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agents.extensions.models.oci_model as oci_model_module
+    from agents.extensions.models.oci_model import build_signed_openai_client
+
+    monkeypatch.setattr(oci_model_module, "_load_profile", lambda profile, config_file: {})
+    monkeypatch.setattr(oci_model_module, "_build_auth", lambda *args, **kwargs: FakeOciAuth())
+
+    client = build_signed_openai_client(
+        region="us-chicago-1",
+        compartment_id=COMPARTMENT_ID,
+        project_id=PROJECT_ID,
     )
+    assert "inference.generativeai.us-chicago-1.oci.oraclecloud.com" in str(client.base_url)
+    assert client.project == PROJECT_ID
+    # The compartment header is attached by the oci-openai client.
+    assert client._client.headers.get("opc-compartment-id") == COMPARTMENT_ID
 
 
-def test_signer_replaces_bearer_auth_and_adds_compartment() -> None:
-    fake_signer = FakeSigner()
-    signer = OCIRequestSigner(fake_signer, compartment_id=COMPARTMENT_ID)
-    request = httpx.Request(
-        "POST",
-        "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com/openai/v1/chat/completions",
-        json={"model": "openai.gpt-4o"},
-        headers={"Authorization": "Bearer should-be-removed"},
-    )
+def test_builder_requires_compartment(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agents.extensions.models.oci_model as oci_model_module
+    from agents.extensions.models.oci_model import build_signed_openai_client
 
-    signed = _drive_auth_flow(signer, request)
+    monkeypatch.setattr(oci_model_module, "_load_profile", lambda profile, config_file: {})
+    monkeypatch.setattr(oci_model_module, "_build_auth", lambda *args, **kwargs: FakeOciAuth())
+    monkeypatch.delenv("OCI_COMPARTMENT_ID", raising=False)
 
-    assert signed.headers["authorization"] == "Signature test"
-    assert signed.headers["opc-compartment-id"] == COMPARTMENT_ID
-    assert fake_signer.signed_bodies == [request.content]
-
-
-def test_signer_rebuilds_signer_on_401() -> None:
-    rebuilt: list[FakeSigner] = []
-
-    def refresh() -> FakeSigner:
-        new_signer = FakeSigner(signature=f"Signature refreshed-{len(rebuilt)}")
-        rebuilt.append(new_signer)
-        return new_signer
-
-    signer = OCIRequestSigner(FakeSigner(), refresh_signer=refresh)
-    request = httpx.Request("POST", "https://example.com/openai/v1/chat/completions", json={})
-
-    flow = signer.auth_flow(request)
-    first = next(flow)
-    assert first.headers["authorization"] == "Signature test"
-
-    retried = flow.send(httpx.Response(401, request=request))
-    assert len(rebuilt) == 1
-    assert retried.headers["authorization"] == "Signature refreshed-0"
-
-
-def test_signer_does_not_retry_without_refresh() -> None:
-    signer = OCIRequestSigner(FakeSigner())
-    request = httpx.Request("POST", "https://example.com/openai/v1/chat/completions", json={})
-
-    flow = signer.auth_flow(request)
-    next(flow)
-    with pytest.raises(StopIteration):
-        flow.send(httpx.Response(401, request=request))
-
-
-def test_provider_requires_model_name() -> None:
-    provider = OCIProvider(compartment_id=COMPARTMENT_ID)
     with pytest.raises(UserError):
-        provider.get_model(None)
+        build_signed_openai_client(region="us-chicago-1")
+
+
+def test_auth_mode_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agents.extensions.models.oci_model as oci_model_module
+    from agents.extensions.models.oci_model import _build_auth
+
+    selected: list[tuple[str, dict[str, Any]]] = []
+
+    def make_stub(kind: str) -> Any:
+        def factory(**kwargs: Any) -> Any:
+            selected.append((kind, kwargs))
+            return FakeOciAuth()
+
+        return factory
+
+    monkeypatch.setattr(oci_model_module, "OciUserPrincipalAuth", make_stub("api_key"))
+    monkeypatch.setattr(oci_model_module, "OciSessionAuth", make_stub("security_token"))
+
+    # Profiles with a security token use session auth automatically.
+    _build_auth(None, "PROFILE_A", None, {"security_token_file": "/tmp/token"})
+    # Plain API-key profiles use user-principal auth.
+    _build_auth(None, "PROFILE_B", None, {})
+    # Explicit modes are honored regardless of the profile contents.
+    _build_auth("security_token", "PROFILE_C", None, {})
+
+    assert [kind for kind, _ in selected] == ["security_token", "api_key", "security_token"]
+    assert selected[0][1]["profile_name"] == "PROFILE_A"
 
 
 async def test_close_releases_internally_created_client(monkeypatch: pytest.MonkeyPatch) -> None:
     import agents.extensions.models.oci_model as oci_model_module
 
-    class FakeAsyncOpenAI:
-        def __init__(self) -> None:
-            self.closed = False
-
-        async def close(self) -> None:
-            self.closed = True
-
     fake_client = FakeAsyncOpenAI()
-    client_config = OCIClientConfig(
-        signer=FakeSigner(), config={}, region="us-chicago-1", compartment_id=COMPARTMENT_ID
-    )
-    monkeypatch.setattr(oci_model_module, "resolve_client_config", lambda **kwargs: client_config)
     monkeypatch.setattr(
-        oci_model_module, "build_signed_openai_client", lambda config, **kwargs: fake_client
+        oci_model_module, "build_signed_openai_client", lambda **kwargs: fake_client
     )
 
     from agents.extensions.models.oci_model import OCIChatCompletionsModel, OCIResponsesModel
@@ -120,6 +101,9 @@ async def test_close_releases_internally_created_client(monkeypatch: pytest.Monk
     assert fake_client.closed
 
     fake_client = FakeAsyncOpenAI()
+    monkeypatch.setattr(
+        oci_model_module, "build_signed_openai_client", lambda **kwargs: fake_client
+    )
     responses_model = OCIResponsesModel("openai.gpt-5")
     await responses_model.close()
     assert fake_client.closed
@@ -128,31 +112,20 @@ async def test_close_releases_internally_created_client(monkeypatch: pytest.Monk
 async def test_close_leaves_caller_provided_client_open() -> None:
     from agents.extensions.models.oci_model import OCIChatCompletionsModel
 
-    class FakeAsyncOpenAI:
-        def __init__(self) -> None:
-            self.closed = False
-
-        async def close(self) -> None:
-            self.closed = True
-
     caller_client = FakeAsyncOpenAI()
     model = OCIChatCompletionsModel("openai.gpt-4o", openai_client=caller_client)  # type: ignore[arg-type]
     await model.close()
     assert not caller_client.closed
 
 
+def test_provider_requires_model_name() -> None:
+    provider = OCIProvider(compartment_id=COMPARTMENT_ID)
+    with pytest.raises(UserError):
+        provider.get_model(None)
+
+
 def test_provider_routes_to_model_classes(monkeypatch: pytest.MonkeyPatch) -> None:
     import agents.extensions.models.oci_provider as oci_provider_module
-
-    client_config = OCIClientConfig(
-        signer=FakeSigner(),
-        config={},
-        region="us-chicago-1",
-        compartment_id=COMPARTMENT_ID,
-    )
-    monkeypatch.setattr(
-        oci_provider_module, "resolve_client_config", lambda **kwargs: client_config
-    )
 
     created: list[tuple[str, str]] = []
 
@@ -167,9 +140,7 @@ def test_provider_routes_to_model_classes(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(oci_provider_module, "OCIChatCompletionsModel", StubChatModel)
     monkeypatch.setattr(oci_provider_module, "OCIResponsesModel", StubResponsesModel)
     monkeypatch.setattr(
-        oci_provider_module,
-        "build_signed_openai_client",
-        lambda config, **kwargs: object(),
+        oci_provider_module, "build_signed_openai_client", lambda **kwargs: object()
     )
 
     provider = OCIProvider(compartment_id=COMPARTMENT_ID)
