@@ -1133,7 +1133,10 @@ class DaytonaSandboxSession(BaseSandboxSession):
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         if not isinstance(payload, bytes | bytearray):
-            raise WorkspaceWriteTypeError(path=Path(tar_path), actual_type=type(payload).__name__)
+            raise WorkspaceWriteTypeError(
+                path=root,
+                actual_type=type(payload).__name__
+            )
 
         try:
             validate_tar_bytes(
