@@ -162,6 +162,47 @@ async def test_agent_run_over_responses_transport() -> None:
     assert request.headers["opc-compartment-id"] == COMPARTMENT_ID
 
 
+async def test_project_id_is_sent_as_openai_project_header() -> None:
+    from agents.extensions.models.oci_model import build_signed_openai_client
+    from agents.extensions.models.oci_signer import OCIClientConfig
+
+    project_id = "ocid1.generativeaiproject.oc1..testproject"
+
+    # The builder propagates project_id onto the OpenAI client.
+    client_config = OCIClientConfig(
+        signer=FakeSigner(), config={}, region=REGION, compartment_id=COMPARTMENT_ID
+    )
+    built = build_signed_openai_client(client_config, project_id=project_id)
+    assert built.project == project_id
+    await built.close()
+
+    # On the wire, the project lands as the OpenAI-Project header next to the
+    # signature and compartment headers.
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_responses_reply(text="Hello.", response_id="resp_1"))
+
+    openai_client = AsyncOpenAI(
+        base_url=oci_openai_base_url(REGION),
+        api_key="oci-request-signing",
+        project=project_id,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            auth=OCIRequestSigner(FakeSigner(), compartment_id=COMPARTMENT_ID),
+        ),
+    )
+    model = OCIResponsesModel("openai.gpt-5", openai_client=openai_client)
+    agent = Agent(name="weather-agent", instructions="Answer briefly.", model=model)
+    result = await Runner.run(agent, "Say hello.")
+
+    assert result.final_output == "Hello."
+    assert seen[0].headers["openai-project"] == project_id
+    assert seen[0].headers["opc-compartment-id"] == COMPARTMENT_ID
+    assert seen[0].headers["authorization"] == "Signature integration-test"
+
+
 async def test_chat_completions_transport_streams_signed_requests() -> None:
     sse_body = (
         "data: "

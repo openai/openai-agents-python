@@ -110,7 +110,7 @@ async def test_close_releases_internally_created_client(monkeypatch: pytest.Monk
     )
     monkeypatch.setattr(oci_model_module, "resolve_client_config", lambda **kwargs: client_config)
     monkeypatch.setattr(
-        oci_model_module, "build_signed_openai_client", lambda config, request_timeout: fake_client
+        oci_model_module, "build_signed_openai_client", lambda config, **kwargs: fake_client
     )
 
     from agents.extensions.models.oci_model import OCIChatCompletionsModel, OCIResponsesModel
@@ -169,7 +169,7 @@ def test_provider_routes_to_model_classes(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(
         oci_provider_module,
         "build_signed_openai_client",
-        lambda config, request_timeout: object(),
+        lambda config, **kwargs: object(),
     )
 
     provider = OCIProvider(compartment_id=COMPARTMENT_ID)
