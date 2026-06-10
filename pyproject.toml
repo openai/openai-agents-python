@@ -37,7 +37,7 @@ Repository = "https://github.com/openai/openai-agents-python"
 voice = ["numpy>=2.2.0, <3; python_version>='3.10'", "websockets>=15.0, <17"]
 viz = ["graphviz>=0.17"]
 litellm = ["litellm>=1.83.0"]
-oci = ["oci>=2.150.0"]
+oci = ["oci-openai>=1.1.0"]
 any-llm = ["any-llm-sdk>=1.11.0, <2; python_version >= '3.11'"]
 realtime = ["websockets>=15.0, <17"]
 sqlalchemy = ["SQLAlchemy>=2.0", "asyncpg>=0.29.0"]
@@ -141,7 +141,7 @@ module = "sounddevice.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["oci", "oci.*", "requests", "requests.*"]
+module = ["oci", "oci.*", "oci_openai", "oci_openai.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
