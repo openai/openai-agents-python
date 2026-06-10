@@ -1072,7 +1072,7 @@ class MCPServerStdioParams(TypedDict):
     `['server.js', '--port', '8080']`."""
 
     env: NotRequired[dict[str, str]]
-    """The environment variables to set for the server. ."""
+    """The environment variables to set for the server."""
 
     cwd: NotRequired[str | Path]
     """The working directory to use when spawning the process."""

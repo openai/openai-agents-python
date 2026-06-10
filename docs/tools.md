@@ -561,7 +561,7 @@ french_agent = Agent(
 orchestrator_agent = Agent(
     name="orchestrator_agent",
     instructions=(
-        "You are a translation agent. You use the tools given to you to translate."
+        "You are a translation agent. You use the tools given to you to translate. "
         "If asked for multiple translations, you call the relevant tools."
     ),
     tools=[
