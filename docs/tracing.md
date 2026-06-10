@@ -188,7 +188,7 @@ await Runner.run(
 ```
 
 ## Additional notes
-- View free traces at Openai Traces dashboard.
+- View free traces at OpenAI Traces dashboard.
 
 
 ## Ecosystem integrations
