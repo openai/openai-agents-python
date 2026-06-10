@@ -116,10 +116,12 @@ def build_signed_openai_client(
         config_file: OCI config file location (defaults to `~/.oci/config`).
         region: OCI region whose Generative AI endpoint should be called.
         compartment_id: Compartment all inference requests are billed against.
-        project_id: Optional OCI Generative AI project OCID
-            (`ocid1.generativeaiproject...`), sent as the `OpenAI-Project` header.
-            Projects scope response/conversation retention and memory settings on the
-            Responses endpoint.
+        project_id: OCI Generative AI project OCID (`ocid1.generativeaiproject...`),
+            sent as the `OpenAI-Project` header; falls back to the `OCI_PROJECT_ID`
+            env var. Oracle's documentation states that projects are required to call
+            the OCI OpenAI-compatible API; they scope response/conversation retention
+            and memory settings. Left optional here because tenancies without project
+            enforcement accept requests without one.
         request_timeout: Per-request timeout in seconds.
     """
     uses_file_config = auth_type not in ("instance_principal", "resource_principal")
@@ -132,6 +134,7 @@ def build_signed_openai_client(
     resolved_compartment = (
         compartment_id or os.environ.get("OCI_COMPARTMENT_ID") or profile_config.get("tenancy")
     )
+    resolved_project = project_id or os.environ.get("OCI_PROJECT_ID")
     if not resolved_compartment:
         raise UserError(
             "A compartment_id is required for OCI Generative AI. Pass it explicitly or set "
@@ -145,7 +148,7 @@ def build_signed_openai_client(
             region=str(resolved_region),
             compartment_id=resolved_compartment,
             timeout=request_timeout,
-            project=project_id,
+            project=resolved_project,
         ),
     )
 

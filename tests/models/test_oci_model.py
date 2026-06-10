@@ -47,6 +47,18 @@ def test_builder_constructs_signed_client(monkeypatch: pytest.MonkeyPatch) -> No
     assert client._client.headers.get("opc-compartment-id") == COMPARTMENT_ID
 
 
+def test_builder_resolves_project_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agents.extensions.models.oci_model as oci_model_module
+    from agents.extensions.models.oci_model import build_signed_openai_client
+
+    monkeypatch.setattr(oci_model_module, "_load_profile", lambda profile, config_file: {})
+    monkeypatch.setattr(oci_model_module, "_build_auth", lambda *args, **kwargs: FakeOciAuth())
+    monkeypatch.setenv("OCI_PROJECT_ID", PROJECT_ID)
+
+    client = build_signed_openai_client(region="us-chicago-1", compartment_id=COMPARTMENT_ID)
+    assert client.project == PROJECT_ID
+
+
 def test_builder_requires_compartment(monkeypatch: pytest.MonkeyPatch) -> None:
     import agents.extensions.models.oci_model as oci_model_module
     from agents.extensions.models.oci_model import build_signed_openai_client
