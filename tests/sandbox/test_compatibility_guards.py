@@ -333,6 +333,15 @@ def test_core_sandbox_public_export_surface_is_stable() -> None:
                 "VercelSandboxSessionState",
             },
         ),
+        (
+            "agents.extensions.sandbox.upstash_box",
+            {
+                "UpstashBoxSandboxClient",
+                "UpstashBoxSandboxClientOptions",
+                "UpstashBoxSandboxSession",
+                "UpstashBoxSandboxSessionState",
+            },
+        ),
     ],
 )
 def test_extension_sandbox_package_export_surfaces_are_stable(
@@ -508,6 +517,24 @@ def test_optional_sandbox_dataclass_constructor_field_order_is_stable(
                 "workspace_persistence",
                 "snapshot_expiration_ms",
                 "network_policy",
+            ),
+        ),
+        (
+            "agents.extensions.sandbox.upstash_box",
+            "UpstashBoxSandboxClientOptions",
+            (
+                "api_key",
+                "base_url",
+                "name",
+                "size",
+                "runtime",
+                "keep_alive",
+                "network_policy",
+                "git_token",
+                "snapshot_id",
+                "pause_on_exit",
+                "env_vars",
+                "exposed_ports",
             ),
         ),
     ],
@@ -745,6 +772,26 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
                 "network_policy",
             ),
         ),
+        (
+            "agents.extensions.sandbox.upstash_box",
+            "UpstashBoxSandboxSessionState",
+            (
+                "type",
+                "session_id",
+                "snapshot",
+                "manifest",
+                "exposed_ports",
+                "snapshot_fingerprint",
+                "snapshot_fingerprint_version",
+                "workspace_root_ready",
+                "box_id",
+                "base_url",
+                "base_env_vars",
+                "keep_alive",
+                "pause_on_exit",
+                "snapshot_id",
+            ),
+        ),
     ],
 )
 def test_sandbox_session_state_field_order_is_stable(
@@ -786,6 +833,12 @@ def test_sandbox_session_state_field_order_is_stable(
         ("agents.extensions.sandbox.daytona", "DaytonaSandboxClientOptions", (), "daytona"),
         ("agents.extensions.sandbox.runloop", "RunloopSandboxClientOptions", (), "runloop"),
         ("agents.extensions.sandbox.vercel", "VercelSandboxClientOptions", (), "vercel"),
+        (
+            "agents.extensions.sandbox.upstash_box",
+            "UpstashBoxSandboxClientOptions",
+            (),
+            "upstash_box",
+        ),
     ],
 )
 def test_optional_sandbox_client_options_json_round_trip_preserves_type(
@@ -851,6 +904,11 @@ def test_optional_sandbox_client_options_json_round_trip_preserves_type(
             "VercelSandboxSessionState",
             {"sandbox_id": "sandbox-123"},
         ),
+        (
+            "agents.extensions.sandbox.upstash_box",
+            "UpstashBoxSandboxSessionState",
+            {"box_id": "box-123", "base_url": "https://box.example.test"},
+        ),
     ],
 )
 def test_optional_sandbox_session_state_json_round_trip_preserves_type(
@@ -901,6 +959,16 @@ def test_core_discriminator_type_strings_are_stable() -> None:
         ("agents.sandbox.sandboxes.unix_local", "UnixLocalSandboxSessionState", "unix_local"),
         ("agents.sandbox.sandboxes.docker", "DockerSandboxClientOptions", "docker"),
         ("agents.sandbox.sandboxes.docker", "DockerSandboxSessionState", "docker"),
+        (
+            "agents.extensions.sandbox.upstash_box",
+            "UpstashBoxSandboxClientOptions",
+            "upstash_box",
+        ),
+        (
+            "agents.extensions.sandbox.upstash_box",
+            "UpstashBoxSandboxSessionState",
+            "upstash_box",
+        ),
     ],
 )
 def test_optional_sandbox_discriminator_type_strings_are_stable(

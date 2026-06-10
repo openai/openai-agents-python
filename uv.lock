@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-06-03T15:18:58.611598Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -2492,6 +2492,9 @@ temporal = [
     { name = "temporalio" },
     { name = "textual" },
 ]
+upstash-box = [
+    { name = "aiohttp" },
+]
 vercel = [
     { name = "vercel" },
 ]
@@ -2542,6 +2545,7 @@ dev = [
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'blaxel'", specifier = ">=3.12,<4" },
     { name = "aiohttp", marker = "extra == 'cloudflare'", specifier = ">=3.12,<4" },
+    { name = "aiohttp", marker = "extra == 'upstash-box'", specifier = ">=3.12,<4" },
     { name = "any-llm-sdk", marker = "python_full_version >= '3.11' and extra == 'any-llm'", specifier = ">=1.11.0,<2" },
     { name = "asyncpg", marker = "extra == 'sqlalchemy'", specifier = ">=0.29.0" },
     { name = "blaxel", marker = "extra == 'blaxel'", specifier = ">=0.2.50" },
@@ -2575,7 +2579,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<17" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<17" },
 ]
-provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "docker", "blaxel", "daytona", "cloudflare", "e2b", "modal", "runloop", "vercel", "s3", "temporal"]
+provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "docker", "blaxel", "daytona", "cloudflare", "e2b", "modal", "runloop", "vercel", "upstash-box", "s3", "temporal"]
 
 [package.metadata.requires-dev]
 dev = [

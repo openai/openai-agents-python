@@ -376,3 +376,33 @@ Blaxel sandboxes support cloud bucket mounts (S3, R2, GCS) through
 `BlaxelCloudBucketMountStrategy` and persistent drive mounts through
 `BlaxelDriveMountStrategy`. See the
 [Blaxel Drive docs](https://docs.blaxel.ai/Agent-drive/Overview) for details.
+
+## Upstash Box
+
+### Setup
+
+Install the repo extra:
+
+```bash
+uv sync --extra upstash-box
+```
+
+Create an Upstash Box API key in the [Upstash Console](https://console.upstash.com) and export
+the required environment variables:
+
+```bash
+export OPENAI_API_KEY=...
+export UPSTASH_BOX_API_KEY=...
+```
+
+Optionally set `UPSTASH_BOX_BASE_URL` to target a non-default Box API endpoint.
+
+### Run
+
+```bash
+uv run python examples/sandbox/extensions/upstash_box_runner.py --stream
+```
+
+Upstash Box has no Python SDK, so this client talks to the Box REST API directly over HTTP.
+It supports command execution, file read/write, exposed ports, keep-alive boxes,
+create-from-snapshot (via `snapshot_id`), and pause/resume lifecycle.
