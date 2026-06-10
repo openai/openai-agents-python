@@ -80,6 +80,7 @@ class OCIChatCompletionsModel(OpenAIChatCompletionsModel):
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
         openai_client: AsyncOpenAI | None = None,
     ) -> None:
+        owns_openai_client = openai_client is None
         if openai_client is None:
             client_config = resolve_client_config(
                 auth_type=auth_type,
@@ -92,6 +93,13 @@ class OCIChatCompletionsModel(OpenAIChatCompletionsModel):
                 client_config, request_timeout=request_timeout
             )
         super().__init__(model, openai_client)
+        self._owns_openai_client = owns_openai_client
+
+    async def close(self) -> None:
+        """Release the internally created signing client, if this model owns it."""
+        await super().close()
+        if self._owns_openai_client:
+            await self._client.close()
 
 
 class OCIResponsesModel(OpenAIResponsesModel):
@@ -124,6 +132,7 @@ class OCIResponsesModel(OpenAIResponsesModel):
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
         openai_client: AsyncOpenAI | None = None,
     ) -> None:
+        owns_openai_client = openai_client is None
         if openai_client is None:
             client_config = resolve_client_config(
                 auth_type=auth_type,
@@ -136,6 +145,13 @@ class OCIResponsesModel(OpenAIResponsesModel):
                 client_config, request_timeout=request_timeout
             )
         super().__init__(model, openai_client)
+        self._owns_openai_client = owns_openai_client
+
+    async def close(self) -> None:
+        """Release the internally created signing client, if this model owns it."""
+        await super().close()
+        if self._owns_openai_client:
+            await self._client.close()
 
 
 __all__ = [

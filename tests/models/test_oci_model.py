@@ -94,6 +94,53 @@ def test_provider_requires_model_name() -> None:
         provider.get_model(None)
 
 
+async def test_close_releases_internally_created_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agents.extensions.models.oci_model as oci_model_module
+
+    class FakeAsyncOpenAI:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    fake_client = FakeAsyncOpenAI()
+    client_config = OCIClientConfig(
+        signer=FakeSigner(), config={}, region="us-chicago-1", compartment_id=COMPARTMENT_ID
+    )
+    monkeypatch.setattr(oci_model_module, "resolve_client_config", lambda **kwargs: client_config)
+    monkeypatch.setattr(
+        oci_model_module, "build_signed_openai_client", lambda config, request_timeout: fake_client
+    )
+
+    from agents.extensions.models.oci_model import OCIChatCompletionsModel, OCIResponsesModel
+
+    model = OCIChatCompletionsModel("openai.gpt-4o")
+    await model.close()
+    assert fake_client.closed
+
+    fake_client = FakeAsyncOpenAI()
+    responses_model = OCIResponsesModel("openai.gpt-5")
+    await responses_model.close()
+    assert fake_client.closed
+
+
+async def test_close_leaves_caller_provided_client_open() -> None:
+    from agents.extensions.models.oci_model import OCIChatCompletionsModel
+
+    class FakeAsyncOpenAI:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    caller_client = FakeAsyncOpenAI()
+    model = OCIChatCompletionsModel("openai.gpt-4o", openai_client=caller_client)  # type: ignore[arg-type]
+    await model.close()
+    assert not caller_client.closed
+
+
 def test_provider_routes_to_model_classes(monkeypatch: pytest.MonkeyPatch) -> None:
     import agents.extensions.models.oci_provider as oci_provider_module
 
