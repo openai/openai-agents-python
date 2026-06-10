@@ -441,8 +441,9 @@ async def test_compaction_session_accepts_but_does_not_forward_wrapper():
 
 
 @pytest.mark.asyncio
-async def test_rewind_session_items_forwards_wrapper():
-    """The retry-rewind helper forwards the wrapper to the session it reads and pops."""
+async def test_rewind_session_items_does_not_forward_wrapper():
+    """The retry-rewind helper removes items via pop_item, which is outside the wrapper
+    contract, so it operates on the session's default scope and does not forward the wrapper."""
     from agents.run_internal.session_persistence import rewind_session_items
 
     session = ContextAwareSession()
@@ -450,11 +451,8 @@ async def test_rewind_session_items_forwards_wrapper():
     await session.add_items([item])
     session.get_items_wrappers.clear()
 
-    wrapper = RunContextWrapper(context=UserInfo())
-    await rewind_session_items(session, [item], wrapper=wrapper)
+    await rewind_session_items(session, [item])
 
-    # The rewind read the tail with the wrapper and popped the matching item back off.
-    assert len(session.get_items_wrappers) > 0
-    for received in session.get_items_wrappers:
-        assert received is wrapper
+    # The rewind still works (the matching item is popped) but no wrapper is forwarded.
     assert await session.get_items() == []
+    assert all(received is None for received in session.get_items_wrappers)
