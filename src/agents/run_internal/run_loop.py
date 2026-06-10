@@ -1463,7 +1463,9 @@ async def run_single_turn_streamed(
 
     async def rewind_model_request() -> None:
         items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
-        await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
+        await rewind_session_items(
+            session, items_to_rewind, server_conversation_tracker, wrapper=context_wrapper
+        )
         if server_conversation_tracker is not None:
             server_conversation_tracker.rewind_input(filtered.input)
 
@@ -1887,7 +1889,9 @@ async def get_new_response(
 
     async def rewind_model_request() -> None:
         items_to_rewind = session_items_to_rewind if session_items_to_rewind is not None else []
-        await rewind_session_items(session, items_to_rewind, server_conversation_tracker)
+        await rewind_session_items(
+            session, items_to_rewind, server_conversation_tracker, wrapper=context_wrapper
+        )
         if server_conversation_tracker is not None:
             server_conversation_tracker.rewind_input(filtered.input)
 

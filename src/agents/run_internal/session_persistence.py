@@ -398,7 +398,10 @@ async def save_result_to_session(
         if has_local_tool_outputs:
             defer_compaction = getattr(session, "_defer_compaction", None)
             if callable(defer_compaction):
-                result = defer_compaction(response_id, store=store)
+                if session_method_accepts_wrapper(defer_compaction):
+                    result = defer_compaction(response_id, store=store, wrapper=wrapper)
+                else:
+                    result = defer_compaction(response_id, store=store)
                 if inspect.isawaitable(result):
                     await result
             logger.debug(
@@ -424,7 +427,10 @@ async def save_result_to_session(
         }
         if store is not None:
             compaction_args["store"] = store
-        await session.run_compaction(compaction_args)
+        if session_method_accepts_wrapper(session.run_compaction):
+            await session.run_compaction(compaction_args, wrapper=wrapper)
+        else:
+            await session.run_compaction(compaction_args)
 
     return saved_run_items_count
 
@@ -459,6 +465,8 @@ async def rewind_session_items(
     session: Session | None,
     items: Sequence[TResponseInputItem],
     server_tracker: OpenAIServerConversationTracker | None = None,
+    *,
+    wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """
     Best-effort helper to roll back items recently persisted to a session when a conversation
@@ -499,6 +507,7 @@ async def rewind_session_items(
             "Skipping session rewind because the current tail does not match the retry-owned suffix"
         ),
         pop_failure_warning="Failed to rewind session item: %s",
+        wrapper=wrapper,
     )
     if not rewound:
         return
@@ -507,13 +516,14 @@ async def rewind_session_items(
         session,
         snapshot_serializations,
         ignore_ids_for_matching=ignore_ids_for_matching,
+        wrapper=wrapper,
     )
 
     if session is None or server_tracker is None:
         return
 
     try:
-        latest_items = await session.get_items(limit=1)
+        latest_items = await _session_get_items(session, limit=1, wrapper=wrapper)
     except Exception as exc:
         logger.debug("Failed to peek session items while rewinding: %s", exc)
         return
@@ -526,7 +536,7 @@ async def rewind_session_items(
         return
 
     try:
-        session_items = await session.get_items()
+        session_items = await _session_get_items(session, wrapper=wrapper)
     except Exception as exc:
         logger.debug("Failed to inspect session tail while stripping stray items: %s", exc)
         return
@@ -554,6 +564,7 @@ async def rewind_session_items(
             "retry-owned conversation items"
         ),
         pop_failure_warning="Failed to strip stray session item: %s",
+        wrapper=wrapper,
     )
 
 
@@ -563,6 +574,7 @@ async def wait_for_session_cleanup(
     *,
     max_attempts: int = 5,
     ignore_ids_for_matching: bool = False,
+    wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """
     Confirm that rewound items are no longer present in the session tail so the store stays
@@ -575,7 +587,7 @@ async def wait_for_session_cleanup(
 
     for attempt in range(max_attempts):
         try:
-            tail_items = await session.get_items(limit=window)
+            tail_items = await _session_get_items(session, limit=window, wrapper=wrapper)
         except Exception as exc:
             logger.debug("Failed to verify session cleanup (attempt %d): %s", attempt + 1, exc)
             await asyncio.sleep(0.1 * (attempt + 1))
@@ -700,13 +712,16 @@ async def _rewind_session_tail_suffix(
     ignore_ids_for_matching: bool,
     mismatch_warning: str,
     pop_failure_warning: str,
+    wrapper: RunContextWrapper[Any] | None = None,
 ) -> bool:
     """Remove an exact serialized suffix from the session tail, aborting when the tail diverges."""
     if not expected_serializations:
         return True
 
     try:
-        tail_items = await session.get_items(limit=len(expected_serializations))
+        tail_items = await _session_get_items(
+            session, limit=len(expected_serializations), wrapper=wrapper
+        )
     except Exception as exc:
         logger.warning(pop_failure_warning, exc)
         return False
@@ -734,12 +749,12 @@ async def _rewind_session_tail_suffix(
             if inspect.isawaitable(result):
                 result = await result
         except Exception as exc:
-            await _restore_popped_session_items(session, popped_items)
+            await _restore_popped_session_items(session, popped_items, wrapper=wrapper)
             logger.warning(pop_failure_warning, exc)
             return False
 
         if result is None:
-            await _restore_popped_session_items(session, popped_items)
+            await _restore_popped_session_items(session, popped_items, wrapper=wrapper)
             logger.warning(mismatch_warning)
             return False
 
@@ -748,7 +763,7 @@ async def _rewind_session_tail_suffix(
             result, ignore_ids_for_matching=ignore_ids_for_matching
         )
         if popped_serialized != expected:
-            await _restore_popped_session_items(session, popped_items)
+            await _restore_popped_session_items(session, popped_items, wrapper=wrapper)
             logger.warning(mismatch_warning)
             return False
 
@@ -756,7 +771,10 @@ async def _rewind_session_tail_suffix(
 
 
 async def _restore_popped_session_items(
-    session: Session, popped_items: Sequence[TResponseInputItem]
+    session: Session,
+    popped_items: Sequence[TResponseInputItem],
+    *,
+    wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """Best-effort restoration for items popped during a failed rewind attempt."""
     if not popped_items:
@@ -767,9 +785,7 @@ async def _restore_popped_session_items(
         return
 
     try:
-        result = add_items(list(reversed(popped_items)))
-        if inspect.isawaitable(result):
-            await result
+        await _session_add_items(session, list(reversed(popped_items)), wrapper=wrapper)
     except Exception as exc:
         logger.warning("Failed to restore session items after a rewind mismatch: %s", exc)
 

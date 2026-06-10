@@ -431,3 +431,50 @@ async def test_compaction_session_forwards_wrapper_to_underlying_session():
     assert underlying.add_items_wrappers == [wrapper]
     assert underlying.get_items_wrappers == [wrapper]
     assert len(retrieved) == 1
+
+
+@pytest.mark.asyncio
+async def test_compaction_run_compaction_forwards_wrapper_to_underlying_reads():
+    """run_compaction forwards the wrapper to the underlying session's history reads."""
+    from agents.memory.openai_responses_compaction_session import (
+        OpenAIResponsesCompactionSession,
+    )
+
+    underlying = ContextAwareSession()
+    await underlying.add_items([{"role": "user", "content": "hello"}])
+    underlying.get_items_wrappers.clear()
+
+    # Decline actual compaction so no OpenAI client call is made; only the candidate
+    # read path (which forwards the wrapper) runs.
+    session = OpenAIResponsesCompactionSession(
+        "compaction-run",
+        underlying,
+        should_trigger_compaction=lambda _info: False,
+    )
+    wrapper = RunContextWrapper(context=UserInfo())
+
+    await session.run_compaction({"response_id": "resp_1"}, wrapper=wrapper)
+
+    assert len(underlying.get_items_wrappers) > 0
+    for received in underlying.get_items_wrappers:
+        assert received is wrapper
+
+
+@pytest.mark.asyncio
+async def test_rewind_session_items_forwards_wrapper():
+    """The retry-rewind helper forwards the wrapper to the session it reads and pops."""
+    from agents.run_internal.session_persistence import rewind_session_items
+
+    session = ContextAwareSession()
+    item: TResponseInputItem = {"role": "user", "content": "to be rewound"}
+    await session.add_items([item])
+    session.get_items_wrappers.clear()
+
+    wrapper = RunContextWrapper(context=UserInfo())
+    await rewind_session_items(session, [item], wrapper=wrapper)
+
+    # The rewind read the tail with the wrapper and popped the matching item back off.
+    assert len(session.get_items_wrappers) > 0
+    for received in session.get_items_wrappers:
+        assert received is wrapper
+    assert await session.get_items() == []
