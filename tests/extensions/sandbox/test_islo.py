@@ -864,6 +864,85 @@ async def test_resume_reconnects_paused_and_recreates_missing(
 
 
 @pytest.mark.asyncio
+async def test_resume_surfaces_get_sandbox_provider_errors_without_recreate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    islo_module = _load_islo_module(monkeypatch)
+    create_calls: list[dict[str, object]] = []
+
+    class _FailingGetSandboxesClient:
+        async def get_sandbox(self, sandbox_name: str) -> _FakeSandboxResponse:
+            raise _FakeApiError(status_code=500, body=f"failed to get {sandbox_name}")
+
+        async def create_sandbox(self, **kwargs: object) -> _FakeSandboxResponse:
+            create_calls.append(kwargs)
+            return _FakeSandboxResponse(sandbox_id="sb-recreated", name="recreated")
+
+    class _FailingGetAsyncIslo(_FakeAsyncIslo):
+        def __init__(
+            self,
+            *,
+            api_key: str | None = None,
+            base_url: str | None = None,
+            compute_url: str | None = None,
+        ) -> None:
+            super().__init__(api_key=api_key, base_url=base_url, compute_url=compute_url)
+            cast(Any, self).sandboxes = _FailingGetSandboxesClient()
+
+    monkeypatch.setattr(islo_module, "_import_islo_sdk", lambda: _FailingGetAsyncIslo)
+    state = _make_state(islo_module, sandbox_id="sb-existing", sandbox_name="existing")
+
+    with pytest.raises(_FakeApiError, match="status_code=500"):
+        await islo_module.IsloSandboxClient().resume(state)
+
+    assert create_calls == []
+    assert _FakeAsyncIslo.instances[-1]._client_wrapper.httpx_client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_resume_surfaces_resume_sandbox_provider_errors_without_recreate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    islo_module = _load_islo_module(monkeypatch)
+    create_calls: list[dict[str, object]] = []
+
+    class _FailingResumeSandboxesClient:
+        async def get_sandbox(self, sandbox_name: str) -> _FakeSandboxResponse:
+            return _FakeSandboxResponse(
+                sandbox_id="sb-paused",
+                name=sandbox_name,
+                status="paused",
+            )
+
+        async def resume_sandbox(self, sandbox_name: str) -> _FakeSandboxResponse:
+            raise _FakeApiError(status_code=503, body=f"failed to resume {sandbox_name}")
+
+        async def create_sandbox(self, **kwargs: object) -> _FakeSandboxResponse:
+            create_calls.append(kwargs)
+            return _FakeSandboxResponse(sandbox_id="sb-recreated", name="recreated")
+
+    class _FailingResumeAsyncIslo(_FakeAsyncIslo):
+        def __init__(
+            self,
+            *,
+            api_key: str | None = None,
+            base_url: str | None = None,
+            compute_url: str | None = None,
+        ) -> None:
+            super().__init__(api_key=api_key, base_url=base_url, compute_url=compute_url)
+            cast(Any, self).sandboxes = _FailingResumeSandboxesClient()
+
+    monkeypatch.setattr(islo_module, "_import_islo_sdk", lambda: _FailingResumeAsyncIslo)
+    state = _make_state(islo_module, sandbox_id="sb-paused", sandbox_name="paused")
+
+    with pytest.raises(_FakeApiError, match="status_code=503"):
+        await islo_module.IsloSandboxClient().resume(state)
+
+    assert create_calls == []
+    assert _FakeAsyncIslo.instances[-1]._client_wrapper.httpx_client.closed is True
+
+
+@pytest.mark.asyncio
 async def test_resume_recreates_stale_running_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

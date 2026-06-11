@@ -1149,7 +1149,10 @@ class IsloSandboxClient(BaseSandboxClient[IsloSandboxClientOptions]):
             if str(getattr(sandbox, "status", "")).lower() in {"running", "started"}:
                 reconnected = await self._reconnected_sandbox_is_usable(state, client)
         except Exception as e:
-            logger.debug("islo sandbox get() failed, will recreate: %s", e)
+            if not _is_not_found_error(e):
+                await self._close_client(client)
+                raise
+            logger.debug("islo sandbox metadata was stale, will recreate: %s", e)
 
         if not reconnected:
             try:
