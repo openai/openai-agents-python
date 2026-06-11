@@ -753,7 +753,7 @@ class RcloneMountPattern(MountPatternBase):
                 tool="rclone serve nfs",
                 context={"type": config.mount_type},
             )
-        cmd: list[str] = ["rclone", "serve", "nfs", f"{config.remote_name}:{config.remote_path}"]
+        cmd: list[str] = ["rclone", "serve", "nfs", f"{remote_name}:{config.remote_path}"]
         cmd.extend(["--addr", nfs_addr])
         cmd.extend(["--config", sandbox_path_str(config_path)])
         if config.read_only:
@@ -784,7 +784,7 @@ class RcloneMountPattern(MountPatternBase):
             cmd: list[str] = [
                 "rclone",
                 "mount",
-                f"{config.remote_name}:{config.remote_path}",
+                f"{remote_name}:{config.remote_path}",
                 sandbox_path_str(path),
             ]
             if config.read_only:
@@ -900,6 +900,11 @@ class RcloneMountPattern(MountPatternBase):
                 context={"type": rclone_config.mount_type},
             )
         session_id_str = session_id.hex
+        remote_name = self.resolve_remote_name(
+            session_id=session_id_str,
+            remote_kind=rclone_config.remote_kind,
+            mount_type=rclone_config.mount_type,
+        )
         # Keep generated rclone config under the workspace root so `session.mkdir()` /
         # `session.write()` can handle it without special-casing absolute paths.
         config_dir = posix_path_as_path(
@@ -963,6 +968,16 @@ class RcloneMountPattern(MountPatternBase):
                 "-lc",
                 f"umount {shlex.quote(sandbox_path_str(path))} >/dev/null 2>&1 || true",
                 shell=False,
+            )
+
+        session_id = getattr(session.state, "session_id", None)
+        if session_id is None:
+            remote_name = rclone_config.remote_name
+        else:
+            remote_name = self.resolve_remote_name(
+                session_id=session_id.hex,
+                remote_kind=rclone_config.remote_kind,
+                mount_type=rclone_config.mount_type,
             )
 
         await session.exec(
