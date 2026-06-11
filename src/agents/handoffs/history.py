@@ -32,6 +32,7 @@ _conversation_history_end = _DEFAULT_CONVERSATION_HISTORY_END
 _SUMMARY_ONLY_INPUT_TYPES = {
     "function_call",
     "function_call_output",
+    "code_interpreter_call",
     # Reasoning items can become orphaned after other summarized items are filtered.
     "reasoning",
 }

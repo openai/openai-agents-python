@@ -14,6 +14,9 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputText,
 )
+from openai.types.responses.response_code_interpreter_tool_call import (
+    ResponseCodeInterpreterToolCall,
+)
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 
 from agents import Agent, RunConfig, Runner, function_tool, handoff
@@ -112,6 +115,19 @@ def _create_reasoning_item(agent: Agent) -> ReasoningItem:
         summary=[Summary(text="Thinking about handoff", type="summary_text")],
     )
     return ReasoningItem(agent=agent, raw_item=raw_item, type="reasoning_item")
+
+
+def _create_code_interpreter_item(agent: Agent) -> ToolCallItem:
+    """Create a mock code interpreter tool call."""
+    raw_item = ResponseCodeInterpreterToolCall(
+        id="ci_123",
+        code="print('hello')",
+        container_id="cntr_123",
+        outputs=[],
+        status="completed",
+        type="code_interpreter_call",
+    )
+    return ToolCallItem(agent=agent, raw_item=raw_item, type="tool_call_item")
 
 
 def _create_tool_approval_item(agent: Agent) -> ToolApprovalItem:
@@ -276,6 +292,36 @@ class TestHandoffHistoryDuplicationFix:
         assert isinstance(first_item, dict)
         summary = str(first_item.get("content", ""))
         assert "reasoning" in summary
+
+    def test_code_interpreter_items_are_filtered_from_input_items(self):
+        """Verify code interpreter calls are summarized instead of forwarded raw."""
+        agent = _create_mock_agent()
+
+        handoff_data = HandoffInputData(
+            input_history=({"role": "user", "content": "Hello"},),
+            pre_handoff_items=(),
+            new_items=(
+                _create_reasoning_item(agent),
+                _create_code_interpreter_item(agent),
+                _create_handoff_call_item(agent),
+                _create_handoff_output_item(agent),
+            ),
+        )
+
+        nested = nest_handoff_history(handoff_data)
+
+        assert nested.input_items is not None
+        has_code_interpreter = any(
+            isinstance(item, ToolCallItem)
+            and cast(dict[str, Any], item.to_input_item()).get("type") == "code_interpreter_call"
+            for item in nested.input_items
+        )
+        assert not has_code_interpreter, "Code interpreter call should be filtered from input_items"
+
+        first_item = nested.input_history[0]
+        assert isinstance(first_item, dict)
+        summary = str(first_item.get("content", ""))
+        assert "code_interpreter_call" in summary
 
     def test_summary_contains_filtered_items_as_text(self):
         """Verify the summary message contains the filtered tool items as text.
