@@ -450,15 +450,19 @@ class MountpointMountPattern(MountPatternBase):
         elif mountpoint_config.mount_type in {"s3_mount", "gcs_mount"}:
             cmd.extend(["--allow-overwrite", "--allow-delete"])
 
-        if mountpoint_config.region:
-            cmd.extend(["--region", mountpoint_config.region])
-        if mountpoint_config.endpoint_url:
-            cmd.extend(["--endpoint-url", mountpoint_config.endpoint_url])
+        region = self.options.region or mountpoint_config.region
+        endpoint_url = self.options.endpoint_url or mountpoint_config.endpoint_url
+        prefix = self.options.prefix or mountpoint_config.prefix
+
+        if region:
+            cmd.extend(["--region", region])
+        if endpoint_url:
+            cmd.extend(["--endpoint-url", endpoint_url])
         if mountpoint_config.mount_type == "gcs_mount":
             # GCS XML API rejects the default upload checksum flow used by mount-s3.
             cmd.extend(["--upload-checksums", "off"])
-        if mountpoint_config.prefix:
-            cmd.extend(["--prefix", mountpoint_config.prefix])
+        if prefix:
+            cmd.extend(["--prefix", prefix])
         cmd.extend([bucket, sandbox_path_str(path)])
 
         env_vars: list[tuple[str, str]] = []
@@ -567,12 +571,17 @@ class S3FilesMountPattern(MountPatternBase):
         options: dict[str, str | None] = dict(s3files_config.extra_options)
         if s3files_config.read_only:
             options["ro"] = None
-        if s3files_config.mount_target_ip:
-            options["mounttargetip"] = s3files_config.mount_target_ip
-        if s3files_config.access_point:
-            options["accesspoint"] = s3files_config.access_point
-        if s3files_config.region:
-            options["region"] = s3files_config.region
+
+        mount_target_ip = self.options.mount_target_ip or s3files_config.mount_target_ip
+        access_point = self.options.access_point or s3files_config.access_point
+        region = self.options.region or s3files_config.region
+
+        if mount_target_ip:
+            options["mounttargetip"] = mount_target_ip
+        if access_point:
+            options["accesspoint"] = access_point
+        if region:
+            options["region"] = region
 
         cmd: list[str] = ["mount", "-t", "s3files"]
         if options:
