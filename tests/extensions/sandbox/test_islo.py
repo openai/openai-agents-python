@@ -943,6 +943,52 @@ async def test_resume_surfaces_resume_sandbox_provider_errors_without_recreate(
 
 
 @pytest.mark.asyncio
+async def test_resume_surfaces_transitional_status_without_recreate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    islo_module = _load_islo_module(monkeypatch)
+    create_calls: list[dict[str, object]] = []
+
+    class _StartingSandboxesClient:
+        async def get_sandbox(self, sandbox_name: str) -> _FakeSandboxResponse:
+            return _FakeSandboxResponse(
+                sandbox_id="sb-starting",
+                name=sandbox_name,
+                status="starting",
+            )
+
+        async def create_sandbox(
+            self,
+            *,
+            init: dict[str, str] | None = None,
+            **kwargs: object,
+        ) -> _FakeSandboxResponse:
+            kwargs["init"] = init
+            create_calls.append(kwargs)
+            return _FakeSandboxResponse(sandbox_id="sb-recreated", name="recreated")
+
+    class _StartingAsyncIslo(_FakeAsyncIslo):
+        def __init__(
+            self,
+            *,
+            api_key: str | None = None,
+            base_url: str | None = None,
+            compute_url: str | None = None,
+        ) -> None:
+            super().__init__(api_key=api_key, base_url=base_url, compute_url=compute_url)
+            cast(Any, self).sandboxes = _StartingSandboxesClient()
+
+    monkeypatch.setattr(islo_module, "_import_islo_sdk", lambda: _StartingAsyncIslo)
+    state = _make_state(islo_module, sandbox_id="sb-starting", sandbox_name="starting")
+
+    with pytest.raises(RuntimeError, match="status=starting"):
+        await islo_module.IsloSandboxClient().resume(state)
+
+    assert create_calls == []
+    assert _FakeAsyncIslo.instances[-1]._client_wrapper.httpx_client.closed is True
+
+
+@pytest.mark.asyncio
 async def test_resume_recreates_stale_running_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

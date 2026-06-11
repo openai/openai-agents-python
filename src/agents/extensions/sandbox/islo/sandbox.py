@@ -1146,8 +1146,13 @@ class IsloSandboxClient(BaseSandboxClient[IsloSandboxClientOptions]):
             status = str(getattr(sandbox, "status", "")).lower()
             if status in {"paused", "stopped"}:
                 sandbox = await client.sandboxes.resume_sandbox(state.sandbox_name)
-            if str(getattr(sandbox, "status", "")).lower() in {"running", "started"}:
+            status = str(getattr(sandbox, "status", "")).lower()
+            if status in {"running", "started"}:
                 reconnected = await self._reconnected_sandbox_is_usable(state, client)
+            else:
+                raise RuntimeError(
+                    f"islo sandbox is not ready to resume: status={status or '<missing>'}"
+                )
         except Exception as e:
             if not _is_not_found_error(e):
                 await self._close_client(client)
