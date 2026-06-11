@@ -450,9 +450,9 @@ class MountpointMountPattern(MountPatternBase):
         elif mountpoint_config.mount_type in {"s3_mount", "gcs_mount"}:
             cmd.extend(["--allow-overwrite", "--allow-delete"])
 
-        region = self.options.region or mountpoint_config.region
-        endpoint_url = self.options.endpoint_url or mountpoint_config.endpoint_url
-        prefix = self.options.prefix or mountpoint_config.prefix
+        region = mountpoint_config.region or self.options.region
+        endpoint_url = mountpoint_config.endpoint_url or self.options.endpoint_url
+        prefix = mountpoint_config.prefix or self.options.prefix
 
         if region:
             cmd.extend(["--region", region])
@@ -568,13 +568,15 @@ class S3FilesMountPattern(MountPatternBase):
         if s3files_config.subpath:
             device = f"{device}:{s3files_config.subpath}"
 
-        options: dict[str, str | None] = dict(s3files_config.extra_options)
+        options: dict[str, str | None] = dict(self.options.extra_options)
+        options.update(s3files_config.extra_options)
+
         if s3files_config.read_only:
             options["ro"] = None
 
-        mount_target_ip = self.options.mount_target_ip or s3files_config.mount_target_ip
-        access_point = self.options.access_point or s3files_config.access_point
-        region = self.options.region or s3files_config.region
+        mount_target_ip = s3files_config.mount_target_ip or self.options.mount_target_ip
+        access_point = s3files_config.access_point or self.options.access_point
+        region = s3files_config.region or self.options.region
 
         if mount_target_ip:
             options["mounttargetip"] = mount_target_ip
