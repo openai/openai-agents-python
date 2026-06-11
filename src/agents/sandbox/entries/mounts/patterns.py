@@ -902,17 +902,13 @@ class RcloneMountPattern(MountPatternBase):
                 context={"type": rclone_config.mount_type},
             )
         session_id_str = session_id.hex
-        remote_name = self.resolve_remote_name(
-            session_id=session_id_str,
-            remote_kind=rclone_config.remote_kind,
-            mount_type=rclone_config.mount_type,
-        )
+        remote_name = rclone_config.remote_name
         # Keep generated rclone config under the workspace root so `session.mkdir()` /
         # `session.write()` can handle it without special-casing absolute paths.
         config_dir = posix_path_as_path(
             coerce_posix_path(f".sandbox-rclone-config/{session_id_str}")
         )
-        config_path = config_dir / f"{rclone_config.remote_name}.conf"
+        config_path = config_dir / f"{remote_name}.conf"
         await session.mkdir(path, parents=True)
         await session.mkdir(config_dir, parents=True)
         session.register_persist_workspace_skip_path(config_dir)
