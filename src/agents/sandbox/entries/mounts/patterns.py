@@ -739,6 +739,7 @@ class RcloneMountPattern(MountPatternBase):
         *,
         config: RcloneMountConfig,
         config_path: Path,
+        remote_name: str,
         nfs_addr: str,
     ) -> None:
         nfs_check = await session.exec(
@@ -778,6 +779,7 @@ class RcloneMountPattern(MountPatternBase):
         path: Path,
         config: RcloneMountConfig,
         config_path: Path,
+        remote_name: str,
         nfs_addr: str | None = None,
     ) -> None:
         if self.mode == "fuse":
@@ -929,6 +931,7 @@ class RcloneMountPattern(MountPatternBase):
                 session,
                 config=rclone_config,
                 config_path=command_config_path,
+                remote_name=remote_name,
                 nfs_addr=nfs_addr,
             )
             await self._start_rclone_client(
@@ -936,6 +939,7 @@ class RcloneMountPattern(MountPatternBase):
                 path=path,
                 config=rclone_config,
                 config_path=command_config_path,
+                remote_name=remote_name,
                 nfs_addr=nfs_addr,
             )
         else:
@@ -945,6 +949,7 @@ class RcloneMountPattern(MountPatternBase):
                 path=path,
                 config=rclone_config,
                 config_path=command_config_path,
+                remote_name=remote_name,
             )
 
     async def unapply(
@@ -985,7 +990,7 @@ class RcloneMountPattern(MountPatternBase):
             "-lc",
             (
                 "pkill -f -- "
-                f"'rclone (mount|serve nfs) {rclone_config.remote_name}:' >/dev/null 2>&1 || true"
+                f"'rclone (mount|serve nfs) {remote_name}:' >/dev/null 2>&1 || true"
             ),
             shell=False,
         )
