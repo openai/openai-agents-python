@@ -449,22 +449,13 @@ class OpenAIChatCompletionsModel(Model):
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
-            messages_json = json.dumps(
-                converted_messages,
-                indent=2,
-                ensure_ascii=False,
-            )
-            tools_json = json.dumps(
-                converted_tools,
-                indent=2,
-                ensure_ascii=False,
-            )
             logger.debug(
-                f"{messages_json}\n"
-                f"Tools:\n{tools_json}\n"
-                f"Stream: {stream}\n"
-                f"Tool choice: {tool_choice}\n"
-                f"Response format: {response_format}\n"
+                "Calling LLM: messages=%d tools=%d stream=%s tool_choice=%s response_format=%s",
+                len(converted_messages),
+                len(converted_tools),
+                stream,
+                tool_choice,
+                response_format,
             )
 
         reasoning_effort = model_settings.reasoning.effort if model_settings.reasoning else None
