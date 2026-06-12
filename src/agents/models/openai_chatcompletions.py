@@ -449,6 +449,9 @@ class OpenAIChatCompletionsModel(Model):
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
+            response_format_summary = (
+                type(response_format).__name__ if response_format is not None else "None"
+            )
             logger.debug(
                 "Calling LLM: messages=%d tools=%d stream=%s tool_choice=%s response_format=%s",
                 len(converted_messages),
