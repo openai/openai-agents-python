@@ -58,6 +58,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     Examples demonstrating how to use hosted MCP (Model Context Protocol) with the OpenAI Responses API, including:
 
     -   Simple hosted MCP without approval (`examples/hosted_mcp/simple.py`)
+    -   Flight search with booking URLs (`examples/hosted_mcp/flight_search.py`)
     -   MCP connectors such as Google Calendar (`examples/hosted_mcp/connectors.py`)
     -   Human-in-the-loop with interruption-based approvals (`examples/hosted_mcp/human_in_the_loop.py`)
     -   On-approval callback for MCP tool calls (`examples/hosted_mcp/on_approval.py`)
