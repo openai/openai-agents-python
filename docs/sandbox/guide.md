@@ -272,7 +272,7 @@ from agents.sandbox import FileMode, Permissions
 from agents.sandbox.entries import File
 
 private_notes = File(
-    content=b"internal notes",
+    text="internal notes",
     permissions=Permissions(
         owner=FileMode.READ | FileMode.WRITE,
         group=FileMode.NONE,
