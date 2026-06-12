@@ -458,7 +458,7 @@ class OpenAIChatCompletionsModel(Model):
                 len(converted_tools),
                 stream,
                 tool_choice,
-                response_format,
+                response_format_summary,
             )
 
         reasoning_effort = model_settings.reasoning.effort if model_settings.reasoning else None
