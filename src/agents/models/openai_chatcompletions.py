@@ -543,7 +543,7 @@ class OpenAIChatCompletionsModel(Model):
             top_p=model_settings.top_p,
             temperature=model_settings.temperature,
             tools=[],
-            parallel_tool_calls=parallel_tool_calls or False,
+            parallel_tool_calls=parallel_tool_calls if isinstance(parallel_tool_calls, bool) else False,
             reasoning=model_settings.reasoning,
         )
         return response, ret
