@@ -93,7 +93,7 @@ The main SDK pieces map onto those layers like this:
 | Piece | What it owns | Ask this question |
 | --- | --- | --- |
 | [`SandboxAgent`][agents.sandbox.sandbox_agent.SandboxAgent] | The agent definition | What should this agent do, and which defaults should travel with it? |
-| [`Manifest`][agents.sandbox.manifest.Manifest] | Fresh-session workspace files and folders | What files and folder should be present on the filesystem when the run starts? |
+| [`Manifest`][agents.sandbox.manifest.Manifest] | Fresh-session workspace files and folders | What files and folders should be present on the filesystem when the run starts? |
 | [`Capability`][agents.sandbox.capabilities.capability.Capability] | Sandbox-native behavior | Which tools, instruction fragments, or runtime behavior should attach to this agent? |
 | [`SandboxRunConfig`][agents.run_config.SandboxRunConfig] | Per-run sandbox client and sandbox-session source | Should this run inject, resume, or create a sandbox session? |
 | [`RunState`][agents.run_state.RunState] | Runner-managed saved sandbox state | Am I resuming a prior runner-managed workflow and carrying its sandbox state forward automatically? |
@@ -272,7 +272,7 @@ from agents.sandbox import FileMode, Permissions
 from agents.sandbox.entries import File
 
 private_notes = File(
-    text="internal notes",
+    text=b"internal notes",
     permissions=Permissions(
         owner=FileMode.READ | FileMode.WRITE,
         group=FileMode.NONE,
