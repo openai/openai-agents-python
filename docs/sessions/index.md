@@ -192,6 +192,8 @@ result = await Runner.run(
 print(f"Agent: {result.final_output}")
 ```
 
+> **Note:** This example assumes the previous turn produced exactly two items: the user prompt and the assistant response. If your agent uses tools, a single turn may add additional items to session history, so you may need to inspect the stored items before popping them.
+
 ## Built-in session implementations
 
 The SDK provides several session implementations for different use cases:
