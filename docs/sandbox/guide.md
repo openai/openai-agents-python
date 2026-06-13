@@ -810,6 +810,7 @@ Keep the sandbox workspace while still using ordinary tools on the same agent:
 from agents.sandbox import SandboxAgent
 from agents.sandbox.capabilities import Shell
 
+# Assumes `get_discount_approval_path` and an MCP `server` are defined elsewhere.
 agent = SandboxAgent(
     name="Workspace reviewer",
     instructions="Inspect the workspace and call host tools when needed.",
