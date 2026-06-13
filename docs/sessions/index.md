@@ -56,6 +56,8 @@ if result.interruptions:
     state = result.to_state()
     for interruption in result.interruptions:
         state.approve(interruption)
+
+    # Resume with the approved run state, not a new user prompt.
     result = await Runner.run(agent, state, session=session)
 ```
 
