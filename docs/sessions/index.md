@@ -412,7 +412,7 @@ Notes:
 
 -   `from_address(...)` creates and owns the Dapr client for you. If your app already manages one, construct `DaprSession(...)` directly with `dapr_client=...`.
 -   Pass `ttl=...` to let the backing state store expire old session data automatically when the store supports TTL.
--   Pass `consistency=DAPR_CONSISTENCY_STRONG` (imported from the Dapr SDK) when you need stronger read-after-write guarantees.
+-   Pass `consistency=DAPR_CONSISTENCY_STRONG` (imported from `agents.extensions.memory`) when you need stronger read-after-write guarantees.
 -   The Dapr Python SDK also checks the HTTP sidecar endpoint. In local development, start Dapr with `--dapr-http-port 3500` as well as the gRPC port used in `dapr_address`.
 -   See [`examples/memory/dapr_session_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/dapr_session_example.py) for a full setup walkthrough, including local components and troubleshooting.
 
