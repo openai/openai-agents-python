@@ -130,7 +130,7 @@ result = await Runner.run(
 )
 ```
 
-If your session backend has default history limits configured, passing `session_settings` in `RunConfig` overrides them for that specific run. This is useful for long conversations where you want to temporarily cap retrieval size without changing the session's default behavior.
+If your session implementation exposes default session settings, `RunConfig.session_settings` overrides only the non-`None` values for that run. This is useful for long conversations where you want to cap retrieval size without changing the session's default behavior.
 
 ## Memory operations
 
