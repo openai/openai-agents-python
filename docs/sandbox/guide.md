@@ -215,7 +215,7 @@ If your skills already live on disk under something like `.agents/skills/<name>/
 
 Prefer built-in capabilities when they fit. Write a custom capability only when you need a sandbox-specific tool or instruction surface that the built-ins do not cover.
 
-## Concepts
+## Core Sandbox Concepts
 
 ### Manifest
 
