@@ -520,7 +520,7 @@ Read the [overview](https://www.restate.dev/blog/durable-orchestration-for-ai-ag
 
 ### DBOS
 
-You can use the Agents SDK [DBOS](https://dbos.dev/) integration to run reliable agents that preserves progress across failures and restarts. It supports long-running agents, human-in-the-loop workflows, and handoffs. It supports both sync and async methods. The integration requires only a SQLite or Postgres database. View the integration [repo](https://github.com/dbos-inc/dbos-openai-agents) and the [docs](https://docs.dbos.dev/integrations/openai-agents) for more details.
+You can use the Agents SDK [DBOS](https://dbos.dev/) integration to run reliable agents that preserve progress across failures and restarts. It supports long-running agents, human-in-the-loop workflows, and handoffs. It supports both sync and async methods. The integration requires only a SQLite or Postgres database. View the integration [repo](https://github.com/dbos-inc/dbos-openai-agents) and the [docs](https://docs.dbos.dev/integrations/openai-agents) for more details.
 
 ## Exceptions
 

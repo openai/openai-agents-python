@@ -229,7 +229,12 @@ billing_agent = RealtimeAgent(
 main_agent = RealtimeAgent(
     name="Customer Service",
     instructions="Triage the request and hand off when needed.",
-    handoffs=[realtime_handoff(billing_agent, tool_description="Transfer to billing support")],
+    handoffs=[
+        realtime_handoff(
+            billing_agent,
+            tool_description_override="Transfer to billing support",
+        )
+    ],
 )
 ```
 
