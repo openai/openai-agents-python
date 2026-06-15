@@ -84,6 +84,7 @@ from agents.run_state import (
 )
 from agents.sandbox import Manifest
 from agents.sandbox.capabilities.capability import Capability
+from agents.sandbox.sandbox_agent import SandboxAgent
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient, UnixLocalSandboxSessionState
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.snapshot import LocalSnapshot, NoopSnapshot
@@ -491,6 +492,53 @@ class TestRunState:
         )
         assert _identity_for(first_identity_map, first_stop) == _identity_for(
             second_identity_map, second_stop
+        )
+
+    def test_build_agent_identity_map_uses_disabled_tools_for_duplicate_names(self) -> None:
+        """Duplicate-name identities should stay stable when only disabled_tools differs."""
+
+        def _identity_for(
+            identity_map: Mapping[str, Agent[Any]],
+            target: Agent[Any],
+        ) -> str:
+            return next(identity for identity, agent in identity_map.items() if agent is target)
+
+        first_patch = SandboxAgent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            disabled_tools={"apply_patch"},
+        )
+        first_image = SandboxAgent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            disabled_tools={"view_image"},
+        )
+        first_root = Agent(name="triage", handoffs=[first_patch, first_image])
+        first_patch.handoffs = [first_root]
+        first_image.handoffs = [first_root]
+
+        second_patch = SandboxAgent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            disabled_tools={"apply_patch"},
+        )
+        second_image = SandboxAgent(
+            name="sandbox",
+            instructions="Shared instructions.",
+            disabled_tools={"view_image"},
+        )
+        second_root = Agent(name="triage", handoffs=[second_image, second_patch])
+        second_patch.handoffs = [second_root]
+        second_image.handoffs = [second_root]
+
+        first_identity_map = _build_agent_identity_map(first_root)
+        second_identity_map = _build_agent_identity_map(second_root)
+
+        assert _identity_for(first_identity_map, first_patch) == _identity_for(
+            second_identity_map, second_patch
+        )
+        assert _identity_for(first_identity_map, first_image) == _identity_for(
+            second_identity_map, second_image
         )
 
     def test_capability_identity_uses_config_but_not_bound_session(self) -> None:

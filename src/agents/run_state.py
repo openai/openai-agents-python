@@ -2967,6 +2967,10 @@ def _agent_identity_signature(agent: Agent[Any]) -> str:
             for capability in capabilities
         )
 
+    disabled_tools = getattr(agent, "disabled_tools", None)
+    if disabled_tools:
+        signature["disabled_tools"] = sorted(str(name) for name in disabled_tools)
+
     return _stable_identity_text(signature)
 
 

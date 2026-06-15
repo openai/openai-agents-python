@@ -38,7 +38,12 @@ class SandboxAgent(Agent[TContext]):
     """User identity used for model-facing sandbox tools such as shell, file reads, and patches."""
 
     disabled_tools: set[str] = field(default_factory=set)
-    """Names of capability-contributed tools to hide from the model during run preparation."""
+    """Names of capability-contributed tools to hide from the model during run preparation.
+
+    This removes the tool's schema. Instruction text that names the tool (the default sandbox
+    prompt or a capability's instructions) is not rewritten, so prefer disabling tools the base
+    instructions do not reference, or override ``base_instructions`` accordingly.
+    """
 
     _sandbox_concurrency_guard: object | None = field(default=None, init=False, repr=False)
 
