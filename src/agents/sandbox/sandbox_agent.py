@@ -38,15 +38,7 @@ class SandboxAgent(Agent[TContext]):
     """User identity used for model-facing sandbox tools such as shell, file reads, and patches."""
 
     disabled_tools: set[str] = field(default_factory=set)
-    """Names of tools to hide from the model.
-
-    Any tool whose ``name`` matches an entry in this set is removed from the merged tool list
-    during run preparation, regardless of which capability contributed it. Filtering happens at
-    a single point after each capability's ``configure_tools`` callback runs, so the two
-    mechanisms compose: ``configure_tools`` customizes a tool, ``disabled_tools`` removes it by
-    name. Names that do not match any contributed tool are ignored. Only capability-contributed
-    tools are filtered; tools attached directly to ``tools`` are left untouched.
-    """
+    """Names of capability-contributed tools to hide from the model during run preparation."""
 
     _sandbox_concurrency_guard: object | None = field(default=None, init=False, repr=False)
 
@@ -66,5 +58,3 @@ class SandboxAgent(Agent[TContext]):
                 f"SandboxAgent run_as must be a string, User, or None, "
                 f"got {type(self.run_as).__name__}"
             )
-        if not isinstance(self.disabled_tools, set):
-            self.disabled_tools = set(self.disabled_tools)

@@ -143,6 +143,7 @@ These are the sandbox-specific options on top of the usual `Agent` fields:
 | `base_instructions` | Advanced escape hatch that replaces the SDK sandbox prompt. |
 | `capabilities` | Sandbox-native tools and behavior that should travel with this agent. |
 | `run_as` | User identity for model-facing sandbox tools such as shell commands, file reads, and patches. |
+| `disabled_tools` | Names of capability-contributed tools to hide from the model, even when their capability stays enabled. |
 
 </div>
 
@@ -214,6 +215,14 @@ For skills, choose the source based on how you want them materialized:
 If your skills already live on disk under something like `.agents/skills/<name>/SKILL.md`, point `LocalDir(...)` at that source root and still use `Skills(...)` to expose them. Keep the default `skills_path=".agents"` unless you have an existing workspace contract that depends on a different in-sandbox layout.
 
 Prefer built-in capabilities when they fit. Write a custom capability only when you need a sandbox-specific tool or instruction surface that the built-ins do not cover.
+
+### `disabled_tools`
+
+`disabled_tools` is a set of tool names to hide from the model while keeping the capability that provides them enabled. Use it when a capability is mostly useful but one of its tools is not, for example keeping `Filesystem` for `apply_patch` while hiding `view_image`, or keeping `Shell` while hiding `write_stdin`.
+
+It is a coarser, name-based switch than per-capability `configure_tools`: `configure_tools` customizes or replaces a tool, while `disabled_tools` removes it. The two compose, so you can customize one tool and drop another in the same agent. Filtering happens once, after capability tools are gathered, so it applies to every capability uniformly and works for non-function tools such as `apply_patch`. Names that do not match any contributed tool are ignored, and tools attached directly to `tools` are not affected.
+
+To drop a whole capability instead of an individual tool, leave it out of `capabilities` rather than listing all its tool names here.
 
 ## Concepts
 

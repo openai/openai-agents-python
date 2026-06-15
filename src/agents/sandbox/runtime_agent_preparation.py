@@ -81,9 +81,8 @@ def prepare_sandbox_agent(
 
     capability_tools = [tool for capability in capabilities for tool in capability.tools()]
     if agent.disabled_tools:
-        # Filter by tool name at the single point where every capability's contributed tools are
-        # gathered into one list. Comparing by `.name` works uniformly across tool types, including
-        # custom tools such as `apply_patch` that the runtime tool-enablement check skips.
+        # Filter by name here, where every tool type is uniform: `is_enabled` only applies to
+        # FunctionTool, so custom tools like `apply_patch` can only be dropped by name.
         capability_tools = [
             tool for tool in capability_tools if tool.name not in agent.disabled_tools
         ]
