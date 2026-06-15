@@ -21,6 +21,7 @@ from agents.sandbox.session import (
     CallbackSink,
     ChainedSink,
     EventPayloadPolicy,
+    HttpProxySink,
     Instrumentation,
     JsonlOutboxSink,
     SandboxSession,
@@ -122,6 +123,44 @@ async def test_jsonl_outbox_sink_appends_one_line_per_event(tmp_path: Path) -> N
     assert len(lines) == 2
     assert json.loads(lines[0])["phase"] == "start"
     assert json.loads(lines[1])["phase"] == "finish"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [TimeoutError("timed out"), OSError("connection reset")],
+)
+@pytest.mark.asyncio
+async def test_http_proxy_sink_writes_spool_on_timeout_or_oserror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exc: BaseException,
+) -> None:
+    spool_path = tmp_path / "spool.jsonl"
+    sink = HttpProxySink(
+        "http://127.0.0.1:9/events",
+        timeout_s=0.001,
+        spool_path=spool_path,
+    )
+
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise exc
+
+    monkeypatch.setattr("agents.sandbox.session.sinks.urlopen", _raise)
+
+    event = SandboxSessionStartEvent(
+        session_id=uuid.uuid4(),
+        seq=1,
+        op="write",
+        span_id="span_write",
+    )
+
+    with pytest.raises(RuntimeError, match="http proxy sink POST failed"):
+        await sink.handle(event)
+
+    assert spool_path.exists()
+    lines = spool_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["seq"] == 1
 
 
 @pytest.mark.asyncio

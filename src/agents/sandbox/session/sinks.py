@@ -317,7 +317,11 @@ class HttpProxySink(EventSink):
         try:
             with urlopen(req, timeout=self.timeout_s) as resp:
                 _ = resp.read(1)  # ensure request completes
-        except (HTTPError, URLError) as e:
+        except (HTTPError, URLError, TimeoutError, OSError) as e:
+            # `urlopen` wraps most network failures in `URLError`, but socket-level
+            # timeouts (e.g. during connect) can surface as bare `TimeoutError`, and
+            # other low-level failures as `OSError`. Treat all of these as delivery
+            # failures so the configured spool fallback is exercised consistently.
             if spool_line is not None and self.spool_path is not None:
                 try:
                     self.spool_path.parent.mkdir(parents=True, exist_ok=True)
