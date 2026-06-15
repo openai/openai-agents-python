@@ -17,17 +17,25 @@ from agents.sandbox.entries import BaseEntry, File
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.sandbox_agent import SandboxAgent
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.tool import CustomTool, FunctionTool
 
 
 class _Capability:
-    def __init__(self, fragment: str | None, *, type: str = "test") -> None:
+    def __init__(
+        self,
+        fragment: str | None,
+        *,
+        type: str = "test",
+        tools: list[object] | None = None,
+    ) -> None:
         self.type = type
         self.fragment = fragment
         self.manifests: list[Manifest] = []
         self.sampling_params_calls: list[dict[str, object]] = []
+        self._tools = tools or []
 
     def tools(self) -> list[object]:
-        return []
+        return list(self._tools)
 
     def sampling_params(self, sampling_params: dict[str, object]) -> dict[str, object]:
         self.sampling_params_calls.append(dict(sampling_params))
@@ -249,3 +257,171 @@ def test_prepare_sandbox_agent_validates_required_capabilities() -> None:
     )
 
     assert prepared.name == "sandbox"
+
+
+def _function_tool(name: str) -> FunctionTool:
+    async def _invoke(_ctx: object, _input: str) -> str:
+        return "ok"
+
+    return FunctionTool(
+        name=name,
+        description=name,
+        params_json_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        on_invoke_tool=_invoke,
+    )
+
+
+def _custom_tool(name: str) -> CustomTool:
+    async def _invoke(_ctx: object, _input: str) -> str:
+        return "ok"
+
+    return CustomTool(name=name, description=name, on_invoke_tool=_invoke)
+
+
+def _prepare_with_tools(
+    tools: list[object],
+    *,
+    disabled_tools: set[str] | None = None,
+    agent_tools: list[object] | None = None,
+) -> list[str]:
+    manifest = Manifest(root="/workspace")
+    agent = SandboxAgent(
+        name="sandbox",
+        instructions="base instructions",
+        tools=cast(Any, agent_tools or []),
+        disabled_tools=disabled_tools or set(),
+    )
+    prepared = sandbox_prep.prepare_sandbox_agent(
+        agent=agent,
+        session=cast(BaseSandboxSession, _session_with_manifest(manifest)),
+        capabilities=cast(list[Capability], [_Capability(None, tools=tools)]),
+    )
+    return [cast(Any, tool).name for tool in prepared.tools]
+
+
+def test_disabled_tools_defaults_to_empty_set() -> None:
+    assert SandboxAgent(name="sandbox").disabled_tools == set()
+
+
+def test_disabled_tools_instances_do_not_share_default() -> None:
+    first = SandboxAgent(name="first")
+    second = SandboxAgent(name="second")
+    first.disabled_tools.add("exec_command")
+    assert "exec_command" not in second.disabled_tools
+
+
+def test_disabled_tools_removes_named_function_tool() -> None:
+    names = _prepare_with_tools(
+        [_function_tool("exec_command"), _function_tool("view_image")],
+        disabled_tools={"view_image"},
+    )
+    assert "exec_command" in names
+    assert "view_image" not in names
+
+
+def test_disabled_tools_removes_named_custom_tool() -> None:
+    # apply_patch is a CustomTool, which the runtime tool-enablement check skips. Filtering by
+    # name at the aggregation point is the only place it can be removed.
+    names = _prepare_with_tools(
+        [_function_tool("view_image"), _custom_tool("apply_patch")],
+        disabled_tools={"apply_patch"},
+    )
+    assert "view_image" in names
+    assert "apply_patch" not in names
+
+
+def test_disabled_tools_filters_uniformly_across_capabilities() -> None:
+    manifest = Manifest(root="/workspace")
+    shell = _Capability(None, type="shell", tools=[_function_tool("write_stdin")])
+    filesystem = _Capability(None, type="filesystem", tools=[_custom_tool("apply_patch")])
+    prepared = sandbox_prep.prepare_sandbox_agent(
+        agent=SandboxAgent(
+            name="sandbox",
+            instructions="base instructions",
+            disabled_tools={"write_stdin", "apply_patch"},
+        ),
+        session=cast(BaseSandboxSession, _session_with_manifest(manifest)),
+        capabilities=cast(list[Capability], [shell, filesystem]),
+    )
+    assert prepared.tools == []
+
+
+def test_disabled_tools_unknown_name_is_ignored() -> None:
+    names = _prepare_with_tools(
+        [_function_tool("exec_command")],
+        disabled_tools={"does_not_exist"},
+    )
+    assert names == ["exec_command"]
+
+
+def test_disabled_tools_keeps_untargeted_tools() -> None:
+    names = _prepare_with_tools(
+        [_function_tool("exec_command"), _function_tool("view_image")],
+        disabled_tools={"exec_command"},
+    )
+    assert names == ["view_image"]
+
+
+def test_disabled_tools_empty_set_passes_all_tools() -> None:
+    names = _prepare_with_tools([_function_tool("exec_command"), _custom_tool("apply_patch")])
+    assert names == ["exec_command", "apply_patch"]
+
+
+def test_disabled_tools_does_not_filter_agent_attached_tools() -> None:
+    # disabled_tools targets capability-contributed tools, not tools attached directly to the
+    # agent. An agent tool that happens to share a disabled name is left untouched.
+    names = _prepare_with_tools(
+        [_function_tool("exec_command")],
+        disabled_tools={"my_tool"},
+        agent_tools=[_function_tool("my_tool")],
+    )
+    assert "my_tool" in names
+    assert "exec_command" in names
+
+
+def test_disabled_tools_prepares_agent_without_raising() -> None:
+    prepared_names = _prepare_with_tools(
+        [_function_tool("exec_command"), _custom_tool("apply_patch")],
+        disabled_tools={"apply_patch"},
+    )
+    assert prepared_names == ["exec_command"]
+
+
+def test_disabled_tools_compose_with_configure_tools(tmp_path: Path) -> None:
+    # configure_tools runs while a capability builds its tools; disabled_tools filters afterwards.
+    # Both must compose: a customized-but-not-disabled tool keeps its customization, while a
+    # disabled tool is removed.
+    from agents.sandbox.capabilities import Filesystem, FilesystemToolSet
+    from agents.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxSession,
+        UnixLocalSandboxSessionState,
+    )
+    from agents.sandbox.snapshot import NoopSnapshot
+
+    def configure_tools(toolset: FilesystemToolSet) -> None:
+        toolset.view_image.needs_approval = True
+
+    session = UnixLocalSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(tmp_path / "workspace")),
+            snapshot=NoopSnapshot(id="00000000-0000-0000-0000-000000000000"),
+            workspace_root_owned=False,
+        )
+    )
+    capability = Filesystem(configure_tools=configure_tools)
+    capability.bind(session)
+
+    prepared = sandbox_prep.prepare_sandbox_agent(
+        agent=SandboxAgent(
+            name="sandbox",
+            instructions="base instructions",
+            disabled_tools={"apply_patch"},
+        ),
+        session=cast(BaseSandboxSession, session),
+        capabilities=cast(list[Capability], [capability]),
+    )
+
+    tools_by_name = {cast(Any, tool).name: tool for tool in prepared.tools}
+    assert "apply_patch" not in tools_by_name
+    assert "view_image" in tools_by_name
+    assert cast(Any, tools_by_name["view_image"]).needs_approval is True

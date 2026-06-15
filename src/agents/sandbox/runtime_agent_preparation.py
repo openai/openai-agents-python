@@ -80,6 +80,13 @@ def prepare_sandbox_agent(
             raise UserError(f"{type(capability).__name__} requires missing capabilities: {missing}")
 
     capability_tools = [tool for capability in capabilities for tool in capability.tools()]
+    if agent.disabled_tools:
+        # Filter by tool name at the single point where every capability's contributed tools are
+        # gathered into one list. Comparing by `.name` works uniformly across tool types, including
+        # custom tools such as `apply_patch` that the runtime tool-enablement check skips.
+        capability_tools = [
+            tool for tool in capability_tools if tool.name not in agent.disabled_tools
+        ]
     model_settings = agent.model_settings
     extra_args = dict(model_settings.extra_args or {})
     resolved_model_name = resolve_sandbox_model_name(
