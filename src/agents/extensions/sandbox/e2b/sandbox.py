@@ -1289,15 +1289,17 @@ class E2BSandboxSession(BaseSandboxSession):
             return None
 
     async def _terminate_pty_entry(self, entry: _E2BPtyProcessEntry) -> None:
+        if self._entry_exit_code(entry) is not None:
+            return
+
         wait_task = entry.wait_task
 
-        if self._entry_exit_code(entry) is None:
-            kill = getattr(entry.handle, "kill", None)
-            if callable(kill):
-                try:
-                    await kill()
-                except Exception:
-                    pass
+        kill = getattr(entry.handle, "kill", None)
+        if callable(kill):
+            try:
+                await kill()
+            except Exception:
+                pass
 
         if wait_task is not None:
             if not wait_task.done():
