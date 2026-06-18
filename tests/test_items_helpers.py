@@ -84,6 +84,16 @@ def test_extract_last_content_of_refusal_message() -> None:
     assert ItemHelpers.extract_last_content(message) == "I cannot do that"
 
 
+def test_extract_last_content_of_none_refusal_message() -> None:
+    refusal = ResponseOutputRefusal.model_construct(refusal=None, type="refusal")
+    message = make_message([refusal])
+
+    result = ItemHelpers.extract_last_content(message)
+
+    assert isinstance(result, str)
+    assert result == ""
+
+
 def test_extract_last_content_non_message_returns_empty() -> None:
     # Construct some other type of output item, e.g. a tool call, to verify non-message returns "".
     tool_call = ResponseFunctionToolCall(
