@@ -174,6 +174,7 @@ class RealtimeSession(RealtimeModelListener):
             asyncio.Queue()
         )
         self._event_iterator_waiters = 0
+        self._closing = False
         self._closed = False
         self._stored_exception: BaseException | None = None
         self._pending_tool_calls: dict[
@@ -291,7 +292,13 @@ class RealtimeSession(RealtimeModelListener):
         )
 
     async def on_event(self, event: RealtimeModelEvent) -> None:
+        if self._closing or self._closed:
+            return
+
         await self._put_event(RealtimeRawModelEvent(data=event, info=self._event_info))
+
+        if self._closing or self._closed:
+            return
 
         if event.type == "error":
             await self._put_event(RealtimeError(info=self._event_info, error=event.error))
@@ -466,6 +473,8 @@ class RealtimeSession(RealtimeModelListener):
 
     async def _put_event(self, event: RealtimeSessionEvent) -> None:
         """Put an event into the queue."""
+        if self._closed:
+            return
         await self._event_queue.put(event)
 
     async def _function_needs_approval(
@@ -1220,6 +1229,8 @@ class RealtimeSession(RealtimeModelListener):
 
     def _enqueue_guardrail_task(self, text: str, response_id: str) -> None:
         # Runs the guardrails in a separate task to avoid blocking the main loop
+        if self._closing or self._closed:
+            return
 
         task = asyncio.create_task(self._run_output_guardrails(text, response_id))
         self._guardrail_tasks.add(task)
@@ -1278,6 +1289,11 @@ class RealtimeSession(RealtimeModelListener):
         call_id_reserved: bool = False,
     ) -> None:
         """Run tool calls in the background to avoid blocking realtime transport."""
+        if self._closing or self._closed:
+            if call_id_reserved:
+                self._finish_tool_call(event.call_id, mark_completed=False)
+            return
+
         handle_kwargs: dict[str, Any] = {"agent_snapshot": agent_snapshot}
         if from_pending_approval:
             handle_kwargs["from_pending_approval"] = True
@@ -1345,6 +1361,8 @@ class RealtimeSession(RealtimeModelListener):
         if self._closed:
             self._wake_event_iterators()
             return
+
+        self._closing = True
 
         # Remove ourselves as a listener
         self._model.remove_listener(self)

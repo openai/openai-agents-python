@@ -769,6 +769,48 @@ class TestEventHandling:
         assert isinstance(raw_event, RealtimeRawModelEvent)
         assert raw_event.data == function_call_event
 
+    @pytest.mark.asyncio
+    async def test_cleanup_prevents_in_flight_function_call_from_enqueuing_task(
+        self, mock_model, mock_agent
+    ):
+        session = RealtimeSession(mock_model, mock_agent, None)
+        function_call_event = RealtimeModelToolCallEvent(
+            name="test_function",
+            call_id="call_cleanup_race",
+            arguments="{}",
+        )
+
+        first_put_started = asyncio.Event()
+        release_first_put = asyncio.Event()
+        tool_task_started = asyncio.Event()
+        original_put_event = session._put_event
+
+        async def blocked_put_event(event):
+            first_put_started.set()
+            await release_first_put.wait()
+            await original_put_event(event)
+
+        async def blocked_handle_tool_call(*_args, **_kwargs):
+            tool_task_started.set()
+            await asyncio.Event().wait()
+
+        with pytest.MonkeyPatch().context() as m:
+            handle_tool_call_mock = AsyncMock(side_effect=blocked_handle_tool_call)
+            m.setattr(session, "_put_event", blocked_put_event)
+            m.setattr(session, "_handle_tool_call", handle_tool_call_mock)
+
+            on_event_task = asyncio.create_task(session.on_event(function_call_event))
+            await first_put_started.wait()
+
+            await session._cleanup()
+            release_first_put.set()
+            await on_event_task
+            await asyncio.sleep(0)
+
+            assert session._tool_call_tasks == set()
+            assert not tool_task_started.is_set()
+            handle_tool_call_mock.assert_not_awaited()
+
 
 class TestHistoryManagement:
     """Test suite for history management and audio transcription in
