@@ -852,18 +852,28 @@ class LitellmConverter:
         if not annotations:
             return None
 
-        return [
-            Annotation(
-                type="url_citation",
-                url_citation=AnnotationURLCitation(
-                    start_index=annotation["url_citation"]["start_index"],
-                    end_index=annotation["url_citation"]["end_index"],
-                    url=annotation["url_citation"]["url"],
-                    title=annotation["url_citation"]["title"],
-                ),
+        results: list[Annotation] = []
+        for annotation in annotations:
+            url_citation = annotation.get("url_citation")
+            if not url_citation:
+                continue
+
+            url = url_citation.get("url") or ""
+            if not url:
+                continue
+
+            results.append(
+                Annotation(
+                    type="url_citation",
+                    url_citation=AnnotationURLCitation(
+                        start_index=url_citation.get("start_index") or 0,
+                        end_index=url_citation.get("end_index") or 0,
+                        url=url,
+                        title=url_citation.get("title") or "",
+                    ),
+                )
             )
-            for annotation in annotations
-        ]
+        return results or None
 
     @classmethod
     def convert_tool_call_to_openai(
