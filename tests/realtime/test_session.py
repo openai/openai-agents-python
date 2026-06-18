@@ -203,6 +203,45 @@ async def test_cleanup_awaits_cancelled_background_tasks():
 
 
 @pytest.mark.asyncio
+async def test_cleanup_awaits_background_tasks_added_during_cancellation():
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    second_finished = asyncio.Event()
+
+    async def second_task():
+        second_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            second_finished.set()
+
+    async def first_task():
+        first_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            task = asyncio.create_task(second_task())
+            session._guardrail_tasks.add(task)
+            await second_started.wait()
+
+    first = asyncio.create_task(first_task())
+    session._guardrail_tasks.add(first)
+
+    await first_started.wait()
+
+    await session._cleanup()
+
+    assert first.done()
+    assert second_finished.is_set()
+    assert session._guardrail_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_transcription_completed_adds_new_user_item():
     model = _DummyModel()
     agent = RealtimeAgent(name="agent")

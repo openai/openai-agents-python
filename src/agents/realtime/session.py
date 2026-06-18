@@ -1247,22 +1247,24 @@ class RealtimeSession(RealtimeModelListener):
                 )
 
     async def _cancel_and_await_tasks(self, tasks: set[asyncio.Task[Any]]) -> None:
-        if not tasks:
-            return
-
         current_task = asyncio.current_task()
-        tasks_to_await: list[asyncio.Task[Any]] = []
-        for task in list(tasks):
-            if task is current_task:
-                continue
-            if not task.done():
-                task.cancel()
-            tasks_to_await.append(task)
 
-        if tasks_to_await:
+        while tasks:
+            tasks_to_await: list[asyncio.Task[Any]] = []
+            for task in list(tasks):
+                if task is current_task:
+                    tasks.discard(task)
+                    continue
+                if not task.done():
+                    task.cancel()
+                tasks_to_await.append(task)
+
+            if not tasks_to_await:
+                return
+
             await asyncio.gather(*tasks_to_await, return_exceptions=True)
-
-        tasks.clear()
+            for task in tasks_to_await:
+                tasks.discard(task)
 
     async def _cleanup_guardrail_tasks(self) -> None:
         await self._cancel_and_await_tasks(self._guardrail_tasks)
@@ -1344,12 +1346,12 @@ class RealtimeSession(RealtimeModelListener):
             self._wake_event_iterators()
             return
 
+        # Remove ourselves as a listener
+        self._model.remove_listener(self)
+
         # Cancel and cleanup guardrail tasks
         await self._cleanup_guardrail_tasks()
         await self._cleanup_tool_call_tasks()
-
-        # Remove ourselves as a listener
-        self._model.remove_listener(self)
 
         # Close the model connection
         await self._model.close()
