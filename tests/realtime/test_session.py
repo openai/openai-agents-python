@@ -158,6 +158,51 @@ async def test_aiter_exits_waiting_iterators_when_session_closes():
 
 
 @pytest.mark.asyncio
+async def test_cleanup_awaits_cancelled_background_tasks():
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+
+    guardrail_started = asyncio.Event()
+    guardrail_finished = asyncio.Event()
+    tool_started = asyncio.Event()
+    tool_finished = asyncio.Event()
+
+    async def guardrail_task():
+        guardrail_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            guardrail_finished.set()
+
+    async def tool_call_task():
+        tool_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            tool_finished.set()
+
+    guardrail = asyncio.create_task(guardrail_task())
+    tool_call = asyncio.create_task(tool_call_task())
+    session._guardrail_tasks.add(guardrail)
+    session._tool_call_tasks.add(tool_call)
+
+    await guardrail_started.wait()
+    await tool_started.wait()
+
+    await session._cleanup()
+
+    assert guardrail.done()
+    assert tool_call.done()
+    assert guardrail_finished.is_set()
+    assert tool_finished.is_set()
+    assert session._guardrail_tasks == set()
+    assert session._tool_call_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_transcription_completed_adds_new_user_item():
     model = _DummyModel()
     agent = RealtimeAgent(name="agent")
