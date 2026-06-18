@@ -28,7 +28,7 @@ def normalize_custom_data(value: Mapping[str, Any] | None) -> dict[str, Any] | N
 
     copied = copy.deepcopy(dict(value))
     try:
-        return cast(dict[str, Any], json.loads(json.dumps(copied)))
+        return cast(dict[str, Any], json.loads(json.dumps(copied, allow_nan=False)))
     except (TypeError, ValueError) as exc:
         raise UserError("custom_data_extractor must return JSON-compatible data.") from exc
 
