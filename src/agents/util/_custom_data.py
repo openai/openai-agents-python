@@ -15,6 +15,17 @@ CustomDataExtractor = Callable[
 ]
 
 
+def _ensure_mapping_keys_are_strings(value: Any) -> None:
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise UserError("custom_data_extractor must return a mapping with string keys.")
+        for item in value.values():
+            _ensure_mapping_keys_are_strings(item)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            _ensure_mapping_keys_are_strings(item)
+
+
 def normalize_custom_data(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Return a JSON-compatible copy of custom tool-output data."""
     if value is None:
@@ -23,10 +34,9 @@ def normalize_custom_data(value: Mapping[str, Any] | None) -> dict[str, Any] | N
         raise UserError("custom_data_extractor must return a mapping or None.")
     if not value:
         return None
-    if not all(isinstance(key, str) for key in value):
-        raise UserError("custom_data_extractor must return a mapping with string keys.")
 
     copied = copy.deepcopy(dict(value))
+    _ensure_mapping_keys_are_strings(copied)
     try:
         return cast(dict[str, Any], json.loads(json.dumps(copied, allow_nan=False)))
     except (TypeError, ValueError) as exc:

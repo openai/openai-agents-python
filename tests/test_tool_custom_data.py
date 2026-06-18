@@ -116,6 +116,28 @@ async def test_function_tool_custom_data_rejects_non_finite_floats(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_data", [{"nested": {1: "one"}}, {"items": [{1: "one"}]}])
+async def test_function_tool_custom_data_rejects_nested_non_string_keys(
+    bad_data: dict[str, Any],
+) -> None:
+    @function_tool(custom_data_extractor=lambda _ctx: bad_data)
+    def get_data() -> str:
+        return "tool_result"
+
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [[get_text_message("call tool"), get_function_tool_call("get_data", "{}")]]
+    )
+    agent = Agent(name="test", model=model, tools=[get_data])
+
+    with pytest.raises(
+        UserError,
+        match="custom_data_extractor must return a mapping with string keys",
+    ):
+        await Runner.run(agent, input="user")
+
+
+@pytest.mark.asyncio
 async def test_mcp_custom_data_extractor_maps_result_meta_to_tool_output_item() -> None:
     def extract_custom_data(ctx: Any) -> dict[str, Any]:
         return {"mcp_response_meta": dict(ctx.result_meta or {})}
