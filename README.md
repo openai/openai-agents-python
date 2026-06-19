@@ -84,6 +84,18 @@ print(result.final_output)
 
 Explore the [examples](https://github.com/openai/openai-agents-python/tree/main/examples) directory to see the SDK in action, and read our [documentation](https://openai.github.io/openai-agents-python/) for more details.
 
+## Contributing
+
+Contributions are welcome.
+
+If you want to contribute:
+
+1. Open or comment on an issue first to align on scope.
+2. Follow the contribution workflow in [CONTRIBUTING.md](./CONTRIBUTING.md).
+3. Include tests/docs updates when behavior changes.
+
+For docs-only improvements, small focused PRs are encouraged.
+
 ## Acknowledgements
 
 We'd like to acknowledge the excellent work of the open-source community, especially:
