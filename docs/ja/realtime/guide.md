@@ -6,10 +6,6 @@ search:
 
 このガイドでは、OpenAI Agents SDK のリアルタイムレイヤーが OpenAI Realtime API にどのように対応するか、また Python SDK がその上にどのような追加動作を提供するかを説明します。
 
-!!! warning "ベータ機能"
-
-    リアルタイムエージェントはベータ版です。実装を改善する中で、破壊的変更が入る可能性があります。
-
 !!! note "はじめに"
 
     デフォルトの Python パスを使いたい場合は、まず [クイックスタート](quickstart.md) を読んでください。アプリでサーバー側 WebSocket と SIP のどちらを使用すべきか判断している場合は、[Realtime トランスポート](transport.md) を読んでください。ブラウザーの WebRTC トランスポートは Python SDK の一部ではありません。

@@ -2,10 +2,6 @@
 
 This guide explains how the OpenAI Agents SDK's realtime layer maps onto the OpenAI Realtime API, and what extra behavior the Python SDK adds on top.
 
-!!! warning "Beta feature"
-
-    Realtime agents are in beta. Expect some breaking changes as we improve the implementation.
-
 !!! note "Start here"
 
     If you want the default Python path, read the [quickstart](quickstart.md) first. If you are deciding whether your app should use server-side WebSocket or SIP, read [Realtime transport](transport.md). Browser WebRTC transport is not part of the Python SDK.
@@ -235,7 +231,12 @@ billing_agent = RealtimeAgent(
 main_agent = RealtimeAgent(
     name="Customer Service",
     instructions="Triage the request and hand off when needed.",
-    handoffs=[realtime_handoff(billing_agent, tool_description="Transfer to billing support")],
+    handoffs=[
+        realtime_handoff(
+            billing_agent,
+            tool_description_override="Transfer to billing support",
+        )
+    ],
 )
 ```
 

@@ -62,17 +62,20 @@ from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, R
 from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
 from ....sandbox.snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from ....sandbox.types import ExecResult, ExposedPortEndpoint, User
-from ....sandbox.util.retry import (
-    TRANSIENT_HTTP_STATUS_CODES,
-    exception_chain_has_status_code,
-    retry_async,
-)
+from ....sandbox.util.retry import retry_async
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
 from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 
 _DEFAULT_EXEC_TIMEOUT_S = 30.0
 _DEFAULT_REQUEST_TIMEOUT_S = 120.0
 _MAX_ERROR_BODY_CHARS = 2000
+# Cloudflare documents sandbox HTTP status retry semantics at:
+# https://cloudflare-sandbox-sdk.mintlify.app/advanced/error-handling#http-status-code-semantics
+_CLOUDFLARE_HTTP_STATUS_RETRYABLE: dict[int, bool] = {
+    400: False,
+    500: False,
+    503: True,
+}
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +144,12 @@ def _cloudflare_error_context(
     return context
 
 
+def _cloudflare_retryability_for_status(status: int | None) -> bool | None:
+    if status is None:
+        return None
+    return _CLOUDFLARE_HTTP_STATUS_RETRYABLE.get(status)
+
+
 def _cloudflare_exec_error_detail(error: ExecTransportError) -> str | None:
     detail = error.context.get("provider_error")
     if isinstance(detail, str) and detail:
@@ -164,15 +173,17 @@ def _cloudflare_transport_error(
 ) -> ExecTransportError:
     detail = str(cause)
     provider_error = f"{type(cause).__name__}: {detail}" if detail else type(cause).__name__
+    context: dict[str, object] = {
+        "backend": "cloudflare",
+        "operation": operation,
+        "provider_error": provider_error,
+    }
     return ExecTransportError(
         command=command,
-        context={
-            "backend": "cloudflare",
-            "operation": operation,
-            "provider_error": provider_error,
-        },
+        context=context,
         cause=cause,
         message=f"Cloudflare {operation} transport failed: {provider_error}",
+        retryable=None,
     )
 
 
@@ -181,7 +192,7 @@ def _is_transient_workspace_error(exc: BaseException) -> bool:
     if not isinstance(exc, WorkspaceArchiveReadError | WorkspaceArchiveWriteError):
         return False
     status = exc.context.get("http_status")
-    return isinstance(status, int) and status in TRANSIENT_HTTP_STATUS_CODES
+    return isinstance(status, int) and _cloudflare_retryability_for_status(status) is True
 
 
 @dataclass
@@ -731,6 +742,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
                         context=_cloudflare_error_context(status=resp.status, detail=detail),
                         cause=Exception(message),
                         message=message,
+                        retryable=_cloudflare_retryability_for_status(resp.status),
                     )
 
                 stdout_parts: list[bytes] = []
@@ -802,6 +814,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
                     ),
                     cause=Exception(message),
                     message=message,
+                    retryable=_cloudflare_retryability_for_status(resp.status),
                 )
 
         except asyncio.TimeoutError as e:
@@ -1152,6 +1165,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
                             "http_status": resp.status,
                             "message": body.get("error", "path escapes /workspace"),
                         },
+                        retryable=False,
                     )
                 if resp.status != 200:
                     body = {}
@@ -1166,6 +1180,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
                             "http_status": resp.status,
                             "message": body.get("error", f"HTTP {resp.status}"),
                         },
+                        retryable=_cloudflare_retryability_for_status(resp.status),
                     )
                 return io.BytesIO(self._decode_streamed_payload(await resp.read()))
         except (WorkspaceReadNotFoundError, WorkspaceArchiveReadError):
@@ -1219,6 +1234,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
                             "http_status": resp.status,
                             "message": body.get("error", "path escapes /workspace"),
                         },
+                        retryable=False,
                     )
                 if resp.status != 200:
                     body = {}
@@ -1233,6 +1249,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
                             "http_status": resp.status,
                             "message": body.get("error", f"HTTP {resp.status}"),
                         },
+                        retryable=_cloudflare_retryability_for_status(resp.status),
                     )
         except WorkspaceArchiveWriteError:
             raise
@@ -1255,7 +1272,6 @@ class CloudflareSandboxSession(BaseSandboxSession):
 
     @retry_async(
         retry_if=lambda exc, self: isinstance(exc, aiohttp.ClientError)
-        or exception_chain_has_status_code(exc, TRANSIENT_HTTP_STATUS_CODES)
         or _is_transient_workspace_error(exc)
     )
     async def _persist_workspace_via_http(self) -> io.IOBase:
@@ -1286,6 +1302,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
                             "http_status": resp.status,
                             "message": body.get("error", f"HTTP {resp.status}"),
                         },
+                        retryable=_cloudflare_retryability_for_status(resp.status),
                     )
                 return io.BytesIO(self._decode_streamed_payload(await resp.read()))
         except WorkspaceArchiveReadError:
@@ -1297,7 +1314,6 @@ class CloudflareSandboxSession(BaseSandboxSession):
 
     @retry_async(
         retry_if=lambda exc, self, data: isinstance(exc, aiohttp.ClientError)
-        or exception_chain_has_status_code(exc, TRANSIENT_HTTP_STATUS_CODES)
         or _is_transient_workspace_error(exc)
     )
     async def _hydrate_workspace_via_http(self, data: io.IOBase) -> None:
@@ -1346,6 +1362,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
                             "http_status": resp.status,
                             "message": body.get("error", f"HTTP {resp.status}"),
                         },
+                        retryable=_cloudflare_retryability_for_status(resp.status),
                     )
         except WorkspaceArchiveWriteError:
             raise

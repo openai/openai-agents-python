@@ -4,7 +4,7 @@ import asyncio
 import dataclasses
 import inspect
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -16,7 +16,7 @@ from .._tool_identity import (
     get_function_tool_namespace,
 )
 from ..agent import Agent
-from ..exceptions import UserError
+from ..exceptions import ToolInputGuardrailTripwireTriggered, UserError
 from ..handoffs import Handoff
 from ..items import ToolApprovalItem
 from ..logger import logger
@@ -24,6 +24,7 @@ from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, invoke_function_tool
 from ..tool_context import ToolContext
+from ..tool_guardrails import ToolInputGuardrailData
 from ..util._approvals import evaluate_needs_approval_setting
 from .agent import RealtimeAgent
 from .config import RealtimeRunConfig, RealtimeSessionModelSettings, RealtimeUserInput
@@ -520,8 +521,8 @@ class RealtimeSession(RealtimeModelListener):
         *,
         function_tool: FunctionTool,
         agent: RealtimeAgent,
-    ) -> bool | None:
-        """Return True/False when approved/rejected, or None when awaiting approval."""
+    ) -> bool | None | _PendingToolOutput:
+        """Return approval status, pending output for guardrail rejection, or None when awaiting."""
         tool_lookup_key = get_function_tool_lookup_key_for_tool(function_tool)
         approval_item = self._build_tool_approval_item(
             function_tool,
@@ -545,6 +546,20 @@ class RealtimeSession(RealtimeModelListener):
         if approval_status is False:
             return False
 
+        if self._pre_approval_tool_input_guardrails_enabled():
+            rejected_message = await self._run_tool_input_guardrails(
+                tool=function_tool,
+                tool_call=tool_call,
+                agent=agent,
+            )
+            if rejected_message is not None:
+                return self._build_realtime_tool_output(
+                    tool=function_tool,
+                    tool_call=tool_call,
+                    agent=agent,
+                    output=rejected_message,
+                )
+
         self._pending_tool_calls[tool_call.call_id] = (
             tool_call,
             agent,
@@ -561,6 +576,67 @@ class RealtimeSession(RealtimeModelListener):
             )
         )
         return None
+
+    def _pre_approval_tool_input_guardrails_enabled(self) -> bool:
+        return (
+            self._run_config.get("tool_execution", {}).get(
+                "pre_approval_tool_input_guardrails", False
+            )
+            is True
+        )
+
+    async def _run_tool_input_guardrails(
+        self,
+        *,
+        tool: FunctionTool,
+        tool_call: RealtimeModelToolCallEvent,
+        agent: RealtimeAgent,
+    ) -> str | None:
+        """Run function tool input guardrails and return rejection output when blocked."""
+        guardrails = tool.tool_input_guardrails
+        if isinstance(guardrails, str | bytes) or not isinstance(guardrails, Sequence):
+            return None
+        if not guardrails:
+            return None
+
+        tool_context = ToolContext(
+            context=self._context_wrapper.context,
+            usage=self._context_wrapper.usage,
+            tool_name=tool_call.name,
+            tool_call_id=tool_call.call_id,
+            tool_arguments=tool_call.arguments,
+            agent=agent,
+        )
+        for guardrail in guardrails:
+            gr_out = await guardrail.run(
+                ToolInputGuardrailData(context=tool_context, agent=cast(Agent[Any], agent))
+            )
+            if gr_out.behavior["type"] == "raise_exception":
+                raise ToolInputGuardrailTripwireTriggered(guardrail=guardrail, output=gr_out)
+            if gr_out.behavior["type"] == "reject_content":
+                return gr_out.behavior["message"]
+        return None
+
+    def _build_realtime_tool_output(
+        self,
+        *,
+        tool: FunctionTool,
+        tool_call: RealtimeModelToolCallEvent,
+        agent: RealtimeAgent,
+        output: str,
+    ) -> _PendingToolOutput:
+        return _PendingToolOutput(
+            tool_call=tool_call,
+            output=output,
+            start_response=True,
+            tool_end_event=RealtimeToolEnd(
+                info=self._event_info,
+                tool=tool,
+                output=output,
+                agent=agent,
+                arguments=tool_call.arguments,
+            ),
+        )
 
     async def _send_tool_rejection(
         self,
@@ -749,11 +825,32 @@ class RealtimeSession(RealtimeModelListener):
                 approval_status = await self._maybe_request_tool_approval(
                     event, function_tool=func_tool, agent=agent
                 )
+                if isinstance(approval_status, _PendingToolOutput):
+                    await self._send_tool_output_completion(approval_status)
+                    mark_completed = True
+                    return
                 if approval_status is False:
                     await self._send_tool_rejection(event, tool=func_tool, agent=agent)
                     mark_completed = True
                     return
                 if approval_status is None:
+                    return
+
+                rejected_message = await self._run_tool_input_guardrails(
+                    tool=func_tool,
+                    tool_call=event,
+                    agent=agent,
+                )
+                if rejected_message is not None:
+                    await self._send_tool_output_completion(
+                        self._build_realtime_tool_output(
+                            tool=func_tool,
+                            tool_call=event,
+                            agent=agent,
+                            output=rejected_message,
+                        )
+                    )
+                    mark_completed = True
                     return
 
                 await self._put_event(

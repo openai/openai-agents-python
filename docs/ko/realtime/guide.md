@@ -6,10 +6,6 @@ search:
 
 이 가이드는 OpenAI Agents SDK의 실시간 레이어가 OpenAI Realtime API에 어떻게 대응되는지, 그리고 Python SDK가 그 위에 어떤 추가 동작을 더하는지 설명합니다.
 
-!!! warning "베타 기능"
-
-    실시간 에이전트는 베타입니다. 구현을 개선하는 과정에서 일부 호환성이 깨지는 변경이 있을 수 있습니다.
-
 !!! note "시작점"
 
     기본 Python 경로를 원한다면 먼저 [빠른 시작](quickstart.md)을 읽어보세요. 앱에서 서버 측 WebSocket 또는 SIP를 사용해야 할지 결정하는 중이라면 [실시간 전송](transport.md)을 읽어보세요. 브라우저 WebRTC 전송은 Python SDK의 일부가 아닙니다.

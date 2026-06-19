@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import websockets
+from pydantic import TypeAdapter
 
 from agents import Agent, function_tool
 from agents.exceptions import UserError
@@ -446,6 +447,80 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         assert error_event.type == "error"
 
     @pytest.mark.asyncio
+    async def test_custom_voice_response_events_update_response_sequencer(self, model, monkeypatch):
+        """Dict-shaped custom voices should not block response.create sequencing."""
+        payload_types: list[str] = []
+
+        async def fake_send_raw(event):
+            payload_types.append(event.type)
+
+        class CustomVoiceRejectingAdapter:
+            _string_adapter = TypeAdapter(str)
+
+            def validate_python(self, event):
+                voice = event.get("response", {}).get("audio", {}).get("output", {}).get("voice")
+                if isinstance(voice, dict):
+                    self._string_adapter.validate_python(voice)
+                return SimpleNamespace(type=event["type"])
+
+        monkeypatch.setattr(model, "_send_raw_message", fake_send_raw)
+        model._server_event_type_adapter = CustomVoiceRejectingAdapter()
+        mock_listener = AsyncMock()
+        model.add_listener(mock_listener)
+
+        await model._send_user_input(RealtimeModelSendUserInput(user_input="hi"))
+        await asyncio.sleep(0)
+
+        assert payload_types == ["conversation.item.create", "response.create"]
+        assert model._response_control == "create_requested"
+
+        response_with_custom_voice = {
+            "type": "response.created",
+            "response": {"audio": {"output": {"voice": {"id": "voice_test"}}}},
+        }
+        await model._handle_ws_event(response_with_custom_voice)
+
+        assert model._ongoing_response is True
+        assert model._response_control == "free"
+
+        await model._handle_ws_event(
+            {
+                "type": "response.done",
+                "response": {"audio": {"output": {"voice": {"id": "voice_test"}}}},
+            }
+        )
+
+        assert model._ongoing_response is False
+        assert model._response_control == "free"
+        raw_event = mock_listener.on_event.call_args_list[0][0][0]
+        assert raw_event.data is response_with_custom_voice
+        assert response_with_custom_voice["response"]["audio"]["output"]["voice"] == {
+            "id": "voice_test"
+        }
+
+        await model._send_tool_output(
+            RealtimeModelSendToolOutput(
+                tool_call=SimpleNamespace(
+                    id="item_1",
+                    previous_item_id=None,
+                    call_id="call_1",
+                    arguments="{}",
+                    name="lookup",
+                ),
+                output="ok",
+                start_response=True,
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert payload_types == [
+            "conversation.item.create",
+            "response.create",
+            "conversation.item.create",
+            "response.create",
+        ]
+
+    @pytest.mark.asyncio
     async def test_handle_unknown_event_type_ignored(self, model):
         """Test that unknown event types are ignored gracefully."""
         mock_listener = AsyncMock()
@@ -500,6 +575,35 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         audio_state = model._audio_state_tracker.get_state("item_456", 0)
         assert audio_state is not None
         assert audio_state.audio_length_ms > 0  # Should have some audio length
+
+    @pytest.mark.asyncio
+    async def test_audio_delta_event_skips_custom_voice_normalization(self, model, monkeypatch):
+        """High-frequency audio delta events should not pay for custom voice normalization."""
+        mock_listener = AsyncMock()
+        model.add_listener(mock_listener)
+        model._audio_state_tracker.set_audio_format("pcm16")
+
+        def fail_normalize(event):
+            raise AssertionError("custom voice normalization should not run")
+
+        monkeypatch.setattr(
+            "agents.realtime.openai_realtime._normalize_custom_voice_for_server_event_validation",
+            fail_normalize,
+        )
+
+        await model._handle_ws_event(
+            {
+                "type": "response.output_audio.delta",
+                "event_id": "event_123",
+                "response_id": "resp_123",
+                "item_id": "item_456",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "dGVzdCBhdWRpbw==",
+            }
+        )
+
+        assert mock_listener.on_event.call_count == 2
 
     @pytest.mark.asyncio
     async def test_backward_compat_output_item_added_and_done(self, model):
@@ -1518,6 +1622,22 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         cfg = model._get_session_config(settings)
         assert cfg.audio is not None and cfg.audio.output is not None
         assert cfg.audio.output.voice == "verse"
+
+    def test_session_config_accepts_custom_voice_object(self, model):
+        custom_voice = {"id": "voice_test"}
+
+        cfg = model._get_session_config({"voice": custom_voice})
+        payload = cfg.model_dump(exclude_unset=True)
+
+        assert payload["audio"]["output"]["voice"] == custom_voice
+
+    def test_session_config_accepts_nested_custom_voice_object(self, model):
+        custom_voice = {"id": "voice_test"}
+
+        cfg = model._get_session_config({"audio": {"output": {"voice": custom_voice}}})
+        payload = cfg.model_dump(exclude_unset=True)
+
+        assert payload["audio"]["output"]["voice"] == custom_voice
 
     def test_session_config_defaults_audio_formats_when_not_call(self, model):
         settings: dict[str, Any] = {}
