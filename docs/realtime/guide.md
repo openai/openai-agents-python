@@ -206,7 +206,7 @@ agent = RealtimeAgent(
 
 Function tools can require human approval before execution. When that happens, the session emits `tool_approval_required` and pauses the tool run until you call `approve_tool_call()` or `reject_tool_call()`.
 
-If the tool also has input guardrails, those guardrails run immediately before execution after approval. To run them before the approval event is emitted, set `run_config={"tool_execution": {"pre_approval_tool_input_guardrails": True}}` when creating the session. Calls that pass this pre-approval check are still checked again after approval before execution.
+If the tool also has input guardrails, those guardrails run immediately before execution after approval. To run them before the approval event is emitted, create the runner with `RealtimeRunner(..., config={"tool_execution": {"pre_approval_tool_input_guardrails": True}})`. Calls that pass this pre-approval check are still checked again after approval before execution.
 
 ```python
 async for event in session:
