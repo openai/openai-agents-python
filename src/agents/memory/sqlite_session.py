@@ -211,6 +211,12 @@ class SQLiteSession(SessionABC):
         """
         session_limit = resolve_session_limit(limit, self.session_settings)
 
+        if session_limit is not None and session_limit <= 0:
+            # Mirror the Redis/MongoDB/Dapr backends: a non-positive limit means
+            # "no items". Without this, LIMIT -1 returns the whole history on
+            # SQLite (LIMIT -1 == no limit).
+            return []
+
         def _get_items_sync():
             with self._locked_connection() as conn:
                 if session_limit is None:

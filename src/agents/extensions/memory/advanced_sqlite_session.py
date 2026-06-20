@@ -172,6 +172,12 @@ class AdvancedSQLiteSession(SQLiteSession):
         """
         session_limit = resolve_session_limit(limit, self.session_settings)
 
+        if session_limit is not None and session_limit <= 0:
+            # Mirror the Redis/MongoDB/Dapr backends: a non-positive limit means
+            # "no items". Without this, LIMIT -1 returns the whole branch on
+            # SQLite (LIMIT -1 == no limit).
+            return []
+
         if branch_id is None:
             branch_id = self._current_branch_id
 

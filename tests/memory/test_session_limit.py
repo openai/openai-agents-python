@@ -174,3 +174,28 @@ async def test_session_limit_larger_than_history(runner_method):
         assert last_input[2].get("content") == "Message 2"
 
         session.close()
+
+
+@pytest.mark.asyncio
+async def test_session_limit_negative_returns_empty():
+    """A negative session_limit returns no items, like limit=0 and the
+    Redis/MongoDB/Dapr backends. Without the guard, SQLite ``LIMIT -1`` means
+    "no limit" and returns the entire history."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_limit_negative.db"
+        session = SQLiteSession("limit_negative_test", db_path)
+
+        await session.add_items(
+            [
+                {"role": "user", "content": "1"},
+                {"role": "assistant", "content": "2"},
+            ]
+        )
+
+        assert await session.get_items(limit=-1) == []
+        assert await session.get_items(limit=0) == []
+        # Sanity: a positive limit and the no-limit path still work.
+        assert len(await session.get_items(limit=1)) == 1
+        assert len(await session.get_items()) == 2
+
+        session.close()

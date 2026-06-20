@@ -101,6 +101,28 @@ async def test_advanced_session_basic_functionality(agent: Agent):
     session.close()
 
 
+async def test_advanced_get_items_non_positive_limit_returns_empty():
+    """A non-positive limit returns no items, matching Redis/MongoDB/Dapr.
+    Previously limit<=0 reached SQL LIMIT, which returns the whole branch on
+    SQLite (LIMIT -1 == no limit)."""
+    session = AdvancedSQLiteSession(session_id="advanced_nonpositive", create_tables=True)
+
+    await session.add_items(
+        [
+            {"role": "user", "content": "1"},
+            {"role": "assistant", "content": "2"},
+        ]
+    )
+
+    assert await session.get_items(limit=0) == []
+    assert await session.get_items(limit=-1) == []
+    # Sanity: a positive limit and the no-limit path still work.
+    assert len(await session.get_items(limit=1)) == 1
+    assert len(await session.get_items()) == 2
+
+    session.close()
+
+
 async def test_advanced_session_respects_custom_table_names():
     """AdvancedSQLiteSession should consistently use configured table names."""
     session = AdvancedSQLiteSession(

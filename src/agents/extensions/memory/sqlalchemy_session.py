@@ -288,6 +288,12 @@ class SQLAlchemySession(SessionABC):
 
         session_limit = resolve_session_limit(limit, self.session_settings)
 
+        if session_limit is not None and session_limit <= 0:
+            # Mirror the Redis/MongoDB/Dapr backends: a non-positive limit means
+            # "no items". Without this, .limit(-1) returns the whole history on
+            # SQLite (LIMIT -1 == no limit) and raises on PostgreSQL/MySQL.
+            return []
+
         async with self._session_factory() as sess:
             if session_limit is None:
                 stmt = (

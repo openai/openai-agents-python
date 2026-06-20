@@ -184,6 +184,26 @@ async def test_get_items_with_limit(agent: Agent):
     assert len(more_than_all) == 4
 
 
+async def test_get_items_with_non_positive_limit_returns_empty():
+    """A non-positive limit returns no items, matching the Redis/MongoDB/Dapr
+    backends. Previously limit<=0 reached SQL LIMIT, which returns the whole
+    history on SQLite (LIMIT -1 == no limit) and errors on PostgreSQL/MySQL."""
+    session = SQLAlchemySession.from_url("nonpositive_limit_test", url=DB_URL, create_tables=True)
+
+    await session.add_items(
+        [
+            {"role": "user", "content": "1"},
+            {"role": "assistant", "content": "2"},
+        ]
+    )
+
+    assert await session.get_items(limit=0) == []
+    assert await session.get_items(limit=-1) == []
+    # Sanity: a positive limit and the no-limit path still work.
+    assert len(await session.get_items(limit=1)) == 1
+    assert len(await session.get_items()) == 2
+
+
 async def test_pop_from_empty_session():
     """Test that pop_item returns None on an empty session."""
     session = SQLAlchemySession.from_url("empty_session", url=DB_URL, create_tables=True)
