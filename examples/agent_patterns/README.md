@@ -70,6 +70,19 @@ See [`model_behavior_error_handling.py`](./model_behavior_error_handling.py) for
 2. **Log and re-raise with enriched context** — useful in production pipelines that need structured error reporting.
 3. **Retry with a fallback agent** — hand the same task to a more reliable model when the primary one misbehaves.
 
+## Circuit breaker
+
+A circuit breaker wraps repeated agent calls and stops trying after a configurable number of consecutive failures, preventing a misbehaving model or unreachable API from running up costs indefinitely.
+
+The breaker moves through three states:
+- **CLOSED** — normal operation; failures are counted.
+- **OPEN** — too many consecutive failures; calls are rejected immediately without hitting the API.
+- **HALF_OPEN** — after a cooldown period, one probe call is let through. Success resets to CLOSED; failure stays OPEN.
+
+This is useful when running many parallel agent tasks, enforcing cost controls, or integrating with unreliable external tools.
+
+See [`circuit_breaker.py`](./circuit_breaker.py) for an example.
+
 ## Self-healing agent
 
 A more advanced pattern: when `ModelBehaviorError` is caught, the error description is appended to the conversation as a correction and the run is retried, giving the model a chance to fix its own mistake without a full restart.
