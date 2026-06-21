@@ -42,6 +42,8 @@ class VoiceWorkflowBase(abc.ABC):
 
 
 class VoiceWorkflowHelper:
+    """Utility helpers for extracting output from a streaming voice workflow run."""
+
     @classmethod
     async def stream_text_from(cls, result: RunResultStreaming) -> AsyncIterator[str]:
         """Wraps a `RunResultStreaming` object and yields text events from the stream."""
@@ -54,6 +56,8 @@ class VoiceWorkflowHelper:
 
 
 class SingleAgentWorkflowCallbacks:
+    """Callbacks that are invoked at key points in a `SingleAgentVoiceWorkflow` run."""
+
     def on_run(self, workflow: SingleAgentVoiceWorkflow, transcription: str) -> None:
         """Called when the workflow is run."""
         pass
@@ -78,6 +82,18 @@ class SingleAgentVoiceWorkflow(VoiceWorkflowBase):
         self._callbacks = callbacks
 
     async def run(self, transcription: str) -> AsyncIterator[str]:
+        """Run the workflow for a single transcription turn.
+
+        Appends the transcription to the input history, streams the agent's text
+        response token by token, then updates the history with the completed
+        output so the next turn has full context.
+
+        Args:
+            transcription: The user's speech, already converted to text.
+
+        Yields:
+            Text chunks from the agent's streamed response.
+        """
         if self._callbacks:
             self._callbacks.on_run(self, transcription)
 
