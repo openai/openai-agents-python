@@ -30,6 +30,7 @@ For example, you could model the translation task above as tool calls instead: r
 See the [`agents_as_tools.py`](./agents_as_tools.py) file for an example of this.
 See the [`agents_as_tools_streaming.py`](./agents_as_tools_streaming.py) file for a streaming variant that taps into nested agent events via `on_stream`.
 See the [`agents_as_tools_structured.py`](./agents_as_tools_structured.py) file for a structured-input variant using `Agent.as_tool()` parameters.
+See the [`agents_as_tools_conditional.py`](./agents_as_tools_conditional.py) file for a variant that dynamically enables or disables agent tools at runtime using the `is_enabled` parameter, based on the run context (e.g. user access level or preference).
 
 ## LLM-as-a-judge
 

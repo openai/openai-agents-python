@@ -1,3 +1,10 @@
+"""This example demonstrates the agents-as-tools pattern with conditional tool enabling.
+
+Agent tools are dynamically enabled/disabled based on user access levels using the
+is_enabled parameter. The orchestrator sees only the tools that are active for the
+current run context, keeping the model's tool list minimal and relevant.
+"""
+
 import asyncio
 
 from pydantic import BaseModel
@@ -5,12 +12,6 @@ from pydantic import BaseModel
 from agents import Agent, AgentBase, ModelSettings, RunContextWrapper, Runner, trace
 from agents.tool import function_tool
 from examples.auto_mode import confirm_with_fallback, input_with_fallback
-
-"""
-This example demonstrates the agents-as-tools pattern with conditional tool enabling.
-Agent tools are dynamically enabled/disabled based on user access levels using the
-is_enabled parameter.
-"""
 
 
 class AppContext(BaseModel):
