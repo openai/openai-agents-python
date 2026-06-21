@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import asyncio
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 
 from agents import Agent, ItemHelpers, Runner, trace
 from examples.auto_mode import input_with_fallback
@@ -46,14 +46,6 @@ class VerificationResult(BaseModel):
     verifiable: bool
     source_if_any: str  # empty string when verifiable is False
 
-    @model_validator(mode="after")
-    def require_source_when_verifiable(self) -> "VerificationResult":
-        if self.verifiable and not self.source_if_any.strip():
-            raise ValueError(
-                "source_if_any must be a non-empty citation when verifiable is True"
-            )
-        return self
-
 
 # ---------------------------------------------------------------------------
 # Agents
@@ -70,6 +62,10 @@ research_agent = Agent(
     output_type=ClaimList,
 )
 
+# NOTE: This agent relies on the model's parametric memory to judge whether a
+# citation exists.  It is illustrative — in production attach a WebSearchTool
+# or FileSearchTool so the model can retrieve real sources rather than recalling
+# them from training data.
 verifier_agent = Agent(
     name="verifier_agent",
     instructions=(
@@ -127,7 +123,7 @@ async def main() -> None:
             result = await Runner.run(verifier_agent, claim)
             assert isinstance(result.final_output, VerificationResult)
             verdict = result.final_output
-            if verdict.verifiable:
+            if verdict.verifiable and verdict.source_if_any.strip():
                 print(f"  ✓ VERIFIABLE — {claim[:60]}…")
                 print(f"      Source: {verdict.source_if_any}")
                 verified.append((claim, verdict.source_if_any))
