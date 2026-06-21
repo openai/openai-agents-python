@@ -5,8 +5,12 @@ a structured output, the SDK raises ``ModelBehaviorError``.  The default
 behaviour is to let that exception propagate and crash the run.
 
 This example shows a loop that catches ``ModelBehaviorError``, appends the
-error text to the conversation as a user-turn correction, and retries — giving
-the model a chance to fix its own mistake before giving up.
+error text to the conversation as a correction, and retries — giving the
+model a chance to fix its own mistake before giving up.
+
+Crucially, the retry resumes from ``exc.run_data.new_items``, which contains
+all the turns the agent completed before the error occurred.  This avoids
+re-running prior work (and re-triggering tool side effects) on every heal.
 
 The pattern is useful when:
 - You are using a smaller/cheaper model that occasionally calls wrong tools.
@@ -18,8 +22,9 @@ Run with:
 """
 
 import asyncio
+from typing import Union
 
-from agents import Agent, ModelBehaviorError, Runner, function_tool
+from agents import Agent, ModelBehaviorError, Runner, TResponseInputItem, function_tool
 
 MAX_SELF_HEALS = 3
 
@@ -59,8 +64,9 @@ agent = Agent(
 async def run_with_self_healing(task: str) -> str:
     """Run an agent task, retrying up to MAX_SELF_HEALS times on ModelBehaviorError.
 
-    On each retry the error description is appended to the conversation so the
-    model can understand what went wrong and correct itself.
+    On each retry the completed turns from ``exc.run_data.new_items`` are
+    preserved and a correction note is appended, so the model continues from
+    where it left off rather than restarting the full task.
 
     Args:
         task: The initial user message to send to the agent.
@@ -71,12 +77,12 @@ async def run_with_self_healing(task: str) -> str:
     Raises:
         ModelBehaviorError: If the model keeps misbehaving after all retries.
     """
-    messages: str | list = task
+    input: Union[str, list[TResponseInputItem]] = task
     heals_remaining = MAX_SELF_HEALS
 
     while True:
         try:
-            result = await Runner.run(agent, messages)
+            result = await Runner.run(agent, input)
             return result.final_output
         except ModelBehaviorError as exc:
             if heals_remaining <= 0:
@@ -89,17 +95,34 @@ async def run_with_self_healing(task: str) -> str:
                 f"({MAX_SELF_HEALS - heals_remaining}/{MAX_SELF_HEALS}): {exc.message}"
             )
 
-            # Feed the error back so the model can self-correct on the next turn.
-            correction = (
-                f"Your previous response caused an error: {exc.message}\n"
-                "Please correct your approach and try again using only the tools available."
+            # Build the correction message to append.
+            correction: TResponseInputItem = {
+                "role": "user",
+                "content": (
+                    f"Your previous response caused an error: {exc.message}\n"
+                    "Please correct your approach and try again using only the tools available."
+                ),
+            }
+
+            # Resume from the completed turns rather than restarting from scratch.
+            # exc.run_data.new_items holds every RunItem produced before the error,
+            # so prior tool calls and their results are preserved and not re-run.
+            completed_items: list[TResponseInputItem] = (
+                [item.to_input_item() for item in exc.run_data.new_items]
+                if exc.run_data is not None
+                else []
             )
 
-            # Build a fresh input that includes the correction.
-            # We restart from the original task plus the correction note so the
-            # model has full context without the broken tool call in its history.
-            messages = f"{task}\n\n[System note: {correction}]"
-            print("[self-heal] Retrying with correction appended to input...")
+            if completed_items:
+                input = completed_items + [correction]
+                print(
+                    f"[self-heal] Resuming from {len(completed_items)} completed turn(s) "
+                    "with correction appended..."
+                )
+            else:
+                # No completed turns to preserve — fall back to the original task.
+                input = f"{task}\n\n{correction['content']}"
+                print("[self-heal] No prior turns to resume from. Retrying from scratch...")
 
 
 async def main() -> None:
