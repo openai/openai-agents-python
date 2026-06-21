@@ -86,8 +86,9 @@ def get_price(
 ) -> str:
     """Return the price for a product based on the caller's subscription tier.
 
-    The price varies by tier: enterprise customers pay the lowest rate while
-    free-tier users pay the standard price.
+    The price is calculated from the caller's subscription tier (stored in
+    context and never exposed to the LLM directly), so each tier receives
+    a different price without the tier label appearing in the tool output.
 
     Args:
         context: Run context containing the caller's ``UserContext``.
@@ -95,11 +96,12 @@ def get_price(
 
     Returns:
         A human-readable price string in the user's preferred currency.
+        The subscription tier is intentionally omitted from the output.
     """
     user: UserContext = context.context
     price = _TIER_PRICES.get(user.price_tier, _TIER_PRICES["free"])
     symbol = "$" if user.preferred_currency == "USD" else user.preferred_currency + " "
-    return f"{product_name} costs {symbol}{price}/month for {user.price_tier} tier users."
+    return f"{product_name} costs {symbol}{price}/month."
 
 
 @function_tool
