@@ -79,27 +79,25 @@ def validate_review(review: ProductReview) -> list[str]:
         violations.append(
             f"score {review.score} is out of range; it must be between 1 and 10 inclusive."
         )
-        # Skip sentiment/score consistency checks when the score itself is invalid.
-        return violations
-
-    # Sentiment/score consistency checks.
-    # Agent instructions define: positive = 7-10, neutral = 5-6, negative = 1-4.
-    # Validate the full bands so every mismatch triggers a retry.
-    if review.sentiment == "positive" and review.score < 7:
-        violations.append(
-            f"Inconsistent output: sentiment is 'positive' but score is {review.score} "
-            f"(positive requires a score of 7 or higher; 5-6 is neutral, 1-4 is negative)."
-        )
-    elif review.sentiment == "negative" and review.score > 4:
-        violations.append(
-            f"Inconsistent output: sentiment is 'negative' but score is {review.score} "
-            f"(negative requires a score of 4 or lower; 5-6 is neutral, 7-10 is positive)."
-        )
-    elif review.sentiment == "neutral" and not (5 <= review.score <= 6):
-        violations.append(
-            f"Inconsistent output: sentiment is 'neutral' but score is {review.score} "
-            f"(neutral requires a score of 5 or 6)."
-        )
+    else:
+        # Sentiment/score consistency checks (only valid when score is in range).
+        # Agent instructions define: positive = 7-10, neutral = 5-6, negative = 1-4.
+        # Validate the full bands so every mismatch triggers a retry.
+        if review.sentiment == "positive" and review.score < 7:
+            violations.append(
+                f"Inconsistent output: sentiment is 'positive' but score is {review.score} "
+                f"(positive requires a score of 7 or higher; 5-6 is neutral, 1-4 is negative)."
+            )
+        elif review.sentiment == "negative" and review.score > 4:
+            violations.append(
+                f"Inconsistent output: sentiment is 'negative' but score is {review.score} "
+                f"(negative requires a score of 4 or lower; 5-6 is neutral, 7-10 is positive)."
+            )
+        elif review.sentiment == "neutral" and not (5 <= review.score <= 6):
+            violations.append(
+                f"Inconsistent output: sentiment is 'neutral' but score is {review.score} "
+                f"(neutral requires a score of 5 or 6)."
+            )
 
     # key_points must contain at least one item.
     if not review.key_points:

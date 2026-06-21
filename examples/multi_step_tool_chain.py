@@ -30,7 +30,7 @@ import asyncio
 import json
 from typing import Any
 
-from agents import Agent, Runner, function_tool, trace
+from agents import Agent, ModelSettings, Runner, function_tool, trace
 
 # ---------------------------------------------------------------------------
 # Tool definitions
@@ -232,6 +232,7 @@ def rank_facts_by_relevance(facts_json: str, original_query: str) -> str:
 research_agent = Agent(
     name="ResearchAgent",
     model="gpt-4o-mini",
+    model_settings=ModelSettings(parallel_tool_calls=False),
     tools=[search_documents, fetch_document, extract_key_facts, rank_facts_by_relevance],
     instructions=(
         "You are a research assistant. When given a research query:\n"
