@@ -10,8 +10,12 @@ Key concepts shown:
 
 * **``RunContextWrapper[UserContext]``** — a typed wrapper that carries your
   custom context object through every tool call and hook invocation for a
-  single ``Runner.run()`` call.  The LLM never sees the context; it is
-  exclusively for your own code.
+  single ``Runner.run()`` call.  The LLM never sees the
+  ``RunContextWrapper`` object itself; the wrapper is exclusively for your
+  own code.  **Important:** any values you explicitly copy from context
+  into a tool's return value *will* be visible to the model as the tool
+  result — keep sensitive fields out of tool outputs if you need them
+  hidden from the LLM.
 
 * **Context-aware tools** — ``@function_tool`` functions that accept
   ``RunContextWrapper[UserContext]`` as their first parameter and branch on
