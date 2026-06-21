@@ -382,6 +382,22 @@ class RunResult(RunResultBase):
                 return agent
         raise AgentsException("Last agent reference is no longer available.")
 
+    def __repr__(self) -> str:
+        try:
+            agent_name = self.last_agent.name
+        except Exception:
+            agent_name = "unknown"
+        output = repr(self.final_output)
+        if len(output) > 60:
+            output = output[:60] + "..."
+        return (
+            f"RunResult("
+            f"last_agent={agent_name!r}, "
+            f"items={len(self.new_items)}, "
+            f"final_output={output}"
+            f")"
+        )
+
     def _release_last_agent_reference(self) -> None:
         agent = cast("Agent[Any] | None", self.__dict__.get("_last_agent"))
         if agent is None:

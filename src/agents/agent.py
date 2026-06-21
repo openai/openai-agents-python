@@ -484,6 +484,20 @@ class Agent(AgentBase, Generic[TContext]):
                 f"got {type(self.reset_tool_choice).__name__}"
             )
 
+    def __repr__(self) -> str:
+        model = (
+            self.model
+            if isinstance(self.model, str)
+            else type(self.model).__name__
+            if self.model
+            else None
+        )
+        parts = [f"name={self.name!r}"]
+        if model:
+            parts.append(f"model={model!r}")
+        parts.append(f"tools={len(self.tools)}")
+        return f"Agent({', '.join(parts)})"
+
     def clone(self, **kwargs: Any) -> Agent[TContext]:
         """Make a copy of the agent, with the given arguments changed.
         Notes:
