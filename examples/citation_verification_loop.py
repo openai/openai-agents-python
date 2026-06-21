@@ -20,7 +20,7 @@ When to use this pattern:
   has a traceable origin.
 
 Run with:
-    OPENAI_API_KEY=sk-... uv run python examples/citation_verification_loop.py
+    OPENAI_API_KEY=sk-... uv run python -m examples.citation_verification_loop
 """
 
 from __future__ import annotations
@@ -117,7 +117,9 @@ async def main() -> None:
             print(f"  {i}. {c}")
 
         # Step 2: verify each claim individually
-        verified: list[VerificationResult] = []
+        # Store (original_claim, source) tuples so the synthesis prompt always
+        # uses the research agent's exact wording, not a rephrased verifier copy.
+        verified: list[tuple[str, str]] = []
         dropped: list[str] = []
 
         print("\n[VerifierAgent] Checking each claim …")
@@ -125,16 +127,12 @@ async def main() -> None:
             result = await Runner.run(verifier_agent, claim)
             assert isinstance(result.final_output, VerificationResult)
             verdict = result.final_output
-            if verdict.verifiable and verdict.source_if_any.strip():
+            if verdict.verifiable:
                 print(f"  ✓ VERIFIABLE — {claim[:60]}…")
                 print(f"      Source: {verdict.source_if_any}")
-                verified.append(verdict)
+                verified.append((claim, verdict.source_if_any))
             else:
-                if verdict.verifiable:
-                    # verifiable=True but source_if_any is empty — drop to avoid "(Source: )" in output
-                    print(f"  ✗ UNSOURCED — {claim[:60]}… (no citation provided)")
-                else:
-                    print(f"  ✗ UNVERIFIABLE — {claim[:60]}…")
+                print(f"  ✗ UNVERIFIABLE — {claim[:60]}…")
                 dropped.append(claim)
 
         print(f"\nVerified: {len(verified)}  |  Dropped: {len(dropped)}")
@@ -144,7 +142,7 @@ async def main() -> None:
             return
 
         # Step 3: synthesise a final summary from verified claims only
-        verified_block = "\n".join(f"- {v.claim} (Source: {v.source_if_any})" for v in verified)
+        verified_block = "\n".join(f"- {c} (Source: {s})" for c, s in verified)
         synthesis_prompt = f"Topic: {topic}\n\nVerified claims with sources:\n{verified_block}"
 
         synthesis_result = await Runner.run(synthesis_agent, synthesis_prompt)
