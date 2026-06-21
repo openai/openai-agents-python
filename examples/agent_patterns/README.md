@@ -60,3 +60,20 @@ See the [`input_guardrails.py`](./input_guardrails.py) and [`output_guardrails.p
 You can pause runs for manual approval before executing sensitive tools. This is useful for operations like sending money, deleting data, or running destructive commands.
 
 See [`human_in_the_loop.py`](./human_in_the_loop.py) for the base approval flow and [`human_in_the_loop_custom_rejection.py`](./human_in_the_loop_custom_rejection.py) for run-level tool error formatting when approvals are rejected.
+
+## Handling ModelBehaviorError
+
+`ModelBehaviorError` is raised when the model does something unexpected — calling a tool that doesn't exist, returning malformed JSON, or failing schema validation. Rather than always letting the exception crash your run, you have several options.
+
+See [`model_behavior_error_handling.py`](./model_behavior_error_handling.py) for three patterns:
+1. **Return a safe fallback value** — useful for best-effort tasks.
+2. **Log and re-raise with enriched context** — useful in production pipelines that need structured error reporting.
+3. **Retry with a fallback agent** — hand the same task to a more reliable model when the primary one misbehaves.
+
+## Self-healing agent
+
+A more advanced pattern: when `ModelBehaviorError` is caught, the error description is appended to the conversation as a correction and the run is retried, giving the model a chance to fix its own mistake without a full restart.
+
+This is useful when the task is long-running, restarting from scratch is expensive, or you are using a smaller model that occasionally calls wrong tools.
+
+See [`self_healing_agent.py`](./self_healing_agent.py) for an example.
