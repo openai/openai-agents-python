@@ -218,6 +218,7 @@ class ModelSettings:
         return replace(self, **changes)
 
     def to_json_dict(self) -> dict[str, Any]:
+        """Serialize model settings to a JSON-compatible dictionary."""
         return cast(dict[str, Any], TypeAdapter(ModelSettings).dump_python(self, mode="json"))
 
     def to_traceable_dict(self) -> dict[str, Any]:

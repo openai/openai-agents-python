@@ -103,6 +103,7 @@ class InputGuardrail(Generic[TContext]):
     """
 
     def get_name(self) -> str:
+        """Return the guardrail name, falling back to the guardrail function's name."""
         if self.name:
             return self.name
 
@@ -114,6 +115,17 @@ class InputGuardrail(Generic[TContext]):
         input: str | list[TResponseInputItem],
         context: RunContextWrapper[TContext],
     ) -> InputGuardrailResult:
+        """Run the guardrail function and return the result.
+
+        Args:
+            agent: The agent being guarded.
+            input: The raw input string or message list passed to the agent.
+            context: The run context wrapper for this execution.
+
+        Returns:
+            An `InputGuardrailResult` containing this guardrail and the function's output,
+            including whether the tripwire was triggered.
+        """
         if not callable(self.guardrail_function):
             raise UserError(f"Guardrail function must be callable, got {self.guardrail_function}")
 
@@ -157,6 +169,7 @@ class OutputGuardrail(Generic[TContext]):
     """
 
     def get_name(self) -> str:
+        """Return the guardrail name, falling back to the guardrail function's name."""
         if self.name:
             return self.name
 
@@ -165,6 +178,17 @@ class OutputGuardrail(Generic[TContext]):
     async def run(
         self, context: RunContextWrapper[TContext], agent: Agent[Any], agent_output: Any
     ) -> OutputGuardrailResult:
+        """Run the guardrail function against the agent's final output and return the result.
+
+        Args:
+            context: The run context wrapper for this execution.
+            agent: The agent whose output is being checked.
+            agent_output: The final output produced by the agent.
+
+        Returns:
+            An `OutputGuardrailResult` containing this guardrail, the agent, the agent output,
+            and the function's output including whether the tripwire was triggered.
+        """
         if not callable(self.guardrail_function):
             raise UserError(f"Guardrail function must be callable, got {self.guardrail_function}")
 
