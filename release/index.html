@@ -1,0 +1,4561 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+        <link rel="prev" href="../examples/">
+      
+      
+        <link rel="next" href="../ref/">
+      
+      
+      <link rel="icon" href="../images/favicon-platform.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.6.16">
+    
+    
+      
+        <title>Release process/changelog - OpenAI Agents SDK</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.7e37652d.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.06af60db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#release-processchangelog" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="OpenAI Agents SDK" class="md-header__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            OpenAI Agents SDK
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Release process/changelog
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+      <div class="md-header__option">
+  <div class="md-select">
+    
+    <button class="md-header__button md-icon" aria-label="Select language">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m12.87 15.07-2.54-2.51.03-.03A17.5 17.5 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2zm-2.62 7 1.62-4.33L19.12 17z"/></svg>
+    </button>
+    <div class="md-select__inner">
+      <ul class="md-select__list">
+        
+          <li class="md-select__item">
+            <a href="./" hreflang="en" class="md-select__link">
+              English
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../ja/release/" hreflang="ja" class="md-select__link">
+              日本語
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../ko/release/" hreflang="ko" class="md-select__link">
+              한국어
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../zh/release/" hreflang="zh" class="md-select__link">
+              简体中文
+            </a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+</div>
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/openai/openai-agents-python" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="OpenAI Agents SDK" class="md-nav__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../assets/logo.svg" alt="logo">
+
+    </a>
+    OpenAI Agents SDK
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/openai/openai-agents-python" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Intro
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Quickstart
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Configuration
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    Documentation
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            Documentation
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Agents
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_2" id="__nav_4_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Sandbox agents
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_2">
+            <span class="md-nav__icon md-icon"></span>
+            Sandbox agents
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Quickstart
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Concepts
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Sandbox clients
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Agent memory
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../models/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Models
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Tools
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guardrails/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Guardrails
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../running_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Running agents
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Streaming
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi_agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Agent orchestration
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handoffs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Handoffs
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Results
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../human_in_the_loop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Human-in-the-loop
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_12" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_12" id="__nav_4_12_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Sessions
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_12_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_12">
+            <span class="md-nav__icon md-icon"></span>
+            Sessions
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Overview
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/sqlalchemy_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    SQLAlchemy session
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/advanced_sqlite_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Advanced SQLite session
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/encrypted_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Encrypted session
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../context/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Context management
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Usage
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Model context protocol (MCP)
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Tracing
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_17" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_17" id="__nav_4_17_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Realtime agents
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_17_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_17">
+            <span class="md-nav__icon md-icon"></span>
+            Realtime agents
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Quickstart
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/transport/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Transport
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Guide
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_18" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_18" id="__nav_4_18_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Voice agents
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_18_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_18">
+            <span class="md-nav__icon md-icon"></span>
+            Voice agents
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Quickstart
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Pipeline
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Tracing
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../visualization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Agent visualization
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../repl/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    REPL utility
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Examples
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    Release process/changelog
+    
+  </span>
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    Release process/changelog
+    
+  </span>
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#minor-y-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      Minor (Y) versions
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#patch-z-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      Patch (Z) versions
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#breaking-change-changelog" class="md-nav__link">
+    <span class="md-ellipsis">
+      Breaking change changelog
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Breaking change changelog">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#0170" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.17.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0160" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.16.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0150" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.15.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0140" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.14.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0130" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.13.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0120" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.12.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0110" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.11.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0100" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.10.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#090" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.9.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#080" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.8.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#070" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.7.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#060" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.6.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#050" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.5.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#040" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.4.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#030" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.3.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#020" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.2.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#010" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.1.0
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    API Reference
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            API Reference
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Agents
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            Agents
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Agents module
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Agent
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/run/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Runner
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/run_config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Run config
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/run_state/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Run state
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_1_6" id="__nav_5_1_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Sandbox
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="3" aria-labelledby="__nav_5_1_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1_6">
+            <span class="md-nav__icon md-icon"></span>
+            Sandbox
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Overview
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/sandbox_agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    SandboxAgent
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/manifest/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Manifest
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/permissions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Permissions
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/snapshot/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    SnapshotSpec
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/entries/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Workspace entries
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1_6_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_1_6_7" id="__nav_5_1_6_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Capabilities
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="4" aria-labelledby="__nav_5_1_6_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1_6_7">
+            <span class="md-nav__icon md-icon"></span>
+            Capabilities
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/capabilities/capabilities/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Capabilities
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/capabilities/capability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Capability
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/capabilities/filesystem/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Filesystem
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/capabilities/shell/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Shell
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/capabilities/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Memory
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/capabilities/skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Skills
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/capabilities/compaction/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Compaction
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/session/sandbox_client/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Sandbox clients
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/session/sandbox_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    SandboxSession
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/session/sandbox_session_state/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    SandboxSessionState
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/sandboxes/unix_local/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Unix local sandbox
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/sandbox/sandboxes/docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Docker sandbox
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/responses_websocket_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Responses WebSocket session
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/run_error_handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Run error handlers
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Memory
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/repl/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    REPL
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/tool/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Tools
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/tool_context/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Tool context
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/result/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Results
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/stream_events/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Streaming events
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/handoffs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Handoffs
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/lifecycle/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Lifecycle
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/items/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Items
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/run_context/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Run context
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Usage
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/exceptions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Exceptions
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/guardrail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Guardrails
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/prompts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Prompts
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/model_settings/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Model settings
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/strict_schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Strict schema
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/tool_guardrails/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Tool guardrails
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/computer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Computer
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/agent_output/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Agent output
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/function_schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Function schema
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/models/interface/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Model interface
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/models/openai_chatcompletions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    OpenAI Chat Completions model
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/models/openai_responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    OpenAI Responses model
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/models/openai_provider/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    OpenAI provider
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/models/multi_provider/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Multi provider
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/mcp/server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    MCP servers
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/mcp/util/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    MCP util
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/mcp/manager/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    MCP manager
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_2" id="__nav_5_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Tracing
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_2">
+            <span class="md-nav__icon md-icon"></span>
+            Tracing
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Tracing module
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/tracing/create/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Creating traces/spans
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/tracing/traces/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Traces
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/tracing/spans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Spans
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/tracing/processor_interface/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Processor interface
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/tracing/processors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Processors
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/tracing/scope/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Scope
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/tracing/setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Setup
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/tracing/span_data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Span data
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/tracing/util/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Util
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_3" id="__nav_5_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Realtime
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_3">
+            <span class="md-nav__icon md-icon"></span>
+            Realtime
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/realtime/agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    RealtimeAgent
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/realtime/runner/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    RealtimeRunner
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/realtime/session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    RealtimeSession
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/realtime/events/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Events
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/realtime/config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Configuration
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/realtime/model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Model
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_4" id="__nav_5_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Voice
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_4">
+            <span class="md-nav__icon md-icon"></span>
+            Voice
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/voice/pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Pipeline
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/voice/workflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Workflow
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/voice/input/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Input
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/voice/result/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Result
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/voice/pipeline_config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Pipeline config
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/voice/events/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Events
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/voice/exceptions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Exceptions
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/voice/model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Model
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/voice/utils/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Utils
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/voice/models/openai_provider/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    OpenAI voice model provider
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/voice/models/openai_stt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    OpenAI STT
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/voice/models/openai_tts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    OpenAI TTS
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_5" id="__nav_5_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Extensions
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_5">
+            <span class="md-nav__icon md-icon"></span>
+            Extensions
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/extensions/handoff_filters/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Handoff filters
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/extensions/handoff_prompt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Handoff prompt
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_5_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_5_3" id="__nav_5_5_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Third-party adapters
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="3" aria-labelledby="__nav_5_5_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_5_3">
+            <span class="md-nav__icon md-icon"></span>
+            Third-party adapters
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/extensions/models/any_llm_model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Any-LLM model
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/extensions/models/any_llm_provider/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Any-LLM provider
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/extensions/models/litellm_model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    LiteLLM model
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/extensions/models/litellm_provider/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    LiteLLM provider
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/extensions/tool_output_trimmer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Tool output trimmer
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/extensions/memory/sqlalchemy_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    SQLAlchemySession
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/extensions/memory/async_sqlite_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Async SQLite session
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/extensions/memory/redis_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    RedisSession
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/extensions/memory/mongodb_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    MongoDBSession
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/extensions/memory/dapr_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    DaprSession
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/extensions/memory/encrypt_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    EncryptedSession
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ref/extensions/memory/advanced_sqlite_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    AdvancedSQLiteSession
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#minor-y-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      Minor (Y) versions
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#patch-z-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      Patch (Z) versions
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#breaking-change-changelog" class="md-nav__link">
+    <span class="md-ellipsis">
+      Breaking change changelog
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Breaking change changelog">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#0170" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.17.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0160" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.16.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0150" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.15.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0140" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.14.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0130" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.13.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0120" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.12.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0110" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.11.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0100" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.10.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#090" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.9.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#080" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.8.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#070" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.7.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#060" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.6.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#050" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.5.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#040" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.4.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#030" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.3.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#020" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.2.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#010" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.1.0
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="release-processchangelog">Release process/changelog</h1>
+<p>The project follows a slightly modified version of semantic versioning using the form <code>0.Y.Z</code>. The leading <code>0</code> indicates the SDK is still evolving rapidly. Increment the components as follows:</p>
+<h2 id="minor-y-versions">Minor (<code>Y</code>) versions</h2>
+<p>We will increase minor versions <code>Y</code> for <strong>breaking changes</strong> to any public interfaces that are not marked as beta. For example, going from <code>0.0.x</code> to <code>0.1.x</code> might include breaking changes.</p>
+<p>If you don't want breaking changes, we recommend pinning to <code>0.0.x</code> versions in your project.</p>
+<h2 id="patch-z-versions">Patch (<code>Z</code>) versions</h2>
+<p>We will increment <code>Z</code> for non-breaking changes:</p>
+<ul>
+<li>Bug fixes</li>
+<li>New features</li>
+<li>Changes to private interfaces</li>
+<li>Updates to beta features</li>
+</ul>
+<h2 id="breaking-change-changelog">Breaking change changelog</h2>
+<h3 id="0170">0.17.0</h3>
+<p>In this version, sandbox local source materialization keeps <code>LocalFile.src</code> and <code>LocalDir.src</code> within the materialization <code>base_dir</code> unless the source path is covered by <code>Manifest.extra_path_grants</code>. The <code>base_dir</code> is the SDK process current working directory when the manifest is applied; relative local sources are resolved from that directory, while absolute local sources must already be inside it or under an explicit grant. This closes a local artifact boundary issue, but it can affect applications that intentionally copy trusted host files or directories from outside that base directory into a sandbox workspace.</p>
+<p>To migrate, grant trusted host roots at the manifest level with <code>SandboxPathGrant</code>, preferably as read-only when the sandbox only needs to read those files:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">Manifest</span><span class="p">,</span> <span class="n">SandboxPathGrant</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.entries</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dir</span><span class="p">,</span> <span class="n">LocalDir</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="c1"># This is an absolute host path outside the SDK process base_dir.</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="n">TRUSTED_DOCS_ROOT</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/opt/my-app/docs&quot;</span><span class="p">)</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="n">manifest</span> <span class="o">=</span> <span class="n">Manifest</span><span class="p">(</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">extra_path_grants</span><span class="o">=</span><span class="p">(</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>        <span class="c1"># This host root is outside the SDK process base_dir, so the manifest must grant it.</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>        <span class="n">SandboxPathGrant</span><span class="p">(</span><span class="n">path</span><span class="o">=</span><span class="nb">str</span><span class="p">(</span><span class="n">TRUSTED_DOCS_ROOT</span><span class="p">),</span> <span class="n">read_only</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>    <span class="p">),</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="n">entries</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>        <span class="c1"># No grant is needed for local sources that stay under the SDK process base_dir.</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>        <span class="s2">&quot;fixtures&quot;</span><span class="p">:</span> <span class="n">LocalDir</span><span class="p">(</span><span class="n">src</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;fixtures&quot;</span><span class="p">),</span> <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Local test fixtures.&quot;</span><span class="p">),</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>        <span class="c1"># This entry reads from the granted host root and copies it into the sandbox workspace.</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>        <span class="s2">&quot;docs&quot;</span><span class="p">:</span> <span class="n">LocalDir</span><span class="p">(</span><span class="n">src</span><span class="o">=</span><span class="n">TRUSTED_DOCS_ROOT</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Trusted local documents.&quot;</span><span class="p">),</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>        <span class="c1"># Dir creates a sandbox workspace directory; it does not read from the host filesystem.</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>        <span class="s2">&quot;output&quot;</span><span class="p">:</span> <span class="n">Dir</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;Generated artifacts.&quot;</span><span class="p">),</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>    <span class="p">},</span>
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>Treat <code>extra_path_grants</code> as trusted application configuration. Do not populate grants from model output or other untrusted manifest input unless your application has already approved those host paths.</p>
+<h3 id="0160">0.16.0</h3>
+<p>In this version, the SDK default model is now <code>gpt-5.4-mini</code> instead of <code>gpt-4.1</code>. This affects agents and runs that do not explicitly set a model. Because the new default is a GPT-5 model, implicit default model settings now include GPT-5 defaults such as <code>reasoning.effort="none"</code> and <code>verbosity="low"</code>.</p>
+<p>If you need to keep the previous default model behavior, set a model explicitly on the agent or run config, or set the <code>OPENAI_DEFAULT_MODEL</code> environment variable:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-4.1&quot;</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Highlights:</p>
+<ul>
+<li><code>Runner.run</code>, <code>Runner.run_sync</code>, and <code>Runner.run_streamed</code> now accept <code>max_turns=None</code> to disable the turn limit.</li>
+<li>Sandbox workspace hydration now rejects tar archives with symlinks that point outside the archive root, including absolute symlink targets, across local, Docker, and provider-backed sandbox implementations.</li>
+</ul>
+<h3 id="0150">0.15.0</h3>
+<p>In this version, model refusals are now surfaced explicitly as <code>ModelRefusalError</code> instead of being treated as empty text output or, for structured outputs, causing the run loop to retry until <code>MaxTurnsExceeded</code>.</p>
+<p>This affects code that previously expected a refusal-only model response to complete with <code>final_output == ""</code>. To handle refusals without raising, provide a <code>model_refusal</code> run error handler:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run_sync</span><span class="p">(</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    <span class="nb">input</span><span class="p">,</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="n">error_handlers</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;model_refusal&quot;</span><span class="p">:</span> <span class="k">lambda</span> <span class="n">data</span><span class="p">:</span> <span class="n">data</span><span class="o">.</span><span class="n">error</span><span class="o">.</span><span class="n">refusal</span><span class="p">},</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>For structured-output agents, the handler can return a value matching the agent's output schema, and the SDK will validate it like other run error handler final outputs.</p>
+<h3 id="0140">0.14.0</h3>
+<p>This minor release does <strong>not</strong> introduce a breaking change, but it adds a major new beta feature area: Sandbox Agents, plus the runtime, backend, and documentation support needed to use them across local, containerized, and hosted environments.</p>
+<p>Highlights:</p>
+<ul>
+<li>Added a new beta sandbox runtime surface centered on <code>SandboxAgent</code>, <code>Manifest</code>, and <code>SandboxRunConfig</code>, letting agents work inside persistent isolated workspaces with files, directories, Git repos, mounts, snapshots, and resume support.</li>
+<li>Added sandbox execution backends for local and containerized development via <code>UnixLocalSandboxClient</code> and <code>DockerSandboxClient</code>, plus hosted provider integrations for Blaxel, Cloudflare, Daytona, E2B, Modal, Runloop, and Vercel through optional extras.</li>
+<li>Added sandbox memory support so future runs can reuse lessons from prior runs, with progressive disclosure, multi-turn grouping, configurable isolation boundaries, and persisted-memory examples including S3-backed workflows.</li>
+<li>Added a broader workspace and resume model, including local and synthetic workspace entries, remote storage mounts for S3/R2/GCS/Azure Blob Storage/S3 Files, portable snapshots, and resume flows via <code>RunState</code>, <code>SandboxSessionState</code>, or saved snapshots.</li>
+<li>Added substantial sandbox examples and tutorials under <code>examples/sandbox/</code>, covering coding tasks with skills, handoffs, memory, provider-specific setups, and end-to-end workflows such as code review, dataroom QA, and website cloning.</li>
+<li>Extended the core runtime and tracing stack with sandbox-aware session preparation, capability binding, state serialization, unified tracing, prompt cache key defaults, and safer sensitive MCP output redaction.</li>
+</ul>
+<h3 id="0130">0.13.0</h3>
+<p>This minor release does <strong>not</strong> introduce a breaking change, but it includes a notable Realtime default update plus new MCP capabilities and runtime stability fixes.</p>
+<p>Highlights:</p>
+<ul>
+<li>The default websocket Realtime model is now <code>gpt-realtime-1.5</code>, so new Realtime agent setups use the newer model without extra configuration.</li>
+<li><code>MCPServer</code> now exposes <code>list_resources()</code>, <code>list_resource_templates()</code>, and <code>read_resource()</code>, and <code>MCPServerStreamableHttp</code> now exposes <code>session_id</code> so streamable HTTP sessions can be resumed across reconnects or stateless workers.</li>
+<li>Chat Completions integrations can now opt into reasoning-content replay via <code>should_replay_reasoning_content</code>, improving provider-specific reasoning/tool-call continuity for adapters such as LiteLLM/DeepSeek.</li>
+<li>Fixed several runtime and session edge cases, including concurrent first writes in <code>SQLAlchemySession</code>, compaction requests with orphaned assistant message IDs after reasoning stripping, <code>remove_all_tools()</code> leaving MCP/reasoning items behind, and a race in the function-tool batch executor.</li>
+</ul>
+<h3 id="0120">0.12.0</h3>
+<p>This minor release does <strong>not</strong> introduce a breaking change. Check <a href="https://github.com/openai/openai-agents-python/releases/tag/v0.12.0">the release notes</a> for major feature additions.</p>
+<h3 id="0110">0.11.0</h3>
+<p>This minor release does <strong>not</strong> introduce a breaking change. Check <a href="https://github.com/openai/openai-agents-python/releases/tag/v0.11.0">the release notes</a> for major feature additions.</p>
+<h3 id="0100">0.10.0</h3>
+<p>This minor release does <strong>not</strong> introduce a breaking change, but it includes a significant new feature area for OpenAI Responses users: websocket transport support for the Responses API.</p>
+<p>Highlights:</p>
+<ul>
+<li>Added websocket transport support for OpenAI Responses models (opt-in; HTTP remains the default transport).</li>
+<li>Added a <code>responses_websocket_session()</code> helper / <code>ResponsesWebSocketSession</code> for reusing a shared websocket-capable provider and <code>RunConfig</code> across multi-turn runs.</li>
+<li>Added a new websocket streaming example (<code>examples/basic/stream_ws.py</code>) covering streaming, tools, approvals, and follow-up turns.</li>
+</ul>
+<h3 id="090">0.9.0</h3>
+<p>In this version, Python 3.9 is no longer supported, as this major version reached EOL three months ago. Please upgrade to a newer runtime version.</p>
+<p>Additionally, the type hint for the value returned from the <code>Agent#as_tool()</code> method has been narrowed from <code>Tool</code> to <code>FunctionTool</code>. This change should not usually cause breaking issues, but if your code relies on the broader union type, you may need to make some adjustments on your side.</p>
+<h3 id="080">0.8.0</h3>
+<p>In this version, two runtime behavior changes may require migration work:</p>
+<ul>
+<li>Function tools wrapping <strong>synchronous</strong> Python callables now execute on worker threads via <code>asyncio.to_thread(...)</code> instead of running on the event loop thread. If your tool logic depends on thread-local state or thread-affine resources, migrate to an async tool implementation or make thread affinity explicit in your tool code.</li>
+<li>Local MCP tool failure handling is now configurable, and the default behavior can return model-visible error output instead of failing the whole run. If you rely on fail-fast semantics, set <code>mcp_config={"failure_error_function": None}</code>. Server-level <code>failure_error_function</code> values override the agent-level setting, so set <code>failure_error_function=None</code> on each local MCP server that has an explicit handler.</li>
+</ul>
+<h3 id="070">0.7.0</h3>
+<p>In this version, there were a few behavior changes that can affect existing applications:</p>
+<ul>
+<li>Nested handoff history is now <strong>opt-in</strong> (disabled by default). If you depended on the v0.6.x default nested behavior, explicitly set <code>RunConfig(nest_handoff_history=True)</code>.</li>
+<li>The default <code>reasoning.effort</code> for <code>gpt-5.1</code> / <code>gpt-5.2</code> changed to <code>"none"</code> (from the previous default <code>"low"</code> configured by SDK defaults). If your prompts or quality/cost profile relied on <code>"low"</code>, set it explicitly in <code>model_settings</code>.</li>
+</ul>
+<h3 id="060">0.6.0</h3>
+<p>In this version, the default handoff history is now packaged into a single assistant message instead of exposing the raw user/assistant turns, giving downstream agents a concise, predictable recap
+- The existing single-message handoff transcript now by default starts with "For context, here is the conversation so far between the user and the previous agent:" before the <code>&lt;CONVERSATION HISTORY&gt;</code> block, so downstream agents get a clearly labeled recap</p>
+<h3 id="050">0.5.0</h3>
+<p>This version doesn’t introduce any visible breaking changes, but it includes new features and a few significant updates under the hood:</p>
+<ul>
+<li>Added support for <code>RealtimeRunner</code> to handle <a href="https://platform.openai.com/docs/guides/realtime-sip">SIP protocol connections</a></li>
+<li>Significantly revised the internal logic of <code>Runner#run_sync</code> for Python 3.14 compatibility</li>
+</ul>
+<h3 id="040">0.4.0</h3>
+<p>In this version, <a href="https://pypi.org/project/openai/">openai</a> package v1.x versions are no longer supported. Please use openai v2.x along with this SDK.</p>
+<h3 id="030">0.3.0</h3>
+<p>In this version, the Realtime API support migrates to gpt-realtime model and its API interface (GA version).</p>
+<h3 id="020">0.2.0</h3>
+<p>In this version, a few places that used to take <code>Agent</code> as an arg, now take <code>AgentBase</code> as an arg instead. For example, the <code>list_tools()</code> call in MCP servers. This is a purely typing change, you will still receive <code>Agent</code> objects. To update, just fix type errors by replacing <code>Agent</code> with <code>AgentBase</code>.</p>
+<h3 id="010">0.1.0</h3>
+<p>In this version, <a class="autorefs autorefs-internal" title="MCPServer" href="../ref/mcp/server/#agents.mcp.server.MCPServer"><code>MCPServer.list_tools()</code></a> has two new params: <code>run_context</code> and <code>agent</code>. You'll need to add these params to any classes that subclass <code>MCPServer</code>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      <script id="__config" type="application/json">{"base": "..", "features": ["content.code.copy", "content.code.select", "navigation.path", "navigation.sections", "content.code.annotate"], "search": "../assets/javascripts/workers/search.d50fe291.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.50899def.min.js"></script>
+      
+    
+  </body>
+</html>
