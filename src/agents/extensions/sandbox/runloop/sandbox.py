@@ -53,6 +53,7 @@ from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, R
 from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
 from ....sandbox.snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from ....sandbox.types import ExecResult, ExposedPortEndpoint, User
+from ....sandbox.util.retry import iter_exception_chain
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
 from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 
@@ -83,10 +84,16 @@ class _RunloopSdkImports:
     api_response_validation_error: type[BaseException]
     api_status_error: type[BaseException]
     api_timeout_error: type[BaseException]
+    authentication_error: type[BaseException]
+    bad_request_error: type[BaseException]
+    internal_server_error: type[BaseException]
     not_found_error: type[BaseException]
+    permission_denied_error: type[BaseException]
     polling_config: type[Any] | None
     polling_timeout: type[BaseException] | None
+    rate_limit_error: type[BaseException]
     runloop_error: type[BaseException]
+    unprocessable_entity_error: type[BaseException]
 
 
 _RUNLOOP_SDK_IMPORTS: _RunloopSdkImports | None = None
@@ -103,8 +110,14 @@ def _import_runloop_sdk() -> _RunloopSdkImports:
             APIResponseValidationError,
             APIStatusError,
             APITimeoutError,
+            AuthenticationError,
+            BadRequestError,
+            InternalServerError,
             NotFoundError,
+            PermissionDeniedError,
+            RateLimitError,
             RunloopError,
+            UnprocessableEntityError,
         )
         from runloop_api_client.sdk import AsyncRunloopSDK
     except ImportError as e:
@@ -132,10 +145,16 @@ def _import_runloop_sdk() -> _RunloopSdkImports:
         api_response_validation_error=APIResponseValidationError,
         api_status_error=APIStatusError,
         api_timeout_error=APITimeoutError,
+        authentication_error=AuthenticationError,
+        bad_request_error=BadRequestError,
+        internal_server_error=InternalServerError,
         not_found_error=NotFoundError,
+        permission_denied_error=PermissionDeniedError,
         polling_config=polling_config,
         polling_timeout=polling_timeout,
+        rate_limit_error=RateLimitError,
         runloop_error=RunloopError,
+        unprocessable_entity_error=UnprocessableEntityError,
     )
     return _RUNLOOP_SDK_IMPORTS
 
@@ -259,6 +278,56 @@ def _runloop_error_message(exc: BaseException) -> str | None:
         if isinstance(first, str) and first:
             return first
 
+    return None
+
+
+_RUNLOOP_HTTP_STATUS_RETRYABLE: dict[int, bool] = {
+    400: False,
+    401: False,
+    403: False,
+    404: False,
+    408: True,
+    422: False,
+    429: True,
+    500: True,
+    502: True,
+    503: True,
+    504: True,
+}
+
+
+def _runloop_retryable_error_types() -> tuple[type[BaseException], ...]:
+    sdk_imports = _import_runloop_sdk()
+    return (
+        sdk_imports.api_connection_error,
+        sdk_imports.api_timeout_error,
+        sdk_imports.internal_server_error,
+        sdk_imports.rate_limit_error,
+    )
+
+
+def _runloop_non_retryable_error_types() -> tuple[type[BaseException], ...]:
+    sdk_imports = _import_runloop_sdk()
+    return (
+        sdk_imports.authentication_error,
+        sdk_imports.bad_request_error,
+        sdk_imports.not_found_error,
+        sdk_imports.permission_denied_error,
+        sdk_imports.unprocessable_entity_error,
+    )
+
+
+def _runloop_provider_retryability(exc: BaseException) -> bool | None:
+    retryable_error_types = _runloop_retryable_error_types()
+    non_retryable_error_types = _runloop_non_retryable_error_types()
+    for candidate in iter_exception_chain(exc):
+        if isinstance(candidate, retryable_error_types):
+            return True
+        if isinstance(candidate, non_retryable_error_types):
+            return False
+        status_code = _runloop_status_code(candidate)
+        if status_code in _RUNLOOP_HTTP_STATUS_RETRYABLE:
+            return _RUNLOOP_HTTP_STATUS_RETRYABLE[status_code]
     return None
 
 
@@ -781,6 +850,7 @@ class RunloopSandboxSession(BaseSandboxSession):
                     command=command,
                     context=_runloop_error_context(e, backend_detail="exec_failed"),
                     cause=e,
+                    retryable=_runloop_provider_retryability(e),
                 ) from e
             raise ExecTransportError(command=command, cause=e) from e
 
@@ -795,6 +865,7 @@ class RunloopSandboxSession(BaseSandboxSession):
                     reason="backend_unavailable",
                     context=_runloop_error_context(e, backend_detail="get_tunnel_url_failed"),
                     cause=e,
+                    retryable=_runloop_provider_retryability(e),
                 ) from e
             raise
         if isinstance(url, str) and url:
@@ -815,6 +886,7 @@ class RunloopSandboxSession(BaseSandboxSession):
                     reason="backend_unavailable",
                     context=_runloop_error_context(e, backend_detail="enable_tunnel_failed"),
                     cause=e,
+                    retryable=_runloop_provider_retryability(e),
                 ) from e
             raise
         try:
@@ -829,6 +901,7 @@ class RunloopSandboxSession(BaseSandboxSession):
                     reason="backend_unavailable",
                     context=context,
                     cause=e,
+                    retryable=_runloop_provider_retryability(e),
                 ) from e
             raise
         if not isinstance(url, str) or not url:
@@ -894,6 +967,7 @@ class RunloopSandboxSession(BaseSandboxSession):
                     path=error_path,
                     context=_runloop_error_context(e, backend_detail="file_download_failed"),
                     cause=e,
+                    retryable=_runloop_provider_retryability(e),
                 ) from e
             raise WorkspaceArchiveReadError(path=error_path, cause=e) from e
 
@@ -929,6 +1003,7 @@ class RunloopSandboxSession(BaseSandboxSession):
                     path=workspace_path,
                     context=_runloop_error_context(e, backend_detail="file_upload_failed"),
                     cause=e,
+                    retryable=_runloop_provider_retryability(e),
                 ) from e
             raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
 
@@ -1134,10 +1209,14 @@ class RunloopSandboxSession(BaseSandboxSession):
         except WorkspaceArchiveReadError as e:
             snapshot_error = e
         except Exception as e:
+            retryable = None
+            if _is_runloop_provider_error(e):
+                retryable = _runloop_provider_retryability(e)
             snapshot_error = WorkspaceArchiveReadError(
                 path=root,
                 context={"reason": "snapshot_failed"},
                 cause=e,
+                retryable=retryable,
             )
         finally:
             remount_error: WorkspaceArchiveReadError | None = None
@@ -1249,6 +1328,9 @@ class RunloopSandboxSession(BaseSandboxSession):
                 path=root,
                 context=context,
                 cause=e,
+                retryable=_runloop_provider_retryability(e)
+                if _is_runloop_provider_error(e)
+                else None,
             ) from e
 
     async def _restore_snapshot_into_workspace_on_resume(self) -> None:
