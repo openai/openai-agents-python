@@ -205,17 +205,21 @@ class RealtimeSession(RealtimeModelListener):
         """Start the session by connecting to the model. After this, you will be able to stream
         events from the model and send messages and audio to the model.
         """
-        # Add ourselves as a listener
-        self._model.add_listener(self)
-
         model_config = self._model_config.copy()
         model_config["initial_model_settings"] = await self._get_updated_model_settings_from_agent(
             starting_settings=self._model_config.get("initial_model_settings", None),
             agent=self._current_agent,
         )
 
-        # Connect to the model
-        await self._model.connect(model_config)
+        # Add ourselves as a listener only after initial settings have been validated.
+        self._model.add_listener(self)
+
+        try:
+            # Connect to the model.
+            await self._model.connect(model_config)
+        except BaseException:
+            self._model.remove_listener(self)
+            raise
 
         # Emit initial history update
         await self._put_event(

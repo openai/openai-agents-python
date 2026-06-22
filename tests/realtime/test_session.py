@@ -94,6 +94,17 @@ class _DummyModel(RealtimeModel):
             self.listeners.remove(listener)
 
 
+class _FailingConnectModel(_DummyModel):
+    def __init__(self, exc: BaseException) -> None:
+        super().__init__()
+        self.exc = exc
+        self.connect_options: Any | None = None
+
+    async def connect(self, options=None):
+        self.connect_options = options
+        raise self.exc
+
+
 @pytest.mark.asyncio
 async def test_property_and_send_helpers_and_enter_alias():
     model = _DummyModel()
@@ -351,6 +362,46 @@ async def test_updated_model_settings_validates_final_tool_names_after_overrides
 
     assert settings["tools"] == [override_tool]
     assert settings["handoffs"] == []
+
+
+@pytest.mark.asyncio
+async def test_aenter_validates_initial_model_settings_before_listener_registration():
+    model = _DummyModel()
+    tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
+    handoff = Handoff(
+        tool_name="transfer_to_billing",
+        tool_description="Transfer to billing",
+        input_json_schema={},
+        on_invoke_handoff=AsyncMock(return_value=RealtimeAgent(name="billing")),
+        input_filter=None,
+        agent_name="billing",
+        is_enabled=True,
+    )
+    agent = RealtimeAgent(name="agent", tools=[tool], handoffs=[handoff])
+    session = RealtimeSession(model, agent, None)
+
+    with pytest.raises(UserError, match="Duplicate Realtime tool"):
+        await session.__aenter__()
+
+    assert model.listeners == []
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [RuntimeError("connect failed"), asyncio.CancelledError()],
+    ids=["runtime-error", "cancelled-error"],
+)
+@pytest.mark.asyncio
+async def test_aenter_removes_listener_when_connect_fails(exc: BaseException):
+    model = _FailingConnectModel(exc)
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+
+    with pytest.raises(type(exc)):
+        await session.__aenter__()
+
+    assert model.connect_options is not None
+    assert model.listeners == []
 
 
 class MockRealtimeModel(RealtimeModel):
