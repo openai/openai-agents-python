@@ -87,7 +87,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         agent: TAgent,
         tool: Tool,
-        result: str,
+        result: object,
     ) -> None:
         """Called immediately after a local tool is invoked.
 
@@ -95,6 +95,10 @@ class RunHooksBase(Generic[TContext, TAgent]):
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
         and ``tool_arguments``. Other local tool families may provide a plain
         ``RunContextWrapper`` instead.
+
+        Simple tool outputs are typically ``str`` values. Function tools may also return
+        structured tool output objects or any value the SDK can stringify before sending it to
+        the model.
         """
         pass
 
@@ -161,7 +165,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         agent: TAgent,
         tool: Tool,
-        result: str,
+        result: object,
     ) -> None:
         """Called immediately after a local tool is invoked.
 
@@ -169,6 +173,10 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         which exposes tool-call-specific metadata such as ``tool_call_id``, ``tool_name``,
         and ``tool_arguments``. Other local tool families may provide a plain
         ``RunContextWrapper`` instead.
+
+        Simple tool outputs are typically ``str`` values. Function tools may also return
+        structured tool output objects or any value the SDK can stringify before sending it to
+        the model.
         """
         pass
 

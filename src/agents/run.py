@@ -41,6 +41,7 @@ from .run_config import (
     ToolErrorFormatter,
     ToolErrorFormatterArgs,
     ToolExecutionConfig,
+    ToolNotFoundBehavior,
 )
 from .run_context import RunContextWrapper, TContext
 from .run_error_handlers import RunErrorHandlers
@@ -140,6 +141,7 @@ __all__ = [
     "ToolExecutionConfig",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
+    "ToolNotFoundBehavior",
     "DEFAULT_MAX_TURNS",
     "set_default_agent_runner",
     "get_default_agent_runner",

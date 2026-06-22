@@ -23,6 +23,7 @@ from agents import (
     CustomTool,
     Handoff,
     HostedMCPTool,
+    RunConfig,
     ShellTool,
     Tool,
     function_tool,
@@ -866,3 +867,25 @@ def test_process_model_response_rejects_mismatched_function_namespace() -> None:
             output_schema=None,
             handoffs=[],
         )
+
+
+def test_process_model_response_collects_missing_function_tool_when_opted_in() -> None:
+    agent = Agent(name="test", model=FakeModel(), tools=[function_tool(lambda: "ok")])
+    missing_call = get_function_tool_call("missing_tool", "{}", call_id="call_missing")
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=agent.tools,
+        response=_response([missing_call]),
+        output_schema=None,
+        handoffs=[],
+        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
+    )
+
+    assert len(processed.new_items) == 1
+    assert isinstance(processed.new_items[0], ToolCallItem)
+    assert processed.functions == []
+    assert len(processed.function_tools_not_found) == 1
+    assert processed.function_tools_not_found[0].tool_call is missing_call
+    assert processed.function_tools_not_found[0].tool_name == "missing_tool"
+    assert processed.has_tools_or_approvals_to_run()

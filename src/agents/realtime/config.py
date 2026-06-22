@@ -46,6 +46,17 @@ RealtimeAudioFormat: TypeAlias = (
 """The audio format for realtime audio streams."""
 
 
+class RealtimeCustomVoice(TypedDict):
+    """A custom Realtime voice object."""
+
+    id: str
+    """The custom voice ID."""
+
+
+RealtimeVoice: TypeAlias = str | RealtimeCustomVoice | Mapping[str, Any]
+"""The voice to use for realtime audio output."""
+
+
 RealtimeReasoningEffort: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh"] | str
 """The reasoning effort for realtime model responses."""
 
@@ -124,7 +135,7 @@ class RealtimeAudioOutputConfig(TypedDict, total=False):
     """Configuration for audio output in realtime sessions."""
 
     format: RealtimeAudioFormat | OpenAIRealtimeAudioFormats
-    voice: str
+    voice: RealtimeVoice
     speed: float
 
 
@@ -163,7 +174,7 @@ class RealtimeSessionModelSettings(TypedDict):
     audio: NotRequired[RealtimeAudioConfig]
     """The audio configuration for the session."""
 
-    voice: NotRequired[str]
+    voice: NotRequired[RealtimeVoice]
     """The voice to use for audio output."""
 
     speed: NotRequired[float]
@@ -221,6 +232,16 @@ class RealtimeGuardrailsSettings(TypedDict):
     """
 
 
+class RealtimeToolExecutionConfig(TypedDict):
+    """SDK-side execution settings for local realtime tool calls."""
+
+    pre_approval_tool_input_guardrails: NotRequired[bool]
+    """Run function tool input guardrails before emitting a pending approval event.
+
+    The same guardrails still run again immediately before tool execution after approval.
+    """
+
+
 class RealtimeModelTracingConfig(TypedDict):
     """Configuration for tracing in realtime model sessions."""
 
@@ -251,6 +272,9 @@ class RealtimeRunConfig(TypedDict):
 
     async_tool_calls: NotRequired[bool]
     """Whether function tool calls should run asynchronously. Defaults to True."""
+
+    tool_execution: NotRequired[RealtimeToolExecutionConfig]
+    """SDK-side execution settings for local realtime tool calls."""
 
     tool_error_formatter: NotRequired[ToolErrorFormatter]
     """Optional callback that formats tool error messages returned to the model."""

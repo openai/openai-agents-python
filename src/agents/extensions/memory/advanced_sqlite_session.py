@@ -133,26 +133,15 @@ class AdvancedSQLiteSession(SQLiteSession):
         def _add_items_sync():
             """Synchronous helper to add items and structure metadata together."""
             with self._locked_connection() as conn:
-                # Keep both writes in one critical section so message IDs and metadata stay aligned.
-                self._insert_items(conn, items)
-                conn.commit()
                 try:
+                    # Keep both writes in one transaction so metadata failures do not leave orphans.
+                    self._insert_items(conn, items)
                     self._insert_structure_metadata(conn, items)
                     conn.commit()
-                except Exception as e:
+                except Exception:
                     conn.rollback()
-                    self._logger.error(
-                        f"Failed to add structure metadata for session {self.session_id}: {e}"
-                    )
-                    try:
-                        deleted_count = self._cleanup_orphaned_messages_sync(conn)
-                        if deleted_count:
-                            conn.commit()
-                        else:
-                            conn.rollback()
-                    except Exception as cleanup_error:
-                        conn.rollback()
-                        self._logger.error(f"Failed to cleanup orphaned messages: {cleanup_error}")
+                    self._logger.exception("Failed to add items for session %s", self.session_id)
+                    raise
 
         await asyncio.to_thread(_add_items_sync)
 
@@ -367,16 +356,16 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         try:
             await asyncio.to_thread(_add_structure_sync)
-        except Exception as e:
-            self._logger.error(
-                f"Failed to add structure metadata for session {self.session_id}: {e}"
+        except Exception:
+            self._logger.exception(
+                "Failed to add structure metadata for session %s", self.session_id
             )
-            # Try to clean up any orphaned messages to maintain consistency
+            # Try to clean up any orphaned messages to maintain consistency.
             try:
                 await self._cleanup_orphaned_messages()
-            except Exception as cleanup_error:
-                self._logger.error(f"Failed to cleanup orphaned messages: {cleanup_error}")
-            # Don't re-raise - structure metadata is supplementary
+            except Exception:
+                self._logger.exception("Failed to cleanup orphaned messages")
+            raise
 
     def _insert_structure_metadata(
         self,
@@ -469,8 +458,8 @@ class AdvancedSQLiteSession(SQLiteSession):
     async def _cleanup_orphaned_messages(self) -> int:
         """Remove messages that exist in the configured message table but not in message_structure.
 
-        This can happen if _add_structure_metadata fails after super().add_items() succeeds.
-        Used for maintaining data consistency.
+        This can happen for rows written by older or non-atomic structure metadata paths.
+        `add_items()` writes message rows and structure metadata in a single transaction.
         """
 
         def _cleanup_sync():
@@ -487,30 +476,22 @@ class AdvancedSQLiteSession(SQLiteSession):
 
     def _cleanup_orphaned_messages_sync(self, conn: sqlite3.Connection) -> int:
         with closing(conn.cursor()) as cursor:
-            # Find messages without structure metadata.
             cursor.execute(
                 f"""
-                SELECT am.id
-                FROM {self.messages_table} am
-                LEFT JOIN message_structure ms ON am.id = ms.message_id
-                WHERE am.session_id = ? AND ms.message_id IS NULL
-            """,
-                (self.session_id,),
-            )
-
-            orphaned_ids = [row[0] for row in cursor.fetchall()]
-
-            if not orphaned_ids:
-                return 0
-
-            placeholders = ",".join("?" * len(orphaned_ids))
-            cursor.execute(
-                f"DELETE FROM {self.messages_table} WHERE id IN ({placeholders})",
-                orphaned_ids,
+                DELETE FROM {self.messages_table}
+                WHERE session_id = ?
+                AND id NOT IN (
+                    SELECT message_id
+                    FROM message_structure ms
+                    WHERE ms.session_id = ?
+                )
+                """,
+                (self.session_id, self.session_id),
             )
 
             deleted_count = cursor.rowcount
-            self._logger.info(f"Cleaned up {deleted_count} orphaned messages")
+            if deleted_count:
+                self._logger.info(f"Cleaned up {deleted_count} orphaned messages")
             return deleted_count
 
     def _classify_message_type(self, item: TResponseInputItem) -> str:
@@ -786,14 +767,19 @@ class AdvancedSQLiteSession(SQLiteSession):
 
                     structure_deleted = cursor.rowcount
 
+                    orphaned_messages_deleted = self._cleanup_orphaned_messages_sync(conn)
+
                     conn.commit()
 
-                    return usage_deleted, structure_deleted
+                    return usage_deleted, structure_deleted, orphaned_messages_deleted
 
-        usage_deleted, structure_deleted = await asyncio.to_thread(_delete_sync)
+        usage_deleted, structure_deleted, orphaned_messages_deleted = await asyncio.to_thread(
+            _delete_sync
+        )
 
         self._logger.info(
-            f"Deleted branch '{branch_id}': {structure_deleted} message entries, {usage_deleted} usage entries"  # noqa: E501
+            f"Deleted branch '{branch_id}': {structure_deleted} message entries, "
+            f"{usage_deleted} usage entries, {orphaned_messages_deleted} orphaned messages"
         )
 
     async def list_branches(self) -> list[dict[str, Any]]:
