@@ -3286,6 +3286,113 @@ class TestSdkExceptionMapping:
         assert exc_info.value.context["backend"] == "blaxel"
         assert exc_info.value.context["http_status"] == 500
         assert exc_info.value.context["provider_error"] == "HTTP 500: internal error"
+        assert exc_info.value.retryable is True
+
+    @pytest.mark.asyncio
+    async def test_exec_uses_structured_blaxel_non_retryable_error_code(
+        self, fake_sandbox: _FakeSandboxInstance
+    ) -> None:
+        from agents.extensions.sandbox.blaxel import sandbox as mod
+
+        session = _make_session(fake_sandbox)
+
+        class FakeApiError(Exception):
+            def __init__(self) -> None:
+                super().__init__("route not found")
+                self.status_code = 404
+                self.body = {
+                    "error": {
+                        "code": "ROUTE_NOT_FOUND",
+                        "message": "Preview not found: sandbox",
+                        "retryable": False,
+                        "status": 404,
+                    }
+                }
+
+        async def _raise_route_not_found(*args: object, **kw: object) -> None:
+            raise FakeApiError()
+
+        fake_sandbox.process.exec = _raise_route_not_found  # type: ignore[assignment]
+
+        with patch.object(mod, "_import_sandbox_api_error", return_value=FakeApiError):
+            with pytest.raises(ExecTransportError) as exc_info:
+                await session._exec_internal("echo", "hello")
+
+        assert str(exc_info.value) == "Blaxel exec failed: HTTP 404: route not found"
+        assert exc_info.value.context["backend"] == "blaxel"
+        assert exc_info.value.context["http_status"] == 404
+        assert exc_info.value.context["provider_error"] == "HTTP 404: route not found"
+        assert exc_info.value.context["provider_error_code"] == "ROUTE_NOT_FOUND"
+        assert exc_info.value.retryable is False
+
+    @pytest.mark.asyncio
+    async def test_exec_uses_structured_blaxel_retryable_error_code(
+        self, fake_sandbox: _FakeSandboxInstance
+    ) -> None:
+        from agents.extensions.sandbox.blaxel import sandbox as mod
+
+        session = _make_session(fake_sandbox)
+
+        class FakeApiError(Exception):
+            def __init__(self) -> None:
+                super().__init__("workload unavailable")
+                self.status_code = 404
+                self.body = {
+                    "error": {
+                        "code": "WORKLOAD_UNAVAILABLE",
+                        "message": "No healthy replica is serving workload",
+                        "retryable": True,
+                        "status": 404,
+                    }
+                }
+
+        async def _raise_workload_unavailable(*args: object, **kw: object) -> None:
+            raise FakeApiError()
+
+        fake_sandbox.process.exec = _raise_workload_unavailable  # type: ignore[assignment]
+
+        with patch.object(mod, "_import_sandbox_api_error", return_value=FakeApiError):
+            with pytest.raises(ExecTransportError) as exc_info:
+                await session._exec_internal("echo", "hello")
+
+        assert str(exc_info.value) == "Blaxel exec failed: HTTP 404: workload unavailable"
+        assert exc_info.value.context["backend"] == "blaxel"
+        assert exc_info.value.context["http_status"] == 404
+        assert exc_info.value.context["provider_error"] == "HTTP 404: workload unavailable"
+        assert exc_info.value.context["provider_error_code"] == "WORKLOAD_UNAVAILABLE"
+        assert exc_info.value.retryable is True
+
+    @pytest.mark.parametrize(
+        ("code", "expected_retryable"),
+        [
+            ("ROUTE_NOT_FOUND", False),
+            ("WORKLOAD_NOT_FOUND", False),
+            ("WORKSPACE_NOT_FOUND", False),
+            ("WORKLOAD_UNAVAILABLE", True),
+            ("AUTHENTICATION_REQUIRED", False),
+            ("AUTHENTICATION_FAILED", False),
+            ("FORBIDDEN", False),
+            ("BAD_REQUEST", False),
+            ("USAGE_LIMIT_EXCEEDED", False),
+            ("POLICY_VIOLATION", False),
+        ],
+    )
+    def test_blaxel_retryability_error_code_table(
+        self,
+        code: str,
+        expected_retryable: bool,
+    ) -> None:
+        from agents.extensions.sandbox.blaxel import sandbox as mod
+
+        class FakeApiError(Exception):
+            def __init__(self) -> None:
+                super().__init__(code)
+                self.body = {"error": {"code": code, "message": code}}
+
+        retryable, provider_error_code = mod._blaxel_provider_retryability(FakeApiError())
+
+        assert retryable is expected_retryable
+        assert provider_error_code == code
 
 
 # ---------------------------------------------------------------------------

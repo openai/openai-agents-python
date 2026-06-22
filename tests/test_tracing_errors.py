@@ -16,6 +16,7 @@ from agents import (
     RunContextWrapper,
     Runner,
     TResponseInputItem,
+    _debug,
 )
 
 from .fake_model import FakeModel
@@ -133,7 +134,11 @@ async def test_multi_turn_no_handoffs():
 
 
 @pytest.mark.asyncio
-async def test_tool_call_error():
+async def test_tool_call_error(monkeypatch: pytest.MonkeyPatch):
+    # Opt in to tool payload logging so the friendly "parsing tool arguments" message,
+    # which depends on inspecting the chained JSONDecodeError, is preserved.
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
     model = FakeModel(tracing_enabled=True)
 
     agent = Agent(

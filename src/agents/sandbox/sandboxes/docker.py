@@ -1219,9 +1219,19 @@ class DockerSandboxSession(BaseSandboxSession):
             )
             return strip_tar_member_prefix(root_prefixed_archive, prefix=staging_workspace.name)
         except docker.errors.NotFound as e:
-            raise WorkspaceArchiveReadError(path=error_root, cause=e) from e
+            raise WorkspaceArchiveReadError(path=error_root, cause=e, retryable=False) from e
         except docker.errors.APIError as e:
-            raise WorkspaceArchiveReadError(path=error_root, cause=e) from e
+            status_code = getattr(e, "status_code", None)
+            retryable = (
+                True
+                if isinstance(status_code, int) and status_code in TRANSIENT_HTTP_STATUS_CODES
+                else None
+            )
+            raise WorkspaceArchiveReadError(
+                path=error_root,
+                cause=e,
+                retryable=retryable,
+            ) from e
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
         root = self._workspace_root_path()

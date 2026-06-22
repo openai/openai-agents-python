@@ -57,12 +57,18 @@ from agents.realtime.model_inputs import (
     RealtimeModelSendAudio,
     RealtimeModelSendInterrupt,
     RealtimeModelSendSessionUpdate,
+    RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
 )
 from agents.realtime.session import REJECTION_MESSAGE, RealtimeSession, _serialize_tool_output
 from agents.run_context import RunContextWrapper
 from agents.tool import FunctionTool, tool_namespace
 from agents.tool_context import ToolContext
+from agents.tool_guardrails import (
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrailData,
+    tool_input_guardrail,
+)
 
 
 class _DummyModel(RealtimeModel):
@@ -1054,6 +1060,105 @@ class TestToolCallExecution:
         assert tool_end_event.arguments == '{"param": "value"}'
 
     @pytest.mark.asyncio
+    async def test_duplicate_function_tool_call_id_is_ignored(
+        self, mock_model, mock_agent, mock_function_tool
+    ):
+        """Duplicate function call IDs should not re-run side-effecting tools."""
+        mock_agent.get_all_tools.return_value = [mock_function_tool]
+        session = RealtimeSession(mock_model, mock_agent, None)
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_duplicate", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+        await session._handle_tool_call(tool_call_event)
+
+        mock_function_tool.on_invoke_tool.assert_called_once()
+        assert len(mock_model.sent_tool_outputs) == 1
+
+    @pytest.mark.asyncio
+    async def test_function_tool_send_failure_retries_cached_output_without_rerun(
+        self, mock_agent, mock_function_tool
+    ):
+        """A post-execution send failure should retry output without rerunning the tool."""
+
+        class FailingToolOutputModel(MockRealtimeModel):
+            def __init__(self):
+                super().__init__()
+                self.fail_next_tool_output = True
+
+            async def send_event(self, event):
+                if isinstance(event, RealtimeModelSendToolOutput) and self.fail_next_tool_output:
+                    self.fail_next_tool_output = False
+                    raise RuntimeError("send failed")
+                await super().send_event(event)
+
+        mock_agent.get_all_tools.return_value = [mock_function_tool]
+        mock_model = FailingToolOutputModel()
+        session = RealtimeSession(mock_model, mock_agent, None)
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_retry_output", arguments="{}"
+        )
+
+        with pytest.raises(RuntimeError, match="send failed"):
+            await session._handle_tool_call(tool_call_event)
+
+        mock_function_tool.on_invoke_tool.assert_called_once()
+        assert len(mock_model.sent_tool_outputs) == 0
+
+        await session._handle_tool_call(tool_call_event)
+
+        mock_function_tool.on_invoke_tool.assert_called_once()
+        assert len(mock_model.sent_tool_outputs) == 1
+
+    @pytest.mark.asyncio
+    async def test_async_function_tool_send_failure_retries_cached_output_without_rerun(
+        self, mock_agent, mock_function_tool
+    ):
+        """The async task path should keep cached outputs retryable after send failure."""
+
+        class FailingToolOutputModel(MockRealtimeModel):
+            def __init__(self):
+                super().__init__()
+                self.fail_next_tool_output = True
+
+            async def send_event(self, event):
+                if isinstance(event, RealtimeModelSendToolOutput) and self.fail_next_tool_output:
+                    self.fail_next_tool_output = False
+                    raise RuntimeError("send failed")
+                await super().send_event(event)
+
+        mock_agent.get_all_tools.return_value = [mock_function_tool]
+        mock_model = FailingToolOutputModel()
+        session = RealtimeSession(mock_model, mock_agent, None)
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_async_retry_output", arguments="{}"
+        )
+
+        await session.on_event(tool_call_event)
+        tool_call_tasks = list(session._tool_call_tasks)
+        assert len(tool_call_tasks) == 1
+        task_results = await asyncio.gather(*tool_call_tasks, return_exceptions=True)
+        await asyncio.sleep(0)
+
+        assert len(task_results) == 1
+        assert isinstance(task_results[0], RuntimeError)
+        assert session._stored_exception is None
+        assert tool_call_event.call_id in session._pending_tool_outputs
+        mock_function_tool.on_invoke_tool.assert_called_once()
+        assert len(mock_model.sent_tool_outputs) == 0
+
+        await session.on_event(tool_call_event)
+        tool_call_tasks = list(session._tool_call_tasks)
+        assert len(tool_call_tasks) == 1
+        await asyncio.gather(*tool_call_tasks)
+
+        assert session._stored_exception is None
+        assert tool_call_event.call_id not in session._pending_tool_outputs
+        mock_function_tool.on_invoke_tool.assert_called_once()
+        assert len(mock_model.sent_tool_outputs) == 1
+
+    @pytest.mark.asyncio
     async def test_function_tool_timeout_returns_result_message(self, mock_model, mock_agent):
         async def invoke_slow_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
             await asyncio.sleep(0.2)
@@ -1287,6 +1392,42 @@ class TestToolCallExecution:
         assert session._current_agent == second_agent
 
     @pytest.mark.asyncio
+    async def test_handoff_session_update_preserves_custom_voice(self, mock_model):
+        custom_voice = {"id": "voice_test"}
+        first_agent = RealtimeAgent(
+            name="first_agent",
+            instructions="first_agent_instructions",
+            tools=[],
+            handoffs=[],
+        )
+        second_agent = RealtimeAgent(
+            name="second_agent",
+            instructions="second_agent_instructions",
+            tools=[],
+            handoffs=[],
+        )
+        first_agent.handoffs = [second_agent]
+        session = RealtimeSession(
+            mock_model,
+            first_agent,
+            None,
+            model_config={"initial_model_settings": {"voice": custom_voice}},
+        )
+
+        await session._handle_tool_call(
+            RealtimeModelToolCallEvent(
+                name=Handoff.default_tool_name(second_agent),
+                call_id="call_789",
+                arguments="{}",
+            )
+        )
+
+        session_update_event = mock_model.sent_events[0]
+        assert isinstance(session_update_event, RealtimeModelSendSessionUpdate)
+        assert session_update_event.session_settings["voice"] == custom_voice
+        assert mock_model.sent_events[1].start_response is True
+
+    @pytest.mark.asyncio
     async def test_unknown_tool_handling(self, mock_model, mock_agent, mock_function_tool):
         """Test that unknown tools complete the model call without starting a response."""
         # Set up agent to return different tool than what's called
@@ -1343,6 +1484,210 @@ class TestToolCallExecution:
         assert approval_event.tool == mock_function_tool
 
     @pytest.mark.asyncio
+    async def test_tool_input_guardrail_rejects_before_realtime_function_execution(
+        self, mock_model
+    ):
+        """Tool input guardrails should run before regular realtime function tool execution."""
+        executed = False
+
+        @tool_input_guardrail
+        def reject_guardrail(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+            return ToolGuardrailFunctionOutput.reject_content("blocked before execution")
+
+        async def invoke_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            nonlocal executed
+            executed = True
+            return "ok"
+
+        guarded_tool = FunctionTool(
+            name="test_function",
+            description="guarded",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_tool,
+            tool_input_guardrails=[reject_guardrail],
+        )
+        agent = RealtimeAgent(name="agent", tools=[guarded_tool])
+        session = RealtimeSession(mock_model, agent, None, run_config={"async_tool_calls": False})
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_guardrail_reject", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+
+        assert executed is False
+        assert len(mock_model.sent_tool_outputs) == 1
+        _sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_output == "blocked before execution"
+        assert start_response is True
+
+    @pytest.mark.asyncio
+    async def test_realtime_pending_approval_skips_tool_input_guardrails_by_default(
+        self, mock_model
+    ):
+        guardrail_runs = 0
+
+        @tool_input_guardrail
+        def count_guardrail(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+            nonlocal guardrail_runs
+            guardrail_runs += 1
+            return ToolGuardrailFunctionOutput.allow()
+
+        async def invoke_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            return "ok"
+
+        guarded_tool = FunctionTool(
+            name="test_function",
+            description="guarded",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_tool,
+            needs_approval=True,
+            tool_input_guardrails=[count_guardrail],
+        )
+        agent = RealtimeAgent(name="agent", tools=[guarded_tool])
+        session = RealtimeSession(mock_model, agent, None, run_config={"async_tool_calls": False})
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_guardrail_pending", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+
+        assert tool_call_event.call_id in session._pending_tool_calls
+        assert guardrail_runs == 0
+
+    @pytest.mark.asyncio
+    async def test_realtime_pre_approval_tool_input_guardrail_rejects_pending_approval(
+        self, mock_model
+    ):
+        executed = False
+
+        @tool_input_guardrail
+        def reject_guardrail(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+            return ToolGuardrailFunctionOutput.reject_content("blocked before approval")
+
+        async def invoke_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            nonlocal executed
+            executed = True
+            return "ok"
+
+        guarded_tool = FunctionTool(
+            name="test_function",
+            description="guarded",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_tool,
+            needs_approval=True,
+            tool_input_guardrails=[reject_guardrail],
+        )
+        agent = RealtimeAgent(name="agent", tools=[guarded_tool])
+        session = RealtimeSession(
+            mock_model,
+            agent,
+            None,
+            run_config={
+                "async_tool_calls": False,
+                "tool_execution": {"pre_approval_tool_input_guardrails": True},
+            },
+        )
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_pre_approval_reject", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+
+        assert executed is False
+        assert tool_call_event.call_id not in session._pending_tool_calls
+        assert len(mock_model.sent_tool_outputs) == 1
+        _sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_output == "blocked before approval"
+        assert start_response is True
+
+    @pytest.mark.asyncio
+    async def test_realtime_pre_approval_tool_input_guardrails_rerun_after_approval(
+        self, mock_model
+    ):
+        guardrail_runs = 0
+        executed = 0
+
+        @tool_input_guardrail
+        def count_guardrail(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+            nonlocal guardrail_runs
+            guardrail_runs += 1
+            return ToolGuardrailFunctionOutput.allow()
+
+        async def invoke_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            nonlocal executed
+            executed += 1
+            return "ok"
+
+        guarded_tool = FunctionTool(
+            name="test_function",
+            description="guarded",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_tool,
+            needs_approval=True,
+            tool_input_guardrails=[count_guardrail],
+        )
+        agent = RealtimeAgent(name="agent", tools=[guarded_tool])
+        session = RealtimeSession(
+            mock_model,
+            agent,
+            None,
+            run_config={
+                "async_tool_calls": False,
+                "tool_execution": {"pre_approval_tool_input_guardrails": True},
+            },
+        )
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_pre_approval_rerun", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+        assert guardrail_runs == 1
+        assert executed == 0
+
+        await session.approve_tool_call(tool_call_event.call_id)
+
+        assert guardrail_runs == 2
+        assert executed == 1
+        assert len(mock_model.sent_tool_outputs) == 1
+        _sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_output == "ok"
+        assert start_response is True
+
+    @pytest.mark.asyncio
+    async def test_duplicate_pending_approval_call_id_is_ignored_and_approval_runs_once(
+        self, mock_model, mock_agent, mock_function_tool
+    ):
+        """A duplicate approval-gated call should not enqueue another approval or run twice."""
+        mock_function_tool.needs_approval = True
+        mock_agent.get_all_tools.return_value = [mock_function_tool]
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={"async_tool_calls": False},
+        )
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_duplicate_approval", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+        await session._handle_tool_call(tool_call_event)
+
+        assert list(session._pending_tool_calls) == [tool_call_event.call_id]
+        approval_events = []
+        while not session._event_queue.empty():
+            event = await session._event_queue.get()
+            if isinstance(event, RealtimeToolApprovalRequired):
+                approval_events.append(event)
+        assert len(approval_events) == 1
+
+        await session.approve_tool_call(tool_call_event.call_id)
+        await session._handle_tool_call(tool_call_event)
+
+        mock_function_tool.on_invoke_tool.assert_called_once()
+        assert len(mock_model.sent_tool_outputs) == 1
+
+    @pytest.mark.asyncio
     async def test_approve_pending_tool_call_runs_tool(
         self, mock_model, mock_agent, mock_function_tool
     ):
@@ -1374,6 +1719,59 @@ class TestToolCallExecution:
 
         assert any(isinstance(ev, RealtimeToolStart) for ev in events)
         assert any(isinstance(ev, RealtimeToolEnd) for ev in events)
+
+    @pytest.mark.asyncio
+    async def test_async_approve_pending_tool_call_reserves_call_id_before_task_runs(
+        self, mock_model
+    ):
+        """A duplicate event after approval should not outrun the approved async task."""
+        approved_calls: list[str] = []
+        duplicate_calls: list[str] = []
+
+        async def invoke_approved_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            approved_calls.append("approved")
+            return "approved_result"
+
+        async def invoke_duplicate_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            duplicate_calls.append("duplicate")
+            return "duplicate_result"
+
+        approved_tool = FunctionTool(
+            name="test_function",
+            description="approved",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_approved_tool,
+            needs_approval=True,
+        )
+        duplicate_tool = FunctionTool(
+            name="test_function",
+            description="duplicate",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_duplicate_tool,
+            needs_approval=False,
+        )
+        approved_agent = RealtimeAgent(name="approved_agent", tools=[approved_tool])
+        duplicate_agent = RealtimeAgent(name="duplicate_agent", tools=[duplicate_tool])
+        session = RealtimeSession(mock_model, approved_agent, None)
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_async_approval_race", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+        await session.approve_tool_call(tool_call_event.call_id)
+
+        assert tool_call_event.call_id in session._active_tool_call_ids
+        await session._handle_tool_call(tool_call_event, agent_snapshot=duplicate_agent)
+
+        tool_call_tasks = list(session._tool_call_tasks)
+        assert len(tool_call_tasks) == 1
+        await asyncio.gather(*tool_call_tasks)
+
+        assert approved_calls == ["approved"]
+        assert duplicate_calls == []
+        assert len(mock_model.sent_tool_outputs) == 1
+        _sent_call, sent_output, _start_response = mock_model.sent_tool_outputs[0]
+        assert sent_output == "approved_result"
 
     @pytest.mark.asyncio
     async def test_always_approve_namespaced_tool_call_does_not_approve_bare_tool(self, mock_model):
@@ -1454,6 +1852,7 @@ class TestToolCallExecution:
 
         await session._handle_tool_call(tool_call_event)
         await session.reject_tool_call(tool_call_event.call_id)
+        await session._handle_tool_call(tool_call_event)
 
         assert mock_function_tool.on_invoke_tool.call_count == 0
         assert len(mock_model.sent_tool_outputs) == 1
@@ -1469,6 +1868,45 @@ class TestToolCallExecution:
         assert any(
             isinstance(ev, RealtimeToolEnd) and ev.output == REJECTION_MESSAGE for ev in events
         )
+
+    @pytest.mark.asyncio
+    async def test_reject_pending_tool_call_reserves_call_id_before_sending(
+        self, mock_agent, mock_function_tool
+    ):
+        """A duplicate event during rejection output sending should not emit a second output."""
+
+        class BlockingToolOutputModel(MockRealtimeModel):
+            def __init__(self):
+                super().__init__()
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.block_next_tool_output = True
+
+            async def send_event(self, event):
+                if isinstance(event, RealtimeModelSendToolOutput) and self.block_next_tool_output:
+                    self.block_next_tool_output = False
+                    self.started.set()
+                    await self.release.wait()
+                await super().send_event(event)
+
+        mock_function_tool.needs_approval = True
+        mock_agent.get_all_tools.return_value = [mock_function_tool]
+        mock_model = BlockingToolOutputModel()
+        session = RealtimeSession(mock_model, mock_agent, None)
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_reject_race", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+        reject_task = asyncio.create_task(session.reject_tool_call(tool_call_event.call_id))
+        await asyncio.wait_for(mock_model.started.wait(), timeout=1)
+
+        await session._handle_tool_call(tool_call_event)
+
+        mock_model.release.set()
+        await reject_task
+
+        assert len(mock_model.sent_tool_outputs) == 1
 
     @pytest.mark.asyncio
     async def test_reject_pending_tool_call_uses_run_level_formatter(

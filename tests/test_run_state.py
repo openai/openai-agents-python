@@ -29,7 +29,7 @@ from openai.types.responses.response_output_item import LocalShellCall, McpAppro
 from openai.types.responses.tool_param import Mcp
 from pydantic import BaseModel
 
-from agents import Agent, Model, ModelSettings, Runner, handoff, trace
+from agents import Agent, Model, ModelSettings, RunConfig, Runner, handoff, trace
 from agents.computer import Computer
 from agents.exceptions import UserError
 from agents.guardrail import (
@@ -56,6 +56,7 @@ from agents.items import (
     TResponseStreamEvent,
 )
 from agents.run_context import RunContextWrapper
+from agents.run_internal.agent_runner_helpers import resolve_trace_settings
 from agents.run_internal.items import run_items_to_input_items
 from agents.run_internal.run_loop import (
     NextStepInterruption,
@@ -722,6 +723,18 @@ class TestRunState:
             restored_without_key._trace_state.tracing_api_key_hash
             == default_json["trace"]["tracing_api_key_hash"]
         )
+
+        *_, restored_config = resolve_trace_settings(
+            run_state=restored_with_key,
+            run_config=RunConfig(),
+        )
+        assert restored_config is None
+
+        *_, explicit_config = resolve_trace_settings(
+            run_state=restored_with_key,
+            run_config=RunConfig(tracing={"api_key": "explicit-trace-key"}),
+        )
+        assert explicit_config == {"api_key": "explicit-trace-key"}
 
     async def test_throws_error_if_schema_version_is_missing_or_invalid(self):
         """Test that deserialization fails with missing or invalid schema version."""
@@ -1907,6 +1920,37 @@ class TestSerializationRoundTrip:
         assert isinstance(restored_item, ToolCallOutputItem)
         assert restored_item.raw_item == custom_tool_output
         assert restored_item.output == "custom result"
+
+    async def test_deserializes_tool_call_output_custom_data(self):
+        """SDK-only tool output custom data should survive RunState roundtrips."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ItemAgent")
+        state = make_state(agent, context=context, original_input="test", max_turns=5)
+
+        raw_tool_output = {
+            "type": "function_call_output",
+            "call_id": "call_custom_data",
+            "output": "result",
+        }
+        state._generated_items.append(
+            ToolCallOutputItem(
+                agent=agent,
+                raw_item=raw_tool_output,
+                output="result",
+                custom_data={"ui": {"kind": "chart"}, "ids": ["a", "b"]},
+            )
+        )
+
+        json_data = state.to_json()
+        serialized_item = json_data["generated_items"][0]
+        assert serialized_item["custom_data"] == {"ui": {"kind": "chart"}, "ids": ["a", "b"]}
+        assert "custom_data" not in serialized_item["raw_item"]
+
+        new_state = await RunState.from_json(agent, json_data)
+
+        restored_item = new_state._generated_items[0]
+        assert isinstance(restored_item, ToolCallOutputItem)
+        assert restored_item.custom_data == {"ui": {"kind": "chart"}, "ids": ["a", "b"]}
 
     async def test_serializes_original_input_with_function_call_output(self):
         """Test that original_input with function_call_output items is preserved."""
@@ -4623,6 +4667,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.7",
                 "1.8",
                 "1.9",
+                "1.10",
                 CURRENT_SCHEMA_VERSION,
             }
         )

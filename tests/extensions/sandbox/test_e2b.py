@@ -1456,6 +1456,7 @@ async def test_e2b_persist_workspace_raises_on_nonzero_snapshot_exit() -> None:
 
     assert exc_info.value.context["reason"] == "snapshot_nonzero_exit"
     assert exc_info.value.context["exit_code"] == 2
+    assert exc_info.value.retryable is False
 
 
 @pytest.mark.asyncio
@@ -2025,8 +2026,10 @@ async def test_e2b_pty_start_maps_timeout_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sandbox = _FakeE2BSandbox()
-    timeout_exc = e2b_module._import_e2b_exceptions().get("timeout")
-    if timeout_exc is None:
+    timeout_error_types = e2b_module._e2b_timeout_error_types()
+    if timeout_error_types:
+        timeout_exc = timeout_error_types[0]
+    else:
 
         class _FakeTimeout(Exception):
             pass
@@ -2034,8 +2037,8 @@ async def test_e2b_pty_start_maps_timeout_failures(
         timeout_exc = _FakeTimeout
         monkeypatch.setattr(
             e2b_module,
-            "_import_e2b_exceptions",
-            lambda: {"timeout": _FakeTimeout},
+            "_e2b_timeout_error_types",
+            lambda: (_FakeTimeout,),
         )
     sandbox.pty.create_error = timeout_exc("timed out")
     state = E2BSandboxSessionState(
@@ -2072,8 +2075,8 @@ async def test_e2b_exec_timeout_preserves_provider_details(
 
     monkeypatch.setattr(
         e2b_module,
-        "_import_e2b_exceptions",
-        lambda: {"timeout": _FakeTimeout},
+        "_e2b_timeout_error_types",
+        lambda: (_FakeTimeout,),
     )
 
     async def _raise_timeout(*args: object, **kwargs: object) -> object:
@@ -2122,10 +2125,10 @@ async def test_e2b_exec_maps_httpcore_read_timeout_to_timeout_error(
 
 
 @pytest.mark.asyncio
-async def test_e2b_exec_maps_missing_sandbox_timeout_to_transport_error(
+async def test_e2b_exec_maps_missing_sandbox_not_found_to_transport_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _FakeTimeout(Exception):
+    class _FakeNotFound(Exception):
         pass
 
     sandbox = _FakeE2BSandbox()
@@ -2140,21 +2143,94 @@ async def test_e2b_exec_maps_missing_sandbox_timeout_to_transport_error(
 
     monkeypatch.setattr(
         e2b_module,
-        "_import_e2b_exceptions",
-        lambda: {"timeout": _FakeTimeout},
+        "_e2b_non_retryable_error_types",
+        lambda: (_FakeNotFound,),
     )
+    monkeypatch.setattr(e2b_module, "_e2b_retryable_error_types", lambda: ())
+    monkeypatch.setattr(e2b_module, "_e2b_timeout_error_types", lambda: ())
 
-    async def _raise_timeout(*args: object, **kwargs: object) -> object:
+    async def _raise_not_found(*args: object, **kwargs: object) -> object:
         _ = (args, kwargs)
-        raise _FakeTimeout("The sandbox was not found: request failed")
+        raise _FakeNotFound("The sandbox was not found: request failed")
 
-    monkeypatch.setattr(e2b_module, "_sandbox_run_command", _raise_timeout)
+    monkeypatch.setattr(e2b_module, "_sandbox_run_command", _raise_not_found)
 
     with pytest.raises(ExecTransportError) as exc_info:
         await session._exec_internal("python3", "build.py", timeout=2.0)  # noqa: SLF001
 
     assert exc_info.value.context["provider_error"] == "The sandbox was not found: request failed"
-    assert exc_info.value.context["reason"] == "sandbox_not_found"
+    assert exc_info.value.context["reason"] == "_FakeNotFound"
+    assert exc_info.value.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_e2b_exec_marks_rate_limit_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeRateLimit(Exception):
+        pass
+
+    sandbox = _FakeE2BSandbox()
+    state = E2BSandboxSessionState(
+        session_id=uuid.uuid4(),
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=sandbox.sandbox_id,
+        workspace_root_ready=True,
+    )
+    session = E2BSandboxSession.from_state(state, sandbox=sandbox)
+
+    monkeypatch.setattr(e2b_module, "_e2b_retryable_error_types", lambda: (_FakeRateLimit,))
+    monkeypatch.setattr(e2b_module, "_e2b_non_retryable_error_types", lambda: ())
+    monkeypatch.setattr(e2b_module, "_e2b_timeout_error_types", lambda: ())
+
+    async def _raise_rate_limit(*args: object, **kwargs: object) -> object:
+        _ = (args, kwargs)
+        raise _FakeRateLimit("rate limit exceeded")
+
+    monkeypatch.setattr(e2b_module, "_sandbox_run_command", _raise_rate_limit)
+
+    with pytest.raises(ExecTransportError) as exc_info:
+        await session._exec_internal("python3", "build.py", timeout=2.0)  # noqa: SLF001
+
+    assert exc_info.value.context["provider_error"] == "rate limit exceeded"
+    assert exc_info.value.context["reason"] == "_FakeRateLimit"
+    assert exc_info.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_e2b_exec_marks_deterministic_provider_errors_non_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeGitAuth(Exception):
+        pass
+
+    sandbox = _FakeE2BSandbox()
+    state = E2BSandboxSessionState(
+        session_id=uuid.uuid4(),
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=sandbox.sandbox_id,
+        workspace_root_ready=True,
+    )
+    session = E2BSandboxSession.from_state(state, sandbox=sandbox)
+
+    monkeypatch.setattr(e2b_module, "_e2b_retryable_error_types", lambda: ())
+    monkeypatch.setattr(e2b_module, "_e2b_non_retryable_error_types", lambda: (_FakeGitAuth,))
+    monkeypatch.setattr(e2b_module, "_e2b_timeout_error_types", lambda: ())
+
+    async def _raise_git_auth(*args: object, **kwargs: object) -> object:
+        _ = (args, kwargs)
+        raise _FakeGitAuth("git authentication failed")
+
+    monkeypatch.setattr(e2b_module, "_sandbox_run_command", _raise_git_auth)
+
+    with pytest.raises(ExecTransportError) as exc_info:
+        await session._exec_internal("python3", "build.py", timeout=2.0)  # noqa: SLF001
+
+    assert exc_info.value.context["provider_error"] == "git authentication failed"
+    assert exc_info.value.context["reason"] == "_FakeGitAuth"
+    assert exc_info.value.retryable is False
 
 
 @pytest.mark.asyncio
@@ -2212,20 +2288,22 @@ async def test_e2b_pty_start_maps_httpcore_read_timeout_to_timeout_error() -> No
 
 
 @pytest.mark.asyncio
-async def test_e2b_pty_start_maps_missing_sandbox_timeout_to_transport_error(
+async def test_e2b_pty_start_maps_missing_sandbox_not_found_to_transport_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _FakeTimeout(Exception):
+    class _FakeNotFound(Exception):
         pass
 
     monkeypatch.setattr(
         e2b_module,
-        "_import_e2b_exceptions",
-        lambda: {"timeout": _FakeTimeout},
+        "_e2b_non_retryable_error_types",
+        lambda: (_FakeNotFound,),
     )
+    monkeypatch.setattr(e2b_module, "_e2b_retryable_error_types", lambda: ())
+    monkeypatch.setattr(e2b_module, "_e2b_timeout_error_types", lambda: ())
 
     sandbox = _FakeE2BSandbox()
-    sandbox.pty.create_error = _FakeTimeout("The sandbox was not found: request failed")
+    sandbox.pty.create_error = _FakeNotFound("The sandbox was not found: request failed")
     state = E2BSandboxSessionState(
         session_id=uuid.uuid4(),
         manifest=Manifest(root="/workspace"),
@@ -2239,4 +2317,5 @@ async def test_e2b_pty_start_maps_missing_sandbox_timeout_to_transport_error(
         await session.pty_exec_start("python3", shell=False, tty=True, timeout=2.0)
 
     assert exc_info.value.context["provider_error"] == "The sandbox was not found: request failed"
-    assert exc_info.value.context["reason"] == "sandbox_not_found"
+    assert exc_info.value.context["reason"] == "_FakeNotFound"
+    assert exc_info.value.retryable is False

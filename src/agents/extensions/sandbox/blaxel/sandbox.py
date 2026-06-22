@@ -63,6 +63,7 @@ from ....sandbox.util.retry import (
     TRANSIENT_HTTP_STATUS_CODES,
     exception_chain_contains_type,
     exception_chain_has_status_code,
+    iter_exception_chain,
     retry_async,
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
@@ -70,6 +71,85 @@ from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, s
 
 DEFAULT_BLAXEL_WORKSPACE_ROOT = "/workspace"
 logger = logging.getLogger(__name__)
+
+
+# Blaxel documents structured API error codes and retryability at:
+# https://docs.blaxel.ai/troubleshooting/error-codes
+_BLAXEL_ERROR_CODE_RETRYABLE: dict[str, bool] = {
+    "ROUTE_NOT_FOUND": False,  # 404
+    "WORKLOAD_NOT_FOUND": False,  # 404
+    "WORKSPACE_NOT_FOUND": False,  # 404
+    "WORKLOAD_UNAVAILABLE": True,  # 404
+    "AUTHENTICATION_REQUIRED": False,  # 401
+    "AUTHENTICATION_FAILED": False,  # 401
+    "FORBIDDEN": False,  # 403
+    "BAD_REQUEST": False,  # 400
+    "USAGE_LIMIT_EXCEEDED": False,  # 402
+    "POLICY_VIOLATION": False,  # varies
+}
+
+
+def _coerce_mapping(value: object) -> dict[str, object] | None:
+    if isinstance(value, dict):
+        return {str(key): item for key, item in value.items()}
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(decoded, dict):
+            return {str(key): item for key, item in decoded.items()}
+    return None
+
+
+def _blaxel_error_payload(error: BaseException) -> dict[str, object] | None:
+    for candidate in iter_exception_chain(error):
+        for attr in ("body", "payload"):
+            payload = _coerce_mapping(getattr(candidate, attr, None))
+            if payload is not None:
+                return payload
+
+        response = getattr(candidate, "response", None)
+        response_json = getattr(response, "json", None)
+        if callable(response_json):
+            try:
+                payload = _coerce_mapping(response_json())
+            except Exception:
+                payload = None
+            if payload is not None:
+                return payload
+
+        response_text = getattr(response, "text", None)
+        payload = _coerce_mapping(response_text)
+        if payload is not None:
+            return payload
+
+    return None
+
+
+def _blaxel_structured_error(error: BaseException) -> dict[str, object] | None:
+    payload = _blaxel_error_payload(error)
+    if payload is None:
+        return None
+    nested = payload.get("error")
+    if isinstance(nested, dict):
+        return {str(key): value for key, value in nested.items()}
+    return payload
+
+
+def _blaxel_provider_retryability(error: BaseException) -> tuple[bool | None, str | None]:
+    structured_error = _blaxel_structured_error(error)
+    if structured_error is not None:
+        retryable = structured_error.get("retryable")
+        if isinstance(retryable, bool):
+            code = structured_error.get("code")
+            return retryable, str(code) if isinstance(code, str) and code else None
+
+        code = structured_error.get("code")
+        if isinstance(code, str):
+            return _BLAXEL_ERROR_CODE_RETRYABLE.get(code), code
+
+    return None, None
 
 
 def _blaxel_provider_error_detail(error: BaseException) -> str | None:
@@ -91,15 +171,26 @@ def _blaxel_exec_transport_error(
 ) -> ExecTransportError:
     detail = _blaxel_provider_error_detail(cause)
     context: dict[str, object] = {"backend": "blaxel"}
+    retryable, provider_error_code = _blaxel_provider_retryability(cause)
+    if provider_error_code is not None:
+        context["provider_error_code"] = provider_error_code
     if detail:
         context["provider_error"] = detail
     status = getattr(cause, "status_code", None) or getattr(cause, "status", None)
     if isinstance(status, int):
         context["http_status"] = status
+        if retryable is None and status in TRANSIENT_HTTP_STATUS_CODES:
+            retryable = True
     message = "Blaxel exec failed"
     if detail:
         message = f"{message}: {detail}"
-    return ExecTransportError(command=command, context=context, cause=cause, message=message)
+    return ExecTransportError(
+        command=command,
+        context=context,
+        cause=cause,
+        message=message,
+        retryable=retryable,
+    )
 
 
 def _import_blaxel_sdk() -> Any:
@@ -583,6 +674,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
                             "reason": "tar_failed",
                             "output": result.stderr.decode("utf-8", errors="replace"),
                         },
+                        retryable=False,
                     )
                 raw_data: Any = await self._sandbox.fs.read_binary(tar_path)
                 if isinstance(raw_data, str):

@@ -411,6 +411,10 @@ async def _collect_runs_by_approval(
             rejection_items.append(rejection_item)
             continue
 
+        if approval_status is True:
+            approved_runs.append(run)
+            continue
+
         needs_approval = True
         if needs_approval_checker:
             try:
@@ -424,25 +428,22 @@ async def _collect_runs_by_approval(
             approved_runs.append(run)
             continue
 
-        if approval_status is True:
-            approved_runs.append(run)
-        else:
-            function_tool = get_mapping_or_attr(run, "function_tool")
-            pending_item = existing_pending or ToolApprovalItem(
-                agent=agent,
-                raw_item=get_mapping_or_attr(run, "tool_call"),
-                tool_name=tool_name,
-                tool_namespace=get_tool_call_namespace(get_mapping_or_attr(run, "tool_call")),
-                tool_origin=(
-                    get_function_tool_origin(function_tool)
-                    if isinstance(function_tool, FunctionTool)
-                    else None
-                ),
-                tool_lookup_key=get_function_tool_lookup_key_for_call(
-                    get_mapping_or_attr(run, "tool_call")
-                ),
-            )
-            pending_interruption_adder(pending_item)
+        function_tool = get_mapping_or_attr(run, "function_tool")
+        pending_item = existing_pending or ToolApprovalItem(
+            agent=agent,
+            raw_item=get_mapping_or_attr(run, "tool_call"),
+            tool_name=tool_name,
+            tool_namespace=get_tool_call_namespace(get_mapping_or_attr(run, "tool_call")),
+            tool_origin=(
+                get_function_tool_origin(function_tool)
+                if isinstance(function_tool, FunctionTool)
+                else None
+            ),
+            tool_lookup_key=get_function_tool_lookup_key_for_call(
+                get_mapping_or_attr(run, "tool_call")
+            ),
+        )
+        pending_interruption_adder(pending_item)
 
     return approved_runs, rejection_items
 
