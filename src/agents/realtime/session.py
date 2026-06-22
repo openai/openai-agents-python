@@ -26,6 +26,7 @@ from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, Tool, invok
 from ..tool_context import ToolContext
 from ..tool_guardrails import ToolInputGuardrailData
 from ..util._approvals import evaluate_needs_approval_setting
+from ._tool_filtering import filter_enabled_tools
 from ._tool_validation import validate_realtime_tool_names
 from .agent import RealtimeAgent
 from .config import RealtimeRunConfig, RealtimeSessionModelSettings, RealtimeUserInput
@@ -1437,25 +1438,10 @@ class RealtimeSession(RealtimeModelListener):
         self,
         snapshot: _RealtimeDispatchSnapshot,
     ) -> _RealtimeDispatchSnapshot:
-        async def _check_tool_enabled(tool: Tool) -> bool:
-            if not isinstance(tool, FunctionTool):
-                return True
-
-            attr = tool.is_enabled
-            if isinstance(attr, bool):
-                return attr
-            result = attr(self._context_wrapper, snapshot.agent)
-            if inspect.isawaitable(result):
-                return bool(await result)
-            return bool(result)
-
-        tool_results, handoffs = await asyncio.gather(
-            asyncio.gather(*(_check_tool_enabled(tool) for tool in snapshot.tools)),
+        tools, handoffs = await asyncio.gather(
+            filter_enabled_tools(snapshot.tools, self._context_wrapper, snapshot.agent),
             filter_enabled_handoffs(snapshot.handoffs, self._context_wrapper, snapshot.agent),
         )
-        tools = [
-            tool for tool, enabled in zip(snapshot.tools, tool_results, strict=False) if enabled
-        ]
         return _RealtimeDispatchSnapshot(
             agent=snapshot.agent,
             tools=tuple(tools),
@@ -1485,6 +1471,12 @@ class RealtimeSession(RealtimeModelListener):
         # Apply starting settings (from model config) next
         if starting_settings:
             updated_settings.update(starting_settings)
+            if "tools" in starting_settings:
+                updated_settings["tools"] = await filter_enabled_tools(
+                    updated_settings.get("tools") or [],
+                    self._context_wrapper,
+                    agent,
+                )
             if "handoffs" in starting_settings:
                 updated_settings["handoffs"] = await filter_enabled_handoffs(
                     updated_settings.get("handoffs") or [],

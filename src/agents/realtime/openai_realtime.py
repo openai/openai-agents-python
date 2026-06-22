@@ -100,6 +100,7 @@ from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper, TContext
 from ..version import __version__
+from ._tool_filtering import filter_enabled_tools, filter_statically_enabled_tools
 from ._tool_validation import validate_realtime_tool_names
 from .agent import RealtimeAgent
 from .config import (
@@ -434,6 +435,12 @@ async def _build_model_settings_from_agent(
 
     if starting_settings:
         updated_settings.update(starting_settings)
+        if "tools" in starting_settings:
+            updated_settings["tools"] = await filter_enabled_tools(
+                updated_settings.get("tools") or [],
+                context_wrapper,
+                agent,
+            )
         if "handoffs" in starting_settings:
             updated_settings["handoffs"] = await filter_enabled_handoffs(
                 updated_settings.get("handoffs") or [],
@@ -1523,8 +1530,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self, tools: list[Tool], handoffs: list[Handoff]
     ) -> list[OpenAISessionFunction]:
         converted_tools: list[OpenAISessionFunction] = []
+        enabled_tools = filter_statically_enabled_tools(tools)
         enabled_handoffs = [handoff for handoff in handoffs if handoff.is_enabled is not False]
-        for tool in tools:
+        for tool in enabled_tools:
             if not isinstance(tool, FunctionTool):
                 raise UserError(f"Tool {tool.name} is unsupported. Must be a function tool.")
             ensure_function_tool_supports_responses_only_features(
@@ -1540,7 +1548,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 )
             )
 
-        validate_realtime_tool_names(tools, enabled_handoffs)
+        validate_realtime_tool_names(enabled_tools, enabled_handoffs)
 
         for handoff in enabled_handoffs:
             converted_tools.append(
@@ -1590,6 +1598,12 @@ class OpenAIRealtimeSIPModel(OpenAIRealtimeWebSocketModel):
 
         if overrides:
             merged_settings.update(overrides)
+            if "tools" in overrides:
+                merged_settings["tools"] = await filter_enabled_tools(
+                    merged_settings.get("tools") or [],
+                    context_wrapper,
+                    agent,
+                )
             if "handoffs" in overrides:
                 merged_settings["handoffs"] = await filter_enabled_handoffs(
                     merged_settings.get("handoffs") or [],

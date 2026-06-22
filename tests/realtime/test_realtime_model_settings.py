@@ -21,13 +21,21 @@ from agents.realtime.openai_realtime import (
     _collect_enabled_handoffs,
 )
 from agents.run_context import RunContextWrapper
-from agents.tool import function_tool
+from agents.tool import FunctionTool, function_tool
 
 
 def _disabled_billing_realtime_handoff(*, is_enabled: Any = False) -> Handoff[Any, Any]:
     return realtime_handoff(
         RealtimeAgent(name="billing"),
         tool_name_override="transfer_to_billing",
+        is_enabled=is_enabled,
+    )
+
+
+def _disabled_billing_realtime_tool(*, is_enabled: Any = False) -> FunctionTool:
+    return function_tool(
+        lambda: "ok",
+        name_override="transfer_to_billing",
         is_enabled=is_enabled,
     )
 
@@ -98,6 +106,48 @@ async def test_build_model_settings_filters_disabled_starting_handoff_name_confl
 
     assert merged["tools"] == [tool]
     assert merged["handoffs"] == []
+
+
+@pytest.mark.asyncio
+async def test_build_model_settings_filters_disabled_starting_tool_name_conflict():
+    disabled_tool = _disabled_billing_realtime_tool()
+    handoff = _disabled_billing_realtime_handoff(is_enabled=True)
+    agent = RealtimeAgent(name="parent", handoffs=[handoff])
+
+    merged = await _build_model_settings_from_agent(
+        agent=agent,
+        context_wrapper=RunContextWrapper(None),
+        base_settings={},
+        starting_settings={"tools": [disabled_tool]},
+        run_config=None,
+    )
+
+    assert merged["tools"] == []
+    assert merged["handoffs"] == [handoff]
+
+
+@pytest.mark.asyncio
+async def test_build_model_settings_evaluates_starting_tool_is_enabled_callable():
+    calls: list[tuple[RunContextWrapper[Any], RealtimeAgent[Any]]] = []
+
+    async def is_enabled(ctx: RunContextWrapper[Any], agent_arg: RealtimeAgent[Any]) -> bool:
+        calls.append((ctx, agent_arg))
+        return False
+
+    disabled_tool = _disabled_billing_realtime_tool(is_enabled=is_enabled)
+    agent = RealtimeAgent(name="parent")
+    context_wrapper = RunContextWrapper(None)
+
+    merged = await _build_model_settings_from_agent(
+        agent=agent,
+        context_wrapper=context_wrapper,
+        base_settings={},
+        starting_settings={"tools": [disabled_tool]},
+        run_config=None,
+    )
+
+    assert merged["tools"] == []
+    assert calls == [(context_wrapper, agent)]
 
 
 @pytest.mark.asyncio
@@ -203,6 +253,23 @@ async def test_sip_initial_session_payload_filters_disabled_initial_model_settin
 
 
 @pytest.mark.asyncio
+async def test_sip_initial_session_payload_filters_disabled_initial_model_settings_tool():
+    disabled_tool = _disabled_billing_realtime_tool()
+    agent = RealtimeAgent(
+        name="parent",
+        handoffs=[_disabled_billing_realtime_handoff(is_enabled=True)],
+    )
+
+    payload = await OpenAIRealtimeSIPModel.build_initial_session_payload(
+        agent,
+        model_config={"initial_model_settings": {"tools": [disabled_tool]}},
+    )
+
+    tool_names = [getattr(tool, "name", None) for tool in payload.tools or []]
+    assert tool_names == ["transfer_to_billing"]
+
+
+@pytest.mark.asyncio
 async def test_sip_initial_session_payload_filters_disabled_override_handoff():
     tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
     disabled_handoff = _disabled_billing_realtime_handoff()
@@ -215,6 +282,23 @@ async def test_sip_initial_session_payload_filters_disabled_override_handoff():
 
     tool_names = [getattr(tool, "name", None) for tool in payload.tools or []]
     assert tool_names.count("transfer_to_billing") == 1
+
+
+@pytest.mark.asyncio
+async def test_sip_initial_session_payload_filters_disabled_override_tool():
+    disabled_tool = _disabled_billing_realtime_tool()
+    agent = RealtimeAgent(
+        name="parent",
+        handoffs=[_disabled_billing_realtime_handoff(is_enabled=True)],
+    )
+
+    payload = await OpenAIRealtimeSIPModel.build_initial_session_payload(
+        agent,
+        overrides={"tools": [disabled_tool]},
+    )
+
+    tool_names = [getattr(tool, "name", None) for tool in payload.tools or []]
+    assert tool_names == ["transfer_to_billing"]
 
 
 @pytest.mark.asyncio
