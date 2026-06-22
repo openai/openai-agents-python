@@ -128,7 +128,7 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.10"
+CURRENT_SCHEMA_VERSION = "1.11"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -145,6 +145,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.8": "Persists SDK-generated prompt cache keys across resume flows.",
     "1.9": "Persists pending custom tool calls and tool origin metadata across resume flows.",
     "1.10": "Allows serialized RunState snapshots to disable max_turns with null.",
+    "1.11": "Persists SDK-only custom data on tool output items across resume flows.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -908,6 +909,9 @@ class RunState(Generic[TContext, TAgent]):
         tool_origin = getattr(item, "tool_origin", None)
         if isinstance(tool_origin, ToolOrigin):
             result["tool_origin"] = tool_origin.to_json_dict()
+        custom_data = getattr(item, "custom_data", None)
+        if isinstance(custom_data, dict) and custom_data:
+            result["custom_data"] = _ensure_json_compatible(custom_data)
 
         return result
 
@@ -3192,12 +3196,19 @@ def _deserialize_items(
                 raw_item_output = _deserialize_tool_call_output_raw_item(normalized_raw_item)
                 if raw_item_output is None:
                     continue
+                stored_custom_data = item_data.get("custom_data")
+                custom_data = (
+                    stored_custom_data
+                    if isinstance(stored_custom_data, dict) and stored_custom_data
+                    else None
+                )
                 result.append(
                     ToolCallOutputItem(
                         agent=agent,
                         raw_item=raw_item_output,
                         output=item_data.get("output", ""),
                         tool_origin=_deserialize_tool_origin(item_data.get("tool_origin")),
+                        custom_data=custom_data,
                     )
                 )
 
