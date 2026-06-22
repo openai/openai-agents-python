@@ -105,6 +105,21 @@ class _FailingConnectModel(_DummyModel):
         raise self.exc
 
 
+def _agent_with_ambiguous_realtime_tools(name: str = "invalid_agent") -> RealtimeAgent:
+    tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
+    target = RealtimeAgent(name=f"{name}_target")
+    handoff = Handoff(
+        tool_name="transfer_to_billing",
+        tool_description="Transfer to billing",
+        input_json_schema={},
+        on_invoke_handoff=AsyncMock(return_value=target),
+        input_filter=None,
+        agent_name=target.name,
+        is_enabled=True,
+    )
+    return RealtimeAgent(name=name, tools=[tool], handoffs=[handoff])
+
+
 @pytest.mark.asyncio
 async def test_property_and_send_helpers_and_enter_alias():
     model = _DummyModel()
@@ -1514,6 +1529,42 @@ class TestToolCallExecution:
 
         # Verify agent was updated
         assert session._current_agent == second_agent
+
+    @pytest.mark.asyncio
+    async def test_handoff_validation_failure_keeps_current_agent(self, mock_model):
+        first_agent = RealtimeAgent(
+            name="first_agent",
+            instructions="first_agent_instructions",
+            tools=[],
+            handoffs=[],
+        )
+        invalid_agent = _agent_with_ambiguous_realtime_tools("invalid_agent")
+        invalid_handoff = Handoff(
+            tool_name="transfer_to_invalid_agent",
+            tool_description="Transfer to invalid agent",
+            input_json_schema={},
+            on_invoke_handoff=AsyncMock(return_value=invalid_agent),
+            input_filter=None,
+            agent_name=invalid_agent.name,
+            is_enabled=True,
+        )
+        first_agent.handoffs = [invalid_handoff]
+        session = RealtimeSession(mock_model, first_agent, None)
+
+        with pytest.raises(UserError, match="Duplicate Realtime tool"):
+            await session._handle_tool_call(
+                RealtimeModelToolCallEvent(
+                    name=invalid_handoff.tool_name,
+                    call_id="call_invalid",
+                    arguments="{}",
+                )
+            )
+
+        assert session._current_agent is first_agent
+        assert mock_model.sent_events == []
+        assert mock_model.sent_tool_outputs == []
+        assert "call_invalid" not in session._active_tool_call_ids
+        assert "call_invalid" not in session._completed_tool_call_ids
 
     @pytest.mark.asyncio
     async def test_handoff_session_update_preserves_custom_voice(self, mock_model):
@@ -3089,6 +3140,18 @@ class TestUpdateAgentFunctionality:
 
         # Check that the current agent and session settings are updated
         assert session._current_agent == second_agent
+
+    @pytest.mark.asyncio
+    async def test_update_agent_validation_failure_keeps_current_agent(self, mock_model):
+        first_agent = RealtimeAgent(name="first", instructions="first", tools=[], handoffs=[])
+        invalid_agent = _agent_with_ambiguous_realtime_tools()
+        session = RealtimeSession(mock_model, first_agent, None)
+
+        with pytest.raises(UserError, match="Duplicate Realtime tool"):
+            await session.update_agent(invalid_agent)
+
+        assert session._current_agent is first_agent
+        assert mock_model.sent_events == []
 
 
 class TestTranscriptPreservation:
