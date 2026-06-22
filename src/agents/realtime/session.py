@@ -80,6 +80,7 @@ class _RealtimeSessionClosedSentinel:
 
 
 _REALTIME_SESSION_CLOSED_SENTINEL = _RealtimeSessionClosedSentinel()
+_CLEANUP_BACKGROUND_TASK_TIMEOUT = 5.0
 
 
 def _serialize_tool_output(output: Any) -> str:
@@ -473,7 +474,7 @@ class RealtimeSession(RealtimeModelListener):
 
     async def _put_event(self, event: RealtimeSessionEvent) -> None:
         """Put an event into the queue."""
-        if self._closed:
+        if self._closing or self._closed:
             return
         await self._event_queue.put(event)
 
@@ -541,6 +542,8 @@ class RealtimeSession(RealtimeModelListener):
         )
 
         needs_approval = await self._function_needs_approval(function_tool, tool_call)
+        if self._closing or self._closed:
+            return None
         if not needs_approval:
             return True
 
@@ -561,6 +564,8 @@ class RealtimeSession(RealtimeModelListener):
                 tool_call=tool_call,
                 agent=agent,
             )
+            if self._closing or self._closed:
+                return None
             if rejected_message is not None:
                 return self._build_realtime_tool_output(
                     tool=function_tool,
@@ -569,6 +574,8 @@ class RealtimeSession(RealtimeModelListener):
                     output=rejected_message,
                 )
 
+        if self._closing or self._closed:
+            return None
         self._pending_tool_calls[tool_call.call_id] = (
             tool_call,
             agent,
@@ -675,17 +682,27 @@ class RealtimeSession(RealtimeModelListener):
         )
 
     async def _send_tool_output_completion(self, pending_output: _PendingToolOutput) -> None:
+        if self._closing or self._closed:
+            return
+
         call_id = pending_output.tool_call.call_id
         self._pending_tool_outputs[call_id] = pending_output
         try:
             await self._send_pending_tool_output(pending_output)
         except Exception as exc:
+            if self._closing or self._closed:
+                self._pending_tool_outputs.pop(call_id, None)
+                return
             raise _PendingToolOutputSendError(call_id, exc) from exc
         self._pending_tool_outputs.pop(call_id, None)
 
     async def _send_pending_tool_output(self, pending_output: _PendingToolOutput) -> None:
+        if self._closing or self._closed:
+            return
         if pending_output.session_update is not None:
             await self._model.send_event(pending_output.session_update)
+        if self._closing or self._closed:
+            return
         await self._model.send_event(
             RealtimeModelSendToolOutput(
                 tool_call=pending_output.tool_call,
@@ -693,6 +710,8 @@ class RealtimeSession(RealtimeModelListener):
                 start_response=pending_output.start_response,
             )
         )
+        if self._closing or self._closed:
+            return
         if pending_output.tool_end_event is not None:
             await self._put_event(pending_output.tool_end_event)
 
@@ -826,6 +845,9 @@ class RealtimeSession(RealtimeModelListener):
                 agent.get_all_tools(self._context_wrapper),
                 self._get_handoffs(agent, self._context_wrapper),
             )
+            if self._closing or self._closed:
+                return
+
             function_map = {tool.name: tool for tool in tools if isinstance(tool, FunctionTool)}
             handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
 
@@ -834,6 +856,8 @@ class RealtimeSession(RealtimeModelListener):
                 approval_status = await self._maybe_request_tool_approval(
                     event, function_tool=func_tool, agent=agent
                 )
+                if self._closing or self._closed:
+                    return
                 if isinstance(approval_status, _PendingToolOutput):
                     await self._send_tool_output_completion(approval_status)
                     mark_completed = True
@@ -850,6 +874,8 @@ class RealtimeSession(RealtimeModelListener):
                     tool_call=event,
                     agent=agent,
                 )
+                if self._closing or self._closed:
+                    return
                 if rejected_message is not None:
                     await self._send_tool_output_completion(
                         self._build_realtime_tool_output(
@@ -870,6 +896,8 @@ class RealtimeSession(RealtimeModelListener):
                         arguments=event.arguments,
                     )
                 )
+                if self._closing or self._closed:
+                    return
 
                 tool_context = ToolContext(
                     context=self._context_wrapper.context,
@@ -884,6 +912,8 @@ class RealtimeSession(RealtimeModelListener):
                     context=tool_context,
                     arguments=event.arguments,
                 )
+                if self._closing or self._closed:
+                    return
 
                 await self._send_tool_output_completion(
                     _PendingToolOutput(
@@ -913,6 +943,8 @@ class RealtimeSession(RealtimeModelListener):
 
                 # Execute the handoff to get the new agent
                 result = await handoff.on_invoke_handoff(self._context_wrapper, event.arguments)
+                if self._closing or self._closed:
+                    return
                 if not isinstance(result, RealtimeAgent):
                     raise UserError(
                         f"Handoff {handoff.tool_name} returned invalid result: {type(result)}"
@@ -929,6 +961,8 @@ class RealtimeSession(RealtimeModelListener):
                     starting_settings=None,
                     agent=self._current_agent,
                 )
+                if self._closing or self._closed:
+                    return
 
                 # Send handoff event
                 await self._put_event(
@@ -972,6 +1006,8 @@ class RealtimeSession(RealtimeModelListener):
             self._finish_tool_call(event.call_id, mark_completed=mark_completed)
 
     def _begin_tool_call(self, call_id: str, *, from_pending_approval: bool) -> bool:
+        if self._closing or self._closed:
+            return False
         if call_id in self._active_tool_call_ids or call_id in self._completed_tool_call_ids:
             return False
         if not from_pending_approval and call_id in self._pending_tool_calls:
@@ -981,7 +1017,7 @@ class RealtimeSession(RealtimeModelListener):
 
     def _finish_tool_call(self, call_id: str, *, mark_completed: bool) -> None:
         self._active_tool_call_ids.discard(call_id)
-        if mark_completed:
+        if mark_completed and not self._closing and not self._closed:
             self._completed_tool_call_ids.add(call_id)
 
     @classmethod
@@ -1197,7 +1233,7 @@ class RealtimeSession(RealtimeModelListener):
 
         if triggered_results:
             # Double-check: bail if already interrupted for this response
-            if response_id in self._interrupted_response_ids:
+            if response_id in self._interrupted_response_ids or self._closing or self._closed:
                 return False
 
             # Mark as interrupted immediately (before any awaits) to minimize race window
@@ -1213,9 +1249,13 @@ class RealtimeSession(RealtimeModelListener):
             )
 
             # Interrupt the model
+            if self._closing or self._closed:
+                return False
             await self._model.send_event(RealtimeModelSendInterrupt(force_response_cancel=True))
 
             # Send guardrail triggered message
+            if self._closing or self._closed:
+                return False
             guardrail_names = [result.guardrail.get_name() for result in triggered_results]
             await self._model.send_event(
                 RealtimeModelSendUserInput(
@@ -1243,6 +1283,10 @@ class RealtimeSession(RealtimeModelListener):
         # Remove from tracking set
         self._guardrail_tasks.discard(task)
 
+        if self._closing or self._closed:
+            self._retrieve_task_exception(task)
+            return
+
         # Check for exceptions and propagate as events
         if not task.cancelled():
             exception = task.exception()
@@ -1257,28 +1301,88 @@ class RealtimeSession(RealtimeModelListener):
                     )
                 )
 
-    async def _cancel_and_await_tasks(self, tasks: set[asyncio.Task[Any]]) -> None:
-        current_task = asyncio.current_task()
+    def _retrieve_task_exception(self, task: asyncio.Task[Any]) -> None:
+        if task.cancelled():
+            return
+        task.exception()
 
-        while tasks:
-            tasks_to_await: list[asyncio.Task[Any]] = []
-            for task in list(tasks):
+    def _discard_task_from_sets(
+        self,
+        task: asyncio.Task[Any],
+        task_sets: Sequence[set[asyncio.Task[Any]]],
+    ) -> None:
+        for task_set in task_sets:
+            task_set.discard(task)
+
+    def _cancel_and_detach_remaining_tasks(
+        self,
+        task_sets: Sequence[set[asyncio.Task[Any]]],
+        current_task: asyncio.Task[Any] | None,
+    ) -> int:
+        detached = 0
+        for task_set in task_sets:
+            for task in list(task_set):
                 if task is current_task:
-                    tasks.discard(task)
+                    task_set.discard(task)
                     continue
                 if not task.done():
                     task.cancel()
-                tasks_to_await.append(task)
+                task_set.discard(task)
+                detached += 1
+        return detached
+
+    async def _cancel_and_await_tasks(
+        self,
+        task_sets: Sequence[set[asyncio.Task[Any]]],
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        timeout = _CLEANUP_BACKGROUND_TASK_TIMEOUT if timeout is None else timeout
+        current_task = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        while any(task_sets):
+            tasks_to_await: list[asyncio.Task[Any]] = []
+            for task_set in task_sets:
+                for task in list(task_set):
+                    if task is current_task:
+                        task_set.discard(task)
+                        continue
+                    if not task.done():
+                        task.cancel()
+                    tasks_to_await.append(task)
 
             if not tasks_to_await:
                 return
 
-            await asyncio.gather(*tasks_to_await, return_exceptions=True)
-            for task in tasks_to_await:
-                tasks.discard(task)
+            remaining_timeout = deadline - loop.time()
+            if remaining_timeout <= 0:
+                detached = self._cancel_and_detach_remaining_tasks(task_sets, current_task)
+                if detached:
+                    logger.warning(
+                        "Timed out waiting for %d realtime background task(s) to cancel.",
+                        detached,
+                    )
+                return
+
+            done, pending = await asyncio.wait(tasks_to_await, timeout=remaining_timeout)
+            for task in done:
+                self._discard_task_from_sets(task, task_sets)
+                self._retrieve_task_exception(task)
+
+            if pending:
+                for task in pending:
+                    self._discard_task_from_sets(task, task_sets)
+                detached = self._cancel_and_detach_remaining_tasks(task_sets, current_task)
+                logger.warning(
+                    "Timed out waiting for %d realtime background task(s) to cancel.",
+                    len(pending) + detached,
+                )
+                return
 
     async def _cleanup_guardrail_tasks(self) -> None:
-        await self._cancel_and_await_tasks(self._guardrail_tasks)
+        await self._cancel_and_await_tasks((self._guardrail_tasks,))
 
     def _enqueue_tool_call_task(
         self,
@@ -1306,6 +1410,10 @@ class RealtimeSession(RealtimeModelListener):
 
     def _on_tool_call_task_done(self, task: asyncio.Task[Any]) -> None:
         self._tool_call_tasks.discard(task)
+
+        if self._closing or self._closed:
+            self._retrieve_task_exception(task)
+            return
 
         if task.cancelled():
             return
@@ -1350,7 +1458,7 @@ class RealtimeSession(RealtimeModelListener):
         )
 
     async def _cleanup_tool_call_tasks(self) -> None:
-        await self._cancel_and_await_tasks(self._tool_call_tasks)
+        await self._cancel_and_await_tasks((self._tool_call_tasks,))
 
     def _wake_event_iterators(self) -> None:
         for _ in range(self._event_iterator_waiters):
@@ -1367,9 +1475,8 @@ class RealtimeSession(RealtimeModelListener):
         # Remove ourselves as a listener
         self._model.remove_listener(self)
 
-        # Cancel and cleanup guardrail tasks
-        await self._cleanup_guardrail_tasks()
-        await self._cleanup_tool_call_tasks()
+        # Cancel and cleanup guardrail/tool-call tasks together so one group cannot block the other.
+        await self._cancel_and_await_tasks((self._guardrail_tasks, self._tool_call_tasks))
 
         # Close the model connection
         await self._model.close()
@@ -1377,6 +1484,8 @@ class RealtimeSession(RealtimeModelListener):
         # Clear pending approval tracking
         self._pending_tool_calls.clear()
         self._pending_tool_outputs.clear()
+        self._active_tool_call_ids.clear()
+        self._completed_tool_call_ids.clear()
 
         # Mark as closed
         self._closed = True

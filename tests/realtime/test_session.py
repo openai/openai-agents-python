@@ -158,22 +158,28 @@ async def test_aiter_exits_waiting_iterators_when_session_closes():
 
 
 @pytest.mark.asyncio
-async def test_cleanup_awaits_cancelled_background_tasks():
-    model = _DummyModel()
-    agent = RealtimeAgent(name="agent")
-    session = RealtimeSession(model, agent, None)
-
+async def test_cleanup_cancels_task_groups_concurrently_and_awaits_finalizers():
     guardrail_started = asyncio.Event()
     guardrail_finished = asyncio.Event()
     tool_started = asyncio.Event()
+    tool_cancelled = asyncio.Event()
     tool_finished = asyncio.Event()
+
+    class CloseAssertingModel(_DummyModel):
+        async def close(self):
+            assert guardrail_finished.is_set()
+            assert tool_finished.is_set()
+
+    model = CloseAssertingModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
 
     async def guardrail_task():
         guardrail_started.set()
         try:
             await asyncio.Event().wait()
         finally:
-            await asyncio.sleep(0)
+            await tool_cancelled.wait()
             guardrail_finished.set()
 
     async def tool_call_task():
@@ -181,7 +187,7 @@ async def test_cleanup_awaits_cancelled_background_tasks():
         try:
             await asyncio.Event().wait()
         finally:
-            await asyncio.sleep(0)
+            tool_cancelled.set()
             tool_finished.set()
 
     guardrail = asyncio.create_task(guardrail_task())
@@ -192,12 +198,121 @@ async def test_cleanup_awaits_cancelled_background_tasks():
     await guardrail_started.wait()
     await tool_started.wait()
 
-    await session._cleanup()
+    await asyncio.wait_for(session._cleanup(), timeout=1)
 
     assert guardrail.done()
     assert tool_call.done()
     assert guardrail_finished.is_set()
     assert tool_finished.is_set()
+    assert session._guardrail_tasks == set()
+    assert session._tool_call_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_timeout_bounds_cancellation_resistant_task():
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+
+    task_started = asyncio.Event()
+    cancel_seen = asyncio.Event()
+    release_task = asyncio.Event()
+
+    async def cancellation_resistant_task():
+        task_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancel_seen.set()
+            await release_task.wait()
+            raise
+
+    task = asyncio.create_task(cancellation_resistant_task())
+    session._guardrail_tasks.add(task)
+
+    await task_started.wait()
+
+    with pytest.MonkeyPatch().context() as m:
+        m.setattr("agents.realtime.session._CLEANUP_BACKGROUND_TASK_TIMEOUT", 0.01)
+        await asyncio.wait_for(session._cleanup(), timeout=1)
+
+    await asyncio.wait_for(cancel_seen.wait(), timeout=1)
+    assert session._closed
+    assert session._guardrail_tasks == set()
+    assert not task.done()
+
+    release_task.set()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_skips_tracked_task_that_calls_close():
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+
+    close_finished = asyncio.Event()
+
+    async def tracked_task():
+        await session.close()
+        close_finished.set()
+
+    task = asyncio.create_task(tracked_task())
+    session._tool_call_tasks.add(task)
+    task.add_done_callback(session._on_tool_call_task_done)
+
+    await asyncio.wait_for(close_finished.wait(), timeout=1)
+    await task
+
+    assert session._closed
+    assert session._tool_call_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_late_task_failures_after_cleanup_timeout_do_not_mutate_session():
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+
+    guardrail_started = asyncio.Event()
+    guardrail_cancelled = asyncio.Event()
+    tool_started = asyncio.Event()
+    tool_cancelled = asyncio.Event()
+    release_tasks = asyncio.Event()
+
+    async def fail_after_timeout(started: asyncio.Event, cancelled: asyncio.Event):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release_tasks.wait()
+            raise RuntimeError("late failure") from None
+
+    guardrail = asyncio.create_task(fail_after_timeout(guardrail_started, guardrail_cancelled))
+    tool_call = asyncio.create_task(fail_after_timeout(tool_started, tool_cancelled))
+    session._guardrail_tasks.add(guardrail)
+    session._tool_call_tasks.add(tool_call)
+    guardrail.add_done_callback(session._on_guardrail_task_done)
+    tool_call.add_done_callback(session._on_tool_call_task_done)
+
+    await guardrail_started.wait()
+    await tool_started.wait()
+
+    with pytest.MonkeyPatch().context() as m:
+        m.setattr("agents.realtime.session._CLEANUP_BACKGROUND_TASK_TIMEOUT", 0.01)
+        await asyncio.wait_for(session._cleanup(), timeout=1)
+
+    await asyncio.wait_for(guardrail_cancelled.wait(), timeout=1)
+    await asyncio.wait_for(tool_cancelled.wait(), timeout=1)
+
+    release_tasks.set()
+    results = await asyncio.gather(guardrail, tool_call, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert all(isinstance(result, RuntimeError) for result in results)
+    assert session._stored_exception is None
+    assert session._event_queue.empty()
     assert session._guardrail_tasks == set()
     assert session._tool_call_tasks == set()
 
