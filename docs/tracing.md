@@ -188,7 +188,7 @@ await Runner.run(
 ```
 
 ## Additional notes
-- View free traces at Openai Traces dashboard.
+- View free traces at OpenAI Traces dashboard.
 
 
 ## Ecosystem integrations
@@ -223,3 +223,4 @@ The following community and vendor integrations support the OpenAI Agents SDK tr
 -   [HoneyHive](https://docs.honeyhive.ai/v2/integrations/openai-agents)
 -   [Asqav](https://www.asqav.com/docs/integrations#openai-agents)
 -   [Datadog](https://docs.datadoghq.com/llm_observability/instrumentation/auto_instrumentation/?tab=python#openai-agents)
+-   [Latitude](https://docs.latitude.so/telemetry/frameworks/openai-agents)

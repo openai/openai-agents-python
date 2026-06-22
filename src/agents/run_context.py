@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic
 
@@ -225,6 +226,14 @@ class RunContextWrapper(Generic[TContext]):
             return record.rejection_messages.get(call_id)
         return None
 
+    @staticmethod
+    def _restore_approval_value(value: Any) -> bool | list[str]:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, str)]
+        return []
+
     def get_rejection_message(
         self,
         tool_name: str,
@@ -435,13 +444,17 @@ class RunContextWrapper(Generic[TContext]):
                 break
         return status
 
-    def _rebuild_approvals(self, approvals: dict[str, dict[str, Any]]) -> None:
+    def _rebuild_approvals(self, approvals: Any) -> None:
         """Restore approvals from serialized state."""
         self._approvals = {}
+        if not isinstance(approvals, Mapping):
+            return
         for tool_name, record_dict in approvals.items():
+            if not isinstance(tool_name, str) or not isinstance(record_dict, dict):
+                continue
             record = _ApprovalRecord()
-            record.approved = record_dict.get("approved", [])
-            record.rejected = record_dict.get("rejected", [])
+            record.approved = self._restore_approval_value(record_dict.get("approved", []))
+            record.rejected = self._restore_approval_value(record_dict.get("rejected", []))
             rejection_messages = record_dict.get("rejection_messages", {})
             if isinstance(rejection_messages, dict):
                 record.rejection_messages = {

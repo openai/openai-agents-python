@@ -53,7 +53,10 @@ from agents.run_internal.run_loop import (
     ToolRunShellCall,
     extract_tool_call_id,
 )
-from agents.run_internal.tool_planning import _select_function_tool_runs_for_resume
+from agents.run_internal.tool_planning import (
+    _collect_runs_by_approval,
+    _select_function_tool_runs_for_resume,
+)
 from agents.run_state import RunState as RunStateClass
 from agents.tool import HostedMCPTool
 from agents.usage import Usage
@@ -1303,6 +1306,69 @@ async def test_resume_skips_needs_approval_checker_when_status_resolved() -> Non
     assert checker_calls == []
     assert [run.tool_call.call_id for run in selected] == ["approved-call"]
     assert rejections == ["rejected-call"]
+
+
+@pytest.mark.asyncio
+async def test_collect_runs_by_approval_skips_checker_when_status_resolved() -> None:
+    """Approved/rejected shell calls must not invoke needs_approval_checker.
+
+    Mirrors #3229 for non-function tools: when the approval status is already
+    True or False, a user-supplied checker (which may have side effects, hit
+    the network, or raise) must be short-circuited.
+    """
+    shell_tool = ShellTool(executor=lambda _req: "ok", needs_approval=True)
+    approved_call = make_shell_call("approved-shell")
+    rejected_call = make_shell_call("rejected-shell")
+    agent = Agent(name="agent")
+    context_wrapper = make_context_wrapper()
+    context_wrapper.approve_tool(
+        ToolApprovalItem(
+            agent=agent,
+            raw_item=cast(dict[str, Any], approved_call),
+            tool_name=shell_tool.name,
+        )
+    )
+    context_wrapper.reject_tool(
+        ToolApprovalItem(
+            agent=agent,
+            raw_item=cast(dict[str, Any], rejected_call),
+            tool_name=shell_tool.name,
+        )
+    )
+
+    runs = [
+        ToolRunShellCall(tool_call=approved_call, shell_tool=shell_tool),
+        ToolRunShellCall(tool_call=rejected_call, shell_tool=shell_tool),
+    ]
+    checker_calls: list[str] = []
+
+    async def _needs_approval(run: ToolRunShellCall) -> bool:
+        checker_calls.append(run.tool_call["call_id"])
+        raise AssertionError("checker must not run for resolved approvals")
+
+    async def _build_rejection(run: ToolRunShellCall, call_id: str) -> RunItem:
+        return ToolCallOutputItem(
+            output="rejected",
+            raw_item={"type": "function_call_output", "call_id": call_id, "output": "rejected"},
+            agent=agent,
+        )
+
+    approved, rejections = await _collect_runs_by_approval(
+        runs,
+        call_id_extractor=lambda run: run.tool_call["call_id"],
+        tool_name_resolver=lambda run: run.shell_tool.name,
+        rejection_builder=_build_rejection,
+        context_wrapper=context_wrapper,
+        approval_items_by_call_id={},
+        agent=agent,
+        pending_interruption_adder=lambda _item: None,
+        needs_approval_checker=_needs_approval,
+        output_exists_checker=lambda _call_id: False,
+    )
+
+    assert checker_calls == []
+    assert approved == [runs[0]]
+    assert len(rejections) == 1
 
 
 @pytest.mark.asyncio

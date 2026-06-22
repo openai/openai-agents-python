@@ -1,5 +1,6 @@
 import inspect
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -79,6 +80,31 @@ async def test_multiple_handoffs_setup():
 
     assert handoff_objects[0].agent_name == agent_1.name
     assert handoff_objects[1].agent_name == agent_2.name
+
+
+def test_default_handoff_tool_name_allows_whitespace_without_warning(
+    caplog: pytest.LogCaptureFixture,
+):
+    agent = Agent(name="Refund agent")
+
+    with caplog.at_level(logging.WARNING):
+        tool_name = Handoff.default_tool_name(agent)
+
+    assert tool_name == "transfer_to_refund_agent"
+    assert not caplog.records
+
+
+def test_default_handoff_tool_name_warns_for_non_whitespace_invalid_characters(
+    caplog: pytest.LogCaptureFixture,
+):
+    agent = Agent(name="Refund/agent")
+
+    with caplog.at_level(logging.WARNING):
+        tool_name = Handoff.default_tool_name(agent)
+
+    assert tool_name == "transfer_to_refund_agent"
+    assert len(caplog.records) == 1
+    assert "contains invalid characters for function calling" in caplog.records[0].message
 
 
 @pytest.mark.asyncio

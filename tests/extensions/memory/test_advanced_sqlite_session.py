@@ -80,6 +80,52 @@ def create_mock_run_result(usage: Usage | None = None, agent: Agent | None = Non
     )
 
 
+class FailingOnceStructureMetadataSession(AdvancedSQLiteSession):
+    """Advanced session test double that fails the next structure metadata write."""
+
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.fail_structure_metadata_once = True
+
+    def _insert_structure_metadata(
+        self,
+        conn: Any,
+        items: list[TResponseInputItem],
+    ) -> None:
+        if self.fail_structure_metadata_once:
+            self.fail_structure_metadata_once = False
+            raise RuntimeError("structure metadata failed")
+        super()._insert_structure_metadata(conn, items)
+
+
+class PartiallyFailingStructureMetadataSession(AdvancedSQLiteSession):
+    """Advanced session test double that fails after writing one structure row."""
+
+    def _insert_structure_metadata(
+        self,
+        conn: Any,
+        items: list[TResponseInputItem],
+    ) -> None:
+        cursor = conn.execute(
+            f"SELECT id FROM {self.messages_table} WHERE session_id = ? ORDER BY id ASC LIMIT 1",
+            (self.session_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("no inserted message id found")
+
+        conn.execute(
+            """
+            INSERT INTO message_structure
+            (session_id, message_id, branch_id, message_type, sequence_number,
+             user_turn_number, branch_turn_number, tool_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (self.session_id, row[0], self._current_branch_id, "user", 1, 1, 1, None),
+        )
+        raise RuntimeError("structure metadata failed after partial write")
+
+
 async def test_advanced_session_basic_functionality(agent: Agent):
     """Test basic AdvancedSQLiteSession functionality."""
     session_id = "advanced_test"
@@ -145,6 +191,133 @@ async def test_advanced_session_respects_custom_table_names():
     assert await session.get_items(branch_id="main") == items
 
     session.close()
+
+
+async def test_add_items_rolls_back_messages_when_structure_metadata_fails():
+    """Failed structure metadata writes should not leave invisible message rows."""
+    session = FailingOnceStructureMetadataSession(
+        session_id="advanced_add_items_rollback",
+        create_tables=True,
+    )
+    items: list[TResponseInputItem] = [{"role": "user", "content": "not saved"}]
+
+    try:
+        with pytest.raises(RuntimeError, match="structure metadata failed"):
+            await session.add_items(items)
+
+        assert await session.get_items() == []
+
+        with session._locked_connection() as conn:
+            message_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+            structure_count = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+
+        assert message_count == 0
+        assert structure_count == 0
+    finally:
+        session.close()
+
+
+async def test_add_items_can_retry_after_structure_metadata_failure():
+    """Retrying after a metadata failure should persist the batch exactly once."""
+    session = FailingOnceStructureMetadataSession(
+        session_id="advanced_add_items_retry",
+        create_tables=True,
+    )
+    items: list[TResponseInputItem] = [{"role": "user", "content": "saved once"}]
+
+    try:
+        with pytest.raises(RuntimeError, match="structure metadata failed"):
+            await session.add_items(items)
+
+        await session.add_items(items)
+
+        assert await session.get_items() == items
+
+        with session._locked_connection() as conn:
+            message_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+            structure_count = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+
+        assert message_count == 1
+        assert structure_count == 1
+    finally:
+        session.close()
+
+
+async def test_add_items_failure_preserves_existing_history():
+    """A failed batch should not roll back or hide previously committed messages."""
+    session = FailingOnceStructureMetadataSession(
+        session_id="advanced_add_items_existing_history",
+        create_tables=True,
+    )
+    existing_items: list[TResponseInputItem] = [{"role": "user", "content": "already saved"}]
+    failed_items: list[TResponseInputItem] = [{"role": "assistant", "content": "not saved"}]
+
+    try:
+        session.fail_structure_metadata_once = False
+        await session.add_items(existing_items)
+
+        session.fail_structure_metadata_once = True
+        with pytest.raises(RuntimeError, match="structure metadata failed"):
+            await session.add_items(failed_items)
+
+        assert await session.get_items() == existing_items
+
+        with session._locked_connection() as conn:
+            message_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+            structure_count = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+
+        assert message_count == 1
+        assert structure_count == 1
+    finally:
+        session.close()
+
+
+async def test_add_items_rolls_back_partial_structure_metadata_write():
+    """Partial metadata writes should roll back with the message rows in the same batch."""
+    session = PartiallyFailingStructureMetadataSession(
+        session_id="advanced_add_items_partial_metadata",
+        create_tables=True,
+    )
+    items: list[TResponseInputItem] = [{"role": "user", "content": "not saved"}]
+
+    try:
+        with pytest.raises(RuntimeError, match="structure metadata failed after partial write"):
+            await session.add_items(items)
+
+        assert await session.get_items() == []
+
+        with session._locked_connection() as conn:
+            message_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+            structure_count = conn.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+
+        assert message_count == 0
+        assert structure_count == 0
+    finally:
+        session.close()
 
 
 async def test_message_structure_tracking(agent: Agent):
@@ -440,6 +613,168 @@ async def test_branching_functionality(agent: Agent):
     assert branches_after_delete[0]["branch_id"] == "main"
 
     session.close()
+
+
+async def test_delete_branch_removes_branch_only_messages():
+    """Deleting a branch should not leave unreferenced branch-only messages behind."""
+    session_id = "branch_delete_cleanup_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    main_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "content": "First answer"},
+        {"role": "user", "content": "Second question"},
+        {"role": "assistant", "content": "Second answer"},
+    ]
+    await session.add_items(main_items)
+
+    await session.create_branch_from_turn(2, "cleanup_branch")
+    branch_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Branch-only question"},
+        {"role": "assistant", "content": "Branch-only answer"},
+    ]
+    await session.add_items(branch_items)
+
+    await session.delete_branch("cleanup_branch", force=True)
+
+    with session._locked_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT message_data
+            FROM {session.messages_table}
+            WHERE session_id = ?
+            ORDER BY id
+            """,
+            (session.session_id,),
+        ).fetchall()
+
+    contents = [json.loads(message_data)["content"] for (message_data,) in rows]
+    assert contents == [
+        "First question",
+        "First answer",
+        "Second question",
+        "Second answer",
+    ]
+    assert await session.get_items(branch_id="main") == main_items
+
+    session.close()
+
+
+async def test_delete_branch_keeps_messages_still_referenced_by_another_branch():
+    """Deleting one branch should keep messages inherited by a surviving branch."""
+    session = AdvancedSQLiteSession(
+        session_id="branch_delete_shared_descendant_test",
+        create_tables=True,
+    )
+
+    main_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Main first question"},
+        {"role": "assistant", "content": "Main first answer"},
+        {"role": "user", "content": "Main second question"},
+        {"role": "assistant", "content": "Main second answer"},
+    ]
+    branch_a_shared_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Branch A shared question"},
+        {"role": "assistant", "content": "Branch A shared answer"},
+    ]
+    branch_a_only_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Branch A only question"},
+        {"role": "assistant", "content": "Branch A only answer"},
+    ]
+
+    try:
+        await session.add_items(main_items)
+        await session.create_branch_from_turn(2, "branch_a")
+        await session.add_items(branch_a_shared_items + branch_a_only_items)
+
+        await session.create_branch_from_turn(3, "branch_b")
+        await session.delete_branch("branch_a")
+
+        with session._locked_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT message_data
+                FROM {session.messages_table}
+                WHERE session_id = ?
+                ORDER BY id
+                """,
+                (session.session_id,),
+            ).fetchall()
+
+        contents = [json.loads(message_data)["content"] for (message_data,) in rows]
+        assert "Branch A shared question" in contents
+        assert "Branch A shared answer" in contents
+        assert "Branch A only question" not in contents
+        assert "Branch A only answer" not in contents
+        assert await session.get_items(branch_id="branch_b") == [
+            *main_items[:2],
+            *branch_a_shared_items,
+        ]
+    finally:
+        session.close()
+
+
+async def test_orphan_cleanup_uses_set_based_delete_for_many_messages():
+    """Orphan cleanup should not build one DELETE parameter per orphaned row."""
+
+    class RecordingCursor:
+        def __init__(self, cursor: Any, connection: "RecordingConnection") -> None:
+            self._cursor = cursor
+            self._connection = connection
+
+        @property
+        def rowcount(self) -> int:
+            return cast(int, self._cursor.rowcount)
+
+        def execute(self, sql: str, parameters: Any = None) -> Any:
+            normalized_sql = " ".join(sql.split()).upper()
+            if normalized_sql.startswith("DELETE"):
+                self._connection.delete_parameter_counts.append(len(parameters or ()))
+            if parameters is None:
+                return self._cursor.execute(sql)
+            return self._cursor.execute(sql, parameters)
+
+        def fetchall(self) -> Any:
+            return self._cursor.fetchall()
+
+        def close(self) -> None:
+            self._cursor.close()
+
+    class RecordingConnection:
+        def __init__(self, conn: Any) -> None:
+            self._conn = conn
+            self.delete_parameter_counts: list[int] = []
+
+        def cursor(self) -> RecordingCursor:
+            return RecordingCursor(self._conn.cursor(), self)
+
+    session = AdvancedSQLiteSession(
+        session_id="branch_delete_many_orphans_cleanup",
+        create_tables=True,
+    )
+    orphan_items: list[TResponseInputItem] = [
+        {"role": "user", "content": f"orphan {i}"} for i in range(1200)
+    ]
+
+    try:
+        with session._locked_connection() as conn:
+            session._insert_items(conn, orphan_items)
+            conn.commit()
+
+            recording_conn = RecordingConnection(conn)
+            deleted_count = session._cleanup_orphaned_messages_sync(cast(Any, recording_conn))
+            conn.commit()
+
+            remaining_count = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+
+        assert deleted_count == len(orphan_items)
+        assert remaining_count == 0
+        assert recording_conn.delete_parameter_counts == [2]
+    finally:
+        session.close()
 
 
 async def test_get_conversation_turns():

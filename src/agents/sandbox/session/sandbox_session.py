@@ -274,6 +274,9 @@ class SandboxSession(BaseSandboxSession):
     def normalize_path(self, path: Path | str, *, for_write: bool = False) -> Path:
         return self._inner.normalize_path(path, for_write=for_write)
 
+    def register_persist_workspace_skip_path(self, path: Path | str) -> Path:
+        return self._inner.register_persist_workspace_skip_path(path)
+
     def supports_pty(self) -> bool:
         return self._inner.supports_pty()
 
@@ -348,6 +351,9 @@ class SandboxSession(BaseSandboxSession):
             if isinstance(exc, SandboxError):
                 trace_data["error_code"] = exc.error_code
                 error_data["error_code"] = exc.error_code
+                if exc.retryable is not None:
+                    trace_data["error_retryable"] = exc.retryable
+                    error_data["error_retryable"] = exc.retryable
             span.set_error({"message": type(exc).__name__, "data": error_data})
             return
         if not ok:
@@ -474,6 +480,7 @@ class SandboxSession(BaseSandboxSession):
             event.error_message = str(exc)
             if isinstance(exc, SandboxError):
                 event.error_code = exc.error_code
+                event.error_retryable = exc.retryable
 
         # Preserve raw bytes so Instrumentation can apply per-op/per-sink policies later.
         # Decoding here would force one global formatting decision before sink-specific redaction

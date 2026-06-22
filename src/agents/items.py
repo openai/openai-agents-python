@@ -403,6 +403,13 @@ class ToolCallOutputItem(RunItemBase[Any]):
     tool_origin: ToolOrigin | None = None
     """Optional metadata describing the source of a function-tool-backed item."""
 
+    custom_data: dict[str, Any] | None = None
+    """SDK-only custom data attached to this tool output.
+
+    This data is not part of ``raw_item`` and is not sent back to the model when the output item is
+    replayed as input.
+    """
+
     @property
     def call_id(self) -> str | None:
         """Return the call identifier from the raw item, if available."""

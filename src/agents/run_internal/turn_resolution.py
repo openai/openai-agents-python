@@ -66,7 +66,7 @@ from ..items import (
 )
 from ..lifecycle import RunHooks
 from ..logger import logger
-from ..run_config import RunConfig
+from ..run_config import RunConfig, ToolErrorFormatterArgs
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
 from ..run_state import RunState
@@ -116,6 +116,7 @@ from .run_steps import (
     ToolRunComputerAction,
     ToolRunCustom,
     ToolRunFunction,
+    ToolRunFunctionNotFound,
     ToolRunHandoff,
     ToolRunLocalShellCall,
     ToolRunMCPApprovalRequest,
@@ -207,6 +208,77 @@ async def _maybe_finalize_from_tool_results(
         tool_input_guardrail_results=tool_input_guardrail_results,
         tool_output_guardrail_results=tool_output_guardrail_results,
     )
+
+
+def _default_tool_not_found_message(tool_name: str) -> str:
+    return f"Tool '{tool_name}' not found."
+
+
+async def _resolve_tool_not_found_message(
+    *,
+    context_wrapper: RunContextWrapper[Any],
+    run_config: RunConfig,
+    tool_name: str,
+    call_id: str,
+) -> str:
+    default_message = _default_tool_not_found_message(tool_name)
+    formatter = run_config.tool_error_formatter
+    if formatter is None:
+        return default_message
+
+    try:
+        maybe_message = formatter(
+            ToolErrorFormatterArgs(
+                kind="tool_not_found",
+                tool_type="function",
+                tool_name=tool_name,
+                call_id=call_id,
+                default_message=default_message,
+                run_context=context_wrapper,
+            )
+        )
+        message = await maybe_message if inspect.isawaitable(maybe_message) else maybe_message
+    except Exception as exc:
+        logger.error("Tool error formatter failed for missing tool %s: %s", tool_name, exc)
+        return default_message
+
+    if message is None:
+        return default_message
+
+    if not isinstance(message, str):
+        logger.error(
+            "Tool error formatter returned non-string for missing tool %s: %s",
+            tool_name,
+            type(message).__name__,
+        )
+        return default_message
+
+    return message
+
+
+async def _build_tool_not_found_output_items(
+    *,
+    agent: Agent[Any],
+    calls: Sequence[ToolRunFunctionNotFound],
+    context_wrapper: RunContextWrapper[Any],
+    run_config: RunConfig,
+) -> list[RunItem]:
+    items: list[RunItem] = []
+    for call in calls:
+        message = await _resolve_tool_not_found_message(
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+            tool_name=call.tool_name,
+            call_id=call.tool_call.call_id,
+        )
+        items.append(
+            ToolCallOutputItem(
+                output=message,
+                raw_item=ItemHelpers.tool_call_output_item(call.tool_call, message),
+                agent=agent,
+            )
+        )
+    return items
 
 
 async def run_final_output_hooks(
@@ -613,6 +685,14 @@ async def execute_tools_and_side_effects(
             shell_results=shell_results,
             apply_patch_results=apply_patch_results,
             local_shell_results=local_shell_results,
+        )
+    )
+    new_step_items.extend(
+        await _build_tool_not_found_output_items(
+            agent=public_agent,
+            calls=processed_response.function_tools_not_found,
+            context_wrapper=context_wrapper,
+            run_config=run_config,
         )
     )
 
@@ -1476,6 +1556,7 @@ def process_model_response(
     output_schema: AgentOutputSchemaBase | None,
     handoffs: list[Handoff],
     existing_items: Sequence[RunItem] | None = None,
+    run_config: RunConfig | None = None,
 ) -> ProcessedResponse:
     items: list[RunItem] = []
 
@@ -1487,6 +1568,7 @@ def process_model_response(
     shell_calls = []
     apply_patch_calls = []
     mcp_approval_requests = []
+    function_tools_not_found = []
     tools_used: list[str] = []
     handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
     function_map = build_function_tool_lookup_map(
@@ -1873,6 +1955,15 @@ def process_model_response(
                         data={"tool_name": qualified_output_name or output.name},
                     )
                 )
+                if run_config is not None and (
+                    run_config.tool_not_found_behavior == "return_error_to_model"
+                ):
+                    tool_name = qualified_output_name or output.name
+                    items.append(ToolCallItem(raw_item=output, agent=agent))
+                    function_tools_not_found.append(
+                        ToolRunFunctionNotFound(tool_call=output, tool_name=tool_name)
+                    )
+                    continue
                 error = (
                     f"Tool {qualified_output_name or output.name} not found in agent {agent.name}"
                 )
@@ -1906,6 +1997,7 @@ def process_model_response(
         tools_used=tools_used,
         mcp_approval_requests=mcp_approval_requests,
         interruptions=[],
+        function_tools_not_found=function_tools_not_found,
     )
 
 
@@ -1935,6 +2027,7 @@ async def get_single_step_result_from_response(
         output_schema=output_schema,
         handoffs=handoffs,
         existing_items=pre_step_items,
+        run_config=run_config,
     )
 
     if before_side_effects is not None:

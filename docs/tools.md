@@ -243,7 +243,7 @@ agent = Agent(
 
 ## Function tools
 
-You can use any Python function as a tool. The Agents SDK will setup the tool automatically:
+You can use any Python function as a tool. The Agents SDK will set up the tool automatically:
 
 -   The name of the tool will be the name of the Python function (or you can provide a name)
 -   Tool description will be taken from the docstring of the function (or you can provide a description)
@@ -561,7 +561,7 @@ french_agent = Agent(
 orchestrator_agent = Agent(
     name="orchestrator_agent",
     instructions=(
-        "You are a translation agent. You use the tools given to you to translate."
+        "You are a translation agent. You use the tools given to you to translate. "
         "If asked for multiple translations, you call the relevant tools."
     ),
     tools=[
