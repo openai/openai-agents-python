@@ -206,6 +206,8 @@ agent = RealtimeAgent(
 
 Function tools can require human approval before execution. When that happens, the session emits `tool_approval_required` and pauses the tool run until you call `approve_tool_call()` or `reject_tool_call()`.
 
+If the tool also has input guardrails, those guardrails run immediately before execution after approval. To run them before the approval event is emitted, create the runner with `RealtimeRunner(..., config={"tool_execution": {"pre_approval_tool_input_guardrails": True}})`. Calls that pass this pre-approval check are still checked again after approval before execution.
+
 ```python
 async for event in session:
     if event.type == "tool_approval_required":
@@ -242,7 +244,7 @@ Bare `RealtimeAgent` handoffs are auto-wrapped, and `realtime_handoff(...)` lets
 
 ### Guardrails
 
-Only output guardrails are supported for realtime agents. They run on debounced transcript accumulation rather than on every partial token, and they emit `guardrail_tripped` instead of raising an exception.
+Realtime agents support output guardrails on agent responses and input guardrails on function-tool calls. Output guardrails run on debounced transcript accumulation rather than on every partial token, and they emit `guardrail_tripped` instead of raising an exception.
 
 ```python
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail

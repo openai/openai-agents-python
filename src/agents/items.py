@@ -808,7 +808,10 @@ class ItemHelpers:
             maybe_converted_output_list = [
                 cls._maybe_get_output_as_structured_function_output(item) for item in output
             ]
-            if all(maybe_converted_output_list):
+            # An empty list/tuple has no structured items; ``all([])`` is ``True``,
+            # so guard against it to avoid emitting an empty structured-output list
+            # (which would drop the tool result) and stringify instead.
+            if maybe_converted_output_list and all(maybe_converted_output_list):
                 return [
                     cls._convert_single_tool_output_pydantic_model(item)
                     for item in maybe_converted_output_list

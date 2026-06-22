@@ -6,7 +6,7 @@ search:
 
 ## 사전 준비 사항
 
-Agents SDK의 기본 [빠른 시작 지침](../quickstart.md)을 따르고 가상 환경을 설정했는지 확인하세요. 그런 다음 SDK에서 선택 사항인 음성 의존성을 설치하세요.
+Agents SDK의 기본 [빠른 시작 지침](../quickstart.md)을 따르고 가상 환경을 설정했는지 확인하세요. 그런 다음 SDK의 선택적 음성 의존성을 설치합니다.
 
 ```bash
 pip install 'openai-agents[voice]'
@@ -14,11 +14,11 @@ pip install 'openai-agents[voice]'
 
 ## 개념
 
-알아두어야 할 주요 개념은 [`VoicePipeline`][agents.voice.pipeline.VoicePipeline]이며, 이는 3단계 프로세스입니다.
+알아두어야 할 핵심 개념은 [`VoicePipeline`][agents.voice.pipeline.VoicePipeline]이며, 이는 3단계 프로세스입니다.
 
-1. 음성-텍스트 변환 모델을 실행하여 오디오를 텍스트로 변환합니다.
-2. 일반적으로 에이전트형 워크플로인 코드를 실행하여 결과를 생성합니다.
-3. 텍스트-음성 변환 모델을 실행하여 결과 텍스트를 다시 오디오로 변환합니다.
+1. 음성을 텍스트로 변환하기 위해 음성-텍스트 변환 모델을 실행합니다.
+2. 결과를 생성하기 위해 일반적으로 에이전트형 워크플로인 코드를 실행합니다.
+3. 결과 텍스트를 다시 음성으로 변환하기 위해 텍스트-음성 변환 모델을 실행합니다.
 
 ```mermaid
 graph LR
@@ -48,7 +48,7 @@ graph LR
 
 ## 에이전트
 
-먼저 몇 가지 에이전트를 설정해 보겠습니다. 이 SDK로 에이전트를 만들어 본 적이 있다면 익숙하게 느껴질 것입니다. 에이전트 몇 개, 핸드오프 하나, 도구 하나를 사용합니다.
+먼저 몇 가지 에이전트를 설정해 보겠습니다. 이 SDK로 에이전트를 만들어 본 적이 있다면 익숙하게 느껴질 것입니다. 몇 개의 에이전트, 핸드오프, 도구를 사용합니다.
 
 ```python
 import asyncio
@@ -72,7 +72,7 @@ def get_weather(city: str) -> str:
 
 spanish_agent = Agent(
     name="Spanish",
-    handoff_description="A spanish speaking agent.",
+    handoff_description="A Spanish-speaking agent.",
     instructions=prompt_with_handoff_instructions(
         "You're speaking to a human, so be polite and concise. Speak in Spanish.",
     ),
@@ -82,7 +82,7 @@ spanish_agent = Agent(
 agent = Agent(
     name="Assistant",
     instructions=prompt_with_handoff_instructions(
-        "You're speaking to a human, so be polite and concise. If the user speaks in Spanish, handoff to the spanish agent.",
+        "You're speaking to a human, so be polite and concise. If the user speaks in Spanish, hand off to the Spanish agent.",
     ),
     model="gpt-5.5",
     handoffs=[spanish_agent],
@@ -92,7 +92,7 @@ agent = Agent(
 
 ## 음성 파이프라인
 
-워크플로로 [`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow]를 사용하여 간단한 음성 파이프라인을 설정하겠습니다.
+워크플로로 [`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow]를 사용하여 간단한 음성 파이프라인을 설정합니다.
 
 ```python
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
@@ -124,7 +124,7 @@ async for event in result.stream():
 
 ```
 
-## 전체 구성
+## 종합 구성
 
 ```python
 import asyncio
@@ -156,7 +156,7 @@ def get_weather(city: str) -> str:
 
 spanish_agent = Agent(
     name="Spanish",
-    handoff_description="A spanish speaking agent.",
+    handoff_description="A Spanish-speaking agent.",
     instructions=prompt_with_handoff_instructions(
         "You're speaking to a human, so be polite and concise. Speak in Spanish.",
     ),
@@ -166,7 +166,7 @@ spanish_agent = Agent(
 agent = Agent(
     name="Assistant",
     instructions=prompt_with_handoff_instructions(
-        "You're speaking to a human, so be polite and concise. If the user speaks in Spanish, handoff to the spanish agent.",
+        "You're speaking to a human, so be polite and concise. If the user speaks in Spanish, hand off to the Spanish agent.",
     ),
     model="gpt-5.5",
     handoffs=[spanish_agent],
@@ -195,4 +195,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-이 예제를 실행하면 에이전트가 사용자에게 말을 걸 것입니다! 에이전트와 직접 대화할 수 있는 데모는 [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static)의 예제를 확인하세요.
+이 예제를 실행하면 에이전트가 사용자에게 말을 걸 것입니다! 직접 에이전트에게 말해볼 수 있는 데모는 [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static)의 예제를 확인하세요.

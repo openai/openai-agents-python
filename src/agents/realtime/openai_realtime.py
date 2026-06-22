@@ -471,6 +471,11 @@ class TransportConfig(TypedDict):
     handshake_timeout: NotRequired[float]
     """Time in seconds to wait for the connection handshake to complete."""
 
+    max_size: NotRequired[int | None]
+    """Maximum size in bytes of an incoming websocket message.
+    Defaults to None (no limit). Set an explicit byte limit to bound memory usage for
+    long-lived connections behind proxies or in memory-constrained containers."""
+
 
 class OpenAIRealtimeWebSocketModel(RealtimeModel):
     """A model that uses OpenAI's WebSocket API."""
@@ -589,6 +594,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 connect_kwargs["ping_timeout"] = transport_config["ping_timeout"]
             if "handshake_timeout" in transport_config:
                 connect_kwargs["open_timeout"] = transport_config["handshake_timeout"]
+            if "max_size" in transport_config:
+                connect_kwargs["max_size"] = transport_config["max_size"]
 
         return await websockets.connect(url, **connect_kwargs)
 
