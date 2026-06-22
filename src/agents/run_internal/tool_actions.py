@@ -6,6 +6,7 @@ functions and approval plumbing live in tool_execution.py.
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import inspect
 import json
@@ -26,7 +27,10 @@ from ..run_config import RunConfig
 from ..run_context import RunContextWrapper
 from ..tool import (
     ApplyPatchTool,
+    ApplyPatchToolCustomDataContext,
+    ComputerToolCustomDataContext,
     CustomTool,
+    CustomToolCustomDataContext,
     LocalShellCommandRequest,
     ShellCommandRequest,
     ShellResult,
@@ -36,6 +40,7 @@ from ..tool_context import ToolContext
 from ..tracing import SpanError
 from ..util import _coro
 from ..util._approvals import evaluate_needs_approval_setting
+from ..util._custom_data import maybe_extract_custom_data
 from .items import apply_patch_rejection_item, shell_rejection_item
 from .tool_execution import (
     coerce_apply_patch_operations,
@@ -150,6 +155,27 @@ class ComputerAction:
                 logger.error("Failed to execute computer action: %s", exc, exc_info=True)
                 raise
 
+            image_url = f"data:image/png;base64,{output}" if output else ""
+            raw_item = ComputerCallOutput(
+                call_id=action.tool_call.call_id,
+                output={
+                    "type": "computer_screenshot",
+                    "image_url": image_url,
+                },
+                type="computer_call_output",
+                acknowledged_safety_checks=acknowledged_safety_checks,
+            )
+            custom_data = await maybe_extract_custom_data(
+                action.computer_tool.custom_data_extractor,
+                ComputerToolCustomDataContext(
+                    run_context=context_wrapper,
+                    tool=action.computer_tool,
+                    tool_call=action.tool_call,
+                    output=image_url,
+                    raw_item=copy.deepcopy(raw_item),
+                ),
+            )
+
             await asyncio.gather(
                 hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
                 (
@@ -159,22 +185,14 @@ class ComputerAction:
                 ),
             )
 
-            image_url = f"data:image/png;base64,{output}" if output else ""
             if span and config.trace_include_sensitive_data:
                 span.span_data.output = image_url
 
             return ToolCallOutputItem(
                 agent=agent,
                 output=image_url,
-                raw_item=ComputerCallOutput(
-                    call_id=action.tool_call.call_id,
-                    output={
-                        "type": "computer_screenshot",
-                        "image_url": image_url,
-                    },
-                    type="computer_call_output",
-                    acknowledged_safety_checks=acknowledged_safety_checks,
-                ),
+                raw_item=raw_item,
+                custom_data=custom_data,
             )
 
         return await with_tool_function_span(
@@ -686,6 +704,18 @@ class CustomToolAction:
                     )
                 logger.error("Custom tool failed: %s", exc, exc_info=True)
 
+            raw_item = cls._raw_tool_output_item(call_id, output_text)
+            custom_data = await maybe_extract_custom_data(
+                custom_tool.custom_data_extractor,
+                CustomToolCustomDataContext(
+                    tool_context=tool_context,
+                    tool=custom_tool,
+                    input=tool_input,
+                    output=output_text,
+                    raw_item=copy.deepcopy(raw_item),
+                ),
+            )
+
             await asyncio.gather(
                 hooks.on_tool_end(tool_context, agent, custom_tool, output_text),
                 (
@@ -697,8 +727,13 @@ class CustomToolAction:
 
             if span and config.trace_include_sensitive_data:
                 span.span_data.output = output_text
-
-            return cls._tool_output_item(agent, call_id, output_text)
+            return cls._tool_output_item(
+                agent,
+                call_id,
+                output_text,
+                raw_item=raw_item,
+                custom_data=custom_data,
+            )
 
         return await with_tool_function_span(
             config=config,
@@ -711,18 +746,28 @@ class CustomToolAction:
         return output if isinstance(output, str) else str(output)
 
     @staticmethod
-    def _tool_output_item(agent: Agent[Any], call_id: str, output: str) -> ToolCallOutputItem:
+    def _raw_tool_output_item(call_id: str, output: str) -> dict[str, Any]:
+        return {
+            "type": "custom_tool_call_output",
+            "call_id": call_id,
+            "output": output,
+        }
+
+    @classmethod
+    def _tool_output_item(
+        cls,
+        agent: Agent[Any],
+        call_id: str,
+        output: str,
+        *,
+        raw_item: dict[str, Any] | None = None,
+        custom_data: dict[str, Any] | None = None,
+    ) -> ToolCallOutputItem:
         return ToolCallOutputItem(
             agent=agent,
             output=output,
-            raw_item=cast(
-                Any,
-                {
-                    "type": "custom_tool_call_output",
-                    "call_id": call_id,
-                    "output": output,
-                },
-            ),
+            raw_item=cast(Any, raw_item or cls._raw_tool_output_item(call_id, output)),
+            custom_data=custom_data,
         )
 
 
@@ -853,6 +898,26 @@ class ApplyPatchAction:
                     )
                 logger.error("Apply patch editor failed: %s", exc, exc_info=True)
 
+            raw_item: dict[str, Any] = {
+                "type": "apply_patch_call_output",
+                "call_id": call_id,
+                "status": status,
+            }
+            if output_text:
+                raw_item["output"] = output_text
+
+            custom_data = await maybe_extract_custom_data(
+                apply_patch_tool.custom_data_extractor,
+                ApplyPatchToolCustomDataContext(
+                    run_context=context_wrapper,
+                    tool=apply_patch_tool,
+                    operations=operations,
+                    output=output_text,
+                    status=status,
+                    raw_item=copy.deepcopy(raw_item),
+                ),
+            )
+
             await asyncio.gather(
                 hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text),
                 (
@@ -862,14 +927,6 @@ class ApplyPatchAction:
                 ),
             )
 
-            raw_item: dict[str, Any] = {
-                "type": "apply_patch_call_output",
-                "call_id": call_id,
-                "status": status,
-            }
-            if output_text:
-                raw_item["output"] = output_text
-
             if span and config.trace_include_sensitive_data:
                 span.span_data.output = output_text
 
@@ -877,6 +934,7 @@ class ApplyPatchAction:
                 agent=agent,
                 output=output_text,
                 raw_item=raw_item,
+                custom_data=custom_data,
             )
 
         return await with_tool_function_span(

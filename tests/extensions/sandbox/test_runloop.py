@@ -161,6 +161,42 @@ class _FakeAPIResponseValidationError(_FakeAPIError):
         )
 
 
+class _FakeAuthenticationError(_FakeAPIStatusError):
+    def __init__(
+        self,
+        message: str = "authentication failed",
+        *,
+        body: object | None = None,
+        url: str = "https://api.runloop.ai/v1/test",
+        method: str = "POST",
+    ) -> None:
+        super().__init__(401, body=body, url=url, method=method, message=message)
+
+
+class _FakeBadRequestError(_FakeAPIStatusError):
+    def __init__(
+        self,
+        message: str = "bad request",
+        *,
+        body: object | None = None,
+        url: str = "https://api.runloop.ai/v1/test",
+        method: str = "POST",
+    ) -> None:
+        super().__init__(400, body=body, url=url, method=method, message=message)
+
+
+class _FakeInternalServerError(_FakeAPIStatusError):
+    def __init__(
+        self,
+        message: str = "internal server error",
+        *,
+        body: object | None = None,
+        url: str = "https://api.runloop.ai/v1/test",
+        method: str = "POST",
+    ) -> None:
+        super().__init__(500, body=body, url=url, method=method, message=message)
+
+
 class _FakeNotFoundError(_FakeAPIStatusError):
     def __init__(
         self,
@@ -171,6 +207,42 @@ class _FakeNotFoundError(_FakeAPIStatusError):
         method: str = "GET",
     ) -> None:
         super().__init__(404, body=body, url=url, method=method, message=message)
+
+
+class _FakePermissionDeniedError(_FakeAPIStatusError):
+    def __init__(
+        self,
+        message: str = "permission denied",
+        *,
+        body: object | None = None,
+        url: str = "https://api.runloop.ai/v1/test",
+        method: str = "POST",
+    ) -> None:
+        super().__init__(403, body=body, url=url, method=method, message=message)
+
+
+class _FakeRateLimitError(_FakeAPIStatusError):
+    def __init__(
+        self,
+        message: str = "rate limited",
+        *,
+        body: object | None = None,
+        url: str = "https://api.runloop.ai/v1/test",
+        method: str = "POST",
+    ) -> None:
+        super().__init__(429, body=body, url=url, method=method, message=message)
+
+
+class _FakeUnprocessableEntityError(_FakeAPIStatusError):
+    def __init__(
+        self,
+        message: str = "unprocessable entity",
+        *,
+        body: object | None = None,
+        url: str = "https://api.runloop.ai/v1/test",
+        method: str = "POST",
+    ) -> None:
+        super().__init__(422, body=body, url=url, method=method, message=message)
 
 
 class _FakeExecutionResult:
@@ -1165,8 +1237,14 @@ def _load_runloop_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     fake_runloop.APIResponseValidationError = _FakeAPIResponseValidationError
     fake_runloop.APITimeoutError = _FakeAPITimeoutError
     fake_runloop.APIStatusError = _FakeAPIStatusError
+    fake_runloop.AuthenticationError = _FakeAuthenticationError
+    fake_runloop.BadRequestError = _FakeBadRequestError
+    fake_runloop.InternalServerError = _FakeInternalServerError
     fake_runloop.NotFoundError = _FakeNotFoundError
+    fake_runloop.PermissionDeniedError = _FakePermissionDeniedError
+    fake_runloop.RateLimitError = _FakeRateLimitError
     fake_runloop.RunloopError = _FakeRunloopError
+    fake_runloop.UnprocessableEntityError = _FakeUnprocessableEntityError
 
     fake_sdk: Any = types.ModuleType("runloop_api_client.sdk")
     fake_sdk.AsyncRunloopSDK = _FakeAsyncRunloopSDK
@@ -2338,6 +2416,66 @@ class TestRunloopSandbox:
         assert exc_info.value.context["cause_type"] == "_FakeAPIStatusError"
         assert exc_info.value.context["provider_body"] == {"error": "rate limited"}
         assert exc_info.value.context["detail"] == "exec_failed"
+        assert exc_info.value.retryable is True
+
+    @pytest.mark.asyncio
+    async def test_exec_marks_typed_runloop_bad_request_non_retryable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runloop_module = _load_runloop_module(monkeypatch)
+
+        async with runloop_module.RunloopSandboxClient() as client:
+            session = await client.create(options=runloop_module.RunloopSandboxClientOptions())
+            await session.start()
+            sdk = _FakeAsyncRunloopSDK.created_instances[-1]
+            devbox = sdk.devbox.devboxes[session.state.devbox_id]
+
+            async def _raise_bad_request(*args: object, **kwargs: object) -> object:
+                _ = (args, kwargs)
+                raise _FakeBadRequestError(
+                    body={"error": "invalid command"},
+                    url=f"https://api.runloop.ai/v1/devboxes/{devbox.id}/execute",
+                    method="POST",
+                )
+
+            monkeypatch.setattr(devbox.cmd, "exec", _raise_bad_request)
+
+            with pytest.raises(runloop_module.ExecTransportError) as exc_info:
+                await session.exec("pwd", shell=False)
+
+        assert exc_info.value.context["http_status"] == 400
+        assert exc_info.value.context["cause_type"] == "_FakeBadRequestError"
+        assert exc_info.value.context["provider_body"] == {"error": "invalid command"}
+        assert exc_info.value.context["detail"] == "exec_failed"
+        assert exc_info.value.retryable is False
+
+    @pytest.mark.parametrize(
+        ("status", "expected_retryable"),
+        [
+            (400, False),
+            (401, False),
+            (403, False),
+            (404, False),
+            (408, True),
+            (422, False),
+            (429, True),
+            (500, True),
+            (502, True),
+            (503, True),
+            (504, True),
+        ],
+    )
+    def test_runloop_retryability_status_table(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        status: int,
+        expected_retryable: bool,
+    ) -> None:
+        runloop_module = _load_runloop_module(monkeypatch)
+        error = _FakeAPIStatusError(status, body={"error": f"HTTP {status}"})
+
+        assert runloop_module._runloop_provider_retryability(error) is expected_retryable
 
     @pytest.mark.asyncio
     async def test_exec_wraps_command_with_workspace_context(
@@ -2486,6 +2624,7 @@ class TestRunloopSandbox:
         assert exc_info.value.context["cause_type"] == "_FakeAPIStatusError"
         assert exc_info.value.context["provider_body"] == {"error": "download failed"}
         assert exc_info.value.context["detail"] == "file_download_failed"
+        assert exc_info.value.retryable is True
 
     @pytest.mark.asyncio
     async def test_write_wraps_runloop_http_error_with_provider_context(
@@ -2518,6 +2657,7 @@ class TestRunloopSandbox:
         assert exc_info.value.context["cause_type"] == "_FakeAPIStatusError"
         assert exc_info.value.context["provider_body"] == {"error": "upload rate limited"}
         assert exc_info.value.context["detail"] == "file_upload_failed"
+        assert exc_info.value.retryable is True
 
     @pytest.mark.asyncio
     async def test_manifest_apply_preserves_existing_files_in_non_empty_directory(

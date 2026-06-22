@@ -70,6 +70,7 @@ class SandboxSessionFinishEvent(SandboxSessionEventBase):
     error_code: ErrorCode | None = None
     error_type: str | None = None
     error_message: str | None = None
+    error_retryable: bool | None = None
 
     # Optional exec outputs (truncated / opt-in via policy).
     stdout: str | None = None

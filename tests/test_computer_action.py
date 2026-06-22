@@ -502,7 +502,7 @@ class LoggingRunHooks(RunHooks[Any]):
     def __init__(self) -> None:
         super().__init__()
         self.started: list[tuple[Agent[Any], Any]] = []
-        self.ended: list[tuple[Agent[Any], Any, str]] = []
+        self.ended: list[tuple[Agent[Any], Any, object]] = []
 
     async def on_tool_start(
         self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
@@ -510,7 +510,7 @@ class LoggingRunHooks(RunHooks[Any]):
         self.started.append((agent, tool))
 
     async def on_tool_end(
-        self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any, result: str
+        self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any, result: object
     ) -> None:
         self.ended.append((agent, tool, result))
 
@@ -521,7 +521,7 @@ class LoggingAgentHooks(AgentHooks[Any]):
     def __init__(self) -> None:
         super().__init__()
         self.started: list[tuple[Agent[Any], Any]] = []
-        self.ended: list[tuple[Agent[Any], Any, str]] = []
+        self.ended: list[tuple[Agent[Any], Any, object]] = []
 
     async def on_tool_start(
         self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
@@ -529,7 +529,7 @@ class LoggingAgentHooks(AgentHooks[Any]):
         self.started.append((agent, tool))
 
     async def on_tool_end(
-        self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any, result: str
+        self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any, result: object
     ) -> None:
         self.ended.append((agent, tool, result))
 

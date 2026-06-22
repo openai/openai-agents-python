@@ -1111,6 +1111,37 @@ class TestDaytonaSandbox:
         assert mount._mounted_paths == [mount_path]
 
     @pytest.mark.asyncio
+    async def test_persist_workspace_marks_stopped_sandbox_non_retryable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify stopped Daytona sandboxes expose provider-neutral retryability."""
+
+        daytona_module = _load_daytona_module(monkeypatch)
+        sandbox = _FakeDaytonaSandbox()
+        state = daytona_module.DaytonaSandboxSessionState(
+            manifest=Manifest(root=daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT),
+            snapshot=NoopSnapshot(id="snapshot"),
+            sandbox_id=sandbox.id,
+        )
+        session = daytona_module.DaytonaSandboxSession.from_state(state, sandbox=sandbox)
+
+        async def _raise_stopped_sandbox(_cmd: str, **_kwargs: object) -> object:
+            raise RuntimeError(
+                "bad request: failed to resolve container IP after 3 attempts: "
+                "no IP address found. Is the Sandbox started?"
+            )
+
+        monkeypatch.setattr(sandbox.process, "exec", _raise_stopped_sandbox)
+
+        with pytest.raises(daytona_module.WorkspaceArchiveReadError) as exc_info:
+            await session.persist_workspace()
+
+        assert exc_info.value.retryable is False
+        assert exc_info.value.context["backend"] == "daytona"
+        assert exc_info.value.context["reason"] == "sandbox_not_running"
+
+    @pytest.mark.asyncio
     async def test_persist_workspace_uses_nested_mount_targets_and_runtime_skip_paths(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1342,8 +1373,8 @@ class TestDaytonaSandbox:
 
         monkeypatch.setattr(
             daytona_module,
-            "_import_daytona_exceptions",
-            lambda: {"timeout": _FakeTimeout},
+            "_daytona_timeout_error_types",
+            lambda: (_FakeTimeout,),
         )
 
         sandbox = _FakeDaytonaSandbox()
@@ -1357,6 +1388,111 @@ class TestDaytonaSandbox:
 
         with pytest.raises(ExecTimeoutError):
             await session.pty_exec_start("python3", shell=False, tty=False, timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_pty_start_marks_documented_sdk_not_found_non_retryable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        daytona_module = _load_daytona_module(monkeypatch)
+
+        class _FakeNotFound(Exception):
+            status_code = 404
+            error_code = "sandbox_not_found"
+
+        monkeypatch.setattr(
+            daytona_module,
+            "_daytona_non_retryable_error_types",
+            lambda: (_FakeNotFound,),
+        )
+        monkeypatch.setattr(daytona_module, "_daytona_retryable_error_types", lambda: ())
+
+        sandbox = _FakeDaytonaSandbox()
+        sandbox.process.create_pty_session_error = _FakeNotFound("sandbox not found")
+        state = daytona_module.DaytonaSandboxSessionState(
+            manifest=Manifest(root=daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT),
+            snapshot=NoopSnapshot(id="snapshot"),
+            sandbox_id=sandbox.id,
+        )
+        session = daytona_module.DaytonaSandboxSession.from_state(state, sandbox=sandbox)
+
+        with pytest.raises(ExecTransportError) as exc_info:
+            await session.pty_exec_start("python3", shell=False, tty=True)
+
+        assert exc_info.value.retryable is False
+        assert exc_info.value.context["backend"] == "daytona"
+        assert exc_info.value.context["http_status"] == 404
+        assert exc_info.value.context["provider_error_code"] == "sandbox_not_found"
+        assert exc_info.value.context["reason"] == "sandbox_not_found"
+
+    @pytest.mark.asyncio
+    async def test_pty_start_marks_documented_sdk_rate_limit_retryable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        daytona_module = _load_daytona_module(monkeypatch)
+
+        class _FakeRateLimit(Exception):
+            status_code = 429
+            error_code = "rate_limit_exceeded"
+
+        monkeypatch.setattr(
+            daytona_module,
+            "_daytona_retryable_error_types",
+            lambda: (_FakeRateLimit,),
+        )
+        monkeypatch.setattr(daytona_module, "_daytona_non_retryable_error_types", lambda: ())
+
+        sandbox = _FakeDaytonaSandbox()
+        sandbox.process.create_pty_session_error = _FakeRateLimit("rate limit exceeded")
+        state = daytona_module.DaytonaSandboxSessionState(
+            manifest=Manifest(root=daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT),
+            snapshot=NoopSnapshot(id="snapshot"),
+            sandbox_id=sandbox.id,
+        )
+        session = daytona_module.DaytonaSandboxSession.from_state(state, sandbox=sandbox)
+
+        with pytest.raises(ExecTransportError) as exc_info:
+            await session.pty_exec_start("python3", shell=False, tty=True)
+
+        assert exc_info.value.retryable is True
+        assert exc_info.value.context["backend"] == "daytona"
+        assert exc_info.value.context["http_status"] == 429
+        assert exc_info.value.context["provider_error_code"] == "rate_limit_exceeded"
+        assert exc_info.value.context["reason"] == "rate_limit_exceeded"
+
+    @pytest.mark.parametrize(
+        ("status", "expected_retryable"),
+        [
+            (400, False),
+            (401, False),
+            (403, False),
+            (404, False),
+            (409, False),
+            (429, True),
+            (500, True),
+            (502, True),
+            (503, True),
+            (504, True),
+        ],
+    )
+    def test_daytona_retryability_status_table(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        status: int,
+        expected_retryable: bool,
+    ) -> None:
+        daytona_module = _load_daytona_module(monkeypatch)
+        monkeypatch.setattr(daytona_module, "_daytona_non_retryable_error_types", lambda: ())
+        monkeypatch.setattr(daytona_module, "_daytona_retryable_error_types", lambda: ())
+
+        class FakeStatusError(Exception):
+            status_code = status
+
+        retryable, reason = daytona_module._daytona_provider_retryability(FakeStatusError())
+
+        assert retryable is expected_retryable
+        assert reason == f"http_{status}"
 
     @pytest.mark.asyncio
     async def test_session_reader_keeps_entry_live_when_logs_fail_without_exit_code(

@@ -3,6 +3,7 @@ import contextlib
 import copy
 import dataclasses
 import json
+import logging
 import time
 from collections.abc import Callable
 from typing import Any, cast
@@ -11,6 +12,7 @@ import pytest
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
+import agents._debug as _debug
 import agents.tool as tool_module
 from agents import (
     Agent,
@@ -778,6 +780,68 @@ async def test_function_tool_rejects_non_object_json_input(input_json: str) -> N
             ),
             input_json,
         )
+
+
+@pytest.mark.asyncio
+async def test_function_tool_bad_json_redacts_payload_when_dont_log_tool_data(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+
+    def echo(value: str) -> str:
+        return value
+
+    tool = function_tool(echo, name_override="echo_tool", failure_error_function=None)
+    bad_json = '{"secret":"SECRET_TOKEN_123"'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(
+                None,
+                tool_name="echo_tool",
+                tool_call_id="1",
+                tool_arguments=bad_json,
+            ),
+            bad_json,
+        )
+
+    assert str(exc_info.value) == "Invalid JSON input for tool echo_tool"
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    assert "SECRET_TOKEN_123" not in str(exc_info.value)
+    assert "SECRET_TOKEN_123" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_function_tool_bad_json_includes_payload_when_tool_logging_enabled(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
+    def echo(value: str) -> str:
+        return value
+
+    tool = function_tool(echo, name_override="echo_tool", failure_error_function=None)
+    bad_json = '{"secret":"SECRET_TOKEN_123"'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(
+                None,
+                tool_name="echo_tool",
+                tool_call_id="1",
+                tool_arguments=bad_json,
+            ),
+            bad_json,
+        )
+
+    assert str(exc_info.value) == f"Invalid JSON input for tool echo_tool: {bad_json}"
+    assert isinstance(exc_info.value.__cause__, json.JSONDecodeError)
+    assert exc_info.value.__cause__.doc == bad_json
+    assert "SECRET_TOKEN_123" in str(exc_info.value)
+    assert "SECRET_TOKEN_123" in caplog.text
 
 
 @pytest.mark.asyncio

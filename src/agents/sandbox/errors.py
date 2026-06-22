@@ -83,6 +83,8 @@ class SandboxError(Exception):
         op: The operation where the error occurred.
         context: Structured metadata to aid debugging.
         cause: Optional underlying exception.
+        retryable: Whether retrying the same operation is expected to succeed.
+            `None` means the SDK cannot safely classify the error.
     """
 
     message: str
@@ -90,8 +92,11 @@ class SandboxError(Exception):
     op: OpName
     context: dict[str, object]
     cause: BaseException | None = None
+    retryable: bool | None = None
 
     def __post_init__(self) -> None:
+        if self.retryable is None and isinstance(self.cause, SandboxError):
+            self.retryable = self.cause.retryable
         super().__init__(self.message)
         if self.cause is not None:
             self.__cause__ = self.cause
@@ -153,6 +158,7 @@ class InvalidManifestPathError(ConfigurationError):
             op="materialize",
             context={"rel": str(rel), "reason": reason, **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
 
 
@@ -178,6 +184,7 @@ class InvalidCompressionSchemeError(ConfigurationError):
             op="write",
             context={"path": str(path), "scheme": scheme, **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
 
 
@@ -192,11 +199,13 @@ class ExposedPortUnavailableError(SandboxRuntimeError):
         reason: str,
         context: Mapping[str, object] | None = None,
         cause: BaseException | None = None,
+        retryable: bool | None = None,
     ) -> None:
         if reason == "not_configured":
             message = f"port {port} is not configured for host exposure"
         else:
             message = f"port {port} could not be resolved for host exposure"
+        resolved_retryable = False if reason == "not_configured" else retryable
         super().__init__(
             message=message,
             error_code=ErrorCode.EXPOSED_PORT_UNAVAILABLE,
@@ -208,6 +217,7 @@ class ExposedPortUnavailableError(SandboxRuntimeError):
                 **_as_context(context),
             },
             cause=cause,
+            retryable=resolved_retryable,
         )
 
 
@@ -224,6 +234,7 @@ class ExecFailureError(SandboxRuntimeError):
         command: Sequence[str | Path],
         context: Mapping[str, object] | None = None,
         cause: BaseException | None = None,
+        retryable: bool | None = None,
     ) -> None:
         cmd = tuple(str(c) for c in command)
         super().__init__(
@@ -232,6 +243,7 @@ class ExecFailureError(SandboxRuntimeError):
             op="exec",
             context={"command": cmd, "command_str": _format_command(cmd), **_as_context(context)},
             cause=cause,
+            retryable=retryable,
         )
         self.command = cmd
 
@@ -272,6 +284,7 @@ class ExecNonZeroError(ExecFailureError):
                 **_as_context(context),
             },
             cause=cause,
+            retryable=False,
         )
         self.exit_code = exec_result.exit_code
         self.stdout = exec_result.stdout
@@ -297,6 +310,7 @@ class ExecTimeoutError(ExecFailureError):
             command=command,
             context={"timeout_s": timeout_s, **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
         self.timeout_s = timeout_s
 
@@ -311,6 +325,7 @@ class ExecTransportError(ExecFailureError):
         context: Mapping[str, object] | None = None,
         cause: BaseException | None = None,
         message: str | None = None,
+        retryable: bool | None = None,
     ) -> None:
         super().__init__(
             message=message or "exec transport error",
@@ -318,6 +333,7 @@ class ExecTransportError(ExecFailureError):
             command=command,
             context=_as_context(context),
             cause=cause,
+            retryable=retryable,
         )
 
 
@@ -339,6 +355,7 @@ class PtySessionNotFoundError(SandboxRuntimeError):
             op="exec",
             context={"session_id": session_id, **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
         self.session_id = session_id
 
@@ -370,6 +387,7 @@ class ApplyPatchPathError(ApplyPatchError):
             op="apply_patch",
             context={"path": str(path), "reason": reason, **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
 
 
@@ -393,6 +411,7 @@ class ApplyPatchDiffError(ApplyPatchError):
             op="apply_patch",
             context=resolved_context,
             cause=cause,
+            retryable=False,
         )
 
 
@@ -412,6 +431,7 @@ class ApplyPatchFileNotFoundError(WorkspaceIOError):
             op="apply_patch",
             context={"path": str(path), **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
 
 
@@ -431,6 +451,7 @@ class ApplyPatchDecodeError(WorkspaceIOError):
             op="apply_patch",
             context={"path": str(path), **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
 
 
@@ -450,6 +471,7 @@ class WorkspaceReadNotFoundError(WorkspaceIOError):
             op="read",
             context={"path": str(path), **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
 
 
@@ -462,6 +484,7 @@ class WorkspaceArchiveReadError(WorkspaceIOError):
         path: Path,
         context: Mapping[str, object] | None = None,
         cause: BaseException | None = None,
+        retryable: bool | None = None,
     ) -> None:
         super().__init__(
             message=f"failed to read archive for path: {path}",
@@ -469,6 +492,7 @@ class WorkspaceArchiveReadError(WorkspaceIOError):
             op="read",
             context={"path": str(path), **_as_context(context)},
             cause=cause,
+            retryable=retryable,
         )
 
 
@@ -481,6 +505,7 @@ class WorkspaceArchiveWriteError(WorkspaceIOError):
         path: Path,
         context: Mapping[str, object] | None = None,
         cause: BaseException | None = None,
+        retryable: bool | None = None,
     ) -> None:
         super().__init__(
             message=f"failed to write archive for path: {path}",
@@ -488,6 +513,7 @@ class WorkspaceArchiveWriteError(WorkspaceIOError):
             op="write",
             context={"path": str(path), **_as_context(context)},
             cause=cause,
+            retryable=retryable,
         )
 
 
@@ -508,6 +534,7 @@ class WorkspaceWriteTypeError(WorkspaceIOError):
             op="write",
             context={"path": str(path), "actual_type": actual_type, **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
 
 
@@ -520,6 +547,7 @@ class WorkspaceStopError(SandboxRuntimeError):
         path: Path,
         context: Mapping[str, object] | None = None,
         cause: BaseException | None = None,
+        retryable: bool | None = None,
     ) -> None:
         super().__init__(
             message="failed to stop session",
@@ -527,6 +555,7 @@ class WorkspaceStopError(SandboxRuntimeError):
             op="stop",
             context={"path": str(path), **_as_context(context)},
             cause=cause,
+            retryable=retryable,
         )
 
 
@@ -540,6 +569,7 @@ class WorkspaceStartError(SandboxRuntimeError):
         context: Mapping[str, object] | None = None,
         cause: BaseException | None = None,
         message: str | None = None,
+        retryable: bool | None = None,
     ) -> None:
         super().__init__(
             message=message or "failed to start session",
@@ -547,6 +577,7 @@ class WorkspaceStartError(SandboxRuntimeError):
             op="start",
             context={"path": str(path), **_as_context(context)},
             cause=cause,
+            retryable=retryable,
         )
 
 
@@ -566,6 +597,7 @@ class WorkspaceRootNotFoundError(SandboxRuntimeError):
             op="exec",
             context={"path": str(path), **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
 
 
@@ -589,6 +621,7 @@ class LocalFileReadError(LocalArtifactError):
             op="materialize",
             context={"src": str(src), **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
 
 
@@ -608,6 +641,7 @@ class LocalDirReadError(LocalArtifactError):
             op="materialize",
             context={"src": str(src), **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
 
 
@@ -627,6 +661,7 @@ class LocalChecksumError(LocalArtifactError):
             op="materialize",
             context={"src": str(src), **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
 
 
@@ -649,6 +684,7 @@ class GitMissingInImageError(GitArtifactError):
             op="materialize",
             context=_as_context(context),
             cause=cause,
+            retryable=False,
         )
 
 
@@ -670,6 +706,7 @@ class GitCloneError(GitArtifactError):
             op="materialize",
             context={"url": url, "ref": ref, "stderr": stderr, **_as_context(context)},
             cause=cause,
+            retryable=None,
         )
 
 
@@ -696,6 +733,7 @@ class GitSubpathError(GitArtifactError):
                 **_as_context(context),
             },
             cause=cause,
+            retryable=False,
         )
 
 
@@ -722,6 +760,7 @@ class GitCopyError(GitArtifactError):
                 **_as_context(context),
             },
             cause=cause,
+            retryable=None,
         )
 
 
@@ -745,6 +784,7 @@ class MountToolMissingError(MountArtifactError):
             op="materialize",
             context={"tool": tool, **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
 
 
@@ -762,6 +802,7 @@ class MountConfigError(MountArtifactError):
             error_code=ErrorCode.MOUNT_CONFIG_INVALID,
             op="materialize",
             context=_as_context(context),
+            retryable=False,
         )
 
 
@@ -782,6 +823,7 @@ class MountCommandError(MountArtifactError):
             op="materialize",
             context={"command": command, "stderr": stderr, **_as_context(context)},
             cause=cause,
+            retryable=False,
         )
 
 
@@ -801,6 +843,7 @@ class SkillsConfigError(ConfigurationError):
             op="materialize",
             context=_as_context(context),
             cause=cause,
+            retryable=False,
         )
 
 
@@ -821,6 +864,7 @@ class SnapshotPersistError(SnapshotError):
             op="snapshot_persist",
             context={"snapshot_id": snapshot_id, "path": str(path), **_as_context(context)},
             cause=cause,
+            retryable=None,
         )
 
 
@@ -841,6 +885,7 @@ class SnapshotRestoreError(SnapshotError):
             op="snapshot_restore",
             context={"snapshot_id": snapshot_id, "path": str(path), **_as_context(context)},
             cause=cause,
+            retryable=None,
         )
 
 
@@ -859,4 +904,5 @@ class SnapshotNotRestorableError(SnapshotError):
             error_code=ErrorCode.SNAPSHOT_NOT_RESTORABLE,
             op="snapshot_restore",
             context={"snapshot_id": snapshot_id, "path": str(path), **_as_context(context)},
+            retryable=False,
         )
