@@ -8,7 +8,7 @@ from typing_extensions import TypedDict
 
 from agents import RunContextWrapper
 from agents.exceptions import UserError
-from agents.function_schema import function_schema
+from agents.function_schema import _detect_docstring_style, function_schema
 
 
 def no_args_function():
@@ -885,3 +885,37 @@ def test_function_with_annotated_field_multiple_constraints():
 
     with pytest.raises(ValidationError):  # zero factor
         fs.params_pydantic_model(**{"score": 50, "factor": 0.0})
+
+
+@pytest.mark.parametrize(
+    ("doc", "expected"),
+    [
+        # Sphinx (reStructuredText) field markers.
+        (":param x: the value\n:type x: int\n:return: result\n:rtype: int", "sphinx"),
+        # NumPy section headers with dashed underlines.
+        ("Parameters\n----------\nx : int\n    The value.\n\nReturns\n-------\nint\n", "numpy"),
+        # Google section headers.
+        ("Does a thing.\n\nArgs:\n    x: The value.\n\nReturns:\n    The result.", "google"),
+        # No recognizable markers falls back to google.
+        ("Just a plain description with no sections.", "google"),
+        # An empty docstring falls back to google.
+        ("", "google"),
+    ],
+)
+def test_detect_docstring_style(doc, expected):
+    assert _detect_docstring_style(doc) == expected
+
+
+@pytest.mark.parametrize(
+    ("doc", "expected"),
+    [
+        # Sphinx outranks numpy when scores tie.
+        (":param x: the value\nParameters\n----------\nx : int\n", "sphinx"),
+        # Sphinx outranks google when scores tie.
+        (":param x: the value\nArgs:\n    x: the value", "sphinx"),
+        # NumPy outranks google when scores tie.
+        ("Parameters\n----------\nx : int\n\nArgs:\n    x: the value", "numpy"),
+    ],
+)
+def test_detect_docstring_style_tie_break_priority(doc, expected):
+    assert _detect_docstring_style(doc) == expected
