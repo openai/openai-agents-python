@@ -155,6 +155,20 @@ def test_tools_to_session_tools_rejects_function_handoff_name_conflict():
         m._tools_to_session_tools([tool], [h])
 
 
+def test_tools_to_session_tools_ignores_disabled_handoff_name_conflict():
+    tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
+    h = handoff(
+        Agent(name="billing"),
+        tool_name_override="transfer_to_billing",
+        is_enabled=False,
+    )
+    m = OpenAIRealtimeWebSocketModel()
+
+    out = m._tools_to_session_tools([tool], [h])
+
+    assert [tool.name for tool in out] == ["transfer_to_billing"]
+
+
 def test_tools_to_session_tools_rejects_duplicate_handoff_names():
     handoff_one = handoff(Agent(name="billing"), tool_name_override="transfer_to_support")
     handoff_two = handoff(Agent(name="technical"), tool_name_override="transfer_to_support")

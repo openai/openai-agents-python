@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -21,6 +22,14 @@ from agents.realtime.openai_realtime import (
 )
 from agents.run_context import RunContextWrapper
 from agents.tool import function_tool
+
+
+def _disabled_billing_realtime_handoff(*, is_enabled: Any = False) -> Handoff[Any, Any]:
+    return realtime_handoff(
+        RealtimeAgent(name="billing"),
+        tool_name_override="transfer_to_billing",
+        is_enabled=is_enabled,
+    )
 
 
 @pytest.mark.asyncio
@@ -71,6 +80,51 @@ async def test_build_model_settings_from_agent_merges_agent_fields(monkeypatch: 
     assert merged["model_name"] == "gpt-realtime-2"
     assert merged["tracing"] is None
     assert base_settings == {"model_name": "gpt-realtime-2"}
+
+
+@pytest.mark.asyncio
+async def test_build_model_settings_filters_disabled_starting_handoff_name_conflict():
+    tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
+    disabled_handoff = _disabled_billing_realtime_handoff()
+    agent = RealtimeAgent(name="parent", tools=[tool])
+
+    merged = await _build_model_settings_from_agent(
+        agent=agent,
+        context_wrapper=RunContextWrapper(None),
+        base_settings={},
+        starting_settings={"handoffs": [disabled_handoff]},
+        run_config=None,
+    )
+
+    assert merged["tools"] == [tool]
+    assert merged["handoffs"] == []
+
+
+@pytest.mark.asyncio
+async def test_build_model_settings_does_not_reevaluate_agent_handoff_without_override():
+    call_count = 0
+
+    async def is_enabled(ctx: RunContextWrapper[Any], agent_arg: RealtimeAgent[Any]) -> bool:
+        nonlocal call_count
+        call_count += 1
+        return call_count == 1
+
+    handoff = cast(
+        Handoff[Any, Any],
+        realtime_handoff(RealtimeAgent(name="billing"), is_enabled=is_enabled),
+    )
+    agent = RealtimeAgent(name="parent", handoffs=[handoff])
+
+    merged = await _build_model_settings_from_agent(
+        agent=agent,
+        context_wrapper=RunContextWrapper(None),
+        base_settings={},
+        starting_settings={"voice": "verse"},
+        run_config=None,
+    )
+
+    assert merged["handoffs"] == [handoff]
+    assert call_count == 1
 
 
 @pytest.mark.asyncio
@@ -131,6 +185,61 @@ async def test_sip_model_build_initial_session_payload(monkeypatch: pytest.Monke
             tool_names.add(name)
     assert ping.name in tool_names
     assert f"transfer_to_{child_agent.name}" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_sip_initial_session_payload_filters_disabled_initial_model_settings_handoff():
+    tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
+    disabled_handoff = _disabled_billing_realtime_handoff()
+    agent = RealtimeAgent(name="parent", tools=[tool])
+
+    payload = await OpenAIRealtimeSIPModel.build_initial_session_payload(
+        agent,
+        model_config={"initial_model_settings": {"handoffs": [disabled_handoff]}},
+    )
+
+    tool_names = [getattr(tool, "name", None) for tool in payload.tools or []]
+    assert tool_names.count("transfer_to_billing") == 1
+
+
+@pytest.mark.asyncio
+async def test_sip_initial_session_payload_filters_disabled_override_handoff():
+    tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
+    disabled_handoff = _disabled_billing_realtime_handoff()
+    agent = RealtimeAgent(name="parent", tools=[tool])
+
+    payload = await OpenAIRealtimeSIPModel.build_initial_session_payload(
+        agent,
+        overrides={"handoffs": [disabled_handoff]},
+    )
+
+    tool_names = [getattr(tool, "name", None) for tool in payload.tools or []]
+    assert tool_names.count("transfer_to_billing") == 1
+
+
+@pytest.mark.asyncio
+async def test_sip_initial_session_payload_does_not_reevaluate_agent_handoff_without_override():
+    call_count = 0
+
+    async def is_enabled(ctx: RunContextWrapper[Any], agent_arg: RealtimeAgent[Any]) -> bool:
+        nonlocal call_count
+        call_count += 1
+        return call_count == 1
+
+    handoff = cast(
+        Handoff[Any, Any],
+        realtime_handoff(RealtimeAgent(name="billing"), is_enabled=is_enabled),
+    )
+    agent = RealtimeAgent(name="parent", handoffs=[handoff])
+
+    payload = await OpenAIRealtimeSIPModel.build_initial_session_payload(
+        agent,
+        overrides={"voice": "verse"},
+    )
+
+    tool_names = [getattr(tool, "name", None) for tool in payload.tools or []]
+    assert "transfer_to_billing" in tool_names
+    assert call_count == 1
 
 
 def test_call_id_session_update_omits_null_audio_formats() -> None:

@@ -48,7 +48,7 @@ from .events import (
     RealtimeToolEnd,
     RealtimeToolStart,
 )
-from .handoffs import realtime_handoff
+from .handoffs import collect_enabled_handoffs, filter_enabled_handoffs
 from .items import (
     AssistantAudio,
     AssistantMessageItem,
@@ -1379,7 +1379,12 @@ class RealtimeSession(RealtimeModelListener):
         # Apply starting settings (from model config) next
         if starting_settings:
             updated_settings.update(starting_settings)
-
+            if "handoffs" in starting_settings:
+                updated_settings["handoffs"] = await filter_enabled_handoffs(
+                    updated_settings.get("handoffs") or [],
+                    self._context_wrapper,
+                    agent,
+                )
         validate_realtime_tool_names(
             updated_settings.get("tools", []),
             updated_settings.get("handoffs", []),
@@ -1395,22 +1400,4 @@ class RealtimeSession(RealtimeModelListener):
     async def _get_handoffs(
         cls, agent: RealtimeAgent[Any], context_wrapper: RunContextWrapper[Any]
     ) -> list[Handoff[Any, RealtimeAgent[Any]]]:
-        handoffs: list[Handoff[Any, RealtimeAgent[Any]]] = []
-        for handoff_item in agent.handoffs:
-            if isinstance(handoff_item, Handoff):
-                handoffs.append(handoff_item)
-            elif isinstance(handoff_item, RealtimeAgent):
-                handoffs.append(realtime_handoff(handoff_item))
-
-        async def _check_handoff_enabled(handoff_obj: Handoff[Any, RealtimeAgent[Any]]) -> bool:
-            attr = handoff_obj.is_enabled
-            if isinstance(attr, bool):
-                return attr
-            res = attr(context_wrapper, agent)
-            if inspect.isawaitable(res):
-                return await res
-            return res
-
-        results = await asyncio.gather(*(_check_handoff_enabled(h) for h in handoffs))
-        enabled = [h for h, ok in zip(handoffs, results, strict=False) if ok]
-        return enabled
+        return await collect_enabled_handoffs(agent, context_wrapper)

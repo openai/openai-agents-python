@@ -76,9 +76,10 @@ class _DummyModel(RealtimeModel):
         super().__init__()
         self.events: list[Any] = []
         self.listeners: list[Any] = []
+        self.connect_options: Any | None = None
 
-    async def connect(self, options=None):  # pragma: no cover - not used here
-        pass
+    async def connect(self, options=None):
+        self.connect_options = options
 
     async def close(self):  # pragma: no cover - not used here
         pass
@@ -118,6 +119,19 @@ def _agent_with_ambiguous_realtime_tools(name: str = "invalid_agent") -> Realtim
         is_enabled=True,
     )
     return RealtimeAgent(name=name, tools=[tool], handoffs=[handoff])
+
+
+def _disabled_billing_handoff(*, is_enabled: Any = False) -> Handoff[Any, Any]:
+    target = RealtimeAgent(name="billing")
+    return Handoff(
+        tool_name="transfer_to_billing",
+        tool_description="Transfer to billing",
+        input_json_schema={},
+        on_invoke_handoff=AsyncMock(return_value=target),
+        input_filter=None,
+        agent_name=target.name,
+        is_enabled=is_enabled,
+    )
 
 
 @pytest.mark.asyncio
@@ -355,6 +369,28 @@ async def test_updated_model_settings_ignores_disabled_handoff_name_conflict():
 
 
 @pytest.mark.asyncio
+async def test_updated_model_settings_does_not_reevaluate_agent_handoff_without_override():
+    call_count = 0
+
+    async def is_enabled(ctx: RunContextWrapper[Any], agent_arg: RealtimeAgent[Any]) -> bool:
+        nonlocal call_count
+        call_count += 1
+        return call_count == 1
+
+    handoff = _disabled_billing_handoff(is_enabled=is_enabled)
+    agent = RealtimeAgent(name="agent", handoffs=[handoff])
+    session = RealtimeSession(_DummyModel(), agent, None)
+
+    settings = await session._get_updated_model_settings_from_agent(
+        {"voice": "verse"},
+        agent,
+    )
+
+    assert settings["handoffs"] == [handoff]
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_updated_model_settings_validates_final_tool_names_after_overrides():
     agent_tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
     agent_handoff = Handoff(
@@ -377,6 +413,66 @@ async def test_updated_model_settings_validates_final_tool_names_after_overrides
 
     assert settings["tools"] == [override_tool]
     assert settings["handoffs"] == []
+
+
+@pytest.mark.asyncio
+async def test_updated_model_settings_filters_disabled_override_handoff_name_conflict():
+    tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
+    disabled_handoff = _disabled_billing_handoff()
+    agent = RealtimeAgent(name="agent", tools=[tool])
+    session = RealtimeSession(_DummyModel(), agent, None)
+
+    settings = await session._get_updated_model_settings_from_agent(
+        {"handoffs": [disabled_handoff]},
+        agent,
+    )
+
+    assert settings["tools"] == [tool]
+    assert settings["handoffs"] == []
+
+
+@pytest.mark.asyncio
+async def test_updated_model_settings_evaluates_override_handoff_is_enabled_callable():
+    tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
+    calls: list[tuple[RunContextWrapper[Any], RealtimeAgent[Any]]] = []
+
+    async def is_enabled(ctx: RunContextWrapper[Any], agent_arg: RealtimeAgent[Any]) -> bool:
+        calls.append((ctx, agent_arg))
+        return False
+
+    disabled_handoff = _disabled_billing_handoff(is_enabled=is_enabled)
+    agent = RealtimeAgent(name="agent", tools=[tool])
+    session = RealtimeSession(_DummyModel(), agent, {"account_id": "acct_123"})
+
+    settings = await session._get_updated_model_settings_from_agent(
+        {"handoffs": [disabled_handoff]},
+        agent,
+    )
+
+    assert settings["handoffs"] == []
+    assert calls == [(session._context_wrapper, agent)]
+
+
+@pytest.mark.asyncio
+async def test_aenter_filters_disabled_override_handoff_name_conflict():
+    model = _DummyModel()
+    tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
+    agent = RealtimeAgent(name="agent", tools=[tool])
+    session = RealtimeSession(
+        model,
+        agent,
+        None,
+        model_config={"initial_model_settings": {"handoffs": [_disabled_billing_handoff()]}},
+    )
+
+    await session.__aenter__()
+
+    assert model.connect_options is not None
+    initial_settings = model.connect_options["initial_model_settings"]
+    assert initial_settings["tools"] == [tool]
+    assert initial_settings["handoffs"] == []
+
+    await session.__aexit__(None, None, None)
 
 
 @pytest.mark.asyncio
