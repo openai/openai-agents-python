@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from openai import AsyncStream
 from openai.types.chat import ChatCompletionChunk
+from openai.types.chat.chat_completion_chunk import (
+    Choice,
+    ChoiceDelta,
+    ChoiceDeltaToolCall,
+    ChoiceDeltaToolCallFunction,
+)
 from openai.types.completion_usage import CompletionUsage
 from openai.types.responses import (
     Response,
@@ -42,7 +48,7 @@ from openai.types.responses.response_reasoning_text_done_event import (
 )
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
-from ..exceptions import UserError
+from ..exceptions import ModelBehaviorError, UserError
 from ..items import TResponseStreamEvent
 from ..logger import logger
 from .chatcmpl_helpers import ChatCmplHelpers
@@ -74,6 +80,42 @@ class StreamingState:
     # Store provider data for all output items
     provider_data: dict[str, Any] = field(default_factory=dict)
     has_warned_unsupported_choice: bool = False
+
+
+@dataclass
+class _BufferedToolCall:
+    """Accumulates a streamed Chat Completions function tool call."""
+
+    index: int
+    call_id: str | None = None
+    name: str | None = None
+    arguments: str = ""
+    provider_specific_fields: dict[str, Any] | None = None
+    extra_content: dict[str, Any] | None = None
+
+
+def _merge_buffered_metadata(
+    current: dict[str, Any] | None,
+    incoming: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Merge provider metadata without letting empty chunks erase earlier fields."""
+    if not incoming:
+        return current
+
+    if current is None:
+        return incoming.copy()
+
+    merged = current.copy()
+    for key, value in incoming.items():
+        current_value = merged.get(key)
+        if isinstance(current_value, dict) and isinstance(value, dict):
+            merged[key] = _merge_buffered_metadata(current_value, value) or {}
+        elif isinstance(value, dict) and not value and key in merged:
+            continue
+        else:
+            merged[key] = value
+
+    return merged
 
 
 class SequenceNumber:
@@ -163,6 +205,186 @@ class _StreamOutputLayout:
 
 
 class ChatCmplStreamHandler:
+    @staticmethod
+    def _choice_finished_tool_calls(choice: Choice) -> bool:
+        return choice.finish_reason == "tool_calls"
+
+    @staticmethod
+    def _should_buffer_tool_call_delta(tool_call_delta: ChoiceDeltaToolCall) -> bool:
+        tool_call_type = getattr(tool_call_delta, "type", None)
+        return tool_call_type in (None, "function")
+
+    @staticmethod
+    def _delta_has_passthrough_output(delta: ChoiceDelta | None) -> bool:
+        if delta is None:
+            return False
+
+        if delta.content is not None or delta.tool_calls:
+            return True
+
+        if hasattr(delta, "refusal") and delta.refusal:
+            return True
+
+        if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+            return True
+
+        if hasattr(delta, "reasoning") and delta.reasoning:
+            return True
+
+        if hasattr(delta, "thinking_blocks") and delta.thinking_blocks:
+            return True
+
+        return False
+
+    @staticmethod
+    def _accumulate_tool_call_delta(
+        buffered_calls: dict[int, _BufferedToolCall],
+        tool_call_delta: ChoiceDeltaToolCall,
+    ) -> None:
+        buffered_call = buffered_calls.setdefault(
+            tool_call_delta.index,
+            _BufferedToolCall(index=tool_call_delta.index),
+        )
+
+        if tool_call_delta.id:
+            buffered_call.call_id = tool_call_delta.id
+
+        if tool_call_delta.function:
+            if tool_call_delta.function.name:
+                buffered_call.name = tool_call_delta.function.name
+            if tool_call_delta.function.arguments:
+                buffered_call.arguments += tool_call_delta.function.arguments
+
+        provider_specific_fields = getattr(tool_call_delta, "provider_specific_fields", None)
+        if isinstance(provider_specific_fields, dict):
+            buffered_call.provider_specific_fields = _merge_buffered_metadata(
+                buffered_call.provider_specific_fields,
+                provider_specific_fields,
+            )
+
+        extra_content = getattr(tool_call_delta, "extra_content", None)
+        if isinstance(extra_content, dict):
+            buffered_call.extra_content = _merge_buffered_metadata(
+                buffered_call.extra_content,
+                extra_content,
+            )
+
+    @staticmethod
+    def _buffered_tool_call_delta(
+        buffered_call: _BufferedToolCall,
+    ) -> ChoiceDeltaToolCall:
+        if not buffered_call.call_id:
+            raise ModelBehaviorError(
+                "Buffered Chat Completions tool call stream ended without a tool call id."
+            )
+
+        if not buffered_call.name:
+            raise ModelBehaviorError(
+                "Buffered Chat Completions tool call stream ended without a function name."
+            )
+
+        tool_call_delta = ChoiceDeltaToolCall(
+            index=buffered_call.index,
+            id=buffered_call.call_id,
+            function=ChoiceDeltaToolCallFunction(
+                name=buffered_call.name,
+                arguments=buffered_call.arguments,
+            ),
+            type="function",
+        )
+
+        tool_call_delta_any = cast(Any, tool_call_delta)
+        if buffered_call.provider_specific_fields is not None:
+            tool_call_delta_any.provider_specific_fields = buffered_call.provider_specific_fields
+        if buffered_call.extra_content is not None:
+            tool_call_delta_any.extra_content = buffered_call.extra_content
+
+        return tool_call_delta
+
+    @classmethod
+    def _buffered_tool_calls_chunk(
+        cls,
+        template_chunk: ChatCompletionChunk,
+        buffered_calls: dict[int, _BufferedToolCall],
+    ) -> ChatCompletionChunk:
+        tool_call_deltas = [
+            cls._buffered_tool_call_delta(buffered_call)
+            for _, buffered_call in sorted(buffered_calls.items())
+        ]
+        choice = Choice(
+            index=0,
+            delta=ChoiceDelta(tool_calls=tool_call_deltas),
+            finish_reason="tool_calls",
+        )
+        return template_chunk.model_copy(update={"choices": [choice], "usage": None})
+
+    @classmethod
+    async def buffer_tool_call_stream(
+        cls,
+        stream: AsyncIterator[ChatCompletionChunk],
+    ) -> AsyncIterator[ChatCompletionChunk]:
+        """Buffer streamed function tool-call deltas until they are complete."""
+        buffered_calls: dict[int, _BufferedToolCall] = {}
+        passthrough_tool_call_indexes: set[int] = set()
+        saw_passthrough_tool_call = False
+        last_chunk: ChatCompletionChunk | None = None
+
+        async for chunk in stream:
+            last_chunk = chunk
+
+            if not chunk.choices:
+                yield chunk
+                continue
+
+            passthrough_choices: list[Choice] = []
+            for choice in chunk.choices:
+                if choice.index != 0:
+                    if choice.delta and choice.delta.tool_calls:
+                        saw_passthrough_tool_call = True
+                    passthrough_choices.append(choice)
+                    continue
+
+                delta = choice.delta
+
+                if tool_call_deltas := (delta.tool_calls if delta and delta.tool_calls else None):
+                    remaining_tool_calls: list[ChoiceDeltaToolCall] = []
+                    for tool_call_delta in tool_call_deltas:
+                        if tool_call_delta.index in passthrough_tool_call_indexes:
+                            saw_passthrough_tool_call = True
+                            remaining_tool_calls.append(tool_call_delta)
+                        elif cls._should_buffer_tool_call_delta(tool_call_delta):
+                            cls._accumulate_tool_call_delta(buffered_calls, tool_call_delta)
+                        else:
+                            passthrough_tool_call_indexes.add(tool_call_delta.index)
+                            saw_passthrough_tool_call = True
+                            remaining_tool_calls.append(tool_call_delta)
+
+                    delta = delta.model_copy(update={"tool_calls": remaining_tool_calls or None})
+                    choice = choice.model_copy(update={"delta": delta})
+
+                has_passthrough_output = cls._delta_has_passthrough_output(choice.delta)
+                if (
+                    cls._choice_finished_tool_calls(choice)
+                    and not buffered_calls
+                    and not saw_passthrough_tool_call
+                    and not has_passthrough_output
+                ):
+                    raise ModelBehaviorError(
+                        "Chat Completions stream finished with finish_reason='tool_calls' "
+                        "but did not include any streamed tool call deltas."
+                    )
+
+                if has_passthrough_output:
+                    passthrough_choices.append(choice)
+
+            if passthrough_choices or chunk.usage is not None:
+                yield chunk.model_copy(update={"choices": passthrough_choices})
+
+        if buffered_calls:
+            if last_chunk is None:
+                return
+            yield cls._buffered_tool_calls_chunk(last_chunk, buffered_calls)
+
     @staticmethod
     def _merged_provider_data(
         state: StreamingState,

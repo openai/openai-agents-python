@@ -57,11 +57,13 @@ class OpenAIChatCompletionsModel(Model):
         openai_client: AsyncOpenAI,
         should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
         strict_feature_validation: bool = False,
+        buffer_streamed_tool_calls: bool = False,
     ) -> None:
         self.model = model
         self._client = openai_client
         self.should_replay_reasoning_content = should_replay_reasoning_content
         self._strict_feature_validation = strict_feature_validation
+        self._buffer_streamed_tool_calls = buffer_streamed_tool_calls
         self._has_warned_unsupported_prompt = False
         self._has_warned_unsupported_conversation_state = False
 
@@ -299,9 +301,15 @@ class OpenAIChatCompletionsModel(Model):
             )
 
             final_response: Response | None = None
+            stream_for_handler: AsyncIterator[ChatCompletionChunk]
+            if self._buffer_streamed_tool_calls:
+                stream_for_handler = ChatCmplStreamHandler.buffer_tool_call_stream(stream)
+            else:
+                stream_for_handler = stream
+
             async for chunk in ChatCmplStreamHandler.handle_stream(
                 response,
-                stream,
+                cast(AsyncStream[ChatCompletionChunk], stream_for_handler),
                 model=self.model,
                 strict_feature_validation=self._strict_feature_validation,
             ):

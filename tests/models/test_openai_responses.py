@@ -1770,6 +1770,36 @@ async def test_websocket_model_passes_keepalive_options_to_connect(monkeypatch):
     assert captured_kwargs["ping_timeout"] is None
 
 
+@pytest.mark.asyncio
+async def test_websocket_model_passes_max_size_to_connect(monkeypatch):
+    import websockets.asyncio.client as websockets_client
+
+    client = DummyWSClient()
+    model = OpenAIResponsesWSModel(
+        model="gpt-4",
+        openai_client=client,  # type: ignore[arg-type]
+        websocket_options={"max_size": 8 * 1024 * 1024},
+    )
+    ws = DummyWSConnection([])
+    captured_kwargs: dict[str, Any] = {}
+
+    async def fake_connect(ws_url: str, **kwargs: Any) -> DummyWSConnection:
+        captured_kwargs["ws_url"] = ws_url
+        captured_kwargs.update(kwargs)
+        return ws
+
+    monkeypatch.setattr(websockets_client, "connect", fake_connect)
+
+    opened = await model._open_websocket_connection(
+        "wss://example.test/v1/responses",
+        {"Authorization": "Bearer test-key"},
+        connect_timeout=10.0,
+    )
+
+    assert opened is ws
+    assert captured_kwargs["max_size"] == 8 * 1024 * 1024
+
+
 @pytest.mark.allow_call_model_methods
 def test_websocket_model_reconnects_when_reused_from_different_event_loop(monkeypatch):
     client = DummyWSClient()
