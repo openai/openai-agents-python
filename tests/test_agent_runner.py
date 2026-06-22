@@ -35,10 +35,14 @@ from agents import (
     RunContextWrapper,
     Runner,
     SQLiteSession,
+    ToolExecutionConfig,
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrailData,
     ToolTimeoutError,
     UserError,
     handoff,
     retry_policies,
+    tool_input_guardrail,
     tool_namespace,
 )
 from agents.agent import ToolsToFinalOutputResult
@@ -841,6 +845,131 @@ async def test_resumed_run_uses_serialized_reasoning_item_id_policy() -> None:
     second_request_reasoning = _find_reasoning_input_item(model.last_turn_args.get("input"))
     assert second_request_reasoning is not None
     assert "id" not in second_request_reasoning
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_skips_tool_input_guardrails_by_default() -> None:
+    model = FakeModel()
+    guardrail_runs = 0
+
+    @tool_input_guardrail
+    def count_guardrail(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        nonlocal guardrail_runs
+        guardrail_runs += 1
+        return ToolGuardrailFunctionOutput.allow()
+
+    @function_tool(
+        name_override="approval_tool",
+        needs_approval=True,
+        tool_input_guardrails=[count_guardrail],
+    )
+    def approval_tool() -> str:
+        return "ok"
+
+    agent = Agent(name="test", model=model, tools=[approval_tool])
+    model.set_next_output([get_function_tool_call("approval_tool", "{}", call_id="call_default")])
+
+    result = await Runner.run(agent, "hello")
+
+    assert len(result.interruptions) == 1
+    assert guardrail_runs == 0
+    assert result.tool_input_guardrail_results == []
+
+
+@pytest.mark.asyncio
+async def test_pre_approval_tool_input_guardrails_can_reject_before_pending_approval() -> None:
+    model = FakeModel()
+    executed = False
+
+    @tool_input_guardrail
+    def reject_guardrail(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.reject_content("blocked before approval")
+
+    @function_tool(
+        name_override="approval_tool",
+        needs_approval=True,
+        tool_input_guardrails=[reject_guardrail],
+    )
+    def approval_tool() -> str:
+        nonlocal executed
+        executed = True
+        return "ok"
+
+    agent = Agent(name="test", model=model, tools=[approval_tool])
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("approval_tool", "{}", call_id="call_reject")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent,
+        "hello",
+        run_config=RunConfig(
+            tool_execution=ToolExecutionConfig(pre_approval_tool_input_guardrails=True)
+        ),
+    )
+
+    assert result.final_output == "done"
+    assert result.interruptions == []
+    assert executed is False
+    assert len(result.tool_input_guardrail_results) == 1
+    assert any(
+        isinstance(item, ToolCallOutputItem) and item.output == "blocked before approval"
+        for item in result.new_items
+    )
+
+
+@pytest.mark.asyncio
+async def test_pre_approval_tool_input_guardrails_rerun_after_resume() -> None:
+    model = FakeModel()
+    guardrail_runs = 0
+    executed = 0
+
+    @tool_input_guardrail
+    def count_guardrail(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        nonlocal guardrail_runs
+        guardrail_runs += 1
+        return ToolGuardrailFunctionOutput.allow()
+
+    @function_tool(
+        name_override="approval_tool",
+        needs_approval=True,
+        tool_input_guardrails=[count_guardrail],
+    )
+    def approval_tool() -> str:
+        nonlocal executed
+        executed += 1
+        return "ok"
+
+    agent = Agent(name="test", model=model, tools=[approval_tool])
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("approval_tool", "{}", call_id="call_resume")],
+            [get_text_message("done")],
+        ]
+    )
+    run_config = RunConfig(
+        tool_execution=ToolExecutionConfig(pre_approval_tool_input_guardrails=True)
+    )
+
+    first = await Runner.run(agent, "hello", run_config=run_config)
+    assert len(first.interruptions) == 1
+    assert guardrail_runs == 1
+    assert executed == 0
+    assert len(first.tool_input_guardrail_results) == 1
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+    restored_state = await RunState.from_string(agent, state.to_string())
+
+    resumed = await Runner.run(agent, restored_state, run_config=run_config)
+
+    assert resumed.final_output == "done"
+    assert guardrail_runs == 2
+    assert executed == 1
+    assert len(resumed.tool_input_guardrail_results) == 1
 
 
 @pytest.mark.asyncio
@@ -4324,6 +4453,132 @@ async def test_dynamic_tool_addition_run() -> None:
 
     assert executed["called"] is True
     assert result.final_output == "done"
+
+
+@pytest.mark.asyncio
+async def test_tool_not_found_behavior_returns_error_to_model() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("missing_tool", "{}", call_id="call_missing")],
+            [get_text_message("recovered")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
+    )
+
+    assert result.final_output == "recovered"
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    tool_outputs = [
+        item
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ]
+    assert tool_outputs == [
+        {
+            "call_id": "call_missing",
+            "output": "Tool 'missing_tool' not found.",
+            "type": "function_call_output",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_not_found_behavior_uses_tool_error_formatter() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("missing_tool", "{}", call_id="call_missing")],
+            [get_text_message("recovered")],
+        ]
+    )
+    seen_kinds: list[str] = []
+
+    async def formatter(args: Any) -> str | None:
+        seen_kinds.append(args.kind)
+        if args.kind != "tool_not_found":
+            return None
+        return f"{args.tool_name} unavailable for {args.call_id}"
+
+    result = await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(
+            tool_not_found_behavior="return_error_to_model",
+            tool_error_formatter=formatter,
+        ),
+    )
+
+    assert result.final_output == "recovered"
+    assert seen_kinds == ["tool_not_found"]
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    tool_outputs = [
+        item
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ]
+    assert tool_outputs == [
+        {
+            "call_id": "call_missing",
+            "output": "missing_tool unavailable for call_missing",
+            "type": "function_call_output",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_not_found_behavior_handles_mixed_function_tool_calls() -> None:
+    model = FakeModel()
+    calls: list[str] = []
+
+    @function_tool(name_override="known_tool")
+    async def known_tool() -> str:
+        calls.append("known_tool")
+        return "known result"
+
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[known_tool],
+        tool_use_behavior="run_llm_again",
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call("missing_tool", "{}", call_id="call_missing"),
+                get_function_tool_call("known_tool", "{}", call_id="call_known"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
+    )
+
+    assert calls == ["known_tool"]
+    assert result.final_output == "done"
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    tool_outputs = {
+        item.get("call_id"): item.get("output")
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    }
+    assert tool_outputs == {
+        "call_known": "known result",
+        "call_missing": "Tool 'missing_tool' not found.",
+    }
 
 
 @pytest.mark.asyncio

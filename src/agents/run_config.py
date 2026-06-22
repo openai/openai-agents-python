@@ -63,13 +63,14 @@ class CallModelData(Generic[TContext]):
 
 CallModelInputFilter = Callable[[CallModelData[Any]], MaybeAwaitable[ModelInputData]]
 ReasoningItemIdPolicy = Literal["preserve", "omit"]
+ToolNotFoundBehavior = Literal["raise_error", "return_error_to_model"]
 
 
 @dataclass
 class ToolErrorFormatterArgs(Generic[TContext]):
     """Data passed to ``RunConfig.tool_error_formatter`` callbacks."""
 
-    kind: Literal["approval_rejected"]
+    kind: Literal["approval_rejected", "tool_not_found"]
     """The category of tool error being formatted."""
 
     tool_type: Literal["function", "computer", "shell", "apply_patch", "custom"]
@@ -102,11 +103,19 @@ class ToolExecutionConfig:
     emitted in a turn. This does not change provider-side `parallel_tool_calls` behavior.
     """
 
+    pre_approval_tool_input_guardrails: bool = False
+    """Run function tool input guardrails before emitting a pending approval interruption.
+
+    The same guardrails still run again immediately before tool execution after approval.
+    """
+
     def __post_init__(self) -> None:
         if self.max_function_tool_concurrency is not None and (
             self.max_function_tool_concurrency < 1
         ):
             raise ValueError("tool_execution.max_function_tool_concurrency must be at least 1")
+        if not isinstance(self.pre_approval_tool_input_guardrails, bool):
+            raise ValueError("tool_execution.pre_approval_tool_input_guardrails must be a bool")
 
 
 @dataclass
@@ -319,6 +328,14 @@ class RunConfig:
 
     tool_execution: ToolExecutionConfig | None = None
     """Optional SDK-side execution settings for local tool calls."""
+
+    tool_not_found_behavior: ToolNotFoundBehavior = "raise_error"
+    """Controls unresolved function tool calls emitted by the model.
+
+    - ``"raise_error"`` preserves the default behavior and raises ``ModelBehaviorError``.
+    - ``"return_error_to_model"`` returns a model-visible ``function_call_output`` error and lets
+      the run continue.
+    """
 
 
 class RunOptions(TypedDict, Generic[TContext]):

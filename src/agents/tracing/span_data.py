@@ -161,7 +161,7 @@ class FunctionSpanData(SpanData):
             "type": self.type,
             "name": self.name,
             "input": self.input,
-            "output": str(self.output) if self.output else None,
+            "output": str(self.output) if self.output is not None else None,
             "mcp_data": self.mcp_data,
         }
 
@@ -321,6 +321,7 @@ class TranscriptionSpanData(SpanData):
 
     __slots__ = (
         "input",
+        "input_format",
         "output",
         "model",
         "model_config",
@@ -363,7 +364,7 @@ class SpeechSpanData(SpanData):
     Includes input, output, model, model configuration, and first content timestamp.
     """
 
-    __slots__ = ("input", "output", "model", "model_config", "first_content_at")
+    __slots__ = ("input", "output", "output_format", "model", "model_config", "first_content_at")
 
     def __init__(
         self,
@@ -404,7 +405,7 @@ class SpeechGroupSpanData(SpanData):
     Represents a Speech Group Span in the trace.
     """
 
-    __slots__ = "input"
+    __slots__ = ("input",)
 
     def __init__(
         self,

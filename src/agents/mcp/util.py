@@ -7,8 +7,9 @@ import hashlib
 import inspect
 import json
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol, Union
 
 import httpx
@@ -39,6 +40,7 @@ from ..tool import (
 )
 from ..tool_context import ToolContext
 from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
+from ..util._custom_data import maybe_extract_custom_data
 from ..util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
@@ -149,13 +151,50 @@ class MCPToolMetaContext:
     """The parsed tool arguments."""
 
 
+@dataclass(frozen=True)
+class MCPToolCustomDataContext:
+    """Context passed to MCP tool custom data extractors."""
+
+    run_context: RunContextWrapper[Any]
+    """The current run context."""
+
+    server_name: str
+    """The name of the MCP server."""
+
+    tool_name: str
+    """The original MCP tool name invoked on the server."""
+
+    tool_display_name: str
+    """The public tool name exposed through the Agents SDK."""
+
+    arguments: Mapping[str, Any]
+    """The parsed tool arguments."""
+
+    result_meta: Mapping[str, Any] | None
+    """The MCP tool result ``_meta`` payload, if present."""
+
+    structured_content: Mapping[str, Any] | None
+    """The MCP tool result ``structuredContent`` payload, if present."""
+
+    is_error: bool | None
+    """The MCP tool result ``isError`` flag, if present."""
+
+    tool_output: ToolOutput
+    """The model-visible tool output produced by the Agents SDK."""
+
+
 if TYPE_CHECKING:
     MCPToolMetaResolver = Callable[
         [MCPToolMetaContext],
         MaybeAwaitable[dict[str, Any] | None],
     ]
+    MCPToolCustomDataExtractor = Callable[
+        [MCPToolCustomDataContext],
+        MaybeAwaitable[Mapping[str, Any] | None],
+    ]
 else:
     MCPToolMetaResolver = Callable[..., Any]
+    MCPToolCustomDataExtractor = Callable[..., Any]
 """A function that produces MCP request metadata for tool calls.
 
 Args:
@@ -164,6 +203,7 @@ Args:
 Returns:
     A dict to send as MCP `_meta`, or None to omit metadata.
 """
+"""A function that produces SDK-only custom data for MCP tool output items."""
 
 
 def create_static_tool_filter(
@@ -541,6 +581,41 @@ class MCPUtil:
             merged.update(copy.deepcopy(explicit_meta))
         return merged
 
+    @staticmethod
+    def _copy_mapping_proxy(value: Any) -> Mapping[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        return MappingProxyType(copy.deepcopy(value))
+
+    @classmethod
+    async def _extract_custom_data(
+        cls,
+        *,
+        server: MCPServer,
+        context: RunContextWrapper[Any],
+        tool_name: str,
+        tool_display_name: str,
+        arguments: dict[str, Any],
+        result: Any,
+        tool_output: ToolOutput,
+    ) -> dict[str, Any] | None:
+        extractor = getattr(server, "custom_data_extractor", None)
+        if extractor is None:
+            return None
+
+        extractor_context = MCPToolCustomDataContext(
+            run_context=context,
+            server_name=server.name,
+            tool_name=tool_name,
+            tool_display_name=tool_display_name,
+            arguments=MappingProxyType(copy.deepcopy(arguments)),
+            result_meta=cls._copy_mapping_proxy(getattr(result, "meta", None)),
+            structured_content=cls._copy_mapping_proxy(getattr(result, "structuredContent", None)),
+            is_error=getattr(result, "isError", None),
+            tool_output=copy.deepcopy(tool_output),
+        )
+        return await maybe_extract_custom_data(extractor, extractor_context)
+
     @classmethod
     async def _resolve_meta(
         cls,
@@ -687,6 +762,18 @@ class MCPUtil:
                 tool_output = tool_output_list[0]
             else:
                 tool_output = tool_output_list
+
+        custom_data = await cls._extract_custom_data(
+            server=server,
+            context=context,
+            tool_name=tool.name,
+            tool_display_name=tool_name_for_display,
+            arguments=json_data,
+            result=result,
+            tool_output=tool_output,
+        )
+        if custom_data and isinstance(context, ToolContext):
+            context._custom_data = custom_data
 
         current_span = get_current_span()
         if current_span:

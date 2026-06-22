@@ -2,10 +2,6 @@
 
 Realtime agents in the Python SDK are server-side, low-latency agents built on the OpenAI Realtime API over WebSocket transport.
 
-!!! warning "Beta feature"
-
-    Realtime agents are in beta. Expect some breaking changes as we improve the implementation.
-
 !!! note "Python SDK boundary"
 
     The Python SDK does **not** provide a browser WebRTC transport. This page only covers Python-managed realtime sessions over server-side WebSockets. Use this SDK for server-side orchestration, tools, approvals, and telephony integrations. See also [Realtime transport](transport.md).
@@ -118,7 +114,7 @@ Once the basic session works, the settings most people reach for next are:
 -   `audio.input.turn_detection` for automatic turn detection
 -   `audio.output.voice`
 -   `tool_choice`, `prompt`, `tracing`
--   `async_tool_calls`, `guardrails_settings.debounce_text_length`, `tool_error_formatter`
+-   `async_tool_calls`, `tool_execution.pre_approval_tool_input_guardrails`, `guardrails_settings.debounce_text_length`, `tool_error_formatter`
 
 The older flat aliases such as `input_audio_format`, `output_audio_format`, `input_audio_transcription`, and `turn_detection` still work, but nested `audio` settings are preferred for new code.
 

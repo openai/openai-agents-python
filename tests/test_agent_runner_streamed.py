@@ -139,6 +139,35 @@ async def test_simple_first_run():
 
 
 @pytest.mark.asyncio
+async def test_streamed_tool_not_found_behavior_returns_error_to_model() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("missing_tool", "{}", call_id="call_missing")],
+            [get_text_message("recovered")],
+        ]
+    )
+
+    result = Runner.run_streamed(
+        agent,
+        input="start",
+        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
+    )
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "recovered"
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    assert {
+        item.get("call_id"): item.get("output")
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    } == {"call_missing": "Tool 'missing_tool' not found."}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("terminal_event_type", "terminal_event_cls"),
     [

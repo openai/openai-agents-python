@@ -170,7 +170,10 @@ class Handoff(Generic[TContext, TAgent]):
 
     @classmethod
     def default_tool_name(cls, agent: AgentBase[Any]) -> str:
-        return _transforms.transform_string_function_style(f"transfer_to_{agent.name}")
+        return _transforms.transform_string_function_style(
+            f"transfer_to_{agent.name}",
+            warn_on_whitespace=False,
+        )
 
     @classmethod
     def default_tool_description(cls, agent: AgentBase[Any]) -> str:

@@ -10,7 +10,7 @@ from agents.lifecycle import AgentHooks, RunHooks
 from agents.models.interface import Model
 from agents.run import Runner
 from agents.run_context import AgentHookContext, RunContextWrapper, TContext
-from agents.tool import Tool
+from agents.tool import Tool, function_tool
 from agents.tool_context import ToolContext
 from tests.test_agent_llm_hooks import AgentHooksForTests
 
@@ -60,7 +60,7 @@ class RunHooksForTests(RunHooks):
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
         tool: Tool,
-        result: str,
+        result: object,
     ) -> None:
         self.events["on_tool_end"] += 1
         if isinstance(context, ToolContext):
@@ -386,3 +386,55 @@ async def test_streamed_run_hooks_count_tool_and_handoff_invocations():
     assert hooks.events["on_agent_start"] == 2
     assert hooks.events["on_agent_end"] == 1
     assert len(hooks.tool_context_ids) == 2
+
+
+@pytest.mark.asyncio
+async def test_tool_end_hooks_receive_raw_function_tool_result():
+    class RecordingRunHooks(RunHooks):
+        def __init__(self):
+            self.result: object | None = None
+
+        async def on_tool_end(
+            self,
+            context: RunContextWrapper[Any],
+            agent: Agent[Any],
+            tool: Tool,
+            result: object,
+        ) -> None:
+            self.result = result
+
+    class RecordingAgentHooks(AgentHooks):
+        def __init__(self):
+            self.result: object | None = None
+
+        async def on_tool_end(
+            self,
+            context: RunContextWrapper[Any],
+            agent: Agent[Any],
+            tool: Tool,
+            result: object,
+        ) -> None:
+            self.result = result
+
+    metadata_result: dict[str, object] = {"status": "ok", "count": 1}
+
+    @function_tool
+    def get_metadata() -> dict[str, object]:
+        return metadata_result
+
+    run_hooks = RecordingRunHooks()
+    agent_hooks = RecordingAgentHooks()
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tools=[get_metadata], hooks=agent_hooks)
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("get_metadata", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+
+    await Runner.run(agent, input="user_message", hooks=run_hooks)
+
+    assert run_hooks.result is metadata_result
+    assert agent_hooks.result is metadata_result

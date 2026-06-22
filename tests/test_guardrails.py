@@ -1701,3 +1701,77 @@ async def test_streaming_input_guardrail_exception_awaits_cancelled_siblings():
         )
 
     assert slow_cleanup_finished is True
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_raise_cancels_siblings():
+    """When one input guardrail raises a non-tripwire exception, sibling tasks
+    must be cancelled and awaited so they don't keep running past the function's return."""
+    from agents.run_internal.guardrails import run_input_guardrails
+
+    sibling_started = asyncio.Event()
+    sibling_completed = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    async def slow_sibling_started_first(ctx, agent, input):
+        sibling_started.set()
+        try:
+            await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+        sibling_completed.set()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    async def raise_after_sibling_starts(ctx, agent, input):
+        await sibling_started.wait()
+        raise RuntimeError("boom")
+
+    g_slow = InputGuardrail(guardrail_function=slow_sibling_started_first)
+    g_raise = InputGuardrail(guardrail_function=raise_after_sibling_starts)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await run_input_guardrails(
+            Agent(name="t"), [g_slow, g_raise], "x", RunContextWrapper(context=None)
+        )
+
+    # By the time run_input_guardrails returns (via raise), the sibling must already
+    # have been cancelled and awaited. No additional sleep should be needed.
+    assert sibling_cancelled.is_set(), "Sibling task should have been cancelled"
+    assert not sibling_completed.is_set(), "Sibling task should not have completed"
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_raise_cancels_siblings():
+    """When one output guardrail raises a non-tripwire exception, sibling tasks
+    must be cancelled and awaited so they don't keep running past the function's return."""
+    from agents.run_internal.guardrails import run_output_guardrails
+
+    sibling_started = asyncio.Event()
+    sibling_completed = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    async def slow_sibling_started_first(ctx, agent, agent_output):
+        sibling_started.set()
+        try:
+            await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+        sibling_completed.set()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    async def raise_after_sibling_starts(ctx, agent, agent_output):
+        await sibling_started.wait()
+        raise RuntimeError("boom")
+
+    g_slow = OutputGuardrail(guardrail_function=slow_sibling_started_first)
+    g_raise = OutputGuardrail(guardrail_function=raise_after_sibling_starts)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await run_output_guardrails(
+            [g_slow, g_raise], Agent(name="t"), "out", RunContextWrapper(context=None)
+        )
+
+    assert sibling_cancelled.is_set(), "Sibling task should have been cancelled"
+    assert not sibling_completed.is_set(), "Sibling task should not have completed"

@@ -664,6 +664,58 @@ async def test_cloudflare_exec_non_200_includes_provider_error_details() -> None
         str(exc_info.value)
         == "POST /exec failed: HTTP 502: pool_error: pool error: Failed to start container"
     )
+    assert exc_info.value.retryable is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected_retryable"),
+    [
+        (400, False),
+        (500, False),
+        (503, True),
+    ],
+)
+async def test_cloudflare_exec_retryability_follows_documented_status_semantics(
+    status: int,
+    expected_retryable: bool,
+) -> None:
+    sess = _make_session(
+        fake_http=_FakeHttp(
+            {
+                "POST /exec": _FakeResponse(
+                    status=status,
+                    json_body={
+                        "error": "cloudflare sandbox error",
+                        "code": "cloudflare_error",
+                    },
+                )
+            }
+        )
+    )
+
+    with pytest.raises(ExecTransportError) as exc_info:
+        await sess._exec_internal("mkdir", "-p", "--", "/workspace", timeout=5.0)
+
+    assert exc_info.value.context["backend"] == "cloudflare"
+    assert exc_info.value.context["http_status"] == status
+    assert exc_info.value.context["provider_error"] == "cloudflare_error: cloudflare sandbox error"
+    assert exc_info.value.retryable is expected_retryable
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_retryable"),
+    [
+        (400, False),
+        (500, False),
+        (503, True),
+        (418, None),
+    ],
+)
+def test_cloudflare_retryability_status_table(status: int, expected_retryable: bool | None) -> None:
+    from agents.extensions.sandbox.cloudflare import sandbox as mod
+
+    assert mod._cloudflare_retryability_for_status(status) is expected_retryable
 
 
 @pytest.mark.asyncio
@@ -963,6 +1015,48 @@ async def test_cloudflare_persist_and_hydrate_use_http_endpoints() -> None:
     assert "cache" in persist_calls[0]["params"]["excludes"]
     assert "generated/runtime" in persist_calls[0]["params"]["excludes"]
     assert "root" not in hydrate_calls[0].get("params", {})
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_persist_retries_only_documented_503_status() -> None:
+    fake_http = _FakeHttp(
+        {
+            "POST /persist": _FakeResponse(
+                status=503,
+                json_body={"error": "container starting"},
+            )
+        }
+    )
+    sess = _make_session(fake_http=fake_http)
+
+    with pytest.raises(WorkspaceArchiveReadError) as exc_info:
+        await sess.persist_workspace()
+
+    persist_calls = [c for c in fake_http.calls if c["method"] == "POST" and "/persist" in c["url"]]
+    assert len(persist_calls) == 3
+    assert exc_info.value.context["http_status"] == 503
+    assert exc_info.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_persist_does_not_retry_documented_fail_fast_500() -> None:
+    fake_http = _FakeHttp(
+        {
+            "POST /persist": _FakeResponse(
+                status=500,
+                json_body={"error": "configuration error"},
+            )
+        }
+    )
+    sess = _make_session(fake_http=fake_http)
+
+    with pytest.raises(WorkspaceArchiveReadError) as exc_info:
+        await sess.persist_workspace()
+
+    persist_calls = [c for c in fake_http.calls if c["method"] == "POST" and "/persist" in c["url"]]
+    assert len(persist_calls) == 1
+    assert exc_info.value.context["http_status"] == 500
+    assert exc_info.value.retryable is False
 
 
 @pytest.mark.asyncio
