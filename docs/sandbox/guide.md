@@ -93,7 +93,7 @@ The main SDK pieces map onto those layers like this:
 | Piece | What it owns | Ask this question |
 | --- | --- | --- |
 | [`SandboxAgent`][agents.sandbox.sandbox_agent.SandboxAgent] | The agent definition | What should this agent do, and which defaults should travel with it? |
-| [`Manifest`][agents.sandbox.manifest.Manifest] | Fresh-session workspace files and folders | What files and folder should be present on the filesystem when the run starts? |
+| [`Manifest`][agents.sandbox.manifest.Manifest] | Fresh-session workspace files and folders | What files and folders should be present on the filesystem when the run starts? |
 | [`Capability`][agents.sandbox.capabilities.capability.Capability] | Sandbox-native behavior | Which tools, instruction fragments, or runtime behavior should attach to this agent? |
 | [`SandboxRunConfig`][agents.run_config.SandboxRunConfig] | Per-run sandbox client and sandbox-session source | Should this run inject, resume, or create a sandbox session? |
 | [`RunState`][agents.run_state.RunState] | Runner-managed saved sandbox state | Am I resuming a prior runner-managed workflow and carrying its sandbox state forward automatically? |
@@ -272,7 +272,7 @@ from agents.sandbox import FileMode, Permissions
 from agents.sandbox.entries import File
 
 private_notes = File(
-    text="internal notes",
+    content=b"internal notes",
     permissions=Permissions(
         owner=FileMode.READ | FileMode.WRITE,
         group=FileMode.NONE,
@@ -780,8 +780,13 @@ When a tool-agent needs real isolation instead, give it its own sandbox `RunConf
 from docker import from_env as docker_from_env
 
 from agents.run import RunConfig
-from agents.sandbox import SandboxRunConfig
+from agents.sandbox import SandboxAgent, SandboxRunConfig
 from agents.sandbox.sandboxes.docker import DockerSandboxClient, DockerSandboxClientOptions
+
+rollout_agent = SandboxAgent(
+    name="Rollout Reviewer",
+    instructions="Inspect the rollout packet and summarize implementation risk.",
+)
 
 rollout_agent.as_tool(
     tool_name="review_rollout_risk",
@@ -853,7 +858,7 @@ Approval behavior follows the same split:
 
 ## Further reading
 
-- [Quickstart](quickstart.md): get one sandbox agent running.
+- [Quickstart](../sandbox_agents.md): get one sandbox agent running.
 - [Sandbox clients](clients.md): choose local, Docker, hosted, and mount options.
 - [Agent memory](memory.md): preserve and reuse lessons from prior sandbox runs.
 - [examples/sandbox/](https://github.com/openai/openai-agents-python/tree/main/examples/sandbox): runnable local, coding, memory, handoff, and agent-composition patterns.

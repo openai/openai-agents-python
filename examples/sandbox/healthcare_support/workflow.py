@@ -87,7 +87,7 @@ class WorkflowHooks(RunHooks[HealthcareSupportContext]):
         context: RunContextWrapper[HealthcareSupportContext],
         agent: Agent[HealthcareSupportContext],
         tool: Tool,
-        result: str,
+        result: object,
     ) -> None:
         tool_context = cast(ToolContext[HealthcareSupportContext], context)
         await context.context.emit(

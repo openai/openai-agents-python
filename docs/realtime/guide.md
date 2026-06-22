@@ -2,10 +2,6 @@
 
 This guide explains how the OpenAI Agents SDK's realtime layer maps onto the OpenAI Realtime API, and what extra behavior the Python SDK adds on top.
 
-!!! warning "Beta feature"
-
-    Realtime agents are in beta. Expect some breaking changes as we improve the implementation.
-
 !!! note "Start here"
 
     If you want the default Python path, read the [quickstart](quickstart.md) first. If you are deciding whether your app should use server-side WebSocket or SIP, read [Realtime transport](transport.md). Browser WebRTC transport is not part of the Python SDK.
@@ -210,6 +206,8 @@ agent = RealtimeAgent(
 
 Function tools can require human approval before execution. When that happens, the session emits `tool_approval_required` and pauses the tool run until you call `approve_tool_call()` or `reject_tool_call()`.
 
+If the tool also has input guardrails, those guardrails run immediately before execution after approval. To run them before the approval event is emitted, create the runner with `RealtimeRunner(..., config={"tool_execution": {"pre_approval_tool_input_guardrails": True}})`. Calls that pass this pre-approval check are still checked again after approval before execution.
+
 ```python
 async for event in session:
     if event.type == "tool_approval_required":
@@ -233,7 +231,12 @@ billing_agent = RealtimeAgent(
 main_agent = RealtimeAgent(
     name="Customer Service",
     instructions="Triage the request and hand off when needed.",
-    handoffs=[realtime_handoff(billing_agent, tool_description="Transfer to billing support")],
+    handoffs=[
+        realtime_handoff(
+            billing_agent,
+            tool_description_override="Transfer to billing support",
+        )
+    ],
 )
 ```
 
@@ -241,7 +244,7 @@ Bare `RealtimeAgent` handoffs are auto-wrapped, and `realtime_handoff(...)` lets
 
 ### Guardrails
 
-Only output guardrails are supported for realtime agents. They run on debounced transcript accumulation rather than on every partial token, and they emit `guardrail_tripped` instead of raising an exception.
+Realtime agents support output guardrails on agent responses and input guardrails on function-tool calls. Output guardrails run on debounced transcript accumulation rather than on every partial token, and they emit `guardrail_tripped` instead of raising an exception.
 
 ```python
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail

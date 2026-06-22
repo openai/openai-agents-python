@@ -4,41 +4,41 @@ search:
 ---
 # 工具
 
-工具让智能体能够执行操作：例如获取数据、运行代码、调用外部 API，甚至使用计算机。SDK 支持五类：
+工具让智能体能够执行操作：例如获取数据、运行代码、调用外部 API，甚至使用计算机。SDK 支持五个目录：
 
--   由 OpenAI 托管的工具：在 OpenAI 服务上与模型一起运行。
+-   由OpenAI托管的工具：与模型一起在OpenAI服务上运行。
 -   本地/运行时执行工具：`ComputerTool` 和 `ApplyPatchTool` 始终在你的环境中运行，而 `ShellTool` 可以在本地或托管容器中运行。
--   Function calling：将任何 Python 函数包装为工具。
--   Agents as tools：将智能体暴露为可调用工具，而无需完整任务转移。
--   实验性：Codex 工具：通过工具调用运行限定于工作区的 Codex 任务。
+-   Function calling：将任意 Python 函数包装为工具。
+-   Agents as tools：将智能体公开为可调用工具，而无需完整任务转移。
+-   实验性：Codex 工具：通过工具调用运行工作区作用域的 Codex 任务。
 
 ## 工具类型选择
 
-将本页作为目录，然后跳转到与你所控制的运行时相匹配的部分。
+将本页作为目录，然后跳转到与你控制的运行时相匹配的部分。
 
-| 如果你想要... | 从这里开始 |
+| 如果你想... | 从这里开始 |
 | --- | --- |
-| 使用由 OpenAI 管理的工具（网络检索、文件检索、code interpreter、托管 MCP、图像生成） | [托管工具](#hosted-tools) |
-| 通过工具搜索将大型工具集合延迟到运行时加载 | [托管工具搜索](#hosted-tool-search) |
+| 使用OpenAI管理的工具（网络检索、文件检索、code interpreter、托管MCP、图像生成） | [托管工具](#hosted-tools) |
+| 使用工具搜索将大型工具面推迟到运行时 | [托管工具搜索](#hosted-tool-search) |
 | 在你自己的进程或环境中运行工具 | [本地运行时工具](#local-runtime-tools) |
 | 将 Python 函数包装为工具 | [工具调用](#function-tools) |
-| 让一个智能体在不进行任务转移的情况下调用另一个智能体 | [Agents as tools](#agents-as-tools) |
-| 从智能体运行限定于工作区的 Codex 任务 | [实验性：Codex 工具](#experimental-codex-tool) |
+| 让一个智能体调用另一个智能体，而无需任务转移 | [Agents as tools](#agents-as-tools) |
+| 从智能体运行工作区作用域的 Codex 任务 | [实验性：Codex 工具](#experimental-codex-tool) |
 
 ## 托管工具
 
-使用 [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] 时，OpenAI 提供了一些内置工具：
+使用 [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] 时，OpenAI提供了一些内置工具：
 
 -   [`WebSearchTool`][agents.tool.WebSearchTool] 让智能体进行网络检索。
--   [`FileSearchTool`][agents.tool.FileSearchTool] 允许从你的 OpenAI 向量存储中检索信息。
--   [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] 让 LLM 在沙盒环境中执行代码。
--   [`HostedMCPTool`][agents.tool.HostedMCPTool] 将远程 MCP 服务的工具暴露给模型。
+-   [`FileSearchTool`][agents.tool.FileSearchTool] 允许从你的OpenAI向量存储中检索信息。
+-   [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] 让LLM在沙盒环境中执行代码。
+-   [`HostedMCPTool`][agents.tool.HostedMCPTool] 将远程MCP服务的工具暴露给模型。
 -   [`ImageGenerationTool`][agents.tool.ImageGenerationTool] 根据提示词生成图像。
--   [`ToolSearchTool`][agents.tool.ToolSearchTool] 让模型按需加载延迟工具、命名空间或托管 MCP 服务。
+-   [`ToolSearchTool`][agents.tool.ToolSearchTool] 让模型按需加载延迟工具、命名空间或托管MCP服务。
 
 高级托管搜索选项：
 
--   除了 `vector_store_ids` 和 `max_num_results` 之外，`FileSearchTool` 还支持 `filters`、`ranking_options` 和 `include_search_results`。
+-   除了 `vector_store_ids` 和 `max_num_results`，`FileSearchTool` 还支持 `filters`、`ranking_options` 和 `include_search_results`。
 -   `WebSearchTool` 支持 `filters`、`user_location` 和 `search_context_size`。
 
 ```python
@@ -62,9 +62,9 @@ async def main():
 
 ### 托管工具搜索
 
-工具搜索让 OpenAI Responses 模型可以将大型工具集合延迟到运行时加载，因此模型只会加载当前轮次所需的子集。当你有许多工具调用、命名空间组或托管 MCP 服务，并且希望减少工具 schema token，而不是预先暴露每个工具时，这会很有用。
+工具搜索允许OpenAI Responses 模型将大型工具面推迟到运行时，因此模型只加载当前轮次所需的子集。当你有许多工具调用、命名空间组或托管MCP服务，并希望减少工具 schema token，而无需预先暴露每个工具时，这会很有用。
 
-当候选工具在你构建智能体时已经已知，请从托管工具搜索开始。如果你的应用需要动态决定要加载什么，Responses API 也支持由客户端执行的工具搜索，但标准 `Runner` 不会自动执行该模式。
+当你构建智能体时已知道候选工具，就从托管工具搜索开始。如果你的应用需要动态决定加载什么，Responses API 也支持由客户端执行的工具搜索，但标准 `Runner` 不会自动执行该模式。
 
 ```python
 from typing import Annotated
@@ -108,24 +108,24 @@ print(result.final_output)
 
 注意事项：
 
--   托管工具搜索仅适用于 OpenAI Responses 模型。当前 Python SDK 支持依赖于 `openai>=2.25.0`。
--   当你在智能体上配置延迟加载范围时，需要且只能添加一个 `ToolSearchTool()`。
--   可搜索范围包括 `@function_tool(defer_loading=True)`、`tool_namespace(name=..., description=..., tools=[...])` 和 `HostedMCPTool(tool_config={..., "defer_loading": True})`。
--   延迟加载的工具调用必须与 `ToolSearchTool()` 配对。仅命名空间的设置也可以使用 `ToolSearchTool()`，让模型按需加载正确的分组。
--   `tool_namespace()` 会将 `FunctionTool` 实例归入共享的命名空间名称和描述下。当你有许多相关工具时（例如 `crm`、`billing` 或 `shipping`），这通常是最合适的选择。
--   OpenAI 官方最佳实践指南是[尽可能使用命名空间](https://developers.openai.com/api/docs/guides/tools-tool-search#use-namespaces-where-possible)。
--   在可行时，优先使用命名空间或托管 MCP 服务，而不是许多单独延迟加载的函数。它们通常能为模型提供更好的高层搜索界面，并带来更好的 token 节省效果。
--   命名空间可以混合使用立即可用工具和延迟工具。没有 `defer_loading=True` 的工具仍可立即调用，而同一命名空间中的延迟工具会通过工具搜索加载。
--   经验法则是，让每个命名空间保持相对较小，理想情况下少于 10 个函数。
--   命名的 `tool_choice` 不能指向裸命名空间名称或仅延迟加载的工具。优先使用 `auto`、`required`，或真正的顶层可调用工具名称。
--   `ToolSearchTool(execution="client")` 用于手动编排 Responses。如果模型发出由客户端执行的 `tool_search_call`，标准 `Runner` 会抛出异常，而不会替你执行它。
+-   托管工具搜索仅适用于OpenAI Responses 模型。当前 Python SDK 支持取决于 `openai>=2.25.0`。
+-   在智能体上配置延迟加载面时，请只添加一个 `ToolSearchTool()`。
+-   可搜索的表面包括 `@function_tool(defer_loading=True)`、`tool_namespace(name=..., description=..., tools=[...])` 和 `HostedMCPTool(tool_config={..., "defer_loading": True})`。
+-   延迟加载的函数工具必须与 `ToolSearchTool()` 配对。仅命名空间的设置也可以使用 `ToolSearchTool()`，让模型按需加载正确的组。
+-   `tool_namespace()` 会将 `FunctionTool` 实例按共享的命名空间名称和描述进行分组。当你有许多相关工具（例如 `crm`、`billing` 或 `shipping`）时，这通常最合适。
+-   OpenAI的官方最佳实践指南是[尽可能使用命名空间](https://developers.openai.com/api/docs/guides/tools-tool-search#use-namespaces-where-possible)。
+-   尽可能优先使用命名空间或托管MCP服务，而不是许多单独延迟加载的函数。它们通常会为模型提供更好的高层搜索表面，并更好地节省 token。
+-   命名空间可以混合即时工具和延迟工具。没有 `defer_loading=True` 的工具仍可立即调用，而同一命名空间中的延迟工具会通过工具搜索加载。
+-   经验法则是保持每个命名空间相对较小，理想情况下少于 10 个函数。
+-   具名 `tool_choice` 不能以裸命名空间名称或仅延迟加载的工具为目标。优先使用 `auto`、`required` 或真实的顶层可调用工具名称。
+-   `ToolSearchTool(execution="client")` 用于手动 Responses 编排。如果模型发出由客户端执行的 `tool_search_call`，标准 `Runner` 会抛出异常，而不是为你执行它。
 -   工具搜索活动会出现在 [`RunResult.new_items`](results.md#new-items) 中，也会以专用条目和事件类型出现在 [`RunItemStreamEvent`](streaming.md#run-item-event-names) 中。
--   参见 `examples/tools/tool_search.py`，其中包含覆盖命名空间加载和顶层延迟工具的完整可运行代码示例。
+-   请参阅 `examples/tools/tool_search.py`，获取涵盖命名空间加载和顶层延迟工具的完整可运行代码示例。
 -   官方平台指南：[工具搜索](https://developers.openai.com/api/docs/guides/tools-tool-search)。
 
-### 托管容器 Shell + 技能
+### 托管容器 shell 与技能
 
-`ShellTool` 还支持由 OpenAI 托管的容器执行。当你希望模型在托管容器中运行 shell 命令，而不是在本地运行时中运行时，请使用此模式。
+`ShellTool` 也支持由OpenAI托管的容器执行。当你希望模型在托管容器中运行 shell 命令，而不是在本地运行时中运行时，请使用此模式。
 
 ```python
 from agents import Agent, Runner, ShellTool, ShellToolSkillReference
@@ -158,52 +158,52 @@ result = await Runner.run(
 print(result.final_output)
 ```
 
-若要在后续运行中复用现有容器，请设置 `environment={"type": "container_reference", "container_id": "cntr_..."}`。
+若要在后续运行中复用已有容器，请设置 `environment={"type": "container_reference", "container_id": "cntr_..."}`。
 
 注意事项：
 
 -   托管 shell 可通过 Responses API shell 工具使用。
--   `container_auto` 会为请求配置一个容器；`container_reference` 会复用现有容器。
+-   `container_auto` 会为请求预配一个容器；`container_reference` 会复用已有容器。
 -   `container_auto` 也可以包含 `file_ids` 和 `memory_limit`。
 -   `environment.skills` 接受技能引用和内联技能包。
--   使用托管环境时，不要在 `ShellTool` 上设置 `executor`、`needs_approval` 或 `on_approval`。
+-   对于托管环境，不要在 `ShellTool` 上设置 `executor`、`needs_approval` 或 `on_approval`。
 -   `network_policy` 支持 `disabled` 和 `allowlist` 模式。
--   在 allowlist 模式下，`network_policy.domain_secrets` 可以按名称注入限定于域的密钥。
--   参见 `examples/tools/container_shell_skill_reference.py` 和 `examples/tools/container_shell_inline_skill.py` 获取完整示例。
--   OpenAI 平台指南：[Shell](https://platform.openai.com/docs/guides/tools-shell) 和 [技能](https://platform.openai.com/docs/guides/tools-skills)。
+-   在 allowlist 模式下，`network_policy.domain_secrets` 可以按名称注入域作用域的密钥。
+-   请参阅 `examples/tools/container_shell_skill_reference.py` 和 `examples/tools/container_shell_inline_skill.py` 获取完整代码示例。
+-   OpenAI平台指南：[Shell](https://platform.openai.com/docs/guides/tools-shell) 和 [Skills](https://platform.openai.com/docs/guides/tools-skills)。
 
 ## 本地运行时工具
 
 本地运行时工具在模型响应本身之外执行。模型仍然决定何时调用它们，但实际工作由你的应用或已配置的执行环境完成。
 
-`ComputerTool` 和 `ApplyPatchTool` 始终需要你提供本地实现。`ShellTool` 跨越两种模式：当你希望托管执行时，使用上面的托管容器配置；当你希望命令在自己的进程中运行时，使用下面的本地运行时配置。
+`ComputerTool` 和 `ApplyPatchTool` 始终需要你提供本地实现。`ShellTool` 横跨两种模式：当你想要托管执行时，使用上面的托管容器配置；当你希望命令在自己的进程中运行时，使用下面的本地运行时配置。
 
 本地运行时工具要求你提供实现：
 
 -   [`ComputerTool`][agents.tool.ComputerTool]：实现 [`Computer`][agents.computer.Computer] 或 [`AsyncComputer`][agents.computer.AsyncComputer] 接口，以启用 GUI/浏览器自动化。
 -   [`ShellTool`][agents.tool.ShellTool]：用于本地执行和托管容器执行的最新 shell 工具。
 -   [`LocalShellTool`][agents.tool.LocalShellTool]：旧版本地 shell 集成。
--   [`ApplyPatchTool`][agents.tool.ApplyPatchTool]：实现 [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor]，以在本地应用差异。
+-   [`ApplyPatchTool`][agents.tool.ApplyPatchTool]：实现 [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor] 以在本地应用 diff。
 -   本地 shell 技能可通过 `ShellTool(environment={"type": "local", "skills": [...]})` 使用。
 
-### ComputerTool 和 Responses 计算机工具
+### ComputerTool 与 Responses 计算机工具
 
-`ComputerTool` 仍然是一个本地执行框架：你提供 [`Computer`][agents.computer.Computer] 或 [`AsyncComputer`][agents.computer.AsyncComputer] 实现，SDK 会将该执行框架映射到 OpenAI Responses API 的计算机接口上。
+`ComputerTool` 仍然是一个本地执行框架：你提供 [`Computer`][agents.computer.Computer] 或 [`AsyncComputer`][agents.computer.AsyncComputer] 实现，SDK 会将该执行框架映射到OpenAI Responses API 的计算机表面。
 
-对于显式的 [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) 请求，SDK 会发送 GA 内置工具载荷 `{"type": "computer"}`。较旧的 `computer-use-preview` 模型会保留预览载荷 `{"type": "computer_use_preview", "environment": ..., "display_width": ..., "display_height": ...}`。这与 OpenAI 的[计算机操作指南](https://developers.openai.com/api/docs/guides/tools-computer-use/)中描述的平台迁移一致：
+对于显式的 [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) 请求，SDK 会发送 GA 内置工具负载 `{"type": "computer"}`。较旧的 `computer-use-preview` 模型会保留预览负载 `{"type": "computer_use_preview", "environment": ..., "display_width": ..., "display_height": ...}`。这与OpenAI的[计算机操作指南](https://developers.openai.com/api/docs/guides/tools-computer-use/)中描述的平台迁移一致：
 
 -   模型：`computer-use-preview` -> `gpt-5.5`
 -   工具选择器：`computer_use_preview` -> `computer`
--   计算机调用形态：每个 `computer_call` 一个 `action` -> `computer_call` 上批处理的 `actions[]`
+-   计算机调用形态：每个 `computer_call` 一个 `action` -> `computer_call` 上的批量 `actions[]`
 -   截断：预览路径需要 `ModelSettings(truncation="auto")` -> GA 路径不需要
 
-SDK 会根据实际 Responses 请求中的有效模型选择该传输格式。如果你使用提示词模板，并且由于模型由提示词拥有而使请求省略 `model`，SDK 会保留兼容预览版的计算机载荷，除非你要么显式保留 `model="gpt-5.5"`，要么通过 `ModelSettings(tool_choice="computer")` 或 `ModelSettings(tool_choice="computer_use")` 强制使用 GA 选择器。
+SDK 会根据实际 Responses 请求上的有效模型选择该传输形态。如果你使用提示词模板，并且由于提示词自身指定了模型而请求省略了 `model`，SDK 会保留与预览兼容的计算机负载，除非你保留显式的 `model="gpt-5.5"`，或使用 `ModelSettings(tool_choice="computer")` 或 `ModelSettings(tool_choice="computer_use")` 强制使用 GA 选择器。
 
-当存在 [`ComputerTool`][agents.tool.ComputerTool] 时，`tool_choice="computer"`、`"computer_use"` 和 `"computer_use_preview"` 都会被接受，并会规范化为与有效请求模型匹配的内置选择器。如果没有 `ComputerTool`，这些字符串仍会像普通函数名称一样工作。
+当存在 [`ComputerTool`][agents.tool.ComputerTool] 时，`tool_choice="computer"`、`"computer_use"` 和 `"computer_use_preview"` 都会被接受，并规范化为与有效请求模型匹配的内置选择器。如果没有 `ComputerTool`，这些字符串仍会像普通函数名一样运行。
 
-当 `ComputerTool` 由 [`ComputerProvider`][agents.tool.ComputerProvider] 工厂支持时，这一区别很重要。GA `computer` 载荷在序列化时不需要 `environment` 或尺寸，因此未解析的工厂也没问题。兼容预览版的序列化仍然需要已解析的 `Computer` 或 `AsyncComputer` 实例，以便 SDK 能发送 `environment`、`display_width` 和 `display_height`。
+当 [`ComputerTool`][agents.tool.ComputerTool] 由 [`ComputerProvider`][agents.tool.ComputerProvider] 工厂支持时，这一区别很重要。GA `computer` 负载在序列化时不需要 `environment` 或尺寸，因此未解析的工厂也可以。与预览兼容的序列化仍需要已解析的 `Computer` 或 `AsyncComputer` 实例，以便 SDK 可以发送 `environment`、`display_width` 和 `display_height`。
 
-在运行时，两条路径仍使用相同的本地执行框架。预览版响应会发出带有单个 `action` 的 `computer_call` 条目；`gpt-5.5` 可以发出批处理的 `actions[]`，SDK 会按顺序执行它们，然后生成一个 `computer_call_output` 截图条目。参见 `examples/tools/computer_use.py`，其中包含一个基于 Playwright 的可运行执行框架。
+在运行时，两条路径仍使用相同的本地执行框架。预览响应会发出带有单个 `action` 的 `computer_call` 条目；`gpt-5.5` 可以发出批量 `actions[]`，SDK 会按顺序执行它们，然后生成 `computer_call_output` 截图条目。请参阅 `examples/tools/computer_use.py` 获取基于 Playwright 的可运行执行框架。
 
 ```python
 from agents import Agent, ApplyPatchTool, ShellTool
@@ -247,16 +247,16 @@ agent = Agent(
 
 ## 工具调用
 
-你可以将任何 Python 函数用作工具。Agents SDK 会自动设置该工具：
+你可以将任何 Python 函数用作工具。Agents SDK会自动设置工具：
 
--   工具名称将是 Python 函数的名称（或者你可以提供一个名称）
--   工具描述将来自该函数的 docstring（或者你可以提供一个描述）
+-   工具名称将是 Python 函数的名称（或者你也可以提供一个名称）
+-   工具描述将取自函数的文档字符串（或者你也可以提供一个描述）
 -   函数输入的 schema 会根据函数参数自动创建
--   除非禁用，否则每个输入的描述会来自该函数的 docstring
+-   除非禁用，否则每个输入的描述都会取自函数的文档字符串
 
-我们使用 Python 的 `inspect` 模块提取函数签名，并结合 [`griffe`](https://mkdocstrings.github.io/griffe/) 解析 docstring，使用 `pydantic` 创建 schema。
+我们使用 Python 的 `inspect` 模块提取函数签名，并使用 [`griffe`](https://mkdocstrings.github.io/griffe/) 解析文档字符串，使用 `pydantic` 创建 schema。
 
-使用 OpenAI Responses 模型时，`@function_tool(defer_loading=True)` 会隐藏一个函数工具，直到 `ToolSearchTool()` 加载它。你也可以使用 [`tool_namespace()`][agents.tool.tool_namespace] 对相关工具调用进行分组。完整设置和约束请参见[托管工具搜索](#hosted-tool-search)。
+当你使用OpenAI Responses 模型时，`@function_tool(defer_loading=True)` 会隐藏函数工具，直到 `ToolSearchTool()` 加载它。你也可以使用 [`tool_namespace()`][agents.tool.tool_namespace] 对相关函数工具进行分组。完整设置和约束请参阅[托管工具搜索](#hosted-tool-search)。
 
 ```python
 import json
@@ -308,10 +308,10 @@ for tool in agent.tools:
 
 ```
 
-1.  你可以使用任何 Python 类型作为函数参数，并且函数可以是同步或异步的。
-2.  如果存在 docstring，则会用它来捕获描述和参数描述
-3.  函数可以选择接受 `context`（必须是第一个参数）。你也可以设置覆盖项，例如工具名称、描述、要使用的 docstring 风格等。
-4.  你可以将装饰后的函数传入工具列表。
+1.  你可以将任何 Python 类型用作函数参数，并且函数可以是同步或异步的。
+2.  如果存在文档字符串，则会用于捕获描述和参数描述
+3.  函数可以选择接受 `context`（必须是第一个参数）。你也可以设置覆盖项，例如工具名称、描述、要使用的文档字符串样式等。
+4.  你可以将装饰后的函数传递到工具列表中。
 
 ??? note "展开查看输出"
 
@@ -385,19 +385,19 @@ for tool in agent.tools:
 
 ### 从工具调用返回图像或文件
 
-除了返回文本输出之外，你还可以返回一个或多个图像或文件作为工具调用的输出。为此，你可以返回以下任意内容：
+除了返回文本输出，你还可以将一个或多个图像或文件作为函数工具的输出返回。为此，你可以返回以下任意内容：
 
 -   图像：[`ToolOutputImage`][agents.tool.ToolOutputImage]（或 TypedDict 版本 [`ToolOutputImageDict`][agents.tool.ToolOutputImageDict]）
 -   文件：[`ToolOutputFileContent`][agents.tool.ToolOutputFileContent]（或 TypedDict 版本 [`ToolOutputFileContentDict`][agents.tool.ToolOutputFileContentDict]）
--   文本：字符串或可转为字符串的对象，或者 [`ToolOutputText`][agents.tool.ToolOutputText]（或 TypedDict 版本 [`ToolOutputTextDict`][agents.tool.ToolOutputTextDict]）
+-   文本：字符串或可字符串化的对象，或 [`ToolOutputText`][agents.tool.ToolOutputText]（或 TypedDict 版本 [`ToolOutputTextDict`][agents.tool.ToolOutputTextDict]）
 
 ### 自定义工具调用
 
-有时，你不想将 Python 函数用作工具。如果你愿意，可以直接创建 [`FunctionTool`][agents.tool.FunctionTool]。你需要提供：
+有时，你并不想将 Python 函数用作工具。如果愿意，你可以直接创建 [`FunctionTool`][agents.tool.FunctionTool]。你需要提供：
 
 -   `name`
 -   `description`
--   `params_json_schema`，即参数的 JSON schema
+-   `params_json_schema`，即参数的 JSON Schema
 -   `on_invoke_tool`，这是一个异步函数，它接收 [`ToolContext`][agents.tool_context.ToolContext] 和作为 JSON 字符串的参数，并返回工具输出（例如文本、结构化工具输出对象，或输出列表）。
 
 ```python
@@ -431,18 +431,18 @@ tool = FunctionTool(
 )
 ```
 
-### 参数和 docstring 自动解析
+### 参数和文档字符串自动解析
 
-如前所述，我们会自动解析函数签名以提取工具的 schema，并解析 docstring 以提取工具描述和各个参数的描述。相关说明如下：
+如前所述，我们会自动解析函数签名以提取工具的 schema，并解析文档字符串以提取工具以及各个参数的描述。相关说明如下：
 
-1. 签名解析通过 `inspect` 模块完成。我们使用类型注解来理解参数类型，并动态构建 Pydantic 模型来表示整体 schema。它支持大多数类型，包括 Python 基本类型、Pydantic 模型、TypedDict 等。
-2. 我们使用 `griffe` 解析 docstring。支持的 docstring 格式为 `google`、`sphinx` 和 `numpy`。我们会尝试自动检测 docstring 格式，但这是尽力而为的，你也可以在调用 `function_tool` 时显式设置它。你还可以通过将 `use_docstring_info` 设置为 `False` 来禁用 docstring 解析。
+1. 签名解析通过 `inspect` 模块完成。我们使用类型注解理解参数类型，并动态构建 Pydantic 模型来表示整体 schema。它支持大多数类型，包括 Python 基础类型、Pydantic 模型、TypedDict 等。
+2. 我们使用 `griffe` 解析文档字符串。支持的文档字符串格式包括 `google`、`sphinx` 和 `numpy`。我们会尝试自动检测文档字符串格式，但这属于尽力而为；你也可以在调用 `function_tool` 时显式设置。你还可以通过将 `use_docstring_info` 设置为 `False` 来禁用文档字符串解析。
 
-schema 提取代码位于 [`agents.function_schema`][]。
+schema 提取的代码位于 [`agents.function_schema`][]。
 
-### 使用 Pydantic Field 约束和描述参数
+### 使用 Pydantic Field 的参数约束与描述
 
-你可以使用 Pydantic 的 [`Field`](https://docs.pydantic.dev/latest/concepts/fields/) 为工具参数添加约束（例如数字的最小值/最大值、字符串的长度或模式）和描述。与 Pydantic 中一样，支持两种形式：基于默认值的形式（`arg: int = Field(..., ge=1)`）和 `Annotated`（`arg: Annotated[int, Field(..., ge=1)]`）。生成的 JSON schema 和验证会包含这些约束。
+你可以使用 Pydantic 的 [`Field`](https://docs.pydantic.dev/latest/concepts/fields/) 为工具参数添加约束（例如数字的最小/最大值、字符串的长度或模式）和描述。与 Pydantic 一样，两种形式都受支持：基于默认值的形式（`arg: int = Field(..., ge=1)`）和 `Annotated`（`arg: Annotated[int, Field(..., ge=1)]`）。生成的 JSON Schema 和验证都会包含这些约束。
 
 ```python
 from typing import Annotated
@@ -460,9 +460,9 @@ def score_b(score: Annotated[int, Field(..., ge=0, le=100, description="Score fr
     return f"Score recorded: {score}"
 ```
 
-### 工具调用超时
+### 函数工具超时
 
-你可以使用 `@function_tool(timeout=...)` 为异步工具调用设置每次调用的超时。
+你可以使用 `@function_tool(timeout=...)` 为异步函数工具设置每次调用超时。
 
 ```python
 import asyncio
@@ -482,11 +482,11 @@ agent = Agent(
 )
 ```
 
-达到超时时，默认行为是 `timeout_behavior="error_as_result"`，它会发送一条模型可见的超时消息（例如 `Tool 'slow_lookup' timed out after 2 seconds.`）。
+当达到超时时间时，默认行为是 `timeout_behavior="error_as_result"`，它会发送一条模型可见的超时消息（例如 `Tool 'slow_lookup' timed out after 2 seconds.`）。
 
-你可以控制超时处理方式：
+你可以控制超时处理：
 
--   `timeout_behavior="error_as_result"`（默认）：向模型返回超时消息，使其能够恢复。
+-   `timeout_behavior="error_as_result"`（默认）：向模型返回超时消息，以便它能够恢复。
 -   `timeout_behavior="raise_exception"`：抛出 [`ToolTimeoutError`][agents.exceptions.ToolTimeoutError] 并使运行失败。
 -   `timeout_error_function=...`：在使用 `error_as_result` 时自定义超时消息。
 
@@ -515,11 +515,11 @@ except ToolTimeoutError as e:
 
 ### 工具调用中的错误处理
 
-通过 `@function_tool` 创建函数工具时，你可以传入 `failure_error_function`。这是一个在工具调用崩溃时向 LLM 提供错误响应的函数。
+当你通过 `@function_tool` 创建函数工具时，可以传入 `failure_error_function`。这是一个在工具调用崩溃时向LLM提供错误响应的函数。
 
--   默认情况下（即如果你没有传入任何内容），它会运行 `default_tool_error_function`，告诉 LLM 发生了错误。
--   如果你传入自己的错误函数，则会改为运行该函数，并将响应发送给 LLM。
--   如果你显式传入 `None`，则任何工具调用错误都会重新抛出，由你处理。这可能是模型生成了无效 JSON 导致的 `ModelBehaviorError`，也可能是你的代码崩溃导致的 `UserError` 等。
+-   默认情况下（即如果你什么都不传），它会运行 `default_tool_error_function`，告知LLM发生了错误。
+-   如果你传入自己的错误函数，则会改为运行该函数，并将响应发送给LLM。
+-   如果你显式传入 `None`，则任何工具调用错误都会重新抛出，由你处理。这可能是模型生成了无效 JSON 时的 `ModelBehaviorError`，也可能是你的代码崩溃时的 `UserError`，等等。
 
 ```python
 from agents import function_tool, RunContextWrapper
@@ -546,7 +546,7 @@ def get_user_profile(user_id: str) -> str:
 
 ## Agents as tools
 
-在某些工作流中，你可能希望由一个中央智能体编排一组专业智能体，而不是移交控制权。你可以通过将智能体建模为工具来实现这一点。
+在某些工作流中，你可能希望由一个中心智能体编排由专业化智能体组成的网络，而不是移交控制权。你可以通过将智能体建模为工具来实现这一点。
 
 ```python
 from agents import Agent, Runner
@@ -565,7 +565,7 @@ french_agent = Agent(
 orchestrator_agent = Agent(
     name="orchestrator_agent",
     instructions=(
-        "You are a translation agent. You use the tools given to you to translate."
+        "You are a translation agent. You use the tools given to you to translate. "
         "If asked for multiple translations, you call the relevant tools."
     ),
     tools=[
@@ -585,9 +585,9 @@ async def main():
     print(result.final_output)
 ```
 
-### 工具智能体自定义
+### 工具型智能体自定义
 
-`agent.as_tool` 函数是一个便捷方法，可以轻松地将智能体转换为工具。它支持常见运行时选项，例如 `max_turns`、`run_config`、`hooks`、`previous_response_id`、`conversation_id`、`session` 和 `needs_approval`。它还支持通过 `parameters`、`input_builder` 和 `include_input_schema` 实现结构化输入。对于高级编排（例如条件重试、回退行为，或串联多个智能体调用），请在你的工具实现中直接使用 `Runner.run`：
+`agent.as_tool` 函数是一个便捷方法，可以轻松将智能体转换为工具。它支持常见运行时选项，例如 `max_turns`、`run_config`、`hooks`、`previous_response_id`、`conversation_id`、`session` 和 `needs_approval`。它也支持通过 `parameters`、`input_builder` 和 `include_input_schema` 使用结构化输入。对于更高级的编排（例如条件重试、回退行为，或串联多个智能体调用），请在你的工具实现中直接使用 `Runner.run`：
 
 ```python
 @function_tool
@@ -606,15 +606,15 @@ async def run_my_agent() -> str:
     return str(result.final_output)
 ```
 
-### 工具智能体的结构化输入
+### 工具型智能体的结构化输入
 
 默认情况下，`Agent.as_tool()` 期望单个字符串输入（`{"input": "..."}`），但你可以通过传入 `parameters`（Pydantic 模型或 dataclass 类型）来暴露结构化 schema。
 
 其他选项：
 
 - `include_input_schema=True` 会在生成的嵌套输入中包含完整 JSON Schema。
-- `input_builder=...` 让你完全自定义结构化工具参数如何转换为嵌套智能体输入。
-- `RunContextWrapper.tool_input` 包含嵌套运行上下文中的已解析结构化载荷。
+- `input_builder=...` 允许你完全自定义结构化工具参数如何变成嵌套智能体输入。
+- `RunContextWrapper.tool_input` 在嵌套运行上下文中包含已解析的结构化负载。
 
 ```python
 from pydantic import BaseModel, Field
@@ -634,18 +634,18 @@ translator_tool = translator_agent.as_tool(
 )
 ```
 
-参见 `examples/agent_patterns/agents_as_tools_structured.py` 获取完整可运行代码示例。
+请参阅 `examples/agent_patterns/agents_as_tools_structured.py` 获取完整可运行示例。
 
-### 工具智能体的审批门禁
+### 工具型智能体的审批关口
 
-`Agent.as_tool(..., needs_approval=...)` 使用与 `function_tool` 相同的审批流程。如果需要审批，运行会暂停，待处理条目会出现在 `result.interruptions` 中；然后使用 `result.to_state()`，并在调用 `state.approve(...)` 或 `state.reject(...)` 后恢复。完整的暂停/恢复模式请参见[人在回路指南](human_in_the_loop.md)。
+`Agent.as_tool(..., needs_approval=...)` 使用与 `function_tool` 相同的审批流程。如果需要审批，运行会暂停，待处理条目会出现在 `result.interruptions` 中；然后使用 `result.to_state()`，并在调用 `state.approve(...)` 或 `state.reject(...)` 后恢复。完整的暂停/恢复模式请参阅[人在环路指南](human_in_the_loop.md)。
 
 ### 自定义输出提取
 
-在某些情况下，你可能希望在将工具智能体的输出返回给中央智能体之前对其进行修改。如果你想要执行以下操作，这可能很有用：
+在某些情况下，你可能希望在将工具型智能体的输出返回给中心智能体之前对其进行修改。如果你想要执行以下操作，这可能很有用：
 
--   从子智能体的聊天历史中提取特定信息片段（例如 JSON 载荷）。
--   转换或重新格式化智能体的最终答案（例如将 Markdown 转换为纯文本或 CSV）。
+-   从子智能体的聊天历史中提取特定信息（例如 JSON 负载）。
+-   转换或重新格式化智能体的最终答案（例如，将 Markdown 转换为纯文本或 CSV）。
 -   验证输出，或在智能体响应缺失或格式错误时提供回退值。
 
 你可以通过向 `as_tool` 方法提供 `custom_output_extractor` 参数来实现：
@@ -670,7 +670,7 @@ json_tool = data_agent.as_tool(
 在自定义提取器内部，嵌套的 [`RunResult`][agents.result.RunResult] 还会暴露
 [`agent_tool_invocation`][agents.result.RunResultBase.agent_tool_invocation]，当你在后处理嵌套结果时
 需要外层工具名称、调用 ID 或原始参数，这会很有用。
-参见[结果指南](results.md#agent-as-tool-metadata)。
+请参阅[结果指南](results.md#agent-as-tool-metadata)。
 
 ### 嵌套智能体运行的流式传输
 
@@ -694,15 +694,15 @@ billing_agent_tool = billing_agent.as_tool(
 
 预期行为：
 
-- 事件类型与 `StreamEvent["type"]` 保持一致：`raw_response_event`、`run_item_stream_event`、`agent_updated_stream_event`。
-- 提供 `on_stream` 会自动以流式传输模式运行嵌套智能体，并在返回最终输出之前耗尽该流。
+- 事件类型与 `StreamEvent["type"]` 一致：`raw_response_event`、`run_item_stream_event`、`agent_updated_stream_event`。
+- 提供 `on_stream` 会自动以流式传输模式运行嵌套智能体，并在返回最终输出前消费完整个流。
 - 处理程序可以是同步或异步的；每个事件都会按到达顺序传递。
 - 当工具通过模型工具调用被调用时，会存在 `tool_call`；直接调用可能会使其为 `None`。
-- 参见 `examples/agent_patterns/agents_as_tools_streaming.py` 获取完整可运行示例。
+- 请参阅 `examples/agent_patterns/agents_as_tools_streaming.py` 获取完整可运行示例。
 
 ### 条件式工具启用
 
-你可以使用 `is_enabled` 参数在运行时有条件地启用或禁用智能体工具。这允许你根据上下文、用户偏好或运行时条件，动态过滤哪些工具可供 LLM 使用。
+你可以使用 `is_enabled` 参数在运行时有条件地启用或禁用智能体工具。这样你就可以根据上下文、用户偏好或运行时条件，动态过滤哪些工具可供LLM使用。
 
 ```python
 import asyncio
@@ -763,18 +763,18 @@ asyncio.run(main())
 -   **可调用函数**：接受 `(context, agent)` 并返回布尔值的函数
 -   **异步函数**：用于复杂条件逻辑的异步函数
 
-禁用的工具在运行时会对 LLM 完全隐藏，因此这对以下场景很有用：
+被禁用的工具在运行时对LLM完全隐藏，因此这对于以下场景很有用：
 
 -   基于用户权限的功能门控
--   特定环境的工具可用性（dev vs prod）
+-   环境特定的工具可用性（dev 与 prod）
 -   对不同工具配置进行 A/B 测试
 -   基于运行时状态的动态工具过滤
 
 ## 实验性：Codex 工具
 
-`codex_tool` 包装了 Codex CLI，使智能体可以在工具调用期间运行限定于工作区的任务（shell、文件编辑、MCP 工具）。这个接口是实验性的，可能会发生变化。
+`codex_tool` 包装了 Codex CLI，使智能体可以在工具调用期间运行工作区作用域的任务（shell、文件编辑、MCP工具）。此表面处于实验阶段，可能会发生变化。
 
-当你希望主智能体在不离开当前运行的情况下，将有边界的工作区任务委派给 Codex 时，请使用它。默认情况下，工具名称为 `codex`。如果你设置自定义名称，它必须是 `codex` 或以 `codex_` 开头。当一个智能体包含多个 Codex 工具时，每个工具都必须使用唯一名称。
+当你希望主智能体在不离开当前运行的情况下将一个有边界的工作区任务委派给 Codex 时，请使用它。默认情况下，工具名称是 `codex`。如果你设置自定义名称，它必须是 `codex` 或以 `codex_` 开头。当一个智能体包含多个 Codex 工具时，每个工具都必须使用唯一名称。
 
 ```python
 from agents import Agent
@@ -805,25 +805,25 @@ agent = Agent(
 
 从以下选项组开始：
 
--   执行范围：`sandbox_mode` 和 `working_directory` 定义 Codex 可以在哪里操作。将它们配套设置；当工作目录不在 Git 仓库中时，设置 `skip_git_repo_check=True`。
--   线程默认值：`default_thread_options=ThreadOptions(...)` 配置模型、推理强度、审批策略、附加目录、网络访问和网络检索模式。优先使用 `web_search_mode`，而不是旧版 `web_search_enabled`。
+-   执行范围：`sandbox_mode` 和 `working_directory` 定义 Codex 可操作的位置。将它们配对使用，并在工作目录不在 Git 仓库内时设置 `skip_git_repo_check=True`。
+-   线程默认值：`default_thread_options=ThreadOptions(...)` 配置模型、推理强度、审批策略、额外目录、网络访问和网络检索模式。优先使用 `web_search_mode`，而不是旧版 `web_search_enabled`。
 -   轮次默认值：`default_turn_options=TurnOptions(...)` 配置每轮行为，例如 `idle_timeout_seconds` 和可选的取消 `signal`。
--   工具 I/O：工具调用必须至少包含一个 `inputs` 条目，其形式为 `{ "type": "text", "text": ... }` 或 `{ "type": "local_image", "path": ... }`。`output_schema` 允许你要求结构化 Codex 响应。
+-   工具 I/O：工具调用必须至少包含一个 `inputs` 项，其内容为 `{ "type": "text", "text": ... }` 或 `{ "type": "local_image", "path": ... }`。`output_schema` 让你可以要求结构化 Codex 响应。
 
-线程复用和持久化是独立控制项：
+线程复用和持久化是独立的控制项：
 
--   `persist_session=True` 会为对同一工具实例的重复调用复用一个 Codex 线程。
--   `use_run_context_thread_id=True` 会在运行上下文中存储并复用线程 ID，适用于共享同一可变上下文对象的跨运行场景。
+-   `persist_session=True` 会对同一工具实例的重复调用复用一个 Codex 线程。
+-   `use_run_context_thread_id=True` 会在共享同一可变上下文对象的多次运行之间，将线程 ID 存储并复用于运行上下文中。
 -   线程 ID 优先级为：每次调用的 `thread_id`，然后是运行上下文线程 ID（如果启用），然后是已配置的 `thread_id` 选项。
--   默认运行上下文键为：当 `name="codex"` 时是 `codex_thread_id`，当 `name="codex_<suffix>"` 时是 `codex_thread_id_<suffix>`。可使用 `run_context_thread_id_key` 覆盖它。
+-   默认运行上下文键在 `name="codex"` 时为 `codex_thread_id`，在 `name="codex_<suffix>"` 时为 `codex_thread_id_<suffix>`。可使用 `run_context_thread_id_key` 覆盖它。
 
 运行时配置：
 
 -   认证：设置 `CODEX_API_KEY`（首选）或 `OPENAI_API_KEY`，或传入 `codex_options={"api_key": "..."}`。
 -   运行时：`codex_options.base_url` 会覆盖 CLI base URL。
--   二进制解析：设置 `codex_options.codex_path_override`（或 `CODEX_PATH`）以固定 CLI 路径。否则 SDK 会先从 `PATH` 解析 `codex`，然后回退到捆绑的 vendor 二进制文件。
+-   二进制解析：设置 `codex_options.codex_path_override`（或 `CODEX_PATH`）以固定 CLI 路径。否则 SDK 会从 `PATH` 解析 `codex`，然后回退到捆绑的 vendor 二进制文件。
 -   环境：`codex_options.env` 完全控制子进程环境。提供该选项时，子进程不会继承 `os.environ`。
--   流限制：`codex_options.codex_subprocess_stream_limit_bytes`（或 `OPENAI_AGENTS_CODEX_SUBPROCESS_STREAM_LIMIT_BYTES`）控制 stdout/stderr 读取器限制。有效范围为 `65536` 到 `67108864`；默认值为 `8388608`。
+-   流限制：`codex_options.codex_subprocess_stream_limit_bytes`（或 `OPENAI_AGENTS_CODEX_SUBPROCESS_STREAM_LIMIT_BYTES`）控制 stdout/stderr 读取器限制。有效范围是 `65536` 到 `67108864`；默认值为 `8388608`。
 -   流式传输：`on_stream` 接收线程/轮次生命周期事件和条目事件（`reasoning`、`command_execution`、`mcp_tool_call`、`file_change`、`web_search`、`todo_list` 和 `error` 条目更新）。
 -   输出：结果包括 `response`、`usage` 和 `thread_id`；usage 会添加到 `RunContextWrapper.usage`。
 
@@ -832,4 +832,4 @@ agent = Agent(
 -   [Codex 工具 API 参考](ref/extensions/experimental/codex/codex_tool.md)
 -   [ThreadOptions 参考](ref/extensions/experimental/codex/thread_options.md)
 -   [TurnOptions 参考](ref/extensions/experimental/codex/turn_options.md)
--   参见 `examples/tools/codex.py` 和 `examples/tools/codex_same_thread.py` 获取完整可运行示例。
+-   请参阅 `examples/tools/codex.py` 和 `examples/tools/codex_same_thread.py` 获取完整可运行示例。

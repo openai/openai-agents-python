@@ -87,12 +87,34 @@ _E2B_SANDBOX_SNAPSHOT_MAGIC = b"E2B_SANDBOX_SNAPSHOT_V1\n"
 logger = logging.getLogger(__name__)
 
 
+# E2B documents SDK exception classes at:
+# https://e2b.dev/docs/sdk-reference/python-sdk/v1.0.0/exceptions
+def _e2b_provider_retryability(error: BaseException) -> tuple[bool | None, str | None]:
+    non_retryable_types = _e2b_non_retryable_error_types()
+    retryable_types = _e2b_retryable_error_types()
+
+    for candidate in iter_exception_chain(error):
+        if non_retryable_types and isinstance(candidate, non_retryable_types):
+            return False, type(candidate).__name__
+
+        if retryable_types and isinstance(candidate, retryable_types):
+            return True, type(candidate).__name__
+
+        status = getattr(candidate, "status_code", None) or getattr(candidate, "status", None)
+        if isinstance(status, int) and status in TRANSIENT_HTTP_STATUS_CODES:
+            return True, "transient_http_status"
+
+    if exception_chain_contains_type(error, _retryable_persist_workspace_error_types()):
+        return True, "provider_timeout"
+    return None, None
+
+
 def _raise_e2b_exec_error(
     exc: BaseException,
     *,
     command: Sequence[str | Path],
     timeout: float | None,
-    timeout_exc: type[BaseException] | None,
+    timeout_error_types: tuple[type[BaseException], ...],
 ) -> NoReturn:
     """Classify an E2B exception and raise the appropriate ExecFailureError."""
     # Build context from the exception chain.
@@ -113,13 +135,21 @@ def _raise_e2b_exec_error(
 
     chain = list(iter_exception_chain(exc))
 
-    # Sandbox gone — always a transport error.
-    if any("sandbox" in str(c).lower() and "not found" in str(c).lower() for c in chain):
-        ctx.setdefault("reason", "sandbox_not_found")
-        raise ExecTransportError(command=command, context=ctx, cause=exc) from exc
+    retryable, reason = _e2b_provider_retryability(exc)
+    if reason is not None:
+        ctx.setdefault("reason", reason)
+
+    # Terminal provider errors are transport failures, not command timeouts.
+    if retryable is False:
+        raise ExecTransportError(
+            command=command,
+            context=ctx,
+            cause=exc,
+            retryable=False,
+        ) from exc
 
     # E2B timeout or httpcore read timeout.
-    is_timeout = timeout_exc is not None and exception_chain_contains_type(exc, (timeout_exc,))
+    is_timeout = exception_chain_contains_type(exc, timeout_error_types)
     if not is_timeout and any(
         type(c).__name__ == "ReadTimeout" and type(c).__module__.startswith("httpcore")
         for c in chain
@@ -135,7 +165,7 @@ def _raise_e2b_exec_error(
             cause=exc,
         ) from exc
 
-    raise ExecTransportError(command=command, context=ctx, cause=exc) from exc
+    raise ExecTransportError(command=command, context=ctx, cause=exc, retryable=retryable) from exc
 
 
 def _encode_e2b_snapshot_ref(*, snapshot_id: str) -> bytes:
@@ -491,23 +521,48 @@ async def _sandbox_connect(
     return await sandbox_class._cls_connect(sandbox_id=sandbox_id, timeout=timeout)
 
 
-def _import_e2b_exceptions() -> Mapping[str, type[BaseException]]:
-    """Best-effort import of E2B exception classes for classification."""
-
+def _e2b_exception_types(*names: str) -> tuple[type[BaseException], ...]:
+    """Best-effort import of E2B exception classes by name."""
     try:
-        from e2b.exceptions import (
-            NotFoundException,
-            SandboxException,
-            TimeoutException,
-        )
+        from e2b import exceptions as e2b_exceptions
     except Exception:  # pragma: no cover - handled by fallbacks
-        return {}
+        return ()
 
-    return {
-        "not_found": cast(type[BaseException], NotFoundException),
-        "sandbox": cast(type[BaseException], SandboxException),
-        "timeout": cast(type[BaseException], TimeoutException),
-    }
+    exceptions: list[type[BaseException]] = []
+    for name in names:
+        value = getattr(e2b_exceptions, name, None)
+        if isinstance(value, type) and issubclass(value, BaseException):
+            exceptions.append(value)
+    return tuple(exceptions)
+
+
+def _e2b_retryable_error_types() -> tuple[type[BaseException], ...]:
+    return _e2b_exception_types(
+        "RateLimitException",
+        "TimeoutException",
+    )
+
+
+def _e2b_timeout_error_types() -> tuple[type[BaseException], ...]:
+    return _e2b_exception_types("TimeoutException")
+
+
+def _e2b_non_retryable_error_types() -> tuple[type[BaseException], ...]:
+    return _e2b_exception_types(
+        "AuthenticationException",
+        "FileNotFoundException",
+        "GitAuthException",
+        "GitUpstreamException",
+        "InvalidArgumentException",
+        "NotEnoughSpaceException",
+        "NotFoundException",
+        "SandboxNotFoundException",
+        "TemplateException",
+    )
+
+
+def _e2b_not_found_error_types() -> tuple[type[BaseException], ...]:
+    return _e2b_exception_types("NotFoundException")
 
 
 def _import_command_exit_exception() -> type[BaseException] | None:
@@ -521,12 +576,7 @@ def _import_command_exit_exception() -> type[BaseException] | None:
 
 
 def _retryable_persist_workspace_error_types() -> tuple[type[BaseException], ...]:
-    excs = _import_e2b_exceptions()
-    retryable: list[type[BaseException]] = []
-    timeout_exc = excs.get("timeout")
-    if timeout_exc is not None:
-        retryable.append(timeout_exc)
-    return tuple(retryable)
+    return _e2b_timeout_error_types()
 
 
 class E2BSandboxTimeouts(BaseModel):
@@ -847,8 +897,7 @@ class E2BSandboxSession(BaseSandboxSession):
         cmd_str = shlex.join(command_list)
         exec_timeout = self._coerce_exec_timeout(timeout)
 
-        e2b_exc = _import_e2b_exceptions()
-        timeout_exc = e2b_exc.get("timeout")
+        timeout_error_types = _e2b_timeout_error_types()
         command_exit_exc = _import_command_exit_exception()
 
         try:
@@ -880,7 +929,7 @@ class E2BSandboxSession(BaseSandboxSession):
                 e,
                 command=command,
                 timeout=timeout,
-                timeout_exc=timeout_exc,
+                timeout_error_types=timeout_error_types,
             )
 
     def supports_pty(self) -> bool:
@@ -901,8 +950,7 @@ class E2BSandboxSession(BaseSandboxSession):
         envs = await self._resolved_envs()
         cwd = self.state.manifest.root if self._workspace_root_ready else None
         exec_timeout = self._coerce_exec_timeout(timeout)
-        e2b_exc = _import_e2b_exceptions()
-        timeout_exc = e2b_exc.get("timeout")
+        timeout_error_types = _e2b_timeout_error_types()
 
         entry = _E2BPtyProcessEntry(handle=None, tty=tty)
 
@@ -971,7 +1019,7 @@ class E2BSandboxSession(BaseSandboxSession):
                 e,
                 command=command,
                 timeout=timeout,
-                timeout_exc=timeout_exc,
+                timeout_error_types=timeout_error_types,
             )
 
         if pruned_entry is not None:
@@ -1051,8 +1099,7 @@ class E2BSandboxSession(BaseSandboxSession):
 
         workspace_path = await self._validate_path_access(path)
 
-        e2b_exc = _import_e2b_exceptions()
-        not_found_exc = e2b_exc.get("not_found")
+        not_found_error_types = _e2b_not_found_error_types()
 
         try:
             content = await _sandbox_read_file(
@@ -1066,7 +1113,7 @@ class E2BSandboxSession(BaseSandboxSession):
                 data = str(content).encode("utf-8", errors="replace")
             return io.BytesIO(data)
         except Exception as e:  # pragma: no cover - exercised via unit tests with fakes
-            if not_found_exc is not None and isinstance(e, not_found_exc):
+            if not_found_error_types and isinstance(e, not_found_error_types):
                 raise WorkspaceReadNotFoundError(path=path, cause=e) from e
             raise WorkspaceArchiveReadError(path=path, cause=e) from e
 
@@ -1255,12 +1302,22 @@ class E2BSandboxSession(BaseSandboxSession):
                         "exit_code": exit_code,
                         "stderr": str(getattr(result, "stderr", "") or ""),
                     },
+                    retryable=False,
                 )
             return str(getattr(result, "stdout", "") or "")
         except WorkspaceArchiveReadError:
             raise
         except Exception as e:  # pragma: no cover - exercised via unit tests with fakes
-            raise WorkspaceArchiveReadError(path=error_root, cause=e) from e
+            retryable, reason = _e2b_provider_retryability(e)
+            context: dict[str, object] = {"backend": "e2b"}
+            if reason is not None:
+                context["reason"] = reason
+            raise WorkspaceArchiveReadError(
+                path=error_root,
+                context=context,
+                cause=e,
+                retryable=retryable,
+            ) from e
 
     async def persist_workspace(self) -> io.IOBase:
         if self.state.workspace_persistence == _WORKSPACE_PERSISTENCE_SNAPSHOT:

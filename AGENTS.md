@@ -36,9 +36,11 @@ Before changing runtime code, exported APIs, external configuration, persisted s
 
 #### `$pr-draft-summary`
 
-When a task in this repo finishes with moderate-or-larger code changes, invoke `$pr-draft-summary` in the final handoff to generate the required PR summary block, branch suggestion, title, and draft description. Treat this as the default close-out step after runtime code, tests, examples, build/test configuration, or docs with behavior impact are changed.
+Before every final response for a task that changed runtime code, tests, examples, build/test configuration, or docs with behavior impact, invoke `$pr-draft-summary` to generate the required PR summary block, branch suggestion, title, and draft description. Determine whether to invoke it from the changed files, not from a subjective assessment of change size.
 
 Skip `$pr-draft-summary` only for trivial or conversation-only tasks, repo-meta/doc-only tasks without behavior impact, or when the user explicitly says not to include the PR draft block.
+
+Producing the PR draft block is part of the local final handoff. It is required for eligible local-only or uncommitted changes and does not authorize creating a branch, committing, pushing, or opening a pull request.
 
 ### ExecPlans
 
@@ -125,7 +127,7 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
    ```
 6. When `$code-change-verification` applies, run it to execute the full verification stack before marking work complete.
 7. Commit with concise, imperative messages; keep commits small and focused, then open a pull request.
-8. When reporting code changes as complete (after substantial code work), invoke `$pr-draft-summary` as the final handoff step unless the task falls under the documented skip cases.
+8. Before reporting eligible code changes as complete, invoke `$pr-draft-summary` as the final handoff step unless the task falls under the documented skip cases. Do not omit it based on perceived change size or because the work remains local or uncommitted.
 
 ### Testing & Automated Checks
 
