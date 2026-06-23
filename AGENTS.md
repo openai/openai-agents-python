@@ -48,7 +48,7 @@ Call out compatibility risk early in your plan only when the change affects beha
 
 Use an ExecPlan when work is multi-step, spans several files, involves new features or refactors, or is likely to take more than about an hour. Start with the template and rules in `PLANS.md`, keep milestones and living sections (Progress, Surprises & Discoveries, Decision Log, Outcomes & Retrospective) up to date as you execute, and rewrite the plan if scope shifts. Call out compatibility risk only when the plan changes behavior shipped in the latest release tag or a released or explicitly supported durable external state boundary. Do not treat branch-local interface churn or unreleased post-tag changes on `main` as breaking by default; prefer direct replacement over compatibility layers in those cases, and renumber or squash unreleased persisted schemas before release when the intermediate snapshots are intentionally unsupported. If you intentionally skip an ExecPlan for a complex task, note why in your response so reviewers understand the choice.
 
-### Public API Positional Compatibility
+### Public API Compatibility
 
 Treat the parameter and dataclass field order of exported runtime APIs as a compatibility contract.
 
@@ -56,6 +56,7 @@ Treat the parameter and dataclass field order of exported runtime APIs as a comp
 - When adding a new optional public field/parameter, append it to the end whenever possible and keep old fields in the same order.
 - If reordering is unavoidable, add an explicit compatibility layer and regression tests that exercise the old positional call pattern.
 - Prefer keyword arguments at call sites to reduce accidental breakage, but do not rely on this to justify breaking positional compatibility for public APIs.
+- Treat intended import paths and `__all__` membership as compatibility contracts. When adding or moving a public symbol, update the owning module, intended top-level or subpackage re-exports, and an import regression test. Keep top-level imports free of optional-dependency failures and runtime side effects; use lazy exports when needed.
 
 ### Platform, Docs, and Security Review
 
@@ -65,6 +66,7 @@ Treat the parameter and dataclass field order of exported runtime APIs as a comp
 - When documenting sandbox or security grants, verify the actual implementation path enforces the grant or boundary. Do not claim a grant applies to `LocalDir`, `LocalFile`, archive extraction, or other materialization paths unless those paths actually consult it.
 - When redacting OpenAI tool, MCP, model, or provider payloads, consider traceback display, exception chaining, `__context__`, logs, and telemetry. Suppressing display with `raise ... from None` is not enough if the original exception object still carries sensitive input data.
 - For OpenAI platform or SDK-specific docs changes, prefer `$openai-knowledge` for authoritative platform behavior and inspect the local code path for SDK behavior. Do not rely on generic API assumptions when documenting Responses, Chat Completions, Realtime, tools, MCP, or provider adapters.
+- For Realtime tracing changes, read [Realtime tracing architecture](.agents/references/realtime-tracing.md) before proposing SDK spans. Realtime API server traces and Agents SDK client traces are separate; `group_id` can correlate them but does not create a shared trace hierarchy.
 
 ## Project Structure Guide
 
@@ -83,26 +85,28 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
 - `Makefile`: Common developer commands.
 - `pyproject.toml`, `uv.lock`: Python dependencies and tool configuration.
 - `.github/PULL_REQUEST_TEMPLATE/pull_request_template.md`: Pull request template to use when opening PRs.
+- `.agents/references/`: Durable SDK maintainer architecture references. Start with [the reference map](.agents/references/README.md) and open only the files relevant to the affected runtime boundary.
 - `site/`: Built documentation output.
 
 ### Agents Core Runtime Guidelines
 
+- For `Agent` fields, cloning, dynamic instructions, enabled tools or handoffs, output schemas, run context wrappers, usage aggregation, or public-versus-internal agent identity, read [Agent definition and run context](.agents/references/agent-definition-and-run-context.md).
 - `src/agents/run.py` is the runtime entrypoint (`Runner`, `AgentRunner`). Keep it focused on orchestration and public flow control. Put new runtime logic under `src/agents/run_internal/` and import it into `run.py`.
 - When `run.py` grows, refactor helpers into `run_internal/` modules (for example `run_loop.py`, `turn_resolution.py`, `tool_execution.py`, `session_persistence.py`) and leave only wiring and composition in `run.py`.
-- Keep streaming and non-streaming paths behaviorally aligned. Changes to `run_internal/run_loop.py` (`run_single_turn`, `run_single_turn_streamed`, `get_new_response`, `start_streaming`) should be mirrored, and any new streaming item types must be reflected in `src/agents/stream_events.py`.
-- Input guardrails run only on the first turn and only for the starting agent. Resuming an interruption from `RunState` must not increment the turn counter; only actual model calls advance turns.
-- Server-managed conversation (`conversation_id`, `previous_response_id`, `auto_previous_response_id`) uses `OpenAIServerConversationTracker` in `run_internal/oai_conversation.py`. Only deltas should be sent. If `call_model_input_filter` is used, it must return `ModelInputData` with a list input and the tracker must be updated with the filtered input (`mark_input_as_sent`). Session persistence is disabled when server-managed conversation is active.
-- Adding new tool/output/approval item types requires coordinated updates across:
-  - `src/agents/items.py` (RunItem types and conversions)
-  - `src/agents/run_internal/run_steps.py` (ProcessedResponse and tool run structs)
-  - `src/agents/run_internal/turn_resolution.py` (model output processing, run item extraction)
-  - `src/agents/run_internal/tool_execution.py` and `src/agents/run_internal/tool_planning.py`
-  - `src/agents/run_internal/items.py` (normalization, dedupe, approval filtering)
-  - `src/agents/stream_events.py` (stream event names)
-  - `src/agents/run_state.py` (RunState serialization/deserialization)
-  - `src/agents/run_internal/session_persistence.py` (session save/rewind)
-- If the serialized RunState shape changes, update `CURRENT_SCHEMA_VERSION` in `src/agents/run_state.py` and the related serialization/deserialization logic. Keep released schema versions readable, and feel free to renumber or squash unreleased schema versions before release when those intermediate snapshots are intentionally unsupported.
-- When bumping `CURRENT_SCHEMA_VERSION`, also add or update the matching entry in `SCHEMA_VERSION_SUMMARIES` in `src/agents/run_state.py` so every supported version keeps a short historical note describing what changed in that schema.
+- For turn accounting, guardrail ordering, handoffs, interruptions, cancellation, hooks, or streaming behavior, read [Runner lifecycle](.agents/references/runner-lifecycle.md). Keep streaming and non-streaming paths behaviorally aligned.
+- For new model output, tool call, approval, or run item variants, read [Run item lifecycle](.agents/references/run-item-lifecycle.md) and update every applicable processing, event, replay, persistence, tracing, and serialization surface.
+- For function-tool parameter schemas, `Annotated` or `Field` metadata, strict JSON schema conversion, or structured output schemas, read [Function and output schema](.agents/references/function-and-output-schema.md).
+- For function-tool naming, namespacing, lookup, approvals, tracing, or call-ID changes, read [Tool identity and routing](.agents/references/tool-identity.md) and use the canonical helpers in `src/agents/_tool_identity.py` instead of adding local normalization rules.
+- For function-tool planning, approval ordering, tool guardrails, concurrency, cancellation, timeouts, hooks, or failure conversion, read [Tool execution lifecycle](.agents/references/tool-execution-lifecycle.md).
+- For local MCP connection ownership, `MCPServerManager`, request serialization, tool caching or filtering, transport retries, cancellation, or cleanup, read [Local MCP server lifecycle](.agents/references/local-mcp-server-lifecycle.md).
+- For trace or span context, processors, export, flush, shutdown, sensitive data, or resumed trace state, read [Tracing lifecycle](.agents/references/tracing-lifecycle.md).
+- For `RealtimeSession` lifecycle, background-task, handoff, listener, connection, or cleanup changes, read [Realtime session lifecycle](.agents/references/realtime-session-lifecycle.md) and verify both normal and failure-path resource ownership.
+- For `VoicePipeline`, streamed audio input, STT session ownership, TTS task ordering, voice lifecycle events, PCM framing, or voice tracing changes, read [Voice pipeline lifecycle](.agents/references/voice-pipeline-lifecycle.md).
+- For server-managed conversation (`conversation_id`, `previous_response_id`, `auto_previous_response_id`), read [Conversation state ownership](.agents/references/conversation-state-ownership.md) before changing continuation, filtering, retry, compaction, handoffs, or resume behavior.
+- For client-managed session input, per-turn saves, retry rewind, backend atomicity, or compaction replacement, read [Session persistence](.agents/references/session-persistence.md).
+- For model resolution, `ModelSettings`, provider adapters, Responses versus Chat Completions capabilities, request conversion, terminal events, transport reuse, or model retries, read [Model and provider boundaries](.agents/references/model-provider-boundaries.md).
+- If the serialized `RunState` shape changes, read [RunState schema and resume boundary](.agents/references/runstate-schema.md) and follow its release-boundary, schema-version, backward-read, and regression-test rules.
+- For sandbox session ownership, agent preparation, manifests, host-path materialization, snapshots, resume state, or cleanup, read [Sandbox runtime boundary](.agents/references/sandbox-runtime-boundary.md).
 
 ## Operation Guide
 
