@@ -117,7 +117,7 @@ https://github.com/openai/openai-agents-python/compare/<tag>...<target-commit>
 - <working tree status, tag/target assumptions, or re-run guidance>
 ```
 
-If no risks are found, include a “No material risks identified” line under Risk assessment and still provide a ship call. If you did not run local verification, do not add a verification status section or use it as a release blocker; note any assumptions briefly in Notes.
+If no risks are found, include a "No material risks identified" line under Risk assessment and still provide a ship call. If you did not run local verification, do not add a verification status section or use it as a release blocker; note any assumptions briefly in Notes.
 If the report is not blocked, omit the `Unblock checklist` section.
 
 ### Resources

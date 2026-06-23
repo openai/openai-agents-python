@@ -103,11 +103,19 @@ class ToolExecutionConfig:
     emitted in a turn. This does not change provider-side `parallel_tool_calls` behavior.
     """
 
+    pre_approval_tool_input_guardrails: bool = False
+    """Run function tool input guardrails before emitting a pending approval interruption.
+
+    The same guardrails still run again immediately before tool execution after approval.
+    """
+
     def __post_init__(self) -> None:
         if self.max_function_tool_concurrency is not None and (
             self.max_function_tool_concurrency < 1
         ):
             raise ValueError("tool_execution.max_function_tool_concurrency must be at least 1")
+        if not isinstance(self.pre_approval_tool_input_guardrails, bool):
+            raise ValueError("tool_execution.pre_approval_tool_input_guardrails must be a bool")
 
 
 @dataclass

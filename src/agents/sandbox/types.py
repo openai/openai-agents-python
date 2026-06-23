@@ -65,7 +65,7 @@ class Permissions(BaseModel):
         if perms[0] not in {"d", "-"}:
             raise ValueError(f"invalid permissions type: {perms!r}")
 
-        def parse_triplet(triplet: str) -> int:
+        def parse_triplet(triplet: str, *, special_exec_chars: tuple[str, str]) -> int:
             if len(triplet) != 3:
                 raise ValueError(f"invalid permissions triplet: {triplet!r}")
             mask = 0
@@ -77,15 +77,19 @@ class Permissions(BaseModel):
                 mask |= FileMode.WRITE
             elif triplet[1] != "-":
                 raise ValueError(f"invalid write flag: {triplet!r}")
-            if triplet[2] == "x":
+
+            exec_flag = triplet[2]
+            exec_with_special, special_without_exec = special_exec_chars
+
+            if exec_flag in {"x", exec_with_special}:
                 mask |= FileMode.EXEC
-            elif triplet[2] != "-":
+            elif exec_flag not in {"-", special_without_exec}:
                 raise ValueError(f"invalid exec flag: {triplet!r}")
             return int(mask)
 
-        owner = parse_triplet(perms[1:4])
-        group = parse_triplet(perms[4:7])
-        other = parse_triplet(perms[7:10])
+        owner = parse_triplet(perms[1:4], special_exec_chars=("s", "S"))
+        group = parse_triplet(perms[4:7], special_exec_chars=("s", "S"))
+        other = parse_triplet(perms[7:10], special_exec_chars=("t", "T"))
         return cls(
             owner=owner,
             group=group,

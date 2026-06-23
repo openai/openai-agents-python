@@ -1,0 +1,4 @@
+interface:
+  display_name: "Maintainer Review"
+  short_description: "Assess PR value and draft maintainer decisions"
+  default_prompt: "Use $maintainer-review with this GitHub issue or PR URL, compare credible competing PRs, recommend the best maintainer action, and include an English comment draft when closure or changes are needed."

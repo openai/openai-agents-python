@@ -128,6 +128,86 @@ def test_tools_to_session_tools_includes_handoffs():
     assert out[0].name is not None and out[0].name.startswith("transfer_to_")
 
 
+def test_tools_to_session_tools_rejects_duplicate_function_tool_names():
+    tool_one = function_tool(lambda: "one", name_override="lookup_account")
+    tool_two = function_tool(lambda: "two", name_override="lookup_account")
+    m = OpenAIRealtimeWebSocketModel()
+
+    with pytest.raises(
+        UserError,
+        match=("Duplicate Realtime tool name found: 'lookup_account' \\(2 function tools\\)"),
+    ):
+        m._tools_to_session_tools([tool_one, tool_two], [])
+
+
+def test_tools_to_session_tools_rejects_function_handoff_name_conflict():
+    tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
+    h = handoff(Agent(name="billing"), tool_name_override="transfer_to_billing")
+    m = OpenAIRealtimeWebSocketModel()
+
+    with pytest.raises(
+        UserError,
+        match=(
+            "Duplicate Realtime tool name found: "
+            "'transfer_to_billing' \\(function tool and handoff\\)"
+        ),
+    ):
+        m._tools_to_session_tools([tool], [h])
+
+
+def test_tools_to_session_tools_ignores_disabled_function_tool_name_conflict():
+    tool = function_tool(
+        lambda: "ok",
+        name_override="transfer_to_billing",
+        is_enabled=False,
+    )
+    h = handoff(Agent(name="billing"), tool_name_override="transfer_to_billing")
+    m = OpenAIRealtimeWebSocketModel()
+
+    out = m._tools_to_session_tools([tool], [h])
+
+    assert [tool.name for tool in out] == ["transfer_to_billing"]
+
+
+def test_tools_to_session_tools_omits_disabled_function_tool():
+    tool = function_tool(
+        lambda: "ok",
+        name_override="hidden_tool",
+        is_enabled=False,
+    )
+    m = OpenAIRealtimeWebSocketModel()
+
+    out = m._tools_to_session_tools([tool], [])
+
+    assert out == []
+
+
+def test_tools_to_session_tools_ignores_disabled_handoff_name_conflict():
+    tool = function_tool(lambda: "ok", name_override="transfer_to_billing")
+    h = handoff(
+        Agent(name="billing"),
+        tool_name_override="transfer_to_billing",
+        is_enabled=False,
+    )
+    m = OpenAIRealtimeWebSocketModel()
+
+    out = m._tools_to_session_tools([tool], [h])
+
+    assert [tool.name for tool in out] == ["transfer_to_billing"]
+
+
+def test_tools_to_session_tools_rejects_duplicate_handoff_names():
+    handoff_one = handoff(Agent(name="billing"), tool_name_override="transfer_to_support")
+    handoff_two = handoff(Agent(name="technical"), tool_name_override="transfer_to_support")
+    m = OpenAIRealtimeWebSocketModel()
+
+    with pytest.raises(
+        UserError,
+        match=("Duplicate Realtime tool name found: 'transfer_to_support' \\(2 handoffs\\)"),
+    ):
+        m._tools_to_session_tools([], [handoff_one, handoff_two])
+
+
 def test_tools_to_session_tools_rejects_namespaced_function_tools():
     tool = tool_namespace(
         name="crm",

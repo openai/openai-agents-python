@@ -232,6 +232,16 @@ class RealtimeGuardrailsSettings(TypedDict):
     """
 
 
+class RealtimeToolExecutionConfig(TypedDict):
+    """SDK-side execution settings for local realtime tool calls."""
+
+    pre_approval_tool_input_guardrails: NotRequired[bool]
+    """Run function tool input guardrails before emitting a pending approval event.
+
+    The same guardrails still run again immediately before tool execution after approval.
+    """
+
+
 class RealtimeModelTracingConfig(TypedDict):
     """Configuration for tracing in realtime model sessions."""
 
@@ -262,6 +272,9 @@ class RealtimeRunConfig(TypedDict):
 
     async_tool_calls: NotRequired[bool]
     """Whether function tool calls should run asynchronously. Defaults to True."""
+
+    tool_execution: NotRequired[RealtimeToolExecutionConfig]
+    """SDK-side execution settings for local realtime tool calls."""
 
     tool_error_formatter: NotRequired[ToolErrorFormatter]
     """Optional callback that formats tool error messages returned to the model."""

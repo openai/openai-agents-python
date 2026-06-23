@@ -12,6 +12,7 @@ from agents import (
 )
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.models.multi_provider import MultiProviderMap
+from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.run_internal.run_loop import get_model
 
 
@@ -89,6 +90,19 @@ def test_multi_provider_passes_websocket_base_url_to_openai_provider(monkeypatch
 
     MultiProvider(openai_websocket_base_url="wss://proxy.example.test/v1")
     assert captured_kwargs["websocket_base_url"] == "wss://proxy.example.test/v1"
+
+
+def test_multi_provider_forwards_openai_buffer_streamed_tool_calls_to_chat_model():
+    provider = MultiProvider(
+        openai_client=cast(Any, object()),
+        openai_use_responses=False,
+        openai_buffer_streamed_tool_calls=True,
+    )
+
+    model = provider.get_model("gpt-4o")
+
+    assert isinstance(model, OpenAIChatCompletionsModel)
+    assert model._buffer_streamed_tool_calls is True
 
 
 def test_openai_prefix_defaults_to_alias_mode(monkeypatch):

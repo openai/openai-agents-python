@@ -8,7 +8,6 @@ from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 from typing import Literal, Protocol, runtime_checkable
-from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from ..errors import WorkspaceReadNotFoundError
@@ -181,7 +180,6 @@ class WorkspaceJsonlSink(EventSink):
         self._seen = 0
         self._lock = asyncio.Lock()
         self._flush_every = max(1, int(flush_every))
-        self._existing_outbox_loaded = False
 
     def _resolve_relpath(self) -> Path:
         rel = self.workspace_relpath
@@ -234,23 +232,23 @@ class WorkspaceJsonlSink(EventSink):
             return False
 
     async def _flush_buffer(self) -> None:
+        if self._session is None or not self._buf:
+            return
+
+        relpath = self._resolved_workspace_relpath or self.workspace_relpath
+        existing = await self._read_existing_outbox(relpath)
+        pending = bytes(self._buf)
+        await self._session.write(relpath, io.BytesIO(existing + pending))
+        self._buf.clear()
+
+    async def _read_existing_outbox(self, relpath: Path) -> bytes:
         if self._session is None:
-            return
+            return b""
 
-        await self._ensure_existing_outbox_loaded()
-        relpath = self._resolved_workspace_relpath or self.workspace_relpath
-        await self._session.write(relpath, io.BytesIO(bytes(self._buf)))
-
-    async def _ensure_existing_outbox_loaded(self) -> None:
-        if self._session is None or self._existing_outbox_loaded:
-            return
-
-        relpath = self._resolved_workspace_relpath or self.workspace_relpath
         try:
             existing = await self._session.read(relpath)
         except (FileNotFoundError, WorkspaceReadNotFoundError):
-            self._existing_outbox_loaded = True
-            return
+            return b""
 
         try:
             payload = existing.read()
@@ -258,10 +256,8 @@ class WorkspaceJsonlSink(EventSink):
             existing.close()
 
         if isinstance(payload, str):
-            payload = payload.encode("utf-8")
-        if payload:
-            self._buf = bytearray(payload) + self._buf
-        self._existing_outbox_loaded = True
+            return payload.encode("utf-8")
+        return bytes(payload)
 
     async def handle(self, event: SandboxSessionEvent) -> None:
         # If unbound (e.g., audit event emission used without a SandboxSession wrapper),
@@ -317,7 +313,7 @@ class HttpProxySink(EventSink):
         try:
             with urlopen(req, timeout=self.timeout_s) as resp:
                 _ = resp.read(1)  # ensure request completes
-        except (HTTPError, URLError) as e:
+        except OSError as e:
             if spool_line is not None and self.spool_path is not None:
                 try:
                     self.spool_path.parent.mkdir(parents=True, exist_ok=True)
