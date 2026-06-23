@@ -319,7 +319,10 @@ class RunConfig:
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None
     """Controls how reasoning items are converted to next-turn model input.
 
-    - ``None`` / ``"preserve"`` keeps reasoning item IDs as-is.
+    - ``None`` uses the SDK default. Reasoning item IDs are preserved except when runner-built
+      prior turn history contains Code Interpreter calls, where IDs are omitted to avoid invalid
+      replay.
+    - ``"preserve"`` keeps reasoning item IDs as-is.
     - ``"omit"`` strips reasoning item IDs from model input built by the runner.
     """
 

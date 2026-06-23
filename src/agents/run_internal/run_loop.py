@@ -284,7 +284,11 @@ def _prepare_turn_input_items(
 ) -> list[TResponseInputItem]:
     caller_items = ItemHelpers.input_to_new_input_list(caller_input)
     continuation_items = run_items_to_input_items(generated_items, reasoning_item_id_policy)
-    return prepare_model_input_items(caller_items, continuation_items)
+    return prepare_model_input_items(
+        caller_items,
+        continuation_items,
+        reasoning_item_id_policy=reasoning_item_id_policy,
+    )
 
 
 def _complete_stream_interruption(

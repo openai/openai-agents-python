@@ -35,6 +35,7 @@ __all__ = [
     "REJECTION_MESSAGE",
     "TOOL_CALL_SESSION_DESCRIPTION_KEY",
     "TOOL_CALL_SESSION_TITLE_KEY",
+    "apply_reasoning_item_id_policy",
     "copy_input_items",
     "drop_orphan_function_calls",
     "ensure_input_item_format",
@@ -206,6 +207,8 @@ def normalize_input_items_for_api(items: list[TResponseInputItem]) -> list[TResp
 def prepare_model_input_items(
     caller_items: Sequence[TResponseInputItem],
     generated_items: Sequence[TResponseInputItem] = (),
+    *,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> list[TResponseInputItem]:
     """Normalize model input while pruning orphans only from runner-generated history."""
     normalized_caller_items = normalize_input_items_for_api(list(caller_items))
@@ -214,7 +217,11 @@ def prepare_model_input_items(
 
     normalized_generated_items = normalize_input_items_for_api(list(generated_items))
     filtered_generated_items = drop_orphan_function_calls(normalized_generated_items)
-    return normalized_caller_items + filtered_generated_items
+    safe_generated_items = apply_reasoning_item_id_policy(
+        filtered_generated_items,
+        reasoning_item_id_policy,
+    )
+    return normalized_caller_items + safe_generated_items
 
 
 def normalize_resumed_input(
@@ -307,6 +314,36 @@ def strip_internal_input_item_metadata(item: TResponseInputItem) -> TResponseInp
 
 def _should_omit_reasoning_item_ids(reasoning_item_id_policy: ReasoningItemIdPolicy | None) -> bool:
     return reasoning_item_id_policy == "omit"
+
+
+def apply_reasoning_item_id_policy(
+    items: list[TResponseInputItem],
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+) -> list[TResponseInputItem]:
+    if reasoning_item_id_policy == "preserve":
+        return items
+    if reasoning_item_id_policy == "omit":
+        return [_without_reasoning_item_id(item) for item in items]
+    return _omit_reasoning_ids_for_code_interpreter_history(items)
+
+
+def _omit_reasoning_ids_for_code_interpreter_history(
+    items: list[TResponseInputItem],
+) -> list[TResponseInputItem]:
+    if not any(
+        isinstance(item, dict) and item.get("type") == "code_interpreter_call" for item in items
+    ):
+        return items
+
+    sanitized: list[TResponseInputItem] = []
+    for item in items:
+        if not (isinstance(item, dict) and item.get("type") == "reasoning" and "id" in item):
+            sanitized.append(item)
+            continue
+        reasoning_item = dict(item)
+        reasoning_item.pop("id", None)
+        sanitized.append(cast(TResponseInputItem, reasoning_item))
+    return sanitized
 
 
 def _without_reasoning_item_id(item: TResponseInputItem) -> TResponseInputItem:

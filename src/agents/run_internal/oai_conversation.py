@@ -20,6 +20,7 @@ from ..logger import logger
 from ..models.fake_id import FAKE_RESPONSES_ID
 from .items import (
     ReasoningItemIdPolicy,
+    apply_reasoning_item_id_policy,
     drop_orphan_function_calls,
     fingerprint_input_item,
     normalize_input_items_for_api,
@@ -521,12 +522,16 @@ class OpenAIServerConversationTracker:
             )
         }
         filtered_generated_items = drop_orphan_function_calls(normalized_generated_items)
-        for item in filtered_generated_items:
-            prepared_source_item = normalized_generated_sources.get(id(item))
+        safe_generated_items = apply_reasoning_item_id_policy(
+            filtered_generated_items,
+            self.reasoning_item_id_policy,
+        )
+        for item, source_item in zip(safe_generated_items, filtered_generated_items, strict=False):
+            prepared_source_item = normalized_generated_sources.get(id(source_item))
             if prepared_source_item is not None:
                 self._register_prepared_item_source(item, prepared_source_item)
 
-        return prepared_initial_items + filtered_generated_items
+        return prepared_initial_items + safe_generated_items
 
     def _register_prepared_item_source(
         self, prepared_item: TResponseInputItem, source_item: TResponseInputItem | None = None

@@ -748,6 +748,63 @@ def test_prepare_input_applies_reasoning_item_id_policy_for_generated_items() ->
     ]
 
 
+def test_prepare_input_omits_reasoning_ids_with_code_interpreter_history() -> None:
+    tracker = OpenAIServerConversationTracker(conversation_id="conv7a", previous_response_id=None)
+    generated_items = [
+        DummyRunItem(
+            {
+                "type": "reasoning",
+                "id": "rs_code",
+                "content": [{"type": "input_text", "text": "reasoning trace"}],
+            },
+            type="reasoning_item",
+        ),
+        DummyRunItem(
+            {
+                "type": "code_interpreter_call",
+                "id": "ci_123",
+                "status": "completed",
+                "container_id": "cntr_123",
+                "outputs": [],
+            },
+            type="tool_call_item",
+        ),
+    ]
+
+    prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(list[Any], generated_items),
+    )
+    reasoning_item = cast(dict[str, Any], prepared[0])
+
+    assert reasoning_item["type"] == "reasoning"
+    assert "id" not in reasoning_item
+    assert cast(dict[str, Any], prepared[1])["type"] == "code_interpreter_call"
+
+
+def test_prepare_input_preserves_reasoning_ids_without_code_interpreter_history() -> None:
+    tracker = OpenAIServerConversationTracker(conversation_id="conv7b", previous_response_id=None)
+    generated_items = [
+        DummyRunItem(
+            {
+                "type": "reasoning",
+                "id": "rs_plain",
+                "content": [{"type": "input_text", "text": "reasoning trace"}],
+            },
+            type="reasoning_item",
+        )
+    ]
+
+    prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(list[Any], generated_items),
+    )
+    reasoning_item = cast(dict[str, Any], prepared[0])
+
+    assert reasoning_item["type"] == "reasoning"
+    assert reasoning_item["id"] == "rs_plain"
+
+
 def test_prepare_input_does_not_resend_reasoning_item_after_marking_omitted_id_as_sent() -> None:
     tracker = OpenAIServerConversationTracker(
         conversation_id="conv8",

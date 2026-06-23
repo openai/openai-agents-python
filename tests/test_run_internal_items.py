@@ -287,6 +287,71 @@ def test_drop_orphan_function_calls_does_not_pair_named_tool_search_with_anonymo
     assert [cast(dict[str, Any], item)["type"] for item in filtered] == ["tool_search_output"]
 
 
+def test_prepare_model_input_items_omits_reasoning_ids_with_code_interpreter_calls() -> None:
+    payload: list[Any] = [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_code", "summary": []}),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "code_interpreter_call",
+                "id": "ci_123",
+                "status": "completed",
+                "container_id": "cntr_123",
+                "outputs": [],
+            },
+        ),
+    ]
+
+    prepared = run_items.prepare_model_input_items([], cast(list[TResponseInputItem], payload))
+    reasoning_item = cast(dict[str, Any], prepared[0])
+
+    assert reasoning_item["type"] == "reasoning"
+    assert "id" not in reasoning_item
+    assert cast(dict[str, Any], prepared[1])["type"] == "code_interpreter_call"
+
+
+def test_prepare_model_input_items_preserves_reasoning_ids_when_configured() -> None:
+    payload: list[Any] = [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_code", "summary": []}),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "code_interpreter_call",
+                "id": "ci_123",
+                "status": "completed",
+                "container_id": "cntr_123",
+                "outputs": [],
+            },
+        ),
+    ]
+
+    prepared = run_items.prepare_model_input_items(
+        [],
+        cast(list[TResponseInputItem], payload),
+        reasoning_item_id_policy="preserve",
+    )
+    reasoning_item = cast(dict[str, Any], prepared[0])
+
+    assert reasoning_item["id"] == "rs_code"
+
+
+def test_prepare_model_input_items_omits_reasoning_ids_when_configured() -> None:
+    payload: list[Any] = [
+        cast(TResponseInputItem, {"type": "reasoning", "id": "rs_plain", "summary": []}),
+        cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "done"}),
+    ]
+
+    prepared = run_items.prepare_model_input_items(
+        [],
+        cast(list[TResponseInputItem], payload),
+        reasoning_item_id_policy="omit",
+    )
+    reasoning_item = cast(dict[str, Any], prepared[0])
+
+    assert reasoning_item["type"] == "reasoning"
+    assert "id" not in reasoning_item
+
+
 def test_normalize_and_ensure_input_item_format_keep_non_dict_entries() -> None:
     item = cast(TResponseInputItem, "raw-item")
     assert run_items.ensure_input_item_format(item) == item
