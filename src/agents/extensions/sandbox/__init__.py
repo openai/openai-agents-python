@@ -109,6 +109,18 @@ try:
 except Exception:  # pragma: no cover
     _HAS_VERCEL = False
 
+try:
+    from .upstash_box import (
+        UpstashBoxSandboxClient as UpstashBoxSandboxClient,
+        UpstashBoxSandboxClientOptions as UpstashBoxSandboxClientOptions,
+        UpstashBoxSandboxSession as UpstashBoxSandboxSession,
+        UpstashBoxSandboxSessionState as UpstashBoxSandboxSessionState,
+    )
+
+    _HAS_UPSTASH_BOX = True
+except Exception:  # pragma: no cover
+    _HAS_UPSTASH_BOX = False
+
 __all__: list[str] = []
 
 if _HAS_E2B:
@@ -184,6 +196,16 @@ if _HAS_VERCEL:
             "VercelSandboxClientOptions",
             "VercelSandboxSession",
             "VercelSandboxSessionState",
+        ]
+    )
+
+if _HAS_UPSTASH_BOX:
+    __all__.extend(
+        [
+            "UpstashBoxSandboxClient",
+            "UpstashBoxSandboxClientOptions",
+            "UpstashBoxSandboxSession",
+            "UpstashBoxSandboxSessionState",
         ]
     )
 
