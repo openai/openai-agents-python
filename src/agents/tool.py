@@ -552,6 +552,17 @@ class _FailureHandlingFunctionToolInvoker:
         return bound_invoker
 
     async def __call__(self, ctx: ToolContext[Any], input: str) -> Any:
+        # Validate the context up front. A non-context value (most commonly None) would
+        # otherwise blow up deep in the invocation with a cryptic AttributeError, so fail
+        # fast here with an actionable message before any tool logic runs. The base
+        # RunContextWrapper is accepted because agent-as-tool invokers run with one; the
+        # message points to ToolContext since that is what function tools need.
+        if not isinstance(ctx, RunContextWrapper):
+            raise TypeError(
+                f"on_invoke_tool requires a ToolContext, got {type(ctx).__name__}. "
+                "Construct one with ToolContext(context=..., tool_name=..., "
+                "tool_call_id=..., tool_arguments=...) or invoke the tool through Runner."
+            )
         try:
             return await self._invoke_tool_impl(ctx, input)
         except Exception as e:
