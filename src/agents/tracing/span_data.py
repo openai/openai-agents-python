@@ -1,11 +1,52 @@
 from __future__ import annotations
 
 import abc
+import json
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from openai.types.responses import Response, ResponseInputItemParam
+
+
+# JavaScript's Number type can only safely represent integers in this range.
+_JS_SAFE_INT_MIN = -(2**53 - 1)
+_JS_SAFE_INT_MAX = 2**53 - 1
+
+
+def _convert_large_ints_to_strings(value: Any) -> tuple[Any, bool]:
+    """Recursively convert ints outside JS's safe range to strings.
+
+    Returns a tuple of (converted_value, changed). When no conversion is needed,
+    the original object is returned unchanged to preserve object identity.
+    """
+    if value is None or isinstance(value, str | float):
+        return value, False
+    if isinstance(value, bool):
+        return value, False
+    if isinstance(value, int):
+        if value < _JS_SAFE_INT_MIN or value > _JS_SAFE_INT_MAX:
+            return str(value), True
+        return value, False
+    if isinstance(value, dict):
+        converted_dict: dict[str, Any] = {}
+        changed = False
+        for key, nested_value in value.items():
+            if not isinstance(key, str):
+                continue
+            converted_value, value_changed = _convert_large_ints_to_strings(nested_value)
+            converted_dict[key] = converted_value
+            changed = changed or value_changed
+        return (converted_dict, True) if changed else (value, False)
+    if isinstance(value, list):
+        converted_list: list[Any] = []
+        changed = False
+        for nested_value in value:
+            converted_value, value_changed = _convert_large_ints_to_strings(nested_value)
+            converted_list.append(converted_value)
+            changed = changed or value_changed
+        return (converted_list, True) if changed else (value, False)
+    return value, False
 
 
 class SpanData(abc.ABC):
@@ -157,10 +198,20 @@ class FunctionSpanData(SpanData):
         return "function"
 
     def export(self) -> dict[str, Any]:
+        input_value = self.input
+        if isinstance(input_value, str):
+            try:
+                parsed_input = json.loads(input_value)
+                converted_input, changed = _convert_large_ints_to_strings(parsed_input)
+                if changed:
+                    input_value = json.dumps(converted_input, ensure_ascii=False)
+            except (ValueError, TypeError):
+                pass
+
         return {
             "type": self.type,
             "name": self.name,
-            "input": self.input,
+            "input": input_value,
             "output": str(self.output) if self.output is not None else None,
             "mcp_data": self.mcp_data,
         }

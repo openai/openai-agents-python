@@ -528,3 +528,25 @@ def test_trace_to_json_only_includes_tracing_api_key_when_requested():
         with_key = tr.to_json(include_tracing_api_key=True)
         assert with_key is not None
         assert with_key["tracing_api_key"] == "secret-key"
+
+
+def test_function_span_data_export_converts_large_ints_in_json_input():
+    from agents.tracing.span_data import FunctionSpanData
+
+    span_data = FunctionSpanData(
+        name="add",
+        input='{"a": 10000000000000001, "b": 123456789}',
+        output="10000000123456790",
+    )
+    exported = span_data.export()
+    assert exported["input"] == '{"a": "10000000000000001", "b": 123456789}'
+    assert exported["output"] == "10000000123456790"
+
+
+def test_function_span_data_export_leaves_non_json_input_unchanged():
+    from agents.tracing.span_data import FunctionSpanData
+
+    span_data = FunctionSpanData(name="add", input="plain text: 10000000000000001", output=None)
+    exported = span_data.export()
+    assert exported["input"] == "plain text: 10000000000000001"
+    assert exported["output"] is None

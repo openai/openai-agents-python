@@ -15,6 +15,7 @@ import httpx
 
 from ..logger import logger
 from .processor_interface import TracingExporter, TracingProcessor
+from .span_data import _convert_large_ints_to_strings
 from .spans import Span
 from .traces import Trace
 
@@ -265,39 +266,29 @@ class BackendSpanExporter(TracingExporter):
                     sanitized_span_data = dict(span_data)
                     did_mutate = True
                 sanitized_span_data.pop("usage", None)
-            if not did_mutate:
-                return payload_item
-            sanitized_payload_item = dict(payload_item)
-            sanitized_payload_item["span_data"] = sanitized_span_data
-            return sanitized_payload_item
-
-        usage = span_data.get("usage")
-        if not isinstance(usage, dict):
-            if not did_mutate:
-                return payload_item
-            sanitized_payload_item = dict(payload_item)
-            sanitized_payload_item["span_data"] = sanitized_span_data
-            return sanitized_payload_item
-
-        sanitized_usage = self._sanitize_generation_usage_for_openai_tracing_api(usage)
-
-        if sanitized_usage is None:
-            if not did_mutate:
-                sanitized_span_data = dict(span_data)
-                did_mutate = True
-            sanitized_span_data.pop("usage", None)
-        elif sanitized_usage != usage:
-            if not did_mutate:
-                sanitized_span_data = dict(span_data)
-                did_mutate = True
-            sanitized_span_data["usage"] = sanitized_usage
+        else:
+            usage = span_data.get("usage")
+            if isinstance(usage, dict):
+                sanitized_usage = self._sanitize_generation_usage_for_openai_tracing_api(usage)
+                if sanitized_usage is None:
+                    if not did_mutate:
+                        sanitized_span_data = dict(span_data)
+                        did_mutate = True
+                    sanitized_span_data.pop("usage", None)
+                elif sanitized_usage != usage:
+                    if not did_mutate:
+                        sanitized_span_data = dict(span_data)
+                        did_mutate = True
+                    sanitized_span_data["usage"] = sanitized_usage
 
         if not did_mutate:
-            return payload_item
+            sanitized_payload_item = payload_item
+        else:
+            sanitized_payload_item = dict(payload_item)
+            sanitized_payload_item["span_data"] = sanitized_span_data
 
-        sanitized_payload_item = dict(payload_item)
-        sanitized_payload_item["span_data"] = sanitized_span_data
-        return sanitized_payload_item
+        converted_payload_item, changed = _convert_large_ints_to_strings(sanitized_payload_item)
+        return converted_payload_item if changed else sanitized_payload_item
 
     def _value_json_size_bytes(self, value: Any) -> int:
         try:

@@ -1299,3 +1299,56 @@ def test_truncate_string_for_json_limit_handles_escape_heavy_input():
     assert truncated.endswith(exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX)
     assert exporter._value_json_size_bytes(truncated) <= max_bytes
     exporter.close()
+
+
+def test_sanitize_for_openai_tracing_api_converts_large_ints_to_strings():
+    exporter = BackendSpanExporter(api_key="test_key")
+    payload = {
+        "object": "trace.span",
+        "span_data": {
+            "type": "generation",
+            "input": [
+                {
+                    "role": "user",
+                    "content": {
+                        "big_int": 10_000_000_000_000_001,
+                        "small_int": 42,
+                        "flag": True,
+                    },
+                }
+            ],
+            "output": [
+                {
+                    "role": "assistant",
+                    "content": {
+                        "big_int": -10_000_000_000_000_002,
+                        "small_int": 9007199254740991,
+                    },
+                }
+            ],
+        },
+    }
+
+    sanitized = exporter._sanitize_for_openai_tracing_api(payload)
+    assert sanitized["span_data"]["input"][0]["content"]["big_int"] == "10000000000000001"
+    assert sanitized["span_data"]["input"][0]["content"]["small_int"] == 42
+    assert sanitized["span_data"]["input"][0]["content"]["flag"] is True
+    assert sanitized["span_data"]["output"][0]["content"]["big_int"] == "-10000000000000002"
+    assert sanitized["span_data"]["output"][0]["content"]["small_int"] == 9007199254740991
+    exporter.close()
+
+
+def test_sanitize_for_openai_tracing_api_keeps_small_payload_identity():
+    exporter = BackendSpanExporter(api_key="test_key")
+    payload = {
+        "object": "trace.span",
+        "span_data": {
+            "type": "function",
+            "input": "short input",
+            "output": "short output",
+        },
+    }
+
+    sanitized = exporter._sanitize_for_openai_tracing_api(payload)
+    assert sanitized is payload
+    exporter.close()
