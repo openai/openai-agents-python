@@ -14,7 +14,7 @@ from agents.run_context import RunContextWrapper
 if sys.version_info < (3, 11):
     from exceptiongroup import BaseExceptionGroup
 else:
-    BaseExceptionGroup = getattr(builtins, "BaseExceptionGroup")
+    BaseExceptionGroup = builtins.BaseExceptionGroup
 
 
 class CrashingClientSessionServer(_MCPServerWithClientSession):
