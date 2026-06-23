@@ -111,7 +111,11 @@ async def test_get_all_function_tools_duplicate_error_is_deterministic():
     with pytest.raises(UserError) as exc_info:
         await MCPUtil.get_all_function_tools([server1, server2], False, run_context, agent)
 
-    assert str(exc_info.value) == "Duplicate tool names found across MCP servers: alpha, zeta"
+    assert str(exc_info.value) == (
+        "Duplicate tool names found across MCP servers: alpha, zeta. "
+        "Set `mcp_config={'include_server_in_tool_names': True}` on the agent "
+        "to prefix tool names with their server name and avoid collisions."
+    )
 
 
 @pytest.mark.asyncio
