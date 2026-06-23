@@ -1,8 +1,17 @@
+import sys
 import pytest
+import httpx
+from unittest.mock import AsyncMock, MagicMock
+
+# Handle Python version compatibility for ExceptionGroups
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup
+else:
+    BaseExceptionGroup = ExceptionGroup
 
 from agents import Agent
 from agents.exceptions import UserError
-from agents.mcp.server import _MCPServerWithClientSession
+from agents.mcp.server import _MCPServerWithClientSession, MCPServerStreamableHttp
 from agents.run_context import RunContextWrapper
 
 
@@ -45,3 +54,32 @@ async def test_not_calling_connect_causes_error():
 
     with pytest.raises(UserError):
         await server.call_tool("foo", {})
+
+
+@pytest.mark.asyncio
+async def test_call_tool_nested_exception_group_mapping():
+    """
+    Regression test ensuring that nested ExceptionGroups containing HTTP errors
+    are recursively extracted and mapped to a UserError in call_tool().
+    """
+    # 1. Initialize the server with mock streamable parameters
+    server = MCPServerStreamableHttp(params={"url": "http://fake-mcp-server"})
+    
+    # 2. Simulate an active connection by mocking the session object
+    server.session = MagicMock()
+    
+    # 3. Construct a nested ExceptionGroup hierarchy containing a connection error
+    http_error = httpx.ConnectError("Network unreachable")
+    inner_group = BaseExceptionGroup("inner_failures", [http_error])
+    outer_group = BaseExceptionGroup("outer_failures", [inner_group])
+    
+    # 4. Mock the internal retry handler to raise the nested exception group
+    server._call_tool_with_isolated_retry = AsyncMock(side_effect=outer_group)
+    
+    # 5. Assert that call_tool() catches the nested group, extracts the error, and raises UserError
+    with pytest.raises(UserError) as exc_info:
+        await server.call_tool(tool_name="test_tool", arguments={})
+    
+    # 6. Verify that the user-facing message is mapped correctly based on the root cause
+    assert "Connection lost" in str(exc_info.value)
+    assert exc_info.value.__cause__ is http_error
