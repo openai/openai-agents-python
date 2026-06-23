@@ -1,19 +1,20 @@
+import builtins
 import sys
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
-# Handle Python version compatibility for ExceptionGroups
-if sys.version_info < (3, 11):
-    from exceptiongroup import BaseExceptionGroup
-else:
-    BaseExceptionGroup = ExceptionGroup
-
 from agents import Agent
 from agents.exceptions import UserError
 from agents.mcp.server import MCPServerStreamableHttp, _MCPServerWithClientSession
 from agents.run_context import RunContextWrapper
+
+# Handle Python version compatibility for ExceptionGroups
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup
+else:
+    BaseExceptionGroup = getattr(builtins, "BaseExceptionGroup")
 
 
 class CrashingClientSessionServer(_MCPServerWithClientSession):
