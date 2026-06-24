@@ -185,6 +185,41 @@ async def test_cancel_immediate_drains_owned_tasks_before_marking_complete():
 
 
 @pytest.mark.asyncio
+async def test_stream_events_timeout_marks_result_complete_without_sentinel():
+    result = RunResultStreaming(
+        input="hi",
+        new_items=[],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=RunContextWrapper(context=None),
+        current_agent=Agent(name="A", model=FakeModel()),
+        current_turn=0,
+        max_turns=1,
+        _current_agent_output_schema=None,
+        trace=None,
+    )
+
+    async def wait_forever() -> None:
+        await asyncio.Event().wait()
+
+    result.run_loop_task = asyncio.create_task(wait_forever())
+    event_iter = result.stream_events().__aiter__()
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(event_iter.__anext__(), timeout=0.01)
+
+    assert result.is_complete is True
+
+    remaining_events = [event async for event in result.stream_events()]
+
+    assert remaining_events == []
+
+
+@pytest.mark.asyncio
 async def test_cancel_immediate_mode_explicit():
     """Test explicit immediate mode behaves same as default."""
     model = FakeModel()

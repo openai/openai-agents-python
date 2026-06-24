@@ -754,6 +754,7 @@ class RunResultStreaming(RunResultBase):
                     # Cancellation should return promptly, so avoid waiting on long-running tasks.
                     # Tasks have already been cancelled above.
                     self._cleanup_tasks()
+                    self.is_complete = True
                 elif self._cancel_mode == "immediate":
                     await self._drain_cancelled_tasks()
                     self._check_errors()
