@@ -21,6 +21,8 @@ import json
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from pydantic_core import to_jsonable_python
+
 from agents.agent import Agent
 from agents.items import ItemHelpers, MessageOutputItem
 from agents.memory.session import Session
@@ -62,13 +64,19 @@ def _event_to_dict(event: StreamEvent) -> dict[str, Any] | None:
 
 
 def _serialize_output(output: Any) -> Any:
-    """Best-effort JSON-serializable view of a final output."""
+    """JSON-compatible view of a final output.
+
+    Preserves structured outputs (primitives, lists/dicts, Pydantic models) as
+    JSON data rather than stringifying them, using a JSON-mode encoder so values
+    like datetimes serialize correctly. Falls back to ``str`` only for values
+    that are not JSON-serializable.
+    """
     if isinstance(output, str):
         return output
-    model_dump = getattr(output, "model_dump", None)
-    if callable(model_dump):
-        return model_dump()
-    return str(output)
+    try:
+        return to_jsonable_python(output)
+    except Exception:
+        return str(output)
 
 
 class AgentServer:
@@ -126,6 +134,21 @@ class AgentServer:
             self._sessions[thread_id] = session
         return session
 
+    def _resolve_thread(self, body: dict[str, Any]) -> tuple[str | None, Session | None]:
+        """Resolve a request's ``thread_id`` to a session, rejecting bad types.
+
+        A missing ``thread_id`` runs statelessly. A non-string ``thread_id`` is a
+        client error (422) rather than being silently dropped to a stateless run,
+        which would otherwise echo the id and mislead the caller into thinking the
+        turn was persisted.
+        """
+        thread_id = body.get("thread_id")
+        if thread_id is None:
+            return None, None
+        if not isinstance(thread_id, str):
+            raise HTTPException(status_code=422, detail="'thread_id' must be a string")
+        return thread_id, self._get_session(thread_id)
+
     # -- App ---------------------------------------------------------------
 
     def _build_app(self, title: str) -> FastAPI:
@@ -142,8 +165,7 @@ class AgentServer:
             user_input = body.get("input")
             if not isinstance(user_input, str):
                 raise HTTPException(status_code=422, detail="'input' must be a string")
-            thread_id = body.get("thread_id")
-            session = self._get_session(thread_id) if isinstance(thread_id, str) else None
+            thread_id, session = self._resolve_thread(body)
             result = await Runner.run(self.agent, user_input, session=session, **self._run_kwargs())
             return JSONResponse(
                 {"output": _serialize_output(result.final_output), "thread_id": thread_id}
@@ -156,8 +178,7 @@ class AgentServer:
             user_input = body.get("input")
             if not isinstance(user_input, str):
                 raise HTTPException(status_code=422, detail="'input' must be a string")
-            thread_id = body.get("thread_id")
-            session = self._get_session(thread_id) if isinstance(thread_id, str) else None
+            thread_id, session = self._resolve_thread(body)
 
             async def event_stream() -> AsyncIterator[str]:
                 run = Runner.run_streamed(

@@ -4,6 +4,7 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 
 from agents import Agent
 from agents.extensions.server import AgentServer
@@ -123,3 +124,34 @@ def test_run_refuses_public_bind_without_auth() -> None:
     server = build_server()
     with pytest.raises(ValueError):
         server.run(host="0.0.0.0")
+
+
+# -- Codex review regressions --------------------------------------------------
+
+
+def test_invoke_preserves_structured_output() -> None:
+    # A structured (Pydantic) output must come back as JSON data, not str(repr).
+    class Answer(BaseModel):
+        value: int
+        label: str
+
+    model = FakeModel()
+    model.set_next_output([get_text_message('{"value": 42, "label": "answer"}')])
+    agent = Agent(name="Counter", instructions="x", model=model, output_type=Answer)
+    client = TestClient(AgentServer(agent).app)
+
+    output = client.post("/invoke", json={"input": "number?"}).json()["output"]
+    assert output == {"value": 42, "label": "answer"}
+    assert isinstance(output, dict)
+
+
+def test_invoke_rejects_non_string_thread_id() -> None:
+    client = TestClient(build_server(sessions=True).app)
+    resp = client.post("/invoke", json={"input": "hi", "thread_id": 123})
+    assert resp.status_code == 422
+
+
+def test_stream_rejects_non_string_thread_id() -> None:
+    client = TestClient(build_server(sessions=True).app)
+    resp = client.post("/stream", json={"input": "hi", "thread_id": 123})
+    assert resp.status_code == 422
