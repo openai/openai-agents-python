@@ -2436,6 +2436,11 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+a2a = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "uvicorn" },
+]
 any-llm = [
     { name = "any-llm-sdk", marker = "python_full_version >= '3.11'" },
 ]
@@ -2552,9 +2557,11 @@ requires-dist = [
     { name = "docker", marker = "extra == 'docker'", specifier = ">=6.1" },
     { name = "e2b", marker = "extra == 'e2b'", specifier = "==2.20.0" },
     { name = "e2b-code-interpreter", marker = "extra == 'e2b'", specifier = "==2.4.1" },
+    { name = "fastapi", marker = "extra == 'a2a'", specifier = ">=0.110.0,<1" },
     { name = "graphviz", marker = "extra == 'viz'", specifier = ">=0.17" },
     { name = "griffelib", specifier = ">=2,<3" },
     { name = "grpcio", marker = "extra == 'dapr'", specifier = ">=1.60.0" },
+    { name = "httpx", marker = "extra == 'a2a'", specifier = ">=0.23" },
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.83.0" },
     { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.19.0,<2" },
     { name = "modal", marker = "extra == 'modal'", specifier = "==1.4.3" },
@@ -2570,12 +2577,13 @@ requires-dist = [
     { name = "textual", marker = "extra == 'temporal'", specifier = ">=8.2.3,<8.3" },
     { name = "types-requests", specifier = ">=2.0,<3" },
     { name = "typing-extensions", specifier = ">=4.12.2,<5" },
+    { name = "uvicorn", marker = "extra == 'a2a'", specifier = ">=0.30" },
     { name = "vercel", marker = "extra == 'vercel'", specifier = ">=0.5.6,<0.6" },
     { name = "websockets", specifier = ">=15.0,<17" },
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<17" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<17" },
 ]
-provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "docker", "blaxel", "daytona", "cloudflare", "e2b", "modal", "runloop", "vercel", "s3", "temporal"]
+provides-extras = ["voice", "viz", "litellm", "any-llm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "mongodb", "a2a", "docker", "blaxel", "daytona", "cloudflare", "e2b", "modal", "runloop", "vercel", "s3", "temporal"]
 
 [package.metadata.requires-dev]
 dev = [

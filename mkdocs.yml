@@ -76,6 +76,7 @@ plugins:
                 - Context management: context.md
                 - Usage: usage.md
                 - Model context protocol (MCP): mcp.md
+                - Agent-to-Agent (A2A): a2a.md
                 - Tracing: tracing.md
                 - Realtime agents:
                     - Quickstart: realtime/quickstart.md
