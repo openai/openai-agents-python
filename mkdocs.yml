@@ -86,6 +86,7 @@ plugins:
                     - Pipeline: voice/pipeline.md
                     - Tracing: voice/tracing.md
                 - Agent visualization: visualization.md
+                - Agent server: agent_server.md
                 - REPL utility: repl.md
                 - Examples: examples.md
                 - Release process/changelog: release.md
