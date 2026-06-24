@@ -20,7 +20,15 @@ from agents.extensions.a2a import (
 from agents.extensions.a2a.models import message_from_text
 from agents.tool_context import ToolContext
 from tests.fake_model import FakeModel
-from tests.test_responses import get_text_message
+from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
+
+
+def _sse_results(resp: Any) -> list[dict[str, Any]]:
+    return [
+        json.loads(line[len("data:") :].strip())["result"]
+        for line in resp.text.splitlines()
+        if line.startswith("data:")
+    ]
 
 
 def build_server(text: str = "Paris") -> A2AServer:
@@ -205,3 +213,85 @@ async def test_client_raises_on_error() -> None:
             await client.get_task("does-not-exist")
     finally:
         await client._client.aclose()
+
+
+# -- Codex review regressions --------------------------------------------------
+
+
+def test_stream_respects_max_turns() -> None:
+    # Turn 1 calls a tool; turn 2 would finish — max_turns=1 must block turn 2.
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [[get_function_tool_call("noop", "{}")], [get_text_message("done")]]
+    )
+    agent = Agent(
+        name="Looper",
+        instructions="x",
+        model=model,
+        tools=[get_function_tool("noop", "ok")],
+    )
+    server = A2AServer(agent, url="http://testserver/", max_turns=1)
+    client = TestClient(server.app)
+
+    body = send_body("go")
+    body["method"] = "message/stream"
+    events = _sse_results(client.post("/", json=body))
+
+    final = events[-1]
+    assert final["kind"] == "status-update"
+    assert final["final"] is True
+    # Without max_turns flowing into the streamed run, turn 2 would complete with "done".
+    assert final["status"]["state"] == "failed"
+
+
+def test_stream_falls_back_to_final_output() -> None:
+    # Run ends on a tool result: no message deltas, so the final must come from
+    # run.final_output, not an empty string.
+    model = FakeModel()
+    model.set_next_output([get_function_tool_call("get_answer", "{}")])
+    agent = Agent(
+        name="Tooler",
+        instructions="x",
+        model=model,
+        tools=[get_function_tool("get_answer", "42")],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    server = A2AServer(agent, url="http://testserver/")
+    client = TestClient(server.app)
+
+    body = send_body("go")
+    body["method"] = "message/stream"
+    events = _sse_results(client.post("/", json=body))
+
+    final = events[-1]
+    assert final["status"]["state"] == "completed"
+    assert "42" in final["status"]["message"]["parts"][0]["text"]
+
+
+async def test_client_stream_surfaces_non_sse_error() -> None:
+    # A peer that answers message/stream with a plain JSON-RPC error (HTTP 200,
+    # not an event stream) must raise instead of yielding an empty stream.
+    from fastapi import FastAPI
+    from fastapi.responses import JSONResponse
+
+    app = FastAPI()
+
+    @app.post("/")
+    async def _rpc() -> JSONResponse:
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32004, "message": "streaming unsupported"},
+            }
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    http = httpx.AsyncClient(transport=transport, base_url="http://test")
+    client = A2AClient("http://test/", httpx_client=http)
+    try:
+        with pytest.raises(A2AError):
+            async for _ in client.stream_message("hi"):
+                pass
+    finally:
+        await http.aclose()

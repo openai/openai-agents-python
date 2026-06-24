@@ -240,8 +240,15 @@ class A2AServer:
 
             collected = ""
             try:
-                run = Runner.run_streamed(self.agent, text_from_message(params.message))
+                run = Runner.run_streamed(
+                    self.agent, text_from_message(params.message), **self._run_kwargs()
+                )
                 async for event in run.stream_events():
+                    # A concurrent tasks/cancel flips the shared task status; stop the
+                    # in-flight run instead of completing it.
+                    if task.status.state == TaskState.CANCELED:
+                        run.cancel()
+                        break
                     delta = _delta_text(event)
                     if not delta:
                         continue
@@ -259,7 +266,24 @@ class A2AServer:
                             append=True,
                         ),
                     )
-                final_text = collected or ItemHelpers.text_message_outputs(run.new_items)
+                if task.status.state == TaskState.CANCELED:
+                    yield self._sse(
+                        req.id,
+                        TaskStatusUpdateEvent(
+                            task_id=task.id,
+                            context_id=context_id,
+                            status=task.status,
+                            final=True,
+                        ),
+                    )
+                    return
+                # Mirror the non-streaming fallback: a run that ends on a tool result
+                # has no message deltas, so fall back to the final output.
+                final_text = (
+                    collected
+                    or ItemHelpers.text_message_outputs(run.new_items)
+                    or str(run.final_output)
+                )
             except Exception as e:
                 task.status = TaskStatus(state=TaskState.FAILED, message=message_from_text(str(e)))
                 yield self._sse(

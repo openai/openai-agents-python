@@ -155,6 +155,19 @@ class A2AClient:
             "POST", self._rpc_url(), json=body, headers=self._headers
         ) as resp:
             resp.raise_for_status()
+            # A peer that doesn't support streaming may answer with a plain
+            # JSON-RPC body (HTTP 200) instead of an event stream. Surface its
+            # error / result rather than silently dropping the non-SSE lines.
+            content_type = resp.headers.get("content-type", "")
+            if "text/event-stream" not in content_type:
+                payload = json.loads(await resp.aread())
+                if payload.get("error"):
+                    error = payload["error"]
+                    raise A2AError(f"{error.get('code')}: {error.get('message')}")
+                result = payload.get("result")
+                if isinstance(result, dict):
+                    yield result
+                return
             async for line in resp.aiter_lines():
                 if not line.startswith("data:"):
                     continue
