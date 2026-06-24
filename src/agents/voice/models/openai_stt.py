@@ -321,18 +321,51 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             if exc and isinstance(exc, Exception):
                 self._stored_exception = exc
 
-    def _cleanup_tasks(self) -> None:
-        if self._listener_task and not self._listener_task.done():
-            self._listener_task.cancel()
+    async def _cleanup_tasks(self) -> None:
+        current_task = asyncio.current_task()
+        tasks_to_await: set[asyncio.Task[Any]] = set()
 
-        if self._process_events_task and not self._process_events_task.done():
-            self._process_events_task.cancel()
+        while True:
+            while True:
+                tasks = [
+                    task
+                    for task in (
+                        self._listener_task,
+                        self._process_events_task,
+                        self._stream_audio_task,
+                        self._connection_task,
+                    )
+                    if task is not None and task is not current_task and task not in tasks_to_await
+                ]
+                if not tasks:
+                    break
 
-        if self._stream_audio_task and not self._stream_audio_task.done():
-            self._stream_audio_task.cancel()
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
 
-        if self._connection_task and not self._connection_task.done():
-            self._connection_task.cancel()
+                tasks_to_await.update(tasks)
+                await asyncio.sleep(0)
+
+            if not tasks_to_await:
+                return
+
+            for task in tasks_to_await:
+                if not task.done():
+                    task.cancel()
+
+            await asyncio.gather(*tasks_to_await, return_exceptions=True)
+
+            if all(
+                task is None or task is current_task or task in tasks_to_await
+                for task in (
+                    self._listener_task,
+                    self._process_events_task,
+                    self._stream_audio_task,
+                    self._connection_task,
+                )
+            ):
+                return
 
     async def transcribe_turns(self) -> AsyncIterator[str]:
         self._connection_task = asyncio.create_task(self._process_websocket_connection())
@@ -367,7 +400,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         if self._websocket:
             await self._websocket.close()
 
-        self._cleanup_tasks()
+        await self._cleanup_tasks()
 
 
 class OpenAISTTModel(STTModel):
