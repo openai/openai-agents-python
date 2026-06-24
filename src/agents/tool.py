@@ -552,6 +552,12 @@ class _FailureHandlingFunctionToolInvoker:
         return bound_invoker
 
     async def __call__(self, ctx: ToolContext[Any], input: str) -> Any:
+        if not isinstance(ctx, RunContextWrapper):
+            raise TypeError(
+                f"on_invoke_tool requires a ToolContext, got {type(ctx).__name__}. "
+                "Construct one with ToolContext(context=..., tool_name=..., "
+                "tool_call_id=..., tool_arguments=...) or invoke the tool through Runner."
+            )
         try:
             return await self._invoke_tool_impl(ctx, input)
         except Exception as e:
