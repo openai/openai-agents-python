@@ -1,9 +1,15 @@
 """Integration tests for the A2A extension against a real OpenAI model.
 
-These are skipped unless a real ``OPENAI_API_KEY`` is set (the test suite
-otherwise injects a dummy ``test_key``), and are marked
-``allow_call_model_methods`` so the real-model guard in ``conftest`` lets them
-through.
+These make real API calls, so they are opt-in: they only run when
+``OPENAI_INTEGRATION_TESTS=1`` is set (with a real ``OPENAI_API_KEY``). CI never
+sets that flag — and injects a fake key — so these are skipped there. They are
+marked ``allow_call_model_methods`` so the real-model guard in ``conftest`` lets
+them through when explicitly enabled.
+
+Run locally with::
+
+    OPENAI_INTEGRATION_TESTS=1 OPENAI_API_KEY=sk-... uv run pytest \
+        tests/extensions/a2a/test_a2a_integration.py
 """
 
 from __future__ import annotations
@@ -16,12 +22,11 @@ import pytest
 from agents import Agent
 from agents.extensions.a2a import A2AClient, A2AServer, Task, text_from_message
 
-_KEY = os.getenv("OPENAI_API_KEY")
 pytestmark = [
     pytest.mark.allow_call_model_methods,
     pytest.mark.skipif(
-        not _KEY or _KEY == "test_key",
-        reason="requires a real OPENAI_API_KEY",
+        os.getenv("OPENAI_INTEGRATION_TESTS") != "1",
+        reason="set OPENAI_INTEGRATION_TESTS=1 (with a real OPENAI_API_KEY) to run",
     ),
 ]
 
