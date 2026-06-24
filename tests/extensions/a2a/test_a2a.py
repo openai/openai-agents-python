@@ -295,3 +295,54 @@ async def test_client_stream_surfaces_non_sse_error() -> None:
                 pass
     finally:
         await http.aclose()
+
+
+# -- Codex re-review regressions -----------------------------------------------
+
+
+def test_stream_persists_artifact_for_tasks_get() -> None:
+    # After a stream, tasks/get must return the deliverable artifact.
+    server = build_server("Paris")
+    client = TestClient(server.app)
+
+    body = send_body("capital of France?")
+    body["method"] = "message/stream"
+    events = _sse_results(client.post("/", json=body))
+    task_id = events[0]["id"]
+
+    got = client.post(
+        "/", json={"jsonrpc": "2.0", "id": "2", "method": "tasks/get", "params": {"id": task_id}}
+    ).json()["result"]
+    assert got["status"]["state"] == "completed"
+    assert got["artifacts"][0]["parts"][0]["text"] == "Paris"
+
+
+async def test_client_get_card_falls_back_to_legacy_path() -> None:
+    # A 0.2.x peer that only serves /.well-known/agent.json is still discoverable.
+    from fastapi import FastAPI
+    from fastapi.responses import JSONResponse
+
+    app = FastAPI()
+
+    @app.get("/.well-known/agent.json")
+    async def _legacy() -> JSONResponse:
+        return JSONResponse(
+            {"name": "Legacy", "description": "d", "version": "1", "url": "http://test/"}
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    http = httpx.AsyncClient(transport=transport, base_url="http://test")
+    client = A2AClient("http://test/", httpx_client=http)
+    try:
+        card = await client.get_agent_card()
+        assert card.name == "Legacy"
+    finally:
+        await http.aclose()
+
+
+def test_task_state_accepts_auth_required() -> None:
+    assert TaskState("auth-required") == TaskState.AUTH_REQUIRED
+    task = Task.model_validate(
+        {"id": "t", "contextId": "c", "kind": "task", "status": {"state": "auth-required"}}
+    )
+    assert task.status.state == TaskState.AUTH_REQUIRED

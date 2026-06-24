@@ -120,8 +120,15 @@ class A2AClient:
         return Task.model_validate(result)
 
     async def get_agent_card(self) -> AgentCard:
-        """Fetch the remote agent's public card."""
+        """Fetch the remote agent's public card.
+
+        Falls back to the legacy ``/.well-known/agent.json`` path on a 404 so
+        0.2.x peers that only publish discovery there remain reachable.
+        """
         resp = await self._client.get(self._well_known_url(), headers=self._headers)
+        if resp.status_code == 404:
+            legacy_url = self.base_url + ".well-known/agent.json"
+            resp = await self._client.get(legacy_url, headers=self._headers)
         resp.raise_for_status()
         return AgentCard.model_validate(resp.json())
 

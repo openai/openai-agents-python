@@ -315,6 +315,15 @@ class A2AServer:
             agent_msg = message_from_text(final_text, role="agent")
             agent_msg.context_id = context_id
             agent_msg.task_id = task.id
+            # Persist the deliverable on the stored task so a later tasks/get (or a
+            # reconnect after the stream) sees the artifact, matching message/send.
+            task.artifacts = [
+                Artifact(
+                    artifact_id=artifact_id,
+                    name="response",
+                    parts=[TextPart(text=final_text)],
+                )
+            ]
             task.status = TaskStatus(state=TaskState.COMPLETED, message=agent_msg)
             task.history.append(agent_msg)
             yield self._sse(
