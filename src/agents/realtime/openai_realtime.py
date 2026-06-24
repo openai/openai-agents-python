@@ -100,13 +100,15 @@ from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper, TContext
 from ..version import __version__
+from ._tool_filtering import filter_enabled_tools, filter_statically_enabled_tools
+from ._tool_validation import validate_realtime_tool_names
 from .agent import RealtimeAgent
 from .config import (
     RealtimeModelTracingConfig,
     RealtimeRunConfig,
     RealtimeSessionModelSettings,
 )
-from .handoffs import realtime_handoff
+from .handoffs import collect_enabled_handoffs, filter_enabled_handoffs
 from .items import RealtimeMessageItem, RealtimeToolCallItem
 from .model import (
     RealtimeModel,
@@ -406,24 +408,7 @@ def _normalize_custom_voice_for_server_event_validation(value: Any) -> Any:
 async def _collect_enabled_handoffs(
     agent: RealtimeAgent[Any], context_wrapper: RunContextWrapper[Any]
 ) -> list[Handoff[Any, RealtimeAgent[Any]]]:
-    handoffs: list[Handoff[Any, RealtimeAgent[Any]]] = []
-    for handoff_item in agent.handoffs:
-        if isinstance(handoff_item, Handoff):
-            handoffs.append(handoff_item)
-        elif isinstance(handoff_item, RealtimeAgent):
-            handoffs.append(realtime_handoff(handoff_item))
-
-    async def _check_handoff_enabled(handoff_obj: Handoff[Any, RealtimeAgent[Any]]) -> bool:
-        attr = handoff_obj.is_enabled
-        if isinstance(attr, bool):
-            return attr
-        res = attr(context_wrapper, agent)
-        if inspect.isawaitable(res):
-            return await res
-        return res
-
-    results = await asyncio.gather(*(_check_handoff_enabled(h) for h in handoffs))
-    return [h for h, ok in zip(handoffs, results, strict=False) if ok]
+    return await collect_enabled_handoffs(agent, context_wrapper)
 
 
 async def _build_model_settings_from_agent(
@@ -450,6 +435,18 @@ async def _build_model_settings_from_agent(
 
     if starting_settings:
         updated_settings.update(starting_settings)
+        if "tools" in starting_settings:
+            updated_settings["tools"] = await filter_enabled_tools(
+                updated_settings.get("tools") or [],
+                context_wrapper,
+                agent,
+            )
+        if "handoffs" in starting_settings:
+            updated_settings["handoffs"] = await filter_enabled_handoffs(
+                updated_settings.get("handoffs") or [],
+                context_wrapper,
+                agent,
+            )
 
     if run_config and run_config.get("tracing_disabled", False):
         updated_settings["tracing"] = None
@@ -1540,7 +1537,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self, tools: list[Tool], handoffs: list[Handoff]
     ) -> list[OpenAISessionFunction]:
         converted_tools: list[OpenAISessionFunction] = []
-        for tool in tools:
+        enabled_tools = filter_statically_enabled_tools(tools)
+        enabled_handoffs = [handoff for handoff in handoffs if handoff.is_enabled is not False]
+        for tool in enabled_tools:
             if not isinstance(tool, FunctionTool):
                 raise UserError(f"Tool {tool.name} is unsupported. Must be a function tool.")
             ensure_function_tool_supports_responses_only_features(
@@ -1556,7 +1555,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 )
             )
 
-        for handoff in handoffs:
+        validate_realtime_tool_names(enabled_tools, enabled_handoffs)
+
+        for handoff in enabled_handoffs:
             converted_tools.append(
                 OpenAISessionFunction(
                     name=handoff.tool_name,
@@ -1604,6 +1605,18 @@ class OpenAIRealtimeSIPModel(OpenAIRealtimeWebSocketModel):
 
         if overrides:
             merged_settings.update(overrides)
+            if "tools" in overrides:
+                merged_settings["tools"] = await filter_enabled_tools(
+                    merged_settings.get("tools") or [],
+                    context_wrapper,
+                    agent,
+                )
+            if "handoffs" in overrides:
+                merged_settings["handoffs"] = await filter_enabled_handoffs(
+                    merged_settings.get("handoffs") or [],
+                    context_wrapper,
+                    agent,
+                )
 
         model = OpenAIRealtimeWebSocketModel()
         return model._get_session_config(merged_settings)

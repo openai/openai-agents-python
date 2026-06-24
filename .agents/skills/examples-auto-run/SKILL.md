@@ -76,6 +76,7 @@ description: Run python examples in auto mode with logging, rerun helpers, and b
 ## Notes
 
 - The runner delegates to `uv run --extra ... examples/run_examples.py`, which already writes per-example logs and supports `--collect`, `--rerun-file`, and `--print-auto-skip`.
+- `examples/sandbox/extensions/vercel_runner.py` is temporarily excluded from auto runs due to credential issues. Do not force-run it until the credential setup is fixed.
 - `start` uses `--write-rerun` so failures are captured automatically.
 - If `.tmp/examples-rerun.txt` exists and is non-empty, invoking the skill with no args runs `rerun` by default.
 

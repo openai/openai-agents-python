@@ -721,13 +721,12 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         if isinstance(e, httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException):
             return e
 
-        # Check if it's an ExceptionGroup containing HTTP errors
+        # Recursively check ExceptionGroups for HTTP errors
         if isinstance(e, BaseExceptionGroup):
             for exc in e.exceptions:
-                if isinstance(
-                    exc, httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException
-                ):
-                    return exc
+                result = self._extract_http_error_from_exception(exc)
+                if result is not None:
+                    return result
 
         return None
 

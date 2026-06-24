@@ -22,10 +22,12 @@ from ..items import ToolApprovalItem
 from ..logger import logger
 from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
-from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, invoke_function_tool
+from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, Tool, invoke_function_tool
 from ..tool_context import ToolContext
 from ..tool_guardrails import ToolInputGuardrailData
 from ..util._approvals import evaluate_needs_approval_setting
+from ._tool_filtering import filter_enabled_tools
+from ._tool_validation import validate_realtime_tool_names
 from .agent import RealtimeAgent
 from .config import RealtimeRunConfig, RealtimeSessionModelSettings, RealtimeUserInput
 from .events import (
@@ -47,7 +49,7 @@ from .events import (
     RealtimeToolEnd,
     RealtimeToolStart,
 )
-from .handoffs import realtime_handoff
+from .handoffs import collect_enabled_handoffs, filter_enabled_handoffs
 from .items import (
     AssistantAudio,
     AssistantMessageItem,
@@ -115,6 +117,22 @@ class _PendingToolOutput:
     session_update: RealtimeModelSendSessionUpdate | None = None
 
 
+@dataclasses.dataclass(frozen=True)
+class _RealtimeDispatchSnapshot:
+    agent: RealtimeAgent[Any]
+    tools: tuple[Tool, ...]
+    handoffs: tuple[Handoff[Any, RealtimeAgent[Any]], ...]
+
+
+@dataclasses.dataclass
+class _PendingToolCall:
+    tool_call: RealtimeModelToolCallEvent
+    agent: RealtimeAgent[Any]
+    dispatch_snapshot: _RealtimeDispatchSnapshot
+    function_tool: FunctionTool
+    approval_item: ToolApprovalItem
+
+
 class _PendingToolOutputSendError(RuntimeError):
     def __init__(self, call_id: str, cause: BaseException) -> None:
         super().__init__(str(cause))
@@ -178,12 +196,11 @@ class RealtimeSession(RealtimeModelListener):
         self._closing = False
         self._closed = False
         self._stored_exception: BaseException | None = None
-        self._pending_tool_calls: dict[
-            str, tuple[RealtimeModelToolCallEvent, RealtimeAgent, FunctionTool, ToolApprovalItem]
-        ] = {}
+        self._pending_tool_calls: dict[str, _PendingToolCall] = {}
         self._active_tool_call_ids: set[str] = set()
         self._completed_tool_call_ids: set[str] = set()
         self._pending_tool_outputs: dict[str, _PendingToolOutput] = {}
+        self._current_dispatch_snapshot: _RealtimeDispatchSnapshot | None = None
 
         # Guardrails state tracking
         self._interrupted_response_ids: set[str] = set()
@@ -206,17 +223,26 @@ class RealtimeSession(RealtimeModelListener):
         """Start the session by connecting to the model. After this, you will be able to stream
         events from the model and send messages and audio to the model.
         """
-        # Add ourselves as a listener
-        self._model.add_listener(self)
-
         model_config = self._model_config.copy()
-        model_config["initial_model_settings"] = await self._get_updated_model_settings_from_agent(
+        initial_model_settings = await self._get_updated_model_settings_from_agent(
             starting_settings=self._model_config.get("initial_model_settings", None),
             agent=self._current_agent,
         )
+        model_config["initial_model_settings"] = initial_model_settings
+        self._current_dispatch_snapshot = self._dispatch_snapshot_from_settings(
+            self._current_agent,
+            initial_model_settings,
+        )
 
-        # Connect to the model
-        await self._model.connect(model_config)
+        # Add ourselves as a listener only after initial settings have been validated.
+        self._model.add_listener(self)
+
+        try:
+            # Connect to the model.
+            await self._model.connect(model_config)
+        except BaseException:
+            self._model.remove_listener(self)
+            raise
 
         # Emit initial history update
         await self._put_event(
@@ -281,12 +307,14 @@ class RealtimeSession(RealtimeModelListener):
 
     async def update_agent(self, agent: RealtimeAgent) -> None:
         """Update the active agent for this session and apply its settings to the model."""
-        self._current_agent = agent
-
         updated_settings = await self._get_updated_model_settings_from_agent(
             starting_settings=None,
-            agent=self._current_agent,
+            agent=agent,
         )
+        updated_snapshot = self._dispatch_snapshot_from_settings(agent, updated_settings)
+
+        self._current_agent = agent
+        self._current_dispatch_snapshot = updated_snapshot
 
         await self._model.send_event(
             RealtimeModelSendSessionUpdate(session_settings=updated_settings)
@@ -305,10 +333,16 @@ class RealtimeSession(RealtimeModelListener):
             await self._put_event(RealtimeError(info=self._event_info, error=event.error))
         elif event.type == "function_call":
             agent_snapshot = self._current_agent
+            dispatch_snapshot = self._current_dispatch_snapshot
+            if dispatch_snapshot is not None and dispatch_snapshot.agent is not agent_snapshot:
+                dispatch_snapshot = None
             if self._async_tool_calls:
-                self._enqueue_tool_call_task(event, agent_snapshot)
+                self._enqueue_tool_call_task(event, agent_snapshot, dispatch_snapshot)
             else:
-                await self._handle_tool_call(event, agent_snapshot=agent_snapshot)
+                handle_kwargs: dict[str, Any] = {"agent_snapshot": agent_snapshot}
+                if dispatch_snapshot is not None:
+                    handle_kwargs["dispatch_snapshot"] = dispatch_snapshot
+                await self._handle_tool_call(event, **handle_kwargs)
         elif event.type == "audio":
             await self._put_event(
                 RealtimeAudio(
@@ -531,6 +565,7 @@ class RealtimeSession(RealtimeModelListener):
         *,
         function_tool: FunctionTool,
         agent: RealtimeAgent,
+        dispatch_snapshot: _RealtimeDispatchSnapshot,
     ) -> bool | None | _PendingToolOutput:
         """Return approval status, pending output for guardrail rejection, or None when awaiting."""
         tool_lookup_key = get_function_tool_lookup_key_for_tool(function_tool)
@@ -576,11 +611,12 @@ class RealtimeSession(RealtimeModelListener):
 
         if self._closing or self._closed:
             return None
-        self._pending_tool_calls[tool_call.call_id] = (
-            tool_call,
-            agent,
-            function_tool,
-            approval_item,
+        self._pending_tool_calls[tool_call.call_id] = _PendingToolCall(
+            tool_call=tool_call,
+            agent=agent,
+            dispatch_snapshot=dispatch_snapshot,
+            function_tool=function_tool,
+            approval_item=approval_item,
         )
         await self._put_event(
             RealtimeToolApprovalRequired(
@@ -764,24 +800,25 @@ class RealtimeSession(RealtimeModelListener):
         if pending is None:
             return
 
-        tool_call, agent_snapshot, function_tool, approval_item = pending
         if not self._begin_tool_call(call_id, from_pending_approval=True):
             return
 
         try:
-            self._context_wrapper.approve_tool(approval_item, always_approve=always)
+            self._context_wrapper.approve_tool(pending.approval_item, always_approve=always)
 
             if self._async_tool_calls:
                 self._enqueue_tool_call_task(
-                    tool_call,
-                    agent_snapshot,
+                    pending.tool_call,
+                    pending.agent,
+                    pending.dispatch_snapshot,
                     from_pending_approval=True,
                     call_id_reserved=True,
                 )
             else:
                 await self._handle_tool_call(
-                    tool_call,
-                    agent_snapshot=agent_snapshot,
+                    pending.tool_call,
+                    agent_snapshot=pending.agent,
+                    dispatch_snapshot=pending.dispatch_snapshot,
                     from_pending_approval=True,
                     call_id_reserved=True,
                 )
@@ -806,14 +843,17 @@ class RealtimeSession(RealtimeModelListener):
             return
 
         mark_completed = False
-        tool_call, agent_snapshot, function_tool, approval_item = pending
         try:
             self._context_wrapper.reject_tool(
-                approval_item,
+                pending.approval_item,
                 always_reject=always,
                 rejection_message=rejection_message,
             )
-            await self._send_tool_rejection(tool_call, tool=function_tool, agent=agent_snapshot)
+            await self._send_tool_rejection(
+                pending.tool_call,
+                tool=pending.function_tool,
+                agent=pending.agent,
+            )
             mark_completed = True
         finally:
             self._finish_tool_call(call_id, mark_completed=mark_completed)
@@ -823,6 +863,7 @@ class RealtimeSession(RealtimeModelListener):
         event: RealtimeModelToolCallEvent,
         *,
         agent_snapshot: RealtimeAgent | None = None,
+        dispatch_snapshot: _RealtimeDispatchSnapshot | None = None,
         from_pending_approval: bool = False,
         call_id_reserved: bool = False,
     ) -> None:
@@ -833,7 +874,8 @@ class RealtimeSession(RealtimeModelListener):
         ):
             return
 
-        agent = agent_snapshot or self._current_agent
+        agent = dispatch_snapshot.agent if dispatch_snapshot is not None else agent_snapshot
+        agent = agent or self._current_agent
         try:
             pending_output = self._pending_tool_outputs.get(event.call_id)
             if pending_output is not None:
@@ -841,20 +883,23 @@ class RealtimeSession(RealtimeModelListener):
                 mark_completed = True
                 return
 
-            tools, handoffs = await asyncio.gather(
-                agent.get_all_tools(self._context_wrapper),
-                self._get_handoffs(agent, self._context_wrapper),
-            )
+            snapshot = await self._resolve_dispatch_snapshot(agent, dispatch_snapshot)
+            snapshot = await self._filter_enabled_dispatch_snapshot(snapshot)
             if self._closing or self._closed:
                 return
-
+            tools = snapshot.tools
+            handoffs = snapshot.handoffs
+            validate_realtime_tool_names(tools, handoffs)
             function_map = {tool.name: tool for tool in tools if isinstance(tool, FunctionTool)}
             handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
 
             if event.name in function_map:
                 func_tool = function_map[event.name]
                 approval_status = await self._maybe_request_tool_approval(
-                    event, function_tool=func_tool, agent=agent
+                    event,
+                    function_tool=func_tool,
+                    agent=agent,
+                    dispatch_snapshot=snapshot,
                 )
                 if self._closing or self._closed:
                     return
@@ -953,16 +998,18 @@ class RealtimeSession(RealtimeModelListener):
                 # Store previous agent for event
                 previous_agent = agent
 
-                # Update current agent
-                self._current_agent = result
-
                 # Get updated model settings from new agent
                 updated_settings = await self._get_updated_model_settings_from_agent(
                     starting_settings=None,
-                    agent=self._current_agent,
+                    agent=result,
                 )
                 if self._closing or self._closed:
                     return
+                updated_snapshot = self._dispatch_snapshot_from_settings(result, updated_settings)
+
+                # Update current agent
+                self._current_agent = result
+                self._current_dispatch_snapshot = updated_snapshot
 
                 # Send handoff event
                 await self._put_event(
@@ -1388,6 +1435,7 @@ class RealtimeSession(RealtimeModelListener):
         self,
         event: RealtimeModelToolCallEvent,
         agent_snapshot: RealtimeAgent,
+        dispatch_snapshot: _RealtimeDispatchSnapshot | None = None,
         *,
         from_pending_approval: bool = False,
         call_id_reserved: bool = False,
@@ -1399,6 +1447,8 @@ class RealtimeSession(RealtimeModelListener):
             return
 
         handle_kwargs: dict[str, Any] = {"agent_snapshot": agent_snapshot}
+        if dispatch_snapshot is not None:
+            handle_kwargs["dispatch_snapshot"] = dispatch_snapshot
         if from_pending_approval:
             handle_kwargs["from_pending_approval"] = True
         if call_id_reserved:
@@ -1491,6 +1541,53 @@ class RealtimeSession(RealtimeModelListener):
         self._closed = True
         self._wake_event_iterators()
 
+    def _dispatch_snapshot_from_settings(
+        self,
+        agent: RealtimeAgent[Any],
+        settings: RealtimeSessionModelSettings,
+    ) -> _RealtimeDispatchSnapshot:
+        return _RealtimeDispatchSnapshot(
+            agent=agent,
+            tools=tuple(settings.get("tools", [])),
+            handoffs=tuple(
+                cast(list[Handoff[Any, RealtimeAgent[Any]]], settings.get("handoffs", []))
+            ),
+        )
+
+    async def _resolve_dispatch_snapshot(
+        self,
+        agent: RealtimeAgent[Any],
+        dispatch_snapshot: _RealtimeDispatchSnapshot | None,
+    ) -> _RealtimeDispatchSnapshot:
+        if dispatch_snapshot is not None:
+            return dispatch_snapshot
+
+        if (
+            self._current_dispatch_snapshot is not None
+            and self._current_dispatch_snapshot.agent is agent
+        ):
+            return self._current_dispatch_snapshot
+
+        tools, handoffs = await asyncio.gather(
+            agent.get_all_tools(self._context_wrapper),
+            self._get_handoffs(agent, self._context_wrapper),
+        )
+        return _RealtimeDispatchSnapshot(agent=agent, tools=tuple(tools), handoffs=tuple(handoffs))
+
+    async def _filter_enabled_dispatch_snapshot(
+        self,
+        snapshot: _RealtimeDispatchSnapshot,
+    ) -> _RealtimeDispatchSnapshot:
+        tools, handoffs = await asyncio.gather(
+            filter_enabled_tools(snapshot.tools, self._context_wrapper, snapshot.agent),
+            filter_enabled_handoffs(snapshot.handoffs, self._context_wrapper, snapshot.agent),
+        )
+        return _RealtimeDispatchSnapshot(
+            agent=snapshot.agent,
+            tools=tuple(tools),
+            handoffs=tuple(cast(list[Handoff[Any, RealtimeAgent[Any]]], handoffs)),
+        )
+
     async def _get_updated_model_settings_from_agent(
         self,
         starting_settings: RealtimeSessionModelSettings | None,
@@ -1514,6 +1611,22 @@ class RealtimeSession(RealtimeModelListener):
         # Apply starting settings (from model config) next
         if starting_settings:
             updated_settings.update(starting_settings)
+            if "tools" in starting_settings:
+                updated_settings["tools"] = await filter_enabled_tools(
+                    updated_settings.get("tools") or [],
+                    self._context_wrapper,
+                    agent,
+                )
+            if "handoffs" in starting_settings:
+                updated_settings["handoffs"] = await filter_enabled_handoffs(
+                    updated_settings.get("handoffs") or [],
+                    self._context_wrapper,
+                    agent,
+                )
+        validate_realtime_tool_names(
+            updated_settings.get("tools", []),
+            updated_settings.get("handoffs", []),
+        )
 
         disable_tracing = self._run_config.get("tracing_disabled", False)
         if disable_tracing:
@@ -1525,22 +1638,4 @@ class RealtimeSession(RealtimeModelListener):
     async def _get_handoffs(
         cls, agent: RealtimeAgent[Any], context_wrapper: RunContextWrapper[Any]
     ) -> list[Handoff[Any, RealtimeAgent[Any]]]:
-        handoffs: list[Handoff[Any, RealtimeAgent[Any]]] = []
-        for handoff_item in agent.handoffs:
-            if isinstance(handoff_item, Handoff):
-                handoffs.append(handoff_item)
-            elif isinstance(handoff_item, RealtimeAgent):
-                handoffs.append(realtime_handoff(handoff_item))
-
-        async def _check_handoff_enabled(handoff_obj: Handoff[Any, RealtimeAgent[Any]]) -> bool:
-            attr = handoff_obj.is_enabled
-            if isinstance(attr, bool):
-                return attr
-            res = attr(context_wrapper, agent)
-            if inspect.isawaitable(res):
-                return await res
-            return res
-
-        results = await asyncio.gather(*(_check_handoff_enabled(h) for h in handoffs))
-        enabled = [h for h, ok in zip(handoffs, results, strict=False) if ok]
-        return enabled
+        return await collect_enabled_handoffs(agent, context_wrapper)
