@@ -343,11 +343,11 @@ class OpenAIChatCompletionsModel(Model):
                     model=self.model,
                     strict_feature_validation=self._strict_feature_validation,
                 ):
-                    yield chunk
-
                     if chunk.type == "response.completed":
                         final_response = chunk.response
                         yielded_terminal_event = True
+
+                    yield chunk
             except asyncio.CancelledError:
                 close_stream_in_background = True
                 self._schedule_async_iterator_close(stream)
