@@ -455,6 +455,14 @@ class FunctionTool:
     )
     """Optional callback that attaches SDK-only custom data to the tool output item."""
 
+    function: ToolFunction[...] | None = field(default=None, kw_only=True, repr=False)
+    """The original Python callable wrapped by `function_tool`, when available.
+
+    This is `None` for tools that are not backed by a plain function (for example,
+    agent-as-tool or hosted-tool wrappers). It gives code outside the Agents
+    runtime a stable hook to introspect, directly test, or re-run the underlying
+    function without going through a `ToolContext`/JSON round-trip."""
+
     _failure_error_function: ToolErrorFunction | None = field(
         default=None,
         kw_only=True,
@@ -619,6 +627,7 @@ def _build_wrapped_function_tool(
     sync_invoker: bool = False,
     mcp_title: str | None = None,
     tool_origin: ToolOrigin | None = None,
+    function: ToolFunction[...] | None = None,
 ) -> FunctionTool:
     """Create a FunctionTool with copied-tool-aware failure handling bound in one place."""
     on_invoke_tool = _with_context_function_tool_failure_error_handler(
@@ -644,6 +653,7 @@ def _build_wrapped_function_tool(
             timeout_error_function=timeout_error_function,
             defer_loading=defer_loading,
             custom_data_extractor=custom_data_extractor,
+            function=function,
             _mcp_title=mcp_title,
             _tool_origin=tool_origin,
         ),
@@ -2033,6 +2043,7 @@ def function_tool(
             timeout_error_function=timeout_error_function,
             defer_loading=defer_loading,
             custom_data_extractor=custom_data_extractor,
+            function=the_func,
             sync_invoker=is_sync_function_tool,
         )
         return function_tool
