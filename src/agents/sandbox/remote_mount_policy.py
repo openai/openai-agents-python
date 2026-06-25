@@ -38,16 +38,33 @@ def build_remote_mount_policy_instructions(manifest: Manifest) -> str | None:
     allowlist_text = ", ".join(
         f"`{command}`" for command in manifest.remote_mount_command_allowlist
     )
-    edit_instructions = (
-        "Use `apply_patch` directly for text edits. "
-        "For shell-based edits, first `cp` the mounted file to a normal local workspace path, "
-        "edit the local copy there, then `cp` it back. "
-    )
+    edit_instructions = _remote_mount_edit_instructions(remote_mounts)
     return REMOTE_MOUNT_POLICY.format(
         path_lines=path_lines,
         REMOTE_MOUNT_COMMAND_ALLOWLIST_TEXT=allowlist_text,
         edit_instructions=edit_instructions,
     )
+
+
+def _remote_mount_edit_instructions(remote_mounts: list[tuple[Path, bool]]) -> str:
+    has_read_write = any(not read_only for _, read_only in remote_mounts)
+    has_read_only = any(read_only for _, read_only in remote_mounts)
+
+    instructions: list[str] = []
+    if has_read_write:
+        instructions.append(
+            "Use `apply_patch` directly for text edits on read+write mounts. "
+            "For shell-based edits on read+write mounts, first `cp` the mounted file "
+            "to a normal local workspace path, edit the local copy there, then copy "
+            "it back."
+        )
+    if has_read_only:
+        instructions.append(
+            "Do not edit paths marked read-only in place, including with `apply_patch`, "
+            "and do not write edited files back to them. Copy read-only files to a "
+            "normal local workspace path only if you need an editable scratch copy."
+        )
+    return " ".join(instructions)
 
 
 def _format_remote_mount_line(path: Path, read_only: bool) -> str:

@@ -95,6 +95,25 @@ def _has_output_payload(item: Any) -> bool:
     return (isinstance(item, dict) and "output" in item) or hasattr(item, "output")
 
 
+def _is_tracked_object(items: Sequence[Any], candidate: Any) -> bool:
+    """Return True when the exact object instance is already tracked."""
+    return any(item is candidate for item in items)
+
+
+def _track_object_once(items: list[Any], candidate: Any) -> None:
+    """Track an object instance once, keeping it alive while identity dedupe is needed."""
+    if not _is_tracked_object(items, candidate):
+        items.append(candidate)
+
+
+def _untrack_object(items: list[Any], candidate: Any) -> None:
+    """Remove an object instance from an identity-tracking list."""
+    for index, item in enumerate(items):
+        if item is candidate:
+            items.pop(index)
+            return
+
+
 @dataclass
 class OpenAIServerConversationTracker:
     """Track server-side conversation state for conversation-aware runs.
@@ -113,9 +132,10 @@ class OpenAIServerConversationTracker:
     previous_response_id: str | None = None
     auto_previous_response_id: bool = False
 
-    # In-process object identity for items that have already been delivered or acknowledged.
-    sent_items: set[int] = field(default_factory=set)
-    server_items: set[int] = field(default_factory=set)
+    # In-process object identity for delivered or acknowledged items. Keep object references
+    # instead of id(obj) integers so a later allocation cannot reuse a stale address.
+    sent_items: list[Any] = field(default_factory=list)
+    server_items: list[Any] = field(default_factory=list)
 
     # Stable provider identifiers returned by the Responses API.
     server_item_ids: set[str] = field(default_factory=set)
@@ -200,7 +220,7 @@ class OpenAIServerConversationTracker:
             for output_item in response.output:
                 if output_item is None:
                     continue
-                self.server_items.add(id(output_item))
+                _track_object_once(self.server_items, output_item)
                 item_id = _normalize_server_item_id(
                     output_item.get("id")
                     if isinstance(output_item, dict)
@@ -263,8 +283,7 @@ class OpenAIServerConversationTracker:
                 if not should_mark:
                     continue
 
-                raw_item_id = id(raw_item)
-                self.sent_items.add(raw_item_id)
+                _track_object_once(self.sent_items, raw_item)
                 fp = _fingerprint_for_tracker(raw_item)
                 if fp:
                     self.sent_item_fingerprints.add(fp)
@@ -297,7 +316,7 @@ class OpenAIServerConversationTracker:
                 if not should_mark:
                     continue
 
-                self.sent_items.add(id(raw_item))
+                _track_object_once(self.sent_items, raw_item)
                 fp = _fingerprint_for_tracker(raw_item)
                 if fp:
                     self.sent_item_fingerprints.add(fp)
@@ -321,7 +340,7 @@ class OpenAIServerConversationTracker:
         for output_item in model_response.output:
             if output_item is None:
                 continue
-            self.server_items.add(id(output_item))
+            _track_object_once(self.server_items, output_item)
             item_id = _normalize_server_item_id(
                 output_item.get("id")
                 if isinstance(output_item, dict)
@@ -361,17 +380,16 @@ class OpenAIServerConversationTracker:
         if not items:
             return
 
-        delivered_source_ids: set[int] = set()
+        delivered_sources: list[TResponseInputItem] = []
         delivered_by_content: set[str] = set()
         for item in items:
             if item is None:
                 continue
             source_item = self._consume_prepared_item_source(item)
-            source_item_id = id(source_item)
-            if source_item_id in delivered_source_ids:
+            if _is_tracked_object(delivered_sources, source_item):
                 continue
-            delivered_source_ids.add(source_item_id)
-            self.sent_items.add(source_item_id)
+            delivered_sources.append(source_item)
+            _track_object_once(self.sent_items, source_item)
             fp = _fingerprint_for_tracker(source_item)
             if fp:
                 delivered_by_content.add(fp)
@@ -382,7 +400,7 @@ class OpenAIServerConversationTracker:
 
         remaining: list[TResponseInputItem] = []
         for pending in self.remaining_initial_input:
-            if id(pending) in delivered_source_ids:
+            if _is_tracked_object(delivered_sources, pending):
                 continue
             pending_fp = _fingerprint_for_tracker(pending)
             if pending_fp and pending_fp in delivered_by_content:
@@ -402,7 +420,7 @@ class OpenAIServerConversationTracker:
                 continue
             source_item = self._consume_prepared_item_source(item)
             rewind_items.append(source_item)
-            self.sent_items.discard(id(source_item))
+            _untrack_object(self.sent_items, source_item)
             fp = _fingerprint_for_tracker(source_item)
             if fp:
                 self.sent_item_fingerprints.discard(fp)
@@ -469,8 +487,9 @@ class OpenAIServerConversationTracker:
             ):
                 continue
 
-            raw_item_id = id(raw_item)
-            if raw_item_id in self.sent_items or raw_item_id in self.server_items:
+            if _is_tracked_object(self.sent_items, raw_item) or _is_tracked_object(
+                self.server_items, raw_item
+            ):
                 continue
 
             converted_input_item = run_item_to_input_item(run_item, self.reasoning_item_id_policy)

@@ -114,7 +114,7 @@ Once the basic session works, the settings most people reach for next are:
 -   `audio.input.turn_detection` for automatic turn detection
 -   `audio.output.voice`
 -   `tool_choice`, `prompt`, `tracing`
--   `async_tool_calls`, `guardrails_settings.debounce_text_length`, `tool_error_formatter`
+-   `async_tool_calls`, `tool_execution.pre_approval_tool_input_guardrails`, `guardrails_settings.debounce_text_length`, `tool_error_formatter`
 
 The older flat aliases such as `input_audio_format`, `output_audio_format`, `input_audio_transcription`, and `turn_detection` still work, but nested `audio` settings are preferred for new code.
 

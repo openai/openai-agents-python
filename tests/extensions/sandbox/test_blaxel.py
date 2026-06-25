@@ -589,6 +589,22 @@ class TestBlaxelSandboxSession:
             await session._exec_internal("sleep", "100", timeout=0.01)
 
     @pytest.mark.asyncio
+    async def test_exec_timeout_reports_default_timeout(
+        self, fake_sandbox: _FakeSandboxInstance
+    ) -> None:
+        from agents.extensions.sandbox.blaxel.sandbox import BlaxelTimeouts
+
+        state = _make_state()
+        state.timeouts = BlaxelTimeouts(exec_timeout_s=1)
+        session = _make_session(fake_sandbox, state=state)
+        fake_sandbox.process.delay = 10.0
+
+        with pytest.raises(ExecTimeoutError) as exc_info:
+            await session._exec_internal("sleep", "100")
+
+        assert exc_info.value.timeout_s == 1.0
+
+    @pytest.mark.asyncio
     async def test_stop_calls_pty_terminate(self, fake_sandbox: _FakeSandboxInstance) -> None:
         session = _make_session(fake_sandbox)
         terminated = []
@@ -1655,6 +1671,36 @@ class TestPtyExec:
         with patch.object(mod, "_import_aiohttp", return_value=_SlowAiohttp()):
             with pytest.raises(ExecTimeoutError):
                 await session.pty_exec_start("echo", "hello", timeout=0.01)
+
+    @pytest.mark.asyncio
+    async def test_pty_exec_start_timeout_reports_default_timeout(
+        self, fake_sandbox: _FakeSandboxInstance
+    ) -> None:
+        from agents.extensions.sandbox.blaxel import sandbox as mod
+        from agents.extensions.sandbox.blaxel.sandbox import BlaxelTimeouts
+
+        state = _make_state()
+        state.timeouts = BlaxelTimeouts(exec_timeout_s=1)
+        session = _make_session(fake_sandbox, state=state)
+
+        class _SlowAiohttp:
+            WSMsgType = _FakeAiohttp.WSMsgType
+
+            def ClientSession(self) -> Any:
+                class _SlowSession:
+                    async def ws_connect(self, url: str) -> None:
+                        await asyncio.sleep(100)
+
+                    async def close(self) -> None:
+                        pass
+
+                return _SlowSession()
+
+        with patch.object(mod, "_import_aiohttp", return_value=_SlowAiohttp()):
+            with pytest.raises(ExecTimeoutError) as exc_info:
+                await session.pty_exec_start("echo", "hello")
+
+        assert exc_info.value.timeout_s == 1.0
 
     @pytest.mark.asyncio
     async def test_pty_exec_start_connection_error(

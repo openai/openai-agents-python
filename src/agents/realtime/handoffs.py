@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast, overload
 
 from pydantic import TypeAdapter
@@ -25,6 +26,43 @@ THandoffInput = TypeVar("THandoffInput", default=Any)
 
 OnHandoffWithInput = Callable[[RunContextWrapper[Any], THandoffInput], Any]
 OnHandoffWithoutInput = Callable[[RunContextWrapper[Any]], Any]
+
+
+async def filter_enabled_handoffs(
+    handoffs: Iterable[Handoff[Any, Any]],
+    context_wrapper: RunContextWrapper[Any],
+    agent: RealtimeAgent[Any],
+) -> list[Handoff[Any, Any]]:
+    handoffs_list = list(handoffs)
+
+    async def _check_handoff_enabled(handoff_obj: Handoff[Any, Any]) -> bool:
+        attr = handoff_obj.is_enabled
+        if isinstance(attr, bool):
+            return attr
+        result = attr(context_wrapper, agent)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    results = await asyncio.gather(*(_check_handoff_enabled(h) for h in handoffs_list))
+    return [h for h, ok in zip(handoffs_list, results, strict=False) if ok]
+
+
+async def collect_enabled_handoffs(
+    agent: RealtimeAgent[Any],
+    context_wrapper: RunContextWrapper[Any],
+) -> list[Handoff[Any, RealtimeAgent[Any]]]:
+    handoffs: list[Handoff[Any, RealtimeAgent[Any]]] = []
+    for handoff_item in agent.handoffs:
+        if isinstance(handoff_item, Handoff):
+            handoffs.append(handoff_item)
+        elif isinstance(handoff_item, RealtimeAgent):
+            handoffs.append(realtime_handoff(handoff_item))
+
+    return cast(
+        list[Handoff[Any, RealtimeAgent[Any]]],
+        await filter_enabled_handoffs(handoffs, context_wrapper, agent),
+    )
 
 
 @overload

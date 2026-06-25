@@ -3,6 +3,7 @@ import dataclasses
 import json
 import logging
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from inline_snapshot import snapshot
@@ -111,7 +112,46 @@ async def test_get_all_function_tools_duplicate_error_is_deterministic():
     with pytest.raises(UserError) as exc_info:
         await MCPUtil.get_all_function_tools([server1, server2], False, run_context, agent)
 
-    assert str(exc_info.value) == "Duplicate tool names found across MCP servers: alpha, zeta"
+    assert str(exc_info.value) == (
+        "Duplicate tool names found across MCP servers: alpha, zeta. "
+        "Pass `include_server_in_tool_names=True` to "
+        "`MCPUtil.get_all_function_tools()` or set "
+        "`mcp_config={'include_server_in_tool_names': True}` on the "
+        "agent to prefix tool names with their server name and avoid "
+        "collisions."
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_duplicate_error_without_hint_when_prefixed():
+    """When include_server_in_tool_names is already enabled, duplicates should
+    not suggest enabling the same option again.
+    """
+    server1 = FakeMCPServer(server_name="server_1")
+    server1.add_tool("alpha", {})
+
+    server2 = FakeMCPServer(server_name="server_2")
+    server2.add_tool("beta", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
+    def _return_colliding_names(server_tool_batches, *, reserved_names):
+        return {(0, 0): "mcp_same__tool", (1, 0): "mcp_same__tool"}
+
+    with patch.object(
+        MCPUtil, "_build_prefixed_tool_name_overrides", side_effect=_return_colliding_names
+    ):
+        with pytest.raises(UserError) as exc_info:
+            await MCPUtil.get_all_function_tools(
+                [server1, server2],
+                False,
+                run_context,
+                agent,
+                include_server_in_tool_names=True,
+            )
+
+    assert str(exc_info.value) == "Duplicate tool names found across MCP servers: mcp_same__tool"
 
 
 @pytest.mark.asyncio

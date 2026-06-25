@@ -2140,6 +2140,40 @@ class TestTransportIntegration:
         assert captured_kwargs.get("open_timeout") == 0.75
 
     @pytest.mark.asyncio
+    async def test_max_size_config_is_applied(self):
+        """Test that max_size is passed through to websockets.connect."""
+        captured_kwargs: dict[str, Any] = {}
+
+        async def capture_connect(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            mock_ws = AsyncMock()
+            mock_ws.close_code = None
+            return mock_ws
+
+        transport: TransportConfig = {
+            "max_size": 8 * 1024 * 1024,
+        }
+        model = OpenAIRealtimeWebSocketModel(transport_config=transport)
+        with patch("websockets.connect", side_effect=capture_connect):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                config: RealtimeModelConfig = {
+                    "api_key": "test-key",
+                    "url": "ws://localhost:8080/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+                }
+                await model.connect(config)
+
+        assert captured_kwargs.get("max_size") == 8 * 1024 * 1024
+
+    @pytest.mark.asyncio
     async def test_ping_timeout_disabled_vs_enabled(self):
         """Test that ping timeout can be disabled (None) vs enabled with a value."""
         from unittest.mock import AsyncMock, patch
