@@ -387,6 +387,24 @@ In addition to returning text outputs, you can return one or many images or file
 -   Files: [`ToolOutputFileContent`][agents.tool.ToolOutputFileContent] (or the TypedDict version, [`ToolOutputFileContentDict`][agents.tool.ToolOutputFileContentDict])
 -   Text: either a string or stringable objects, or [`ToolOutputText`][agents.tool.ToolOutputText] (or the TypedDict version, [`ToolOutputTextDict`][agents.tool.ToolOutputTextDict])
 
+### Instance methods as tools
+
+You can decorate instance methods with `@function_tool` and pass the bound method from an instance. The `self` argument is supplied automatically and excluded from the tool's JSON schema:
+
+```python
+class Calculator:
+    def __init__(self, base: int):
+        self.base = base
+
+    @function_tool
+    def add_to_base(self, x: int) -> int:
+        """Add x to the calculator's base."""
+        return self.base + x
+
+calc = Calculator(base=10)
+agent = Agent(name="Math", tools=[calc.add_to_base])
+```
+
 ### Custom function tools
 
 Sometimes, you don't want to use a Python function as a tool. You can directly create a [`FunctionTool`][agents.tool.FunctionTool] if you prefer. You'll need to provide:

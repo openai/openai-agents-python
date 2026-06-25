@@ -11,7 +11,7 @@ import weakref
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from types import UnionType
+from types import MethodType, UnionType
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -389,6 +389,16 @@ class FunctionTool:
     _emit_tool_origin: bool = field(default=True, kw_only=True, repr=False)
     """Whether runtime item generation should emit tool origin metadata for this tool."""
 
+    _bind_to_instance: Callable[[Any], FunctionTool] | None = field(
+        default=None, kw_only=True, repr=False, compare=False
+    )
+    """Internal: builds an instance-bound copy of a method-backed tool (see __get__)."""
+
+    _bound_instances: weakref.WeakKeyDictionary[Any, FunctionTool] | None = field(
+        default=None, kw_only=True, repr=False, compare=False
+    )
+    """Internal per-instance cache of bound tools for method-backed function tools."""
+
     @property
     def qualified_name(self) -> str:
         """Return the public qualified name used to identify this function tool."""
@@ -405,6 +415,25 @@ class FunctionTool:
                 copy.deepcopy(self.params_json_schema)
             )
         _validate_function_tool_timeout_config(self)
+
+    def __get__(self, instance: Any, owner: type[Any] | None = None) -> FunctionTool:
+        """Descriptor hook so ``@function_tool`` works on instance methods.
+
+        When the tool is a class attribute accessed via an instance, return a copy
+        bound to that instance (``self`` is supplied automatically and excluded
+        from the JSON schema). Tools that are not method-backed return unchanged.
+        """
+        if instance is None or self._bind_to_instance is None:
+            return self
+        cache = self._bound_instances
+        if cache is None:
+            cache = weakref.WeakKeyDictionary()
+            self._bound_instances = cache
+        bound = cache.get(instance)
+        if bound is None:
+            bound = self._bind_to_instance(instance)
+            cache[instance] = bound
+        return bound
 
     def __copy__(self) -> FunctionTool:
         copied_tool = dataclasses.replace(self)
@@ -550,6 +579,31 @@ def get_function_tool_origin(function_tool: FunctionTool) -> ToolOrigin | None:
     if not function_tool._emit_tool_origin:
         return None
     return function_tool._tool_origin or ToolOrigin(type=ToolOriginType.FUNCTION)
+
+
+def _attach_self_binder(
+    tool: FunctionTool,
+    the_func: ToolFunction[...],
+    create: Callable[[Any], FunctionTool],
+) -> None:
+    """Let a method-backed function tool bind ``self`` when accessed via an instance.
+
+    If ``the_func``'s first parameter is ``self`` (i.e. it is an instance method
+    decorated with ``@function_tool``), record a binder that rebuilds the tool from
+    the method bound to a given instance. The bound method's signature omits
+    ``self``, so the schema and invocation are correct without further changes.
+    """
+    try:
+        params = list(inspect.signature(the_func).parameters)
+    except (TypeError, ValueError):
+        return
+    if not params or params[0] != "self":
+        return
+
+    def _bind(instance: Any) -> FunctionTool:
+        return create(MethodType(the_func, instance))
+
+    tool._bind_to_instance = _bind
 
 
 @dataclass
@@ -1906,6 +1960,7 @@ def function_tool(
             defer_loading=defer_loading,
             sync_invoker=is_sync_function_tool,
         )
+        _attach_self_binder(function_tool, the_func, _create_function_tool)
         return function_tool
 
     # If func is actually a callable, we were used as @function_tool with no parentheses
