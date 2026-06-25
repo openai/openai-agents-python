@@ -11,7 +11,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agents.agent_output import AgentOutputSchemaBase
 from agents.extensions.tool_output_trimmer import ToolOutputTrimmer
+from agents.items import TResponseInputItem
 from agents.run_config import CallModelData, ModelInputData
 
 # ---------------------------------------------------------------------------
@@ -41,6 +43,23 @@ def _func_output(call_id: str, output: str) -> dict[str, Any]:
 def _make_data(items: list[Any]) -> CallModelData[Any]:
     model_data = ModelInputData(input=items, instructions="You are helpful.")
     return CallModelData(model_data=model_data, agent=MagicMock(), context=None)
+
+
+class _Schema(AgentOutputSchemaBase):
+    def is_plain_text(self) -> bool:
+        return False
+
+    def name(self) -> str:
+        return "Schema"
+
+    def json_schema(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {}}
+
+    def is_strict_json_schema(self) -> bool:
+        return False
+
+    def validate_json(self, json_str: str) -> Any:
+        return json.loads(json_str)
 
 
 def _output(result: ModelInputData, idx: int) -> Any:
@@ -181,6 +200,32 @@ class TestTrimming:
         trimmer = ToolOutputTrimmer()
         result = trimmer(_make_data(items))
         assert _output(result, 2) == large
+
+    def test_preserves_output_schema_when_trimming(self) -> None:
+        """The trimmer should not drop structured-output metadata from ModelInputData."""
+        schema = _Schema()
+        items = [
+            _user("q1"),
+            _func_call("c1", "search"),
+            _func_output("c1", "x" * 1000),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+        ]
+        trimmer = ToolOutputTrimmer(recent_turns=1)
+        data = CallModelData(
+            model_data=ModelInputData(
+                input=cast(list[TResponseInputItem], items),
+                instructions="You are helpful.",
+                output_schema=schema,
+            ),
+            agent=MagicMock(),
+            context=None,
+        )
+
+        result = trimmer(data)
+
+        assert result.output_schema is schema
 
     def test_trims_large_old_output(self) -> None:
         """Large output in an old turn should be trimmed."""

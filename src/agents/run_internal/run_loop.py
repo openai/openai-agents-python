@@ -1373,7 +1373,9 @@ async def run_single_turn_streamed(
         context_wrapper=context_wrapper,
         input_items=input,
         system_instructions=system_prompt,
+        output_schema=output_schema,
     )
+    output_schema = filtered.output_schema
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
     hosted_mcp_tool_metadata = collect_mcp_list_tools_metadata(streamed_result._model_input_items)
@@ -1760,7 +1762,7 @@ async def run_single_turn(
     else:
         input = _prepare_turn_input_items(original_input, generated_items, reasoning_item_id_policy)
 
-    new_response = await get_new_response(
+    new_response, output_schema = await get_new_response(
         bindings,
         system_prompt,
         input,
@@ -1811,7 +1813,7 @@ async def get_new_response(
     session: Session | None = None,
     session_items_to_rewind: list[TResponseInputItem] | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
-) -> ModelResponse:
+) -> tuple[ModelResponse, AgentOutputSchemaBase | None]:
     """Call the model and return the raw response, handling retries and hooks."""
     public_agent = bindings.public_agent
     execution_agent = bindings.execution_agent
@@ -1821,7 +1823,9 @@ async def get_new_response(
         context_wrapper=context_wrapper,
         input_items=input,
         system_instructions=system_prompt,
+        output_schema=output_schema,
     )
+    output_schema = filtered.output_schema
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 
@@ -1917,4 +1921,4 @@ async def get_new_response(
         hooks.on_llm_end(context_wrapper, public_agent, new_response),
     )
 
-    return new_response
+    return new_response, output_schema

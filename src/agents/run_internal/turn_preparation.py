@@ -55,18 +55,24 @@ async def maybe_filter_model_input(
     context_wrapper: RunContextWrapper[TContext],
     input_items: list[TResponseInputItem],
     system_instructions: str | None,
+    output_schema: AgentOutputSchemaBase | None,
 ) -> ModelInputData:
     """Apply optional call_model_input_filter to modify model input."""
     effective_instructions = system_instructions
     effective_input: list[TResponseInputItem] = input_items
 
     if run_config.call_model_input_filter is None:
-        return ModelInputData(input=effective_input, instructions=effective_instructions)
+        return ModelInputData(
+            input=effective_input,
+            instructions=effective_instructions,
+            output_schema=output_schema,
+        )
 
     try:
         model_input = ModelInputData(
             input=effective_input.copy(),
             instructions=effective_instructions,
+            output_schema=output_schema,
         )
         filter_payload: CallModelData[TContext] = CallModelData(
             model_data=model_input,
@@ -77,6 +83,8 @@ async def maybe_filter_model_input(
         updated = await maybe_updated if inspect.isawaitable(maybe_updated) else maybe_updated
         if not isinstance(updated, ModelInputData):
             raise UserError("call_model_input_filter must return a ModelInputData instance")
+        if updated.output_schema is None:
+            updated.output_schema = output_schema
         return updated
     except Exception as e:
         _error_tracing.attach_error_to_current_span(

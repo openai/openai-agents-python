@@ -805,7 +805,7 @@ async def test_get_new_response_marks_filtered_input_as_sent() -> None:
 
     run_config = RunConfig(call_model_input_filter=_filter_input)
 
-    await get_new_response(
+    response, output_schema = await get_new_response(
         bind_public_agent(agent),
         None,
         [item_1, item_2],
@@ -820,6 +820,8 @@ async def test_get_new_response_marks_filtered_input_as_sent() -> None:
         None,
     )
 
+    assert isinstance(response, ModelResponse)
+    assert output_schema is None
     assert model.last_turn_args["input"] == [item_1]
     assert any(item is item_1 for item in tracker.sent_items)
     assert all(item is not item_2 for item in tracker.sent_items)

@@ -22,6 +22,7 @@ from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .agent_output import AgentOutputSchemaBase
     from .run_context import RunContextWrapper
     from .sandbox.manifest import Manifest
     from .sandbox.session.base_sandbox_session import BaseSandboxSession
@@ -50,6 +51,7 @@ class ModelInputData:
 
     input: list[TResponseInputItem]
     instructions: str | None
+    output_schema: AgentOutputSchemaBase | None = None
 
 
 @dataclass

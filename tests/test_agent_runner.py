@@ -2561,7 +2561,7 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
     model.add_multiple_turn_outputs([locked_error, [get_text_message("ok")]])
     agent = Agent(name="test", model=model)
 
-    result = await get_new_response(
+    result, output_schema = await get_new_response(
         bindings=bind_public_agent(agent),
         system_prompt=None,
         input=[history_item, new_item],
@@ -2579,6 +2579,7 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
     )
 
     assert isinstance(result, ModelResponse)
+    assert output_schema is None
     assert session.pop_calls == 0
 
 
@@ -2606,7 +2607,7 @@ async def test_get_new_response_uses_agent_retry_settings() -> None:
         ),
     )
 
-    result = await get_new_response(
+    result, output_schema = await get_new_response(
         bindings=bind_public_agent(agent),
         system_prompt=None,
         input=[get_text_input_item("hello")],
@@ -2624,6 +2625,7 @@ async def test_get_new_response_uses_agent_retry_settings() -> None:
     )
 
     assert isinstance(result, ModelResponse)
+    assert output_schema is None
     assert result.usage.requests == 2
 
 

@@ -432,9 +432,9 @@ settings so the resumed turn continues in the same server-managed conversation.
 
 ### Call model input filter
 
-Use `call_model_input_filter` to edit the model input right before the model call. The hook receives the current agent, context, and the combined input items (including session history when present) and returns a new `ModelInputData`.
+Use `call_model_input_filter` to edit the model input right before the model call. The hook receives the current agent, context, and the combined input items (including session history when present) and returns a new `ModelInputData`. The payload also includes the effective output schema for the current call, so a filter can inspect or replace the structured-output schema sent to the model.
 
-The return value must be a [`ModelInputData`][agents.run.ModelInputData] object. Its `input` field is required and must be a list of input items. Returning any other shape raises a `UserError`.
+The return value must be a [`ModelInputData`][agents.run.ModelInputData] object. Its `input` field is required and must be a list of input items. Returning any other shape raises a `UserError`. If the returned `output_schema` is `None`, the current schema is preserved. Return another output schema object to override the schema for that model call, or a plain-text schema such as `AgentOutputSchema(str)` to switch a structured-output call back to plain text.
 
 ```python
 from agents import Agent, Runner, RunConfig
