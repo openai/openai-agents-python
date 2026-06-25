@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from agents import Agent, FunctionTool, Runner, function_tool
+from agents import Agent, FunctionTool, RunContextWrapper, Runner, function_tool
 from agents.tool_context import ToolContext
 from tests.fake_model import FakeModel
 from tests.test_responses import get_function_tool_call, get_text_message
@@ -18,6 +18,11 @@ class Calculator:
     def add_to_base(self, x: int) -> int:
         """Add x to the calculator's base."""
         return self.base + x
+
+    @function_tool
+    def add_with_context(self, ctx: RunContextWrapper[int], x: int) -> int:
+        """Add x to the base and the run context value."""
+        return self.base + x + ctx.context
 
 
 def _ctx(tool: FunctionTool) -> ToolContext:
@@ -50,9 +55,31 @@ async def test_distinct_instances_bind_independently() -> None:
     )
 
 
-def test_bound_tool_is_cached_per_instance() -> None:
+async def test_context_taking_method_binds_self_and_context() -> None:
+    # A method that takes RunContextWrapper after self must not raise at decoration
+    # and must receive both self and the run context when invoked.
     calc = Calculator(10)
-    assert calc.add_to_base is calc.add_to_base
+    tool = calc.add_with_context
+    assert "self" not in tool.params_json_schema.get("properties", {})
+    assert "ctx" not in tool.params_json_schema.get("properties", {})
+    assert "x" in tool.params_json_schema.get("properties", {})
+
+    ctx: ToolContext[int] = ToolContext(
+        context=5, tool_name=tool.name, tool_call_id="1", tool_arguments=""
+    )
+    result = await tool.on_invoke_tool(ctx, json.dumps({"x": 2}))
+    assert result == 17  # base 10 + x 2 + context 5
+
+
+def test_module_level_self_named_function_is_not_treated_as_method() -> None:
+    # A plain function whose first arg happens to be named `self` is unaffected:
+    # `self` stays in the schema and is supplied by the model.
+    @function_tool
+    def weird(self: int, x: int) -> int:
+        """A free function with an unfortunate first argument name."""
+        return self + x
+
+    assert "self" in weird.params_json_schema.get("properties", {})
 
 
 def test_class_access_returns_unbound_tool() -> None:
