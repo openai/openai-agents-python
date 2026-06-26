@@ -163,7 +163,9 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_stream_response_close_closes_provider_stream(monkeypatch) -> None:
+async def test_stream_response_close_closes_provider_stream_with_async_close(
+    monkeypatch,
+) -> None:
     chunk = ChatCompletionChunk(
         id="chunk-id",
         created=1,
@@ -186,7 +188,7 @@ async def test_stream_response_close_closes_provider_stream(monkeypatch) -> None
             self._yielded = True
             return chunk
 
-        async def aclose(self) -> None:
+        async def close(self) -> None:
             self.close_calls += 1
 
     provider_stream = ClosableChatStream()
