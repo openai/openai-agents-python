@@ -85,6 +85,8 @@ class ToolOutputTrimmer:
                 trimmable_tools = self.trimmable_tools
             else:
                 trimmable_tools = frozenset(self.trimmable_tools)
+            if not all(isinstance(tool_name, str) for tool_name in trimmable_tools):
+                raise ValueError("trimmable_tools iterable must contain only strings")
             object.__setattr__(self, "trimmable_tools", trimmable_tools)
 
     def __call__(self, data: CallModelData[Any]) -> ModelInputData:

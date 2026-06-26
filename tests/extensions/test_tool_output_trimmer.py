@@ -109,6 +109,10 @@ class TestValidation:
         with pytest.raises(ValueError, match="trimmable_tools must be a string or iterable"):
             ToolOutputTrimmer(trimmable_tools=b"search")  # type: ignore[arg-type]
 
+    def test_trimmable_tools_non_string_iterable_member_raises(self) -> None:
+        with pytest.raises(ValueError, match="trimmable_tools iterable must contain only strings"):
+            ToolOutputTrimmer(trimmable_tools=["search", 1])  # type: ignore[list-item]
+
 
 # ---------------------------------------------------------------------------
 # Boundary detection
