@@ -447,6 +447,36 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         assert error_event.type == "error"
 
     @pytest.mark.asyncio
+    async def test_handle_invalid_event_schema_redacts_payload_from_logs(self, model, monkeypatch):
+        """Test that invalid event logs omit payload data when model data logging is disabled."""
+        mock_listener = AsyncMock()
+        model.add_listener(mock_listener)
+        monkeypatch.setattr(
+            "agents.realtime.openai_realtime._debug.DONT_LOG_MODEL_DATA",
+            True,
+        )
+
+        invalid_event = {
+            "type": "response.output_audio.delta",
+            "event_id": "evt_123",
+            "delta": "secret transcript",
+        }
+
+        with patch("agents.realtime.openai_realtime.logger") as mock_logger:
+            await model._handle_ws_event(invalid_event)
+
+        mock_logger.error.assert_called_once()
+        logged_call = str(mock_logger.error.call_args)
+        assert "secret transcript" not in logged_call
+        assert "response.output_audio.delta" in logged_call
+        assert "evt_123" in logged_call
+        assert mock_logger.error.call_args.kwargs.get("exc_info") is not True
+
+        assert mock_listener.on_event.call_count == 2
+        error_event = mock_listener.on_event.call_args_list[1][0][0]
+        assert error_event.type == "error"
+
+    @pytest.mark.asyncio
     async def test_custom_voice_response_events_update_response_sequencer(self, model, monkeypatch):
         """Dict-shaped custom voices should not block response.create sequencing."""
         payload_types: list[str] = []
