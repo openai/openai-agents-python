@@ -96,6 +96,7 @@ from agents.tool import (
 )
 from agents.util._types import MaybeAwaitable
 
+from .. import _debug
 from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper, TContext
@@ -186,6 +187,36 @@ AllRealtimeServerEvents = Annotated[
 ]
 
 ServerEventTypeAdapter: TypeAdapter[AllRealtimeServerEvents] | None = None
+
+
+def _server_event_validation_summary(error: BaseException) -> str:
+    if isinstance(error, pydantic.ValidationError):
+        return f"{error.error_count()} validation error(s)"
+
+    return error.__class__.__name__
+
+
+def _server_event_identity(event: Any) -> tuple[Any, Any]:
+    if not isinstance(event, dict):
+        return "unknown", None
+
+    return event.get("type", "unknown"), event.get("event_id")
+
+
+def _log_server_event_validation_failure(event: Any, error: BaseException) -> str:
+    event_type, event_id = _server_event_identity(event)
+
+    if _debug.DONT_LOG_MODEL_DATA:
+        logger.error(
+            "Failed to validate server event type=%s event_id=%s: %s",
+            event_type,
+            event_id,
+            _server_event_validation_summary(error),
+        )
+    else:
+        logger.error(f"Failed to validate server event: {event}", exc_info=True)
+
+    return str(event_type)
 
 
 @dataclass(frozen=True)
@@ -1100,12 +1131,11 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 validation_event
             )
         except pydantic.ValidationError as e:
-            logger.error(f"Failed to validate server event: {event}", exc_info=True)
+            _log_server_event_validation_failure(event, e)
             await self._emit_event(RealtimeModelErrorEvent(error=e))
             return
         except Exception as e:
-            event_type = event.get("type", "unknown") if isinstance(event, dict) else "unknown"
-            logger.error(f"Failed to validate server event: {event}", exc_info=True)
+            event_type = _log_server_event_validation_failure(event, e)
             exception_event = RealtimeModelExceptionEvent(
                 exception=e,
                 context=f"Failed to validate server event: {event_type}",
