@@ -201,8 +201,12 @@ class Usage:
         # when synthesizing an entry from only the top-level fields).
         if other.request_usage_entries:
             self.request_usage_entries.extend(other.request_usage_entries)
-        elif other.requests == 1 and other.total_tokens > 0:
+        elif other.requests == 1 and (
+            other.total_tokens > 0 or other.input_tokens > 0 or other.output_tokens > 0
+        ):
             # Otherwise, if the other Usage represents a single request with tokens, record it.
+            # Some providers report input/output tokens but leave total_tokens at 0, so the
+            # entry is keyed off any non-zero token count to match the documented invariant.
             input_details = other.input_tokens_details or InputTokensDetails(cached_tokens=0)
             output_details = other.output_tokens_details or OutputTokensDetails(reasoning_tokens=0)
             request_usage = RequestUsage(

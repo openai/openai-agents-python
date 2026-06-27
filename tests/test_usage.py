@@ -134,6 +134,32 @@ def test_usage_add_preserves_single_request():
     assert request_usage.output_tokens_details.reasoning_tokens == 20
 
 
+def test_usage_add_preserves_single_request_when_total_tokens_unset():
+    """A single request that reports input/output tokens but leaves total_tokens at 0
+    (some providers pass total_tokens through without populating it) still creates a
+    RequestUsage entry, matching the documented "non-zero tokens" invariant.
+    """
+    u1 = Usage()
+    u2 = Usage(
+        requests=1,
+        input_tokens=100,
+        input_tokens_details=InputTokensDetails(cached_tokens=10),
+        output_tokens=200,
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=20),
+        total_tokens=0,
+    )
+
+    u1.add(u2)
+
+    assert len(u1.request_usage_entries) == 1
+    request_usage = u1.request_usage_entries[0]
+    assert request_usage.input_tokens == 100
+    assert request_usage.output_tokens == 200
+    assert request_usage.total_tokens == 0
+    assert request_usage.input_tokens_details.cached_tokens == 10
+    assert request_usage.output_tokens_details.reasoning_tokens == 20
+
+
 def test_usage_add_ignores_zero_token_requests():
     """Test that zero-token requests don't create request_usage_entries."""
     u1 = Usage()
