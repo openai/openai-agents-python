@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, Literal
 
 from pydantic import TypeAdapter, ValidationError
@@ -37,7 +37,7 @@ def _to_dump_compatible(obj: Any) -> Any:
 
 
 def _to_dump_compatible_internal(obj: Any) -> Any:
-    if isinstance(obj, dict):
+    if isinstance(obj, Mapping):
         return {k: _to_dump_compatible_internal(v) for k, v in obj.items()}
 
     if isinstance(obj, list | tuple):
