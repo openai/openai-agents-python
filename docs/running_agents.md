@@ -461,6 +461,52 @@ If you are using OpenAI server-managed conversation state with `conversation_id`
 
 Set the hook per run via `run_config` to redact sensitive data, trim long histories, or inject additional system guidance.
 
+#### Injecting input between tool turns
+
+Because `call_model_input_filter` runs before every model call, it can also reconcile host-side state that changed while tools were running. A common pattern is to keep a small queue in your local context, let tools or background application code append new user messages to that queue, and drain it in the filter before the next model turn.
+
+```python
+from dataclasses import dataclass, field
+
+from agents import Agent, RunConfig, RunContextWrapper, Runner, function_tool
+from agents.run import CallModelData, ModelInputData
+
+
+@dataclass
+class AppContext:
+    queued_user_messages: list[str] = field(default_factory=list)
+
+
+@function_tool
+def long_running_tool(wrapper: RunContextWrapper[AppContext]) -> str:
+    wrapper.context.queued_user_messages.append("The user added a constraint.")
+    return "tool result"
+
+
+def inject_queued_messages(data: CallModelData[AppContext]) -> ModelInputData:
+    input_items = list(data.model_data.input)
+    if data.context is not None:
+        input_items.extend(
+            {"role": "user", "content": message}
+            for message in data.context.queued_user_messages
+        )
+        data.context.queued_user_messages.clear()
+    return ModelInputData(input=input_items, instructions=data.model_data.instructions)
+
+
+context = AppContext()
+agent = Agent(name="Assistant", tools=[long_running_tool])
+
+result = await Runner.run(
+    agent,
+    "Use the tool, then continue with any queued user updates.",
+    context=context,
+    run_config=RunConfig(call_model_input_filter=inject_queued_messages),
+)
+```
+
+The filter changes the model-facing payload for that turn; it does not mutate `RunResult.input`, automatically persist injected items to a session, or pause a run by itself. If you need durable conversation storage, also write the accepted queued messages to your own session or store. For streaming runs, keep consuming `stream_events()` until completion so the next model turn and any session writes finish before you inspect the result.
+
 ## Errors and recovery
 
 ### Error handlers

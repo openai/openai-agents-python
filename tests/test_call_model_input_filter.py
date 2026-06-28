@@ -1,14 +1,46 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import pytest
 
-from agents import Agent, RunConfig, Runner, TResponseInputItem, UserError
+from agents import Agent, RunConfig, RunContextWrapper, Runner, TResponseInputItem, UserError
 from agents.run import CallModelData, ModelInputData
+from agents.tool import function_tool
 
 from .fake_model import FakeModel
-from .test_responses import get_text_input_item, get_text_message
+from .test_responses import get_function_tool_call, get_text_input_item, get_text_message
+
+
+@dataclass
+class ExternalEventContext:
+    queued_user_messages: list[str] = field(default_factory=list)
+
+
+EXTERNAL_MESSAGE = "The user added a new constraint while the tool was running."
+
+
+@function_tool
+def collect_external_update(wrapper: RunContextWrapper[ExternalEventContext]) -> str:
+    wrapper.context.queued_user_messages.append(EXTERNAL_MESSAGE)
+    return "tool-result"
+
+
+def inject_queued_messages(data: CallModelData[ExternalEventContext]) -> ModelInputData:
+    input_items = list(data.model_data.input)
+    if data.context is not None:
+        input_items.extend(
+            get_text_input_item(message) for message in data.context.queued_user_messages
+        )
+        data.context.queued_user_messages.clear()
+    return ModelInputData(input=input_items, instructions=data.model_data.instructions)
+
+
+def assert_external_message_injected(input_items: list[TResponseInputItem]) -> None:
+    last_item = cast(dict[str, Any], input_items[-1])
+    assert last_item["content"] == EXTERNAL_MESSAGE
+    assert any(item.get("type") == "function_call_output" for item in input_items)
 
 
 @pytest.mark.asyncio
@@ -61,6 +93,64 @@ async def test_call_model_input_filter_async_streamed() -> None:
     assert isinstance(model.last_turn_args["input"], list)
     assert len(model.last_turn_args["input"]) == 2
     assert model.last_turn_args["input"][-1]["content"] == "added-async"
+
+
+@pytest.mark.asyncio
+async def test_call_model_input_filter_injects_external_input_between_tool_turns() -> None:
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("collect_external_update")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent[ExternalEventContext](
+        name="test",
+        model=model,
+        tools=[collect_external_update],
+    )
+    context = ExternalEventContext()
+
+    await Runner.run(
+        agent,
+        input="start",
+        context=context,
+        run_config=RunConfig(call_model_input_filter=inject_queued_messages),
+    )
+
+    assert isinstance(model.last_turn_args["input"], list)
+    assert_external_message_injected(model.last_turn_args["input"])
+    assert context.queued_user_messages == []
+
+
+@pytest.mark.asyncio
+async def test_call_model_input_filter_injects_external_input_between_streamed_tool_turns() -> None:
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("collect_external_update")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent[ExternalEventContext](
+        name="test",
+        model=model,
+        tools=[collect_external_update],
+    )
+    context = ExternalEventContext()
+
+    result = Runner.run_streamed(
+        agent,
+        input="start",
+        context=context,
+        run_config=RunConfig(call_model_input_filter=inject_queued_messages),
+    )
+    async for _ in result.stream_events():
+        pass
+
+    assert isinstance(model.last_turn_args["input"], list)
+    assert_external_message_injected(model.last_turn_args["input"])
+    assert context.queued_user_messages == []
 
 
 @pytest.mark.asyncio
