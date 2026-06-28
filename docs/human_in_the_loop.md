@@ -91,6 +91,41 @@ Manual `interruptions` are the most general pattern, but they are not the only o
 
 When these callbacks return a decision, the run continues without pausing for a human response. For Realtime and voice session APIs, see the approval flow in the [Realtime guide](realtime/guide.md).
 
+## External governance gates
+
+Use the interruption flow when a person should approve a call. If an automated
+policy, audit, or compliance service must decide before execution, use
+[`RunHooks.on_tool_start`][agents.lifecycle.RunHooksBase.on_tool_start] as a
+fail-closed governance gate for local tools. For function tools, the hook
+context includes the tool call ID, tool name, and serialized tool arguments.
+
+```python
+import json
+from typing import Any, cast
+
+from agents import Agent, RunContextWrapper, RunHooks, Tool
+from agents.tool_context import ToolContext
+
+
+async def external_policy_allows(tool_name: str, arguments: dict[str, Any]) -> bool:
+    ...
+
+
+class GovernanceHooks(RunHooks):
+    async def on_tool_start(self, context: RunContextWrapper, _agent: Agent, tool: Tool) -> None:
+        tool_context = cast(ToolContext[Any], context)
+        arguments = json.loads(tool_context.tool_arguments or "{}")
+
+        allowed = await external_policy_allows(tool.name, arguments)
+        if not allowed:
+            raise PermissionError(f"External governance denied tool call: {tool.name}")
+```
+
+Keep this pattern reserved for local tools. Hosted tools run server-side and do
+not pass through `on_tool_start`; use their approval callbacks instead. Store
+policy receipts in your application or policy system if you need an audit trail,
+and avoid placing secrets in serialized run state.
+
 ## Streaming and sessions
 
 The same interruption flow works in streaming runs. After a streamed run pauses, keep consuming [`RunResultStreaming.stream_events()`][agents.result.RunResultStreaming.stream_events] until the iterator finishes, inspect [`RunResultStreaming.interruptions`][agents.result.RunResultStreaming.interruptions], resolve them, and resume with [`Runner.run_streamed(...)`][agents.run.Runner.run_streamed] if you want the resumed output to keep streaming. See [Streaming](streaming.md) for the streamed version of this pattern.

@@ -21,6 +21,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Human-in-the-loop with tool approval and state serialization (`examples/agent_patterns/human_in_the_loop.py`)
     -   Human-in-the-loop with streaming (`examples/agent_patterns/human_in_the_loop_stream.py`)
     -   Custom rejection messages for approval flows (`examples/agent_patterns/human_in_the_loop_custom_rejection.py`)
+    -   External governance gates before local tool execution (`examples/agent_patterns/external_governance_gate.py`)
 
 -   **[basic](https://github.com/openai/openai-agents-python/tree/main/examples/basic):**
     These examples showcase foundational capabilities of the SDK, such as
