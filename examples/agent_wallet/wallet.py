@@ -84,7 +84,14 @@ class StructuralVerifier(IdentityVerifier):
                 authorized=False, reason=f"invalid credential: {e}"
             )
 
-        if cred.expiry and cred.expiry < time.time():
+        if not cred.expiry or cred.expiry <= 0:
+            return VerificationResult(
+                authorized=False,
+                agent_id=cred.agent_id,
+                reason="credential missing required expiry",
+            )
+
+        if cred.expiry < time.time():
             return VerificationResult(
                 authorized=False,
                 agent_id=cred.agent_id,

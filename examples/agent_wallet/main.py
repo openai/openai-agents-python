@@ -41,29 +41,38 @@ readonly_credential = Credential(
 
 
 # ---------------------------------------------------------------------------
-# Define tools that call the paid API
+# Tool factory — credential is bound via closure, NOT passed by the model
 # ---------------------------------------------------------------------------
 
-@function_tool
-def get_market_data(symbol: str, credential: str) -> str:
-    """Get market data for a cryptocurrency symbol.
+def make_market_data_tool(credential: str):
+    """Create a market data tool with a credential bound in the closure.
 
-    This is a paid API call that requires agent authorization.
-    The credential proves the agent has permission to spend on data access.
-
-    Args:
-        symbol: Cryptocurrency symbol (BTC, ETH, SOL).
-        credential: Agent's authorization credential.
+    The credential is supplied by trusted application code at agent setup
+    time, not by the model at runtime. This prevents the model from
+    fabricating or escalating credentials.
     """
-    result = call_paid_api(credential=credential, symbol=symbol)
-    if result.get("error"):
-        return f"Error: {result['message']}"
-    data = result["data"]
-    return (
-        f"{result['symbol']}: ${data['price']:,.2f} "
-        f"({data['change_24h']:+.1f}% 24h) "
-        f"[authorized as {result['authorized_agent']}]"
-    )
+
+    @function_tool
+    def get_market_data(symbol: str) -> str:
+        """Get market data for a cryptocurrency symbol.
+
+        This is a paid API call. Authorization is handled automatically
+        via the agent's bound credential.
+
+        Args:
+            symbol: Cryptocurrency symbol (BTC, ETH, SOL).
+        """
+        result = call_paid_api(credential=credential, symbol=symbol)
+        if result.get("error"):
+            return f"Error: {result['message']}"
+        data = result["data"]
+        return (
+            f"{result['symbol']}: ${data['price']:,.2f} "
+            f"({data['change_24h']:+.1f}% 24h) "
+            f"[authorized as {result['authorized_agent']}]"
+        )
+
+    return get_market_data
 
 
 # ---------------------------------------------------------------------------
@@ -81,11 +90,9 @@ async def run():
         name="ResearchAgent",
         instructions=(
             "You are a market research agent. Use the get_market_data tool "
-            "to look up cryptocurrency prices. Always pass the credential "
-            "provided in context.\n\n"
-            f"Your credential: {authorized_credential}"
+            "to look up cryptocurrency prices."
         ),
-        tools=[get_market_data],
+        tools=[make_market_data_tool(authorized_credential)],
     )
 
     result = await Runner.run(
@@ -103,11 +110,10 @@ async def run():
     unauthorized_agent = Agent(
         name="MonitorAgent",
         instructions=(
-            "You are a monitoring agent. Try to use get_market_data to check "
-            "BTC price. Pass the credential provided in context.\n\n"
-            f"Your credential: {readonly_credential}"
+            "You are a monitoring agent. Use get_market_data to check "
+            "the BTC price."
         ),
-        tools=[get_market_data],
+        tools=[make_market_data_tool(readonly_credential)],
     )
 
     result = await Runner.run(
