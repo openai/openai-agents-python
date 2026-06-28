@@ -7,8 +7,12 @@ Run: uv run python examples/agent_wallet/main.py
 """
 
 import asyncio
+import os
 import sys
 import time
+
+# Ensure sibling modules are importable when run from repo root
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from agents import Agent, Runner, function_tool, gen_trace_id, trace
 from mock_server import call_paid_api
@@ -114,5 +118,7 @@ async def run():
 
 
 if __name__ == "__main__":
-    with trace("Agent Wallet Example", trace_id=gen_trace_id()):
+    trace_id = gen_trace_id()
+    print(f"View trace: https://platform.openai.com/traces/trace?trace_id={trace_id}\n")
+    with trace("Agent Wallet Example", trace_id=trace_id):
         asyncio.run(run())
