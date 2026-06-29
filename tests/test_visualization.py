@@ -172,6 +172,27 @@ def test_cycle_detection():
     assert '"B" -> "A"' in edges
 
 
+def test_names_with_quotes_and_backslashes_are_escaped(mock_agent):
+    """Names containing double quotes or backslashes must be escaped in DOT.
+
+    Otherwise an embedded quote closes the Graphviz identifier early and
+    produces a malformed graph. Backslashes are escaped first, then quotes.
+    """
+    mock_agent.name = 'Weird"Name'
+    mock_agent.tools[0].name = "Back\\slash"
+
+    nodes = get_all_nodes(mock_agent)
+    edges = get_all_edges(mock_agent)
+
+    # The quote is backslash-escaped and the bare unescaped form is gone.
+    assert '"Weird\\"Name" [label="Weird\\"Name"' in nodes
+    assert '"Weird"Name"' not in nodes
+    # The backslash is doubled.
+    assert '"Back\\\\slash"' in nodes
+    # Edges escape names too, so the start arrow points at the escaped id.
+    assert '"__start__" -> "Weird\\"Name";' in edges
+
+
 def test_draw_graph_with_real_agent_no_handoffs():
     """Test that draw_graph works with a real Agent object without handoffs.
 
