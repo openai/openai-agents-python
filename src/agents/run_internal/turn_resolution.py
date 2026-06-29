@@ -115,6 +115,7 @@ from .run_steps import (
     ToolRunApplyPatchCall,
     ToolRunComputerAction,
     ToolRunCustom,
+    ToolRunCustomNotFound,
     ToolRunFunction,
     ToolRunFunctionNotFound,
     ToolRunHandoff,
@@ -220,6 +221,7 @@ async def _resolve_tool_not_found_message(
     run_config: RunConfig,
     tool_name: str,
     call_id: str,
+    tool_type: Literal["function", "computer", "shell", "apply_patch", "custom"] = "function",
 ) -> str:
     default_message = _default_tool_not_found_message(tool_name)
     formatter = run_config.tool_error_formatter
@@ -230,7 +232,7 @@ async def _resolve_tool_not_found_message(
         maybe_message = formatter(
             ToolErrorFormatterArgs(
                 kind="tool_not_found",
-                tool_type="function",
+                tool_type=tool_type,
                 tool_name=tool_name,
                 call_id=call_id,
                 default_message=default_message,
@@ -275,6 +277,42 @@ async def _build_tool_not_found_output_items(
             ToolCallOutputItem(
                 output=message,
                 raw_item=ItemHelpers.tool_call_output_item(call.tool_call, message),
+                agent=agent,
+            )
+        )
+    return items
+
+
+async def _build_custom_tool_not_found_output_items(
+    *,
+    agent: Agent[Any],
+    calls: Sequence[ToolRunCustomNotFound],
+    context_wrapper: RunContextWrapper[Any],
+    run_config: RunConfig,
+) -> list[RunItem]:
+    items: list[RunItem] = []
+    for call in calls:
+        message = await _resolve_tool_not_found_message(
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+            tool_name=call.tool_name,
+            call_id=call.tool_call.call_id,
+            tool_type="custom",
+        )
+        # A custom tool call must be answered with a ``custom_tool_call_output`` item so
+        # the call id is resolved with the correct output type, mirroring the successful
+        # and rejected custom-tool paths.
+        items.append(
+            ToolCallOutputItem(
+                output=message,
+                raw_item=cast(
+                    Any,
+                    {
+                        "type": "custom_tool_call_output",
+                        "call_id": call.tool_call.call_id,
+                        "output": message,
+                    },
+                ),
                 agent=agent,
             )
         )
@@ -691,6 +729,14 @@ async def execute_tools_and_side_effects(
         await _build_tool_not_found_output_items(
             agent=public_agent,
             calls=processed_response.function_tools_not_found,
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+        )
+    )
+    new_step_items.extend(
+        await _build_custom_tool_not_found_output_items(
+            agent=public_agent,
+            calls=processed_response.custom_tools_not_found,
             context_wrapper=context_wrapper,
             run_config=run_config,
         )
@@ -1569,6 +1615,7 @@ def process_model_response(
     apply_patch_calls = []
     mcp_approval_requests = []
     function_tools_not_found = []
+    custom_tools_not_found = []
     tools_used: list[str] = []
     handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
     function_map = build_function_tool_lookup_map(
@@ -1880,6 +1927,16 @@ def process_model_response(
                         data={"tool_name": output.name},
                     )
                 )
+                if run_config is not None and (
+                    run_config.tool_not_found_behavior == "return_error_to_model"
+                ):
+                    # Mirror the function-tool path: instead of aborting the run, surface the
+                    # missing custom tool back to the model as a custom_tool_call_output error
+                    # so it can recover on the next turn.
+                    custom_tools_not_found.append(
+                        ToolRunCustomNotFound(tool_call=output, tool_name=output.name)
+                    )
+                    continue
                 raise ModelBehaviorError(f"Tool {output.name} not found in agent {agent.name}")
         elif (
             isinstance(output, ResponseFunctionToolCall)
@@ -1998,6 +2055,7 @@ def process_model_response(
         mcp_approval_requests=mcp_approval_requests,
         interruptions=[],
         function_tools_not_found=function_tools_not_found,
+        custom_tools_not_found=custom_tools_not_found,
     )
 
 

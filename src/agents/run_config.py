@@ -330,11 +330,12 @@ class RunConfig:
     """Optional SDK-side execution settings for local tool calls."""
 
     tool_not_found_behavior: ToolNotFoundBehavior = "raise_error"
-    """Controls unresolved function tool calls emitted by the model.
+    """Controls unresolved function and custom tool calls emitted by the model.
 
     - ``"raise_error"`` preserves the default behavior and raises ``ModelBehaviorError``.
-    - ``"return_error_to_model"`` returns a model-visible ``function_call_output`` error and lets
-      the run continue.
+    - ``"return_error_to_model"`` returns a model-visible error and lets the run continue. The
+      error is surfaced as a ``function_call_output`` for missing function tools and as a
+      ``custom_tool_call_output`` for missing custom tools.
     """
 
 

@@ -889,3 +889,61 @@ def test_process_model_response_collects_missing_function_tool_when_opted_in() -
     assert processed.function_tools_not_found[0].tool_call is missing_call
     assert processed.function_tools_not_found[0].tool_name == "missing_tool"
     assert processed.has_tools_or_approvals_to_run()
+
+
+def test_process_model_response_raises_for_missing_custom_tool_by_default() -> None:
+    custom_tool = CustomTool(
+        name="raw_editor",
+        description="Edit raw text.",
+        on_invoke_tool=lambda _ctx, raw_input: raw_input,
+        format={"type": "text"},
+    )
+    agent = Agent(name="custom-agent", model=FakeModel(), tools=[custom_tool])
+    missing_call = ResponseCustomToolCall(
+        type="custom_tool_call",
+        name="ghost_custom_tool",
+        call_id="custom-missing-1",
+        input="payload",
+    )
+
+    with pytest.raises(ModelBehaviorError, match="ghost_custom_tool"):
+        run_loop.process_model_response(
+            agent=agent,
+            all_tools=[custom_tool],
+            response=_response([missing_call]),
+            output_schema=None,
+            handoffs=[],
+        )
+
+
+def test_process_model_response_collects_missing_custom_tool_when_opted_in() -> None:
+    custom_tool = CustomTool(
+        name="raw_editor",
+        description="Edit raw text.",
+        on_invoke_tool=lambda _ctx, raw_input: raw_input,
+        format={"type": "text"},
+    )
+    agent = Agent(name="custom-agent", model=FakeModel(), tools=[custom_tool])
+    missing_call = ResponseCustomToolCall(
+        type="custom_tool_call",
+        name="ghost_custom_tool",
+        call_id="custom-missing-1",
+        input="payload",
+    )
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=[custom_tool],
+        response=_response([missing_call]),
+        output_schema=None,
+        handoffs=[],
+        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
+    )
+
+    assert len(processed.new_items) == 1
+    assert isinstance(processed.new_items[0], ToolCallItem)
+    assert processed.custom_tool_calls == []
+    assert len(processed.custom_tools_not_found) == 1
+    assert cast(object, processed.custom_tools_not_found[0].tool_call) is missing_call
+    assert processed.custom_tools_not_found[0].tool_name == "ghost_custom_tool"
+    assert processed.has_tools_or_approvals_to_run()
