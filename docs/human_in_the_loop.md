@@ -8,6 +8,51 @@ With `Agent.as_tool()`, approvals can happen at two different layers: the agent 
 
 This page focuses on the manual approval flow via `interruptions`. If your app can decide in code, some tool types also support programmatic approval callbacks so the run can continue without pausing.
 
+## Guardrails vs. tool approval — which gate when
+
+[Guardrails](guardrails.md) and tool approval are both interception points, and they are complementary rather than interchangeable. A common question is which one to reach for:
+
+| | Guardrails (input/output and tool guardrails) | Tool approval (`needs_approval`) |
+|---|---|---|
+| **What it checks** | The *content* of input, output, or tool arguments/results | Whether a *specific tool call* is allowed to run |
+| **Granularity** | Per run input/output, or per function-tool invocation | Per tool call (the rule sees the parsed arguments and the call ID) |
+| **On trigger** | A tripwire raises a `{Input,Output}GuardrailTripwireTriggered` exception and **halts the run** (tool guardrails can instead skip or replace the call) | The run **pauses**; the call surfaces in `RunResult.interruptions` as a [`ToolApprovalItem`][agents.items.ToolApprovalItem] |
+| **Who decides** | A fast model or your own code, inline and automatically | A human or an external system, out of band |
+| **How it resumes** | Not applicable for a tripwire — the run has stopped | `state.approve(item)` / `state.reject(item)`, then resume with `Runner.run(agent, state)` |
+| **Default** | None until you attach a guardrail | `needs_approval=False` — approval is **off** until you opt a tool in |
+
+Rules of thumb:
+
+-   Use a **guardrail** to automatically reject disallowed *content* — jailbreak attempts, off-topic requests, secrets in tool arguments, sensitive data in tool output.
+-   Use **`needs_approval`** to require sign-off before a consequential *action* — sending an email, issuing a refund, deleting records, running a shell command.
+
+A request can pass every content guardrail and still call a tool like `send_email` or `delete_records`; deciding whether that *call* is permitted is what tool approval is for. The two can be combined on the same tool — see [Tool guardrails](guardrails.md#tool-guardrails) for the ordering when both apply.
+
+!!! Note
+
+    `needs_approval` defaults to `False`, so approval is opt-in per tool rather than deny-by-default. Gate each consequential tool explicitly:
+
+    ```python
+    from agents import function_tool
+
+
+    @function_tool(needs_approval=True)
+    async def delete_records(table: str) -> str:
+        return f"Deleted records in {table}"
+    ```
+
+    For a dynamic policy, pass an async callable. It receives the run context, the parsed tool arguments, and the tool call ID, and returns whether approval is required:
+
+    ```python
+    async def needs_review(_ctx, params, _call_id) -> bool:
+        return params.get("amount", 0) > 100  # require approval over $100
+
+
+    @function_tool(needs_approval=needs_review)
+    async def issue_refund(amount: int) -> str:
+        return f"Refunded ${amount}"
+    ```
+
 ## Marking tools that need approval
 
 Set `needs_approval` to `True` to always require approval or provide an async function that decides per call. The callable receives the run context, parsed tool parameters, and the tool call ID.

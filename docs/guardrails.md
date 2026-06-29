@@ -60,6 +60,8 @@ Tool guardrails wrap **function tools** and let you validate or block tool calls
 - If a function tool requires approval, input tool guardrails normally run after approval and immediately before execution. Set [`RunConfig.tool_execution`][agents.run.RunConfig.tool_execution] to [`ToolExecutionConfig(pre_approval_tool_input_guardrails=True)`][agents.run.ToolExecutionConfig] when you want those input checks to run before the pending approval interruption is emitted. Calls that pass this pre-approval check are still checked again after approval before the tool executes.
 - Tool guardrails apply only to function tools created with [`function_tool`][agents.tool.function_tool]. Handoffs run through the SDK's handoff pipeline rather than the normal function-tool pipeline, so tool guardrails do not apply to the handoff call itself. Hosted tools (`WebSearchTool`, `FileSearchTool`, `HostedMCPTool`, `CodeInterpreterTool`, `ImageGenerationTool`) and built-in execution tools (`ComputerTool`, `ShellTool`, `ApplyPatchTool`, `LocalShellTool`) also do not use this guardrail pipeline, and [`Agent.as_tool()`][agents.agent.Agent.as_tool] does not currently expose tool-guardrail options directly.
 
+Tool guardrails check the *content* of a tool call and decide automatically. If you instead need a human or an external system to sign off before a consequential tool runs, use tool approval (`needs_approval`), which pauses the run rather than checking content. For guidance on choosing between the two, see [Guardrails vs. tool approval — which gate when](human_in_the_loop.md#guardrails-vs-tool-approval-which-gate-when).
+
 See the code snippet below for details.
 
 ## Tripwires
