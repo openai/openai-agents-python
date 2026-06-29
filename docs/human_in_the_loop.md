@@ -16,7 +16,7 @@ This page focuses on the manual approval flow via `interruptions`. If your app c
 |---|---|---|
 | **What it checks** | The *content* of input, output, or tool arguments/results | Whether a *specific tool call* is allowed to run |
 | **Granularity** | Per run input/output, or per function-tool invocation | Per tool call (the rule sees the parsed arguments and the call ID) |
-| **On trigger** | A tripwire raises a `{Input,Output}GuardrailTripwireTriggered` exception and **halts the run** (tool guardrails can instead skip or replace the call) | The run **pauses**; the call surfaces in `RunResult.interruptions` as a [`ToolApprovalItem`][agents.items.ToolApprovalItem] |
+| **On trigger** | Agent input/output guardrails raise `{Input,Output}GuardrailTripwireTriggered` and **halt the run**. A tool guardrail can `reject_content` (skip/replace the call and continue) or `raise_exception` → `ToolGuardrailTripwireTriggered` (**halt**) | The run **pauses**; the call surfaces in `RunResult.interruptions` as a [`ToolApprovalItem`][agents.items.ToolApprovalItem] |
 | **Who decides** | A fast model or your own code, inline and automatically | A human or an external system, out of band |
 | **How it resumes** | Not applicable for a tripwire — the run has stopped | `state.approve(item)` / `state.reject(item)`, then resume with `Runner.run(agent, state)` |
 | **Default** | None until you attach a guardrail | `needs_approval=False` — approval is **off** until you opt a tool in |
