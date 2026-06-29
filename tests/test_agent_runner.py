@@ -12,7 +12,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 from openai import APIConnectionError, BadRequestError
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import ResponseCustomToolCall, ResponseFunctionToolCall
 from openai.types.responses.response_output_text import AnnotationFileCitation, ResponseOutputText
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from typing_extensions import TypedDict
@@ -4530,6 +4530,97 @@ async def test_tool_not_found_behavior_uses_tool_error_formatter() -> None:
             "call_id": "call_missing",
             "output": "missing_tool unavailable for call_missing",
             "type": "function_call_output",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_not_found_behavior_returns_error_to_model_for_custom_tool() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
+    missing_call = ResponseCustomToolCall(
+        type="custom_tool_call",
+        name="missing_custom_tool",
+        call_id="call_missing_custom",
+        input="payload",
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [missing_call],
+            [get_text_message("recovered")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(tool_not_found_behavior="return_error_to_model"),
+    )
+
+    assert result.final_output == "recovered"
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    tool_outputs = [
+        item
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "custom_tool_call_output"
+    ]
+    assert tool_outputs == [
+        {
+            "call_id": "call_missing_custom",
+            "output": "Tool 'missing_custom_tool' not found.",
+            "type": "custom_tool_call_output",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_not_found_behavior_uses_tool_error_formatter_for_custom_tool() -> None:
+    model = FakeModel()
+    agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
+    missing_call = ResponseCustomToolCall(
+        type="custom_tool_call",
+        name="missing_custom_tool",
+        call_id="call_missing_custom",
+        input="payload",
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [missing_call],
+            [get_text_message("recovered")],
+        ]
+    )
+    seen_tool_types: list[str] = []
+
+    async def formatter(args: Any) -> str | None:
+        if args.kind != "tool_not_found":
+            return None
+        seen_tool_types.append(args.tool_type)
+        return f"{args.tool_name} unavailable for {args.call_id}"
+
+    result = await Runner.run(
+        agent,
+        input="start",
+        run_config=RunConfig(
+            tool_not_found_behavior="return_error_to_model",
+            tool_error_formatter=formatter,
+        ),
+    )
+
+    assert result.final_output == "recovered"
+    assert seen_tool_types == ["custom"]
+    second_turn_input = model.last_turn_args["input"]
+    assert isinstance(second_turn_input, list)
+    tool_outputs = [
+        item
+        for item in second_turn_input
+        if isinstance(item, dict) and item.get("type") == "custom_tool_call_output"
+    ]
+    assert tool_outputs == [
+        {
+            "call_id": "call_missing_custom",
+            "output": "missing_custom_tool unavailable for call_missing_custom",
+            "type": "custom_tool_call_output",
         }
     ]
 
