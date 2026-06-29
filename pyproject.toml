@@ -163,6 +163,10 @@ ignore_missing_imports = true
 module = ["vercel", "vercel.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["comply54", "comply54.*"]
+ignore_missing_imports = true
+
 [tool.coverage.run]
 source = ["src/agents"]
 omit = [
