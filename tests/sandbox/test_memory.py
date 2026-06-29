@@ -627,6 +627,13 @@ def test_memory_layout_config_defaults_match_codex_names() -> None:
     assert config.sessions_dir == "sessions"
 
 
+def test_memory_generate_config_phase_models_default_to_same_model() -> None:
+    config = MemoryGenerateConfig()
+
+    assert config.phase_one_model == "gpt-5.4-mini"
+    assert config.phase_two_model == "gpt-5.4-mini"
+
+
 def test_memory_generate_config_accepts_renamed_limit_field() -> None:
     config = MemoryGenerateConfig(max_raw_memories_for_consolidation=123)
 
