@@ -608,7 +608,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
                 return ExecResult(stdout=fallback_bytes, stderr=b"", exit_code=exit_code)
             return ExecResult(stdout=b"", stderr=fallback_bytes, exit_code=exit_code)
         except asyncio.TimeoutError as e:
-            raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
+            raise ExecTimeoutError(command=command, timeout_s=exec_timeout, cause=e) from e
         except (ExecTimeoutError, ExecTransportError):
             raise
         except Exception as e:
@@ -616,7 +616,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             if api_error_cls is not None and isinstance(e, api_error_cls):
                 status = getattr(e, "status_code", None)
                 if status in (408, 504):
-                    raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
+                    raise ExecTimeoutError(command=command, timeout_s=exec_timeout, cause=e) from e
             raise _blaxel_exec_transport_error(command=command, cause=e) from e
 
     # -- running check -------------------------------------------------------
@@ -834,7 +834,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
         except asyncio.TimeoutError as e:
             if not registered:
                 await self._terminate_pty_entry(entry)
-            raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
+            raise ExecTimeoutError(command=command, timeout_s=exec_timeout, cause=e) from e
         except Exception as e:
             if not registered:
                 await self._terminate_pty_entry(entry)

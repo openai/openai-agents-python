@@ -6,6 +6,7 @@ import json
 import tarfile
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from inline_snapshot import snapshot
@@ -21,6 +22,7 @@ from agents.sandbox.session import (
     CallbackSink,
     ChainedSink,
     EventPayloadPolicy,
+    HttpProxySink,
     Instrumentation,
     JsonlOutboxSink,
     SandboxSession,
@@ -278,6 +280,32 @@ async def test_workspace_jsonl_sink_does_not_duplicate_lines_across_flushes(
 
 
 @pytest.mark.asyncio
+async def test_workspace_jsonl_sink_clears_flushed_buffer(tmp_path: Path) -> None:
+    inner = _build_unix_local_session(tmp_path)
+    relpath = Path(f"logs/events-{inner.state.session_id}.jsonl")
+
+    async with inner:
+        sink = WorkspaceJsonlSink(mode="sync", on_error="raise", ephemeral=False, flush_every=1)
+        sink.bind(inner)
+
+        for seq in (1, 2):
+            await sink.handle(
+                SandboxSessionStartEvent(
+                    session_id=inner.state.session_id,
+                    seq=seq,
+                    op="write",
+                    span_id=str(uuid.uuid4()),
+                )
+            )
+            assert sink._buf == bytearray()
+
+        outbox_stream = await inner.read(relpath)
+        lines = outbox_stream.read().decode("utf-8").splitlines()
+
+    assert [json.loads(line)["seq"] for line in lines] == [1, 2]
+
+
+@pytest.mark.asyncio
 async def test_workspace_jsonl_sink_ephemeral_excludes_runtime_outbox_with_existing_parent(
     tmp_path: Path,
 ) -> None:
@@ -361,6 +389,31 @@ async def test_callback_sink_receives_bound_inner_session(tmp_path: Path) -> Non
 
     assert seen
     assert all(session is inner for _op, session in seen)
+
+
+@pytest.mark.asyncio
+async def test_http_proxy_sink_spools_direct_timeout(tmp_path: Path) -> None:
+    spool_path = tmp_path / "events.jsonl"
+    sink = HttpProxySink(
+        "http://127.0.0.1:9/events",
+        mode="sync",
+        on_error="raise",
+        spool_path=spool_path,
+    )
+    event = SandboxSessionStartEvent(
+        session_id=uuid.uuid4(),
+        seq=1,
+        op="write",
+        span_id=str(uuid.uuid4()),
+    )
+
+    with patch("agents.sandbox.session.sinks.urlopen", side_effect=TimeoutError("timed out")):
+        with pytest.raises(RuntimeError, match="http proxy sink POST failed"):
+            await sink.handle(event)
+
+    lines = spool_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["seq"] == 1
 
 
 @pytest.mark.asyncio

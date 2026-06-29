@@ -1921,6 +1921,37 @@ class TestSerializationRoundTrip:
         assert restored_item.raw_item == custom_tool_output
         assert restored_item.output == "custom result"
 
+    async def test_deserializes_tool_call_output_custom_data(self):
+        """SDK-only tool output custom data should survive RunState roundtrips."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ItemAgent")
+        state = make_state(agent, context=context, original_input="test", max_turns=5)
+
+        raw_tool_output = {
+            "type": "function_call_output",
+            "call_id": "call_custom_data",
+            "output": "result",
+        }
+        state._generated_items.append(
+            ToolCallOutputItem(
+                agent=agent,
+                raw_item=raw_tool_output,
+                output="result",
+                custom_data={"ui": {"kind": "chart"}, "ids": ["a", "b"]},
+            )
+        )
+
+        json_data = state.to_json()
+        serialized_item = json_data["generated_items"][0]
+        assert serialized_item["custom_data"] == {"ui": {"kind": "chart"}, "ids": ["a", "b"]}
+        assert "custom_data" not in serialized_item["raw_item"]
+
+        new_state = await RunState.from_json(agent, json_data)
+
+        restored_item = new_state._generated_items[0]
+        assert isinstance(restored_item, ToolCallOutputItem)
+        assert restored_item.custom_data == {"ui": {"kind": "chart"}, "ids": ["a", "b"]}
+
     async def test_serializes_original_input_with_function_call_output(self):
         """Test that original_input with function_call_output items is preserved."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
@@ -4636,6 +4667,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.7",
                 "1.8",
                 "1.9",
+                "1.10",
                 CURRENT_SCHEMA_VERSION,
             }
         )

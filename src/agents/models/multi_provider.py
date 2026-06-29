@@ -89,6 +89,7 @@ class MultiProvider(ModelProvider):
         unknown_prefix_mode: MultiProviderUnknownPrefixMode = "error",
         openai_agent_registration: OpenAIAgentRegistrationConfig | None = None,
         openai_responses_websocket_options: OpenAIResponsesWebSocketOptions | None = None,
+        openai_buffer_streamed_tool_calls: bool = False,
     ) -> None:
         """Create a new OpenAI provider.
 
@@ -126,6 +127,9 @@ class MultiProvider(ModelProvider):
                 provider.
             openai_responses_websocket_options: Optional low-level websocket keepalive options for
                 the OpenAI Responses websocket transport.
+            openai_buffer_streamed_tool_calls: Whether OpenAI Chat Completions models should buffer
+                streamed function tool-call deltas and emit them to the SDK only after the provider
+                stream finishes.
         """
         self.provider_map = provider_map
         self.openai_provider = OpenAIProvider(
@@ -140,6 +144,7 @@ class MultiProvider(ModelProvider):
             strict_feature_validation=openai_strict_feature_validation,
             agent_registration=openai_agent_registration,
             responses_websocket_options=openai_responses_websocket_options,
+            buffer_streamed_tool_calls=openai_buffer_streamed_tool_calls,
         )
         self._openai_prefix_mode = self._validate_openai_prefix_mode(openai_prefix_mode)
         self._unknown_prefix_mode = self._validate_unknown_prefix_mode(unknown_prefix_mode)

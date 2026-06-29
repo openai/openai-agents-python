@@ -103,6 +103,8 @@ class ToolContext(RunContextWrapper[TContext]):
         )
         self.agent = agent
         self.run_config = run_config
+        # Internal adapter hook used to attach SDK-only custom data to the emitted output item.
+        self._custom_data: dict[str, Any] | None = None
 
     @property
     def qualified_tool_name(self) -> str:

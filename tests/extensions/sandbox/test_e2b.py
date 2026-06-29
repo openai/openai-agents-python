@@ -212,6 +212,60 @@ class _FakeE2BResult:
         self.exit_code = exit_code
 
 
+class _FakeE2BCommandExitException(Exception):
+    def __init__(self, *, exit_code: int) -> None:
+        super().__init__(f"command exited with {exit_code}")
+        self.exit_code = exit_code
+
+
+class _FakeE2BAsyncCommandHandle:
+    def __init__(
+        self,
+        *,
+        result_exit_code: int = 0,
+        initial_exit_code: int | None = None,
+        wait_delay_s: float = 0,
+        wait_error: BaseException | None = None,
+        wait_never: bool = False,
+        wait_until_released: bool = False,
+    ) -> None:
+        self.exit_code = initial_exit_code
+        self.result_exit_code = result_exit_code
+        self.wait_delay_s = wait_delay_s
+        self.wait_error = wait_error
+        self.wait_never = wait_never
+        self.wait_until_released = wait_until_released
+        self.wait_calls = 0
+        self.wait_cancelled = False
+        self.kill_calls = 0
+        self._wait_released = asyncio.Event()
+
+    async def wait(self) -> _FakeE2BResult:
+        self.wait_calls += 1
+        try:
+            if self.wait_never:
+                await asyncio.Event().wait()
+            if self.wait_until_released:
+                await self._wait_released.wait()
+            if self.wait_delay_s:
+                await asyncio.sleep(self.wait_delay_s)
+            if self.wait_error is not None:
+                raise self.wait_error
+            self.exit_code = self.result_exit_code
+            return _FakeE2BResult(exit_code=self.result_exit_code)
+        except asyncio.CancelledError:
+            self.wait_cancelled = True
+            raise
+
+    async def kill(self) -> bool:
+        self.kill_calls += 1
+        self.exit_code = 0
+        return True
+
+    def release_wait(self) -> None:
+        self._wait_released.set()
+
+
 class _FakeE2BFiles:
     def __init__(self) -> None:
         self.make_dir_calls: list[tuple[str, float | None]] = []
@@ -244,6 +298,8 @@ class _FakeE2BCommands:
         self.next_result = _FakeE2BResult()
         self.background_calls: list[dict[str, object]] = []
         self.background_error: BaseException | None = None
+        self.next_async_command_handle: _FakeE2BAsyncCommandHandle | None = None
+        self.async_command_stdout_chunks: list[bytes | str] = []
 
     async def run(
         self,
@@ -257,7 +313,7 @@ class _FakeE2BCommands:
         stdin: bool | None = None,
         timeout: float | None = None,
         request_timeout: float | None = None,
-    ) -> _FakeE2BResult:
+    ) -> object:
         _ = request_timeout
         if background:
             if self.background_error is not None:
@@ -274,17 +330,12 @@ class _FakeE2BCommands:
                 }
             )
             if callable(on_stdout):
-                result = on_stdout("started\n")
-                if inspect.isawaitable(result):
-                    await result
+                for chunk in self.async_command_stdout_chunks:
+                    result = on_stdout(chunk)
+                    if inspect.isawaitable(result):
+                        await result
 
-            class _Handle:
-                exit_code = 0
-
-                async def kill(self) -> None:
-                    return None
-
-            return cast(_FakeE2BResult, _Handle())
+            return self.next_async_command_handle or _FakeE2BAsyncCommandHandle()
 
         self.calls.append(
             {
@@ -322,20 +373,30 @@ class _FakeE2BCommands:
         return result
 
 
-class _FakeE2BPtyHandle:
-    def __init__(self) -> None:
+class _FakeE2BPtyHandle(_FakeE2BAsyncCommandHandle):
+    def __init__(
+        self,
+        *,
+        result_exit_code: int = 0,
+        wait_delay_s: float = 0,
+        wait_error: BaseException | None = None,
+        wait_never: bool = True,
+    ) -> None:
+        super().__init__(
+            result_exit_code=result_exit_code,
+            wait_delay_s=wait_delay_s,
+            wait_error=wait_error,
+            wait_never=wait_never,
+        )
         self.pid = "pty-123"
-        self.exit_code: int | None = None
         self.stdin_payloads: list[bytes] = []
-
-    async def kill(self) -> None:
-        self.exit_code = 0
 
 
 class _FakeE2BPty:
     def __init__(self) -> None:
         self.handle = _FakeE2BPtyHandle()
         self.on_data: object | None = None
+        self.stdin_output_chunks: list[bytes | str] = []
         self.create_error: BaseException | None = None
         self.send_stdin_error: BaseException | None = None
 
@@ -365,10 +426,11 @@ class _FakeE2BPty:
             raise self.send_stdin_error
         self.handle.stdin_payloads.append(data)
         if callable(self.on_data):
-            payload = b">>> " if len(self.handle.stdin_payloads) == 1 else b"10\n"
-            result = self.on_data(payload)
-            if inspect.isawaitable(result):
-                await result
+            for chunk in self.stdin_output_chunks:
+                result = self.on_data(chunk)
+                if inspect.isawaitable(result):
+                    await result
+            self.stdin_output_chunks.clear()
 
 
 class _FakeE2BSandbox:
@@ -1798,6 +1860,7 @@ async def test_e2b_clear_workspace_root_on_resume_preserves_nested_mounts(
 @pytest.mark.asyncio
 async def test_e2b_pty_start_and_write_stdin() -> None:
     sandbox = _FakeE2BSandbox()
+    sandbox.pty.stdin_output_chunks = [b">>> "]
     state = E2BSandboxSessionState(
         session_id=uuid.uuid4(),
         manifest=Manifest(root="/workspace"),
@@ -1812,6 +1875,7 @@ async def test_e2b_pty_start_and_write_stdin() -> None:
     assert started.process_id is not None
     assert b">>>" in started.output
 
+    sandbox.pty.stdin_output_chunks = [b"10\n"]
     updated = await session.pty_write_stdin(
         session_id=started.process_id,
         chars="5 + 5\n",
@@ -1822,10 +1886,13 @@ async def test_e2b_pty_start_and_write_stdin() -> None:
     assert b"10" in updated.output
     assert sandbox.pty.handle.stdin_payloads == [b"python3\n", b"5 + 5\n"]
 
+    await session.pty_terminate_all()
+
 
 @pytest.mark.asyncio
 async def test_e2b_pty_start_non_tty_uses_commands_run_in_background() -> None:
     sandbox = _FakeE2BSandbox()
+    sandbox.commands.async_command_stdout_chunks = ["started\n"]
     state = E2BSandboxSessionState(
         session_id=uuid.uuid4(),
         manifest=Manifest(root="/workspace"),
@@ -1849,6 +1916,179 @@ async def test_e2b_pty_start_non_tty_uses_commands_run_in_background() -> None:
             "background": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_e2b_pty_start_non_tty_wakes_when_exit_follows_last_output() -> None:
+    sandbox = _FakeE2BSandbox()
+    handle = _FakeE2BAsyncCommandHandle(wait_delay_s=0.01)
+    sandbox.commands.next_async_command_handle = handle
+    sandbox.commands.async_command_stdout_chunks = ["started\n"]
+    state = E2BSandboxSessionState(
+        session_id=uuid.uuid4(),
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=sandbox.sandbox_id,
+        workspace_root_ready=True,
+    )
+    session = E2BSandboxSession.from_state(state, sandbox=sandbox)
+
+    started = await asyncio.wait_for(
+        session.pty_exec_start("python3", shell=False, tty=False, yield_time_s=10),
+        timeout=1,
+    )
+
+    assert started.process_id is None
+    assert started.exit_code == 0
+    assert started.output == b"started\n"
+    assert handle.wait_calls == 1
+    assert handle.kill_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_e2b_pty_start_tty_wakes_when_session_exits_after_output() -> None:
+    sandbox = _FakeE2BSandbox()
+    handle = _FakeE2BPtyHandle(wait_never=False, wait_delay_s=0.01)
+    sandbox.pty.handle = handle
+    sandbox.pty.stdin_output_chunks = [b"bye\n"]
+    state = E2BSandboxSessionState(
+        session_id=uuid.uuid4(),
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=sandbox.sandbox_id,
+        workspace_root_ready=True,
+    )
+    session = E2BSandboxSession.from_state(state, sandbox=sandbox)
+
+    started = await asyncio.wait_for(
+        session.pty_exec_start("exit", shell=False, tty=True, yield_time_s=10),
+        timeout=1,
+    )
+
+    assert started.process_id is None
+    assert started.exit_code == 0
+    assert started.output == b"bye\n"
+    assert handle.stdin_payloads == [b"exit\n"]
+    assert handle.wait_calls == 1
+    assert handle.kill_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_e2b_pty_start_non_tty_wakes_on_quiet_exit() -> None:
+    sandbox = _FakeE2BSandbox()
+    handle = _FakeE2BAsyncCommandHandle(wait_delay_s=0.01)
+    sandbox.commands.next_async_command_handle = handle
+    state = E2BSandboxSessionState(
+        session_id=uuid.uuid4(),
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=sandbox.sandbox_id,
+        workspace_root_ready=True,
+    )
+    session = E2BSandboxSession.from_state(state, sandbox=sandbox)
+
+    started = await asyncio.wait_for(
+        session.pty_exec_start("true", shell=False, tty=False, yield_time_s=10),
+        timeout=1,
+    )
+
+    assert started.process_id is None
+    assert started.exit_code == 0
+    assert started.output == b""
+    assert handle.wait_calls == 1
+    assert handle.kill_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_e2b_pty_start_non_tty_wakes_on_nonzero_wait_exit() -> None:
+    sandbox = _FakeE2BSandbox()
+    handle = _FakeE2BAsyncCommandHandle(
+        wait_delay_s=0.01,
+        wait_error=_FakeE2BCommandExitException(exit_code=2),
+    )
+    sandbox.commands.next_async_command_handle = handle
+    state = E2BSandboxSessionState(
+        session_id=uuid.uuid4(),
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=sandbox.sandbox_id,
+        workspace_root_ready=True,
+    )
+    session = E2BSandboxSession.from_state(state, sandbox=sandbox)
+
+    started = await asyncio.wait_for(
+        session.pty_exec_start("false", shell=False, tty=False, yield_time_s=10),
+        timeout=1,
+    )
+
+    assert started.process_id is None
+    assert started.exit_code == 2
+    assert started.output == b""
+    assert handle.wait_calls == 1
+    assert handle.kill_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_e2b_pty_start_non_tty_exited_command_preserves_waiter() -> None:
+    sandbox = _FakeE2BSandbox()
+    handle = _FakeE2BAsyncCommandHandle(initial_exit_code=0, wait_until_released=True)
+    sandbox.commands.next_async_command_handle = handle
+    state = E2BSandboxSessionState(
+        session_id=uuid.uuid4(),
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=sandbox.sandbox_id,
+        workspace_root_ready=True,
+    )
+    session = E2BSandboxSession.from_state(state, sandbox=sandbox)
+
+    started = await asyncio.wait_for(
+        session.pty_exec_start("true", shell=False, tty=False, yield_time_s=10),
+        timeout=1,
+    )
+
+    assert started.process_id is None
+    assert started.exit_code == 0
+    assert started.output == b""
+    assert handle.kill_calls == 0
+
+    for _ in range(10):
+        if handle.wait_calls:
+            break
+        await asyncio.sleep(0)
+
+    assert handle.wait_calls == 1
+    assert not handle.wait_cancelled
+
+    handle.release_wait()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_e2b_pty_start_non_tty_running_command_cleans_up_waiter() -> None:
+    sandbox = _FakeE2BSandbox()
+    handle = _FakeE2BAsyncCommandHandle(wait_never=True)
+    sandbox.commands.next_async_command_handle = handle
+    state = E2BSandboxSessionState(
+        session_id=uuid.uuid4(),
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        sandbox_id=sandbox.sandbox_id,
+        workspace_root_ready=True,
+    )
+    session = E2BSandboxSession.from_state(state, sandbox=sandbox)
+
+    started = await session.pty_exec_start("sleep", "60", shell=False, tty=False, yield_time_s=0.01)
+
+    assert started.process_id is not None
+    assert started.exit_code is None
+    assert handle.wait_calls == 1
+    assert handle.kill_calls == 0
+
+    await session.pty_terminate_all()
+
+    assert handle.wait_cancelled
+    assert handle.kill_calls == 1
 
 
 @pytest.mark.asyncio

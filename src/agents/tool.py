@@ -80,6 +80,104 @@ ToolFunction = (
     | ToolFunctionWithToolContext[ToolParams]
 )
 
+
+@dataclass(frozen=True)
+class FunctionToolCustomDataContext:
+    """Context passed to function-tool custom data extractors."""
+
+    tool_context: ToolContext[Any]
+    """The tool invocation context."""
+
+    tool: FunctionTool
+    """The function tool that was invoked."""
+
+    output: Any
+    """The model-visible tool output."""
+
+    raw_item: Mapping[str, Any]
+    """The raw tool output item that will be replayed to the model."""
+
+
+@dataclass(frozen=True)
+class CustomToolCustomDataContext:
+    """Context passed to custom-tool custom data extractors."""
+
+    tool_context: ToolContext[Any]
+    """The tool invocation context."""
+
+    tool: CustomTool
+    """The custom tool that was invoked."""
+
+    input: str
+    """The raw model-provided custom tool input."""
+
+    output: str
+    """The model-visible custom tool output."""
+
+    raw_item: Mapping[str, Any]
+    """The raw custom tool output item that will be replayed to the model."""
+
+
+@dataclass(frozen=True)
+class ComputerToolCustomDataContext:
+    """Context passed to computer-tool custom data extractors."""
+
+    run_context: RunContextWrapper[Any]
+    """The current run context."""
+
+    tool: ComputerTool[Any]
+    """The computer tool that was invoked."""
+
+    tool_call: ResponseComputerToolCall
+    """The computer tool call produced by the model."""
+
+    output: str
+    """The screenshot data URL returned to the model."""
+
+    raw_item: Any
+    """The raw computer call output item that will be replayed to the model."""
+
+
+@dataclass(frozen=True)
+class ApplyPatchToolCustomDataContext:
+    """Context passed to apply-patch custom data extractors."""
+
+    run_context: RunContextWrapper[Any]
+    """The current run context."""
+
+    tool: ApplyPatchTool
+    """The apply_patch tool that was invoked."""
+
+    operations: list[ApplyPatchOperation]
+    """The patch operations requested by the model."""
+
+    output: str
+    """The model-visible apply_patch output."""
+
+    status: Literal["completed", "failed"]
+    """The serialized apply_patch output status."""
+
+    raw_item: Mapping[str, Any]
+    """The raw apply_patch output item that will be replayed to the model."""
+
+
+FunctionToolCustomDataExtractor = Callable[
+    [FunctionToolCustomDataContext],
+    MaybeAwaitable[Mapping[str, Any] | None],
+]
+CustomToolCustomDataExtractor = Callable[
+    [CustomToolCustomDataContext],
+    MaybeAwaitable[Mapping[str, Any] | None],
+]
+ComputerToolCustomDataExtractor = Callable[
+    [ComputerToolCustomDataContext],
+    MaybeAwaitable[Mapping[str, Any] | None],
+]
+ApplyPatchToolCustomDataExtractor = Callable[
+    [ApplyPatchToolCustomDataContext],
+    MaybeAwaitable[Mapping[str, Any] | None],
+]
+
 DEFAULT_APPROVAL_REJECTION_MESSAGE = "Tool execution was not approved."
 ToolTimeoutBehavior = Literal["error_as_result", "raise_exception"]
 ToolErrorFunction = Callable[[RunContextWrapper[Any], Exception], MaybeAwaitable[str]]
@@ -351,6 +449,12 @@ class FunctionTool:
     defer_loading: bool = False
     """Whether the Responses API should hide this tool definition until tool search loads it."""
 
+    custom_data_extractor: FunctionToolCustomDataExtractor | None = field(
+        default=None,
+        kw_only=True,
+    )
+    """Optional callback that attaches SDK-only custom data to the tool output item."""
+
     _failure_error_function: ToolErrorFunction | None = field(
         default=None,
         kw_only=True,
@@ -511,6 +615,7 @@ def _build_wrapped_function_tool(
     timeout_behavior: ToolTimeoutBehavior = "error_as_result",
     timeout_error_function: ToolErrorFunction | None = None,
     defer_loading: bool = False,
+    custom_data_extractor: FunctionToolCustomDataExtractor | None = None,
     sync_invoker: bool = False,
     mcp_title: str | None = None,
     tool_origin: ToolOrigin | None = None,
@@ -538,6 +643,7 @@ def _build_wrapped_function_tool(
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
             defer_loading=defer_loading,
+            custom_data_extractor=custom_data_extractor,
             _mcp_title=mcp_title,
             _tool_origin=tool_origin,
         ),
@@ -614,6 +720,12 @@ class ComputerTool(Generic[ComputerT]):
 
     on_safety_check: Callable[[ComputerToolSafetyCheckData], MaybeAwaitable[bool]] | None = None
     """Optional callback to acknowledge computer tool safety checks."""
+
+    custom_data_extractor: ComputerToolCustomDataExtractor | None = field(
+        default=None,
+        kw_only=True,
+    )
+    """Optional callback that attaches SDK-only custom data to the tool output item."""
 
     def __post_init__(self) -> None:
         _store_computer_initializer(self)
@@ -1166,6 +1278,12 @@ class ApplyPatchTool:
     If provided, it will be invoked immediately when an approval is needed.
     """
 
+    custom_data_extractor: ApplyPatchToolCustomDataExtractor | None = field(
+        default=None,
+        kw_only=True,
+    )
+    """Optional callback that attaches SDK-only custom data to the tool output item."""
+
     @property
     def type(self) -> str:
         return "apply_patch"
@@ -1184,6 +1302,11 @@ class CustomTool:
     on_approval: CustomToolOnApprovalFunction | None = None
     """Optional handler to auto-approve or reject when approval is required."""
     defer_loading: bool = False
+    custom_data_extractor: CustomToolCustomDataExtractor | None = field(
+        default=None,
+        kw_only=True,
+    )
+    """Optional callback that attaches SDK-only custom data to the tool output item."""
 
     tool_config: CustomToolParam = field(init=False, repr=False)
 
@@ -1743,6 +1866,7 @@ def function_tool(
     timeout_behavior: ToolTimeoutBehavior = "error_as_result",
     timeout_error_function: ToolErrorFunction | None = None,
     defer_loading: bool = False,
+    custom_data_extractor: FunctionToolCustomDataExtractor | None = None,
 ) -> FunctionTool:
     """Overload for usage as @function_tool (no parentheses)."""
     ...
@@ -1766,6 +1890,7 @@ def function_tool(
     timeout_behavior: ToolTimeoutBehavior = "error_as_result",
     timeout_error_function: ToolErrorFunction | None = None,
     defer_loading: bool = False,
+    custom_data_extractor: FunctionToolCustomDataExtractor | None = None,
 ) -> Callable[[ToolFunction[...]], FunctionTool]:
     """Overload for usage as @function_tool(...)."""
     ...
@@ -1789,6 +1914,7 @@ def function_tool(
     timeout_behavior: ToolTimeoutBehavior = "error_as_result",
     timeout_error_function: ToolErrorFunction | None = None,
     defer_loading: bool = False,
+    custom_data_extractor: FunctionToolCustomDataExtractor | None = None,
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
     """
     Decorator to create a FunctionTool from a function. By default, we will:
@@ -1834,6 +1960,8 @@ def function_tool(
             timeout_behavior="error_as_result".
         defer_loading: Whether to hide this tool definition until Responses API tool search
             explicitly loads it.
+        custom_data_extractor: Optional callback that returns SDK-only custom data to attach to
+            the emitted ``ToolCallOutputItem``. The returned mapping is not sent to the model.
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
@@ -1904,6 +2032,7 @@ def function_tool(
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
             defer_loading=defer_loading,
+            custom_data_extractor=custom_data_extractor,
             sync_invoker=is_sync_function_tool,
         )
         return function_tool

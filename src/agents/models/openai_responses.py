@@ -210,6 +210,13 @@ class OpenAIResponsesWebSocketOptions(TypedDict):
     spikes.
     """
 
+    max_size: NotRequired[int | None]
+    """Maximum size in bytes of an incoming websocket message.
+
+    The SDK defaults to ``None`` (no limit). Set an explicit byte limit to bound memory usage
+    for long-lived agent processes running behind proxies or in memory-constrained containers.
+    """
+
 
 class _ResponseStreamWithRequestId:
     """Wrap an SDK event stream and retain the originating request ID."""
@@ -1585,6 +1592,8 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
             connect_kwargs["ping_interval"] = self._websocket_options["ping_interval"]
         if "ping_timeout" in self._websocket_options:
             connect_kwargs["ping_timeout"] = self._websocket_options["ping_timeout"]
+        if "max_size" in self._websocket_options:
+            connect_kwargs["max_size"] = self._websocket_options["max_size"]
 
         return await connect(
             ws_url,

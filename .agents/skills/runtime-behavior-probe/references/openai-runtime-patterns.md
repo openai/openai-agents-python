@@ -27,6 +27,17 @@ Do not read these variables automatically. Before a live probe uses any of them,
 
 If the task targets another standard integration, use that integration's expected default variable names under the same rule.
 
+## Environment False Signals
+
+Before attributing a failure to the patch under review, exclude environment and source-selection problems with a control run.
+
+- Confirm the commit and worktree under test. When editable installs, shared environments, `PYTHONPATH`, or generated artifacts can select stale code, verify the imported package path and rebuild before probing.
+- Run base and head controls with the same interpreter, dependencies, environment variables, and command shape.
+- Treat proxy initialization, sandbox denials, unavailable containers, expired snapshots, authentication, quotas, rate limits, service outages, and stale caches as environment conditions until a controlled rerun ties them to the patch.
+- Never print proxy URLs or credentials. Change only the minimum in-scope environment or disposable state needed for the control run, and record which variable names or constraints changed.
+
+In the final report, distinguish code failures, unsupported configurations, environment blockers, and inconclusive probes. Do not combine them into one failed-test count.
+
 ## Responses API Probe Patterns
 
 For Responses API work, start from the uncertainty instead of from the full feature surface.

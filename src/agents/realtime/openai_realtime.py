@@ -96,17 +96,20 @@ from agents.tool import (
 )
 from agents.util._types import MaybeAwaitable
 
+from .. import _debug
 from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper, TContext
 from ..version import __version__
+from ._tool_filtering import filter_enabled_tools, filter_statically_enabled_tools
+from ._tool_validation import validate_realtime_tool_names
 from .agent import RealtimeAgent
 from .config import (
     RealtimeModelTracingConfig,
     RealtimeRunConfig,
     RealtimeSessionModelSettings,
 )
-from .handoffs import realtime_handoff
+from .handoffs import collect_enabled_handoffs, filter_enabled_handoffs
 from .items import RealtimeMessageItem, RealtimeToolCallItem
 from .model import (
     RealtimeModel,
@@ -184,6 +187,36 @@ AllRealtimeServerEvents = Annotated[
 ]
 
 ServerEventTypeAdapter: TypeAdapter[AllRealtimeServerEvents] | None = None
+
+
+def _server_event_validation_summary(error: BaseException) -> str:
+    if isinstance(error, pydantic.ValidationError):
+        return f"{error.error_count()} validation error(s)"
+
+    return error.__class__.__name__
+
+
+def _server_event_identity(event: Any) -> tuple[Any, Any]:
+    if not isinstance(event, dict):
+        return "unknown", None
+
+    return event.get("type", "unknown"), event.get("event_id")
+
+
+def _log_server_event_validation_failure(event: Any, error: BaseException) -> str:
+    event_type, event_id = _server_event_identity(event)
+
+    if _debug.DONT_LOG_MODEL_DATA:
+        logger.error(
+            "Failed to validate server event type=%s event_id=%s: %s",
+            event_type,
+            event_id,
+            _server_event_validation_summary(error),
+        )
+    else:
+        logger.error(f"Failed to validate server event: {event}", exc_info=True)
+
+    return str(event_type)
 
 
 @dataclass(frozen=True)
@@ -406,24 +439,7 @@ def _normalize_custom_voice_for_server_event_validation(value: Any) -> Any:
 async def _collect_enabled_handoffs(
     agent: RealtimeAgent[Any], context_wrapper: RunContextWrapper[Any]
 ) -> list[Handoff[Any, RealtimeAgent[Any]]]:
-    handoffs: list[Handoff[Any, RealtimeAgent[Any]]] = []
-    for handoff_item in agent.handoffs:
-        if isinstance(handoff_item, Handoff):
-            handoffs.append(handoff_item)
-        elif isinstance(handoff_item, RealtimeAgent):
-            handoffs.append(realtime_handoff(handoff_item))
-
-    async def _check_handoff_enabled(handoff_obj: Handoff[Any, RealtimeAgent[Any]]) -> bool:
-        attr = handoff_obj.is_enabled
-        if isinstance(attr, bool):
-            return attr
-        res = attr(context_wrapper, agent)
-        if inspect.isawaitable(res):
-            return await res
-        return res
-
-    results = await asyncio.gather(*(_check_handoff_enabled(h) for h in handoffs))
-    return [h for h, ok in zip(handoffs, results, strict=False) if ok]
+    return await collect_enabled_handoffs(agent, context_wrapper)
 
 
 async def _build_model_settings_from_agent(
@@ -450,6 +466,18 @@ async def _build_model_settings_from_agent(
 
     if starting_settings:
         updated_settings.update(starting_settings)
+        if "tools" in starting_settings:
+            updated_settings["tools"] = await filter_enabled_tools(
+                updated_settings.get("tools") or [],
+                context_wrapper,
+                agent,
+            )
+        if "handoffs" in starting_settings:
+            updated_settings["handoffs"] = await filter_enabled_handoffs(
+                updated_settings.get("handoffs") or [],
+                context_wrapper,
+                agent,
+            )
 
     if run_config and run_config.get("tracing_disabled", False):
         updated_settings["tracing"] = None
@@ -470,6 +498,11 @@ class TransportConfig(TypedDict):
 
     handshake_timeout: NotRequired[float]
     """Time in seconds to wait for the connection handshake to complete."""
+
+    max_size: NotRequired[int | None]
+    """Maximum size in bytes of an incoming websocket message.
+    Defaults to None (no limit). Set an explicit byte limit to bound memory usage for
+    long-lived connections behind proxies or in memory-constrained containers."""
 
 
 class OpenAIRealtimeWebSocketModel(RealtimeModel):
@@ -589,6 +622,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 connect_kwargs["ping_timeout"] = transport_config["ping_timeout"]
             if "handshake_timeout" in transport_config:
                 connect_kwargs["open_timeout"] = transport_config["handshake_timeout"]
+            if "max_size" in transport_config:
+                connect_kwargs["max_size"] = transport_config["max_size"]
 
         return await websockets.connect(url, **connect_kwargs)
 
@@ -1096,12 +1131,11 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 validation_event
             )
         except pydantic.ValidationError as e:
-            logger.error(f"Failed to validate server event: {event}", exc_info=True)
+            _log_server_event_validation_failure(event, e)
             await self._emit_event(RealtimeModelErrorEvent(error=e))
             return
         except Exception as e:
-            event_type = event.get("type", "unknown") if isinstance(event, dict) else "unknown"
-            logger.error(f"Failed to validate server event: {event}", exc_info=True)
+            event_type = _log_server_event_validation_failure(event, e)
             exception_event = RealtimeModelExceptionEvent(
                 exception=e,
                 context=f"Failed to validate server event: {event_type}",
@@ -1533,7 +1567,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self, tools: list[Tool], handoffs: list[Handoff]
     ) -> list[OpenAISessionFunction]:
         converted_tools: list[OpenAISessionFunction] = []
-        for tool in tools:
+        enabled_tools = filter_statically_enabled_tools(tools)
+        enabled_handoffs = [handoff for handoff in handoffs if handoff.is_enabled is not False]
+        for tool in enabled_tools:
             if not isinstance(tool, FunctionTool):
                 raise UserError(f"Tool {tool.name} is unsupported. Must be a function tool.")
             ensure_function_tool_supports_responses_only_features(
@@ -1549,7 +1585,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 )
             )
 
-        for handoff in handoffs:
+        validate_realtime_tool_names(enabled_tools, enabled_handoffs)
+
+        for handoff in enabled_handoffs:
             converted_tools.append(
                 OpenAISessionFunction(
                     name=handoff.tool_name,
@@ -1597,6 +1635,18 @@ class OpenAIRealtimeSIPModel(OpenAIRealtimeWebSocketModel):
 
         if overrides:
             merged_settings.update(overrides)
+            if "tools" in overrides:
+                merged_settings["tools"] = await filter_enabled_tools(
+                    merged_settings.get("tools") or [],
+                    context_wrapper,
+                    agent,
+                )
+            if "handoffs" in overrides:
+                merged_settings["handoffs"] = await filter_enabled_handoffs(
+                    merged_settings.get("handoffs") or [],
+                    context_wrapper,
+                    agent,
+                )
 
         model = OpenAIRealtimeWebSocketModel()
         return model._get_session_config(merged_settings)

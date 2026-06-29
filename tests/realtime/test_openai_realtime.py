@@ -447,6 +447,36 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         assert error_event.type == "error"
 
     @pytest.mark.asyncio
+    async def test_handle_invalid_event_schema_redacts_payload_from_logs(self, model, monkeypatch):
+        """Test that invalid event logs omit payload data when model data logging is disabled."""
+        mock_listener = AsyncMock()
+        model.add_listener(mock_listener)
+        monkeypatch.setattr(
+            "agents.realtime.openai_realtime._debug.DONT_LOG_MODEL_DATA",
+            True,
+        )
+
+        invalid_event = {
+            "type": "response.output_audio.delta",
+            "event_id": "evt_123",
+            "delta": "secret transcript",
+        }
+
+        with patch("agents.realtime.openai_realtime.logger") as mock_logger:
+            await model._handle_ws_event(invalid_event)
+
+        mock_logger.error.assert_called_once()
+        logged_call = str(mock_logger.error.call_args)
+        assert "secret transcript" not in logged_call
+        assert "response.output_audio.delta" in logged_call
+        assert "evt_123" in logged_call
+        assert mock_logger.error.call_args.kwargs.get("exc_info") is not True
+
+        assert mock_listener.on_event.call_count == 2
+        error_event = mock_listener.on_event.call_args_list[1][0][0]
+        assert error_event.type == "error"
+
+    @pytest.mark.asyncio
     async def test_custom_voice_response_events_update_response_sequencer(self, model, monkeypatch):
         """Dict-shaped custom voices should not block response.create sequencing."""
         payload_types: list[str] = []
@@ -2138,6 +2168,40 @@ class TestTransportIntegration:
                 await model.connect(config)
 
         assert captured_kwargs.get("open_timeout") == 0.75
+
+    @pytest.mark.asyncio
+    async def test_max_size_config_is_applied(self):
+        """Test that max_size is passed through to websockets.connect."""
+        captured_kwargs: dict[str, Any] = {}
+
+        async def capture_connect(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            mock_ws = AsyncMock()
+            mock_ws.close_code = None
+            return mock_ws
+
+        transport: TransportConfig = {
+            "max_size": 8 * 1024 * 1024,
+        }
+        model = OpenAIRealtimeWebSocketModel(transport_config=transport)
+        with patch("websockets.connect", side_effect=capture_connect):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                config: RealtimeModelConfig = {
+                    "api_key": "test-key",
+                    "url": "ws://localhost:8080/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+                }
+                await model.connect(config)
+
+        assert captured_kwargs.get("max_size") == 8 * 1024 * 1024
 
     @pytest.mark.asyncio
     async def test_ping_timeout_disabled_vs_enabled(self):

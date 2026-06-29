@@ -370,3 +370,26 @@ def test_tool_call_output_item_mixed_list_partial_invalid_not_converted() -> Non
     # All-or-nothing: if any item is invalid, convert entire list to string
     assert isinstance(payload["output"], str)
     assert payload["output"] == "[{'type': 'text', 'text': 'hello'}, {'msg': 'foobar'}]"
+
+
+def test_tool_call_output_item_empty_list_not_converted() -> None:
+    """An empty list has no structured items, so it should stringify rather than
+    produce an empty structured-output list (which would drop the tool result)."""
+    call = _make_tool_call()
+    payload = ItemHelpers.tool_call_output_item(call, [])
+
+    assert payload["type"] == "function_call_output"
+    assert payload["call_id"] == call.call_id
+    assert isinstance(payload["output"], str)
+    assert payload["output"] == "[]"
+
+
+def test_tool_call_output_item_empty_tuple_not_converted() -> None:
+    """An empty tuple should stringify, mirroring the empty-list behavior."""
+    call = _make_tool_call()
+    payload = ItemHelpers.tool_call_output_item(call, ())
+
+    assert payload["type"] == "function_call_output"
+    assert payload["call_id"] == call.call_id
+    assert isinstance(payload["output"], str)
+    assert payload["output"] == "()"
