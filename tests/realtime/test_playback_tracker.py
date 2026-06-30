@@ -178,3 +178,63 @@ class TestPlaybackTracker:
         # Test None format (defaults to PCM)
         none_length = calculate_audio_length_ms(None, pcm_bytes)
         assert none_length == pytest.approx(expected_pcm, rel=0, abs=1e-6)
+
+    def test_audio_length_calculation_handles_typed_and_mapping_g711_formats(self):
+        """g711 audio passed as a typed pydantic model, Mapping, or ``audio/pcm*`` string
+        must be measured at the g711 sample rate.
+
+        ``RealtimePlaybackTracker.set_audio_format`` and ``ModelAudioTracker.set_audio_format``
+        accept ``RealtimeAudioFormat``, which is ``str | Mapping | AudioPCM/PCMU/PCMA``.
+        Previously the length calculator only special-cased strings starting with
+        ``g711``, so typed/Mapping g711 formats and the ``audio/pcmu``/``audio/pcma``
+        strings silently fell back to PCM-24kHz math, yielding a ~6x wrong duration
+        and miscalculating truncation offsets on interrupt for SIP/Twilio sessions.
+        """
+        from openai.types.realtime.realtime_audio_formats import (
+            AudioPCM,
+            AudioPCMA,
+            AudioPCMU,
+        )
+
+        from agents.realtime._util import calculate_audio_length_ms
+
+        audio_bytes = b"x" * 80  # at g711 8kHz: 10ms
+        expected_g711 = (len(audio_bytes) / 8_000) * 1000
+        expected_pcm = (len(audio_bytes) / (24_000 * 2)) * 1000
+
+        # Typed pydantic models for g711 should resolve to g711 sample rate.
+        assert calculate_audio_length_ms(
+            AudioPCMU(type="audio/pcmu"), audio_bytes
+        ) == pytest.approx(expected_g711, rel=0, abs=1e-6)
+        assert calculate_audio_length_ms(
+            AudioPCMA(type="audio/pcma"), audio_bytes
+        ) == pytest.approx(expected_g711, rel=0, abs=1e-6)
+        # Typed PCM and Mapping/string equivalents stay on the PCM path.
+        assert calculate_audio_length_ms(
+            AudioPCM(type="audio/pcm", rate=24000), audio_bytes
+        ) == pytest.approx(expected_pcm, rel=0, abs=1e-6)
+
+        # Mapping forms (as accepted by RealtimeAudioFormat).
+        assert calculate_audio_length_ms({"type": "audio/pcmu"}, audio_bytes) == pytest.approx(
+            expected_g711, rel=0, abs=1e-6
+        )
+        assert calculate_audio_length_ms({"type": "audio/pcma"}, audio_bytes) == pytest.approx(
+            expected_g711, rel=0, abs=1e-6
+        )
+
+        # API-style ``audio/pcm*`` strings should also be honored.
+        assert calculate_audio_length_ms("audio/pcmu", audio_bytes) == pytest.approx(
+            expected_g711, rel=0, abs=1e-6
+        )
+        assert calculate_audio_length_ms("audio/pcma", audio_bytes) == pytest.approx(
+            expected_g711, rel=0, abs=1e-6
+        )
+
+        # AudioPCMU/AudioPCMA have an Optional `type` field that defaults to None.
+        # The typed-model match must classify them as G.711 even without `type` set.
+        assert calculate_audio_length_ms(AudioPCMU(), audio_bytes) == pytest.approx(
+            expected_g711, rel=0, abs=1e-6
+        )
+        assert calculate_audio_length_ms(AudioPCMA(), audio_bytes) == pytest.approx(
+            expected_g711, rel=0, abs=1e-6
+        )
