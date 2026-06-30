@@ -40,6 +40,8 @@ class FuncSchema:
     strict_json_schema: bool = True
     """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
     as it increases the likelihood of correct JSON input."""
+    skipped_self: bool = False
+    """Whether a leading ``self`` parameter was skipped (method-backed function tools)."""
 
     def to_call_args(self, data: BaseModel) -> tuple[list[Any], dict[str, Any]]:
         """
@@ -50,8 +52,14 @@ class FuncSchema:
         keyword_args: dict[str, Any] = {}
         seen_var_positional = False
 
+        # Skip a leading `self` for method-backed tools; it is supplied by binding,
+        # not by the model, and is not part of the schema.
+        param_items = list(self.signature.parameters.items())
+        if self.skipped_self:
+            param_items = param_items[1:]
+
         # Use enumerate() so we can skip the first parameter if it's context.
-        for idx, (name, param) in enumerate(self.signature.parameters.items()):
+        for idx, (name, param) in enumerate(param_items):
             # If the function takes a RunContextWrapper and this is the first parameter, skip it.
             if self.takes_context and idx == 0:
                 continue
@@ -228,6 +236,7 @@ def function_schema(
     description_override: str | None = None,
     use_docstring_info: bool = True,
     strict_json_schema: bool = True,
+    skip_self: bool = False,
 ) -> FuncSchema:
     """
     Given a Python function, extracts a `FuncSchema` from it, capturing the name, description,
@@ -286,6 +295,17 @@ def function_schema(
     # 2. Inspect function signature and get type hints
     sig = inspect.signature(func)
     params = list(sig.parameters.items())
+
+    # Skip a leading `self` so method-backed tools (decorated instance methods)
+    # validate and serialize correctly: `self` is supplied by binding, and the
+    # next parameter is what should be evaluated for context detection. Gated by
+    # `skip_self` (set by the caller for method-backed tools) so an ordinary
+    # function whose first argument is literally named `self` is unaffected.
+    skipped_self = False
+    if skip_self and params and params[0][0] == "self":
+        params = params[1:]
+        skipped_self = True
+
     takes_context = False
     filtered_params = []
 
@@ -421,4 +441,5 @@ def function_schema(
         signature=sig,
         takes_context=takes_context,
         strict_json_schema=strict_json_schema,
+        skipped_self=skipped_self,
     )
