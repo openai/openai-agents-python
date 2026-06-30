@@ -34,6 +34,7 @@ from agents import (
 )
 from agents.tool import default_tool_error_function
 from agents.tool_context import ToolContext
+from openai.types.responses import ResponseFunctionToolCall
 
 
 def argless_function() -> str:
@@ -1063,3 +1064,35 @@ def test_function_tool_timeout_error_function_must_be_callable() -> None:
             on_invoke_tool=_noop_on_invoke_tool,
             timeout_error_function=cast(Any, "not-callable"),
         )
+
+
+async def test_on_invoke_tool_rejects_non_tool_context() -> None:
+    """Calling on_invoke_tool with a non-context value should fail fast and clearly."""
+
+    @function_tool
+    def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    with pytest.raises(TypeError, match="on_invoke_tool requires a ToolContext"):
+        await add.on_invoke_tool(cast(Any, None), '{"a": 1, "b": 2}')
+
+    with pytest.raises(TypeError, match="on_invoke_tool requires a ToolContext"):
+        await add.on_invoke_tool(cast(Any, "not a context"), '{"a": 1, "b": 2}')
+
+    # A valid ToolContext should still work.
+    tool_call = ResponseFunctionToolCall(
+        type="function_call",
+        name="add",
+        call_id="call-add",
+        arguments='{"a": 1, "b": 2}',
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="add",
+        tool_call_id="call-add",
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+    result = await add.on_invoke_tool(tool_context, tool_call.arguments)
+    assert result == 3
