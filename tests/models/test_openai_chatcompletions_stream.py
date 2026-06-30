@@ -161,6 +161,66 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
     assert completed_resp.usage.output_tokens_details.reasoning_tokens == 3
 
 
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_close_closes_provider_stream_with_async_close(
+    monkeypatch,
+) -> None:
+    chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content="Hi"))],
+    )
+
+    class ClosableChatStream:
+        def __init__(self) -> None:
+            self._yielded = False
+            self.close_calls = 0
+
+        def __aiter__(self) -> "ClosableChatStream":
+            return self
+
+        async def __anext__(self) -> ChatCompletionChunk:
+            if self._yielded:
+                raise StopAsyncIteration
+            self._yielded = True
+            return chunk
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    provider_stream = ClosableChatStream()
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return _empty_response(), provider_stream
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    stream = model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+    stream_agen = cast(Any, stream)
+
+    event = await stream_agen.__anext__()
+    assert event.type == "response.created"
+
+    await stream_agen.aclose()
+
+    assert provider_stream.close_calls == 1
+
+
 @pytest.mark.asyncio
 async def test_stream_handler_filters_multiple_choices_by_default(
     caplog: pytest.LogCaptureFixture,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import time
 from collections.abc import AsyncIterator
@@ -94,6 +96,31 @@ class OpenAIChatCompletionsModel(Model):
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)
+
+    async def _maybe_aclose_async_iterator(self, iterator: Any) -> None:
+        aclose = getattr(iterator, "aclose", None)
+        if callable(aclose):
+            await aclose()
+            return
+
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            close_result = close()
+            if inspect.isawaitable(close_result):
+                await close_result
+
+    def _schedule_async_iterator_close(self, iterator: Any) -> None:
+        task = asyncio.create_task(self._maybe_aclose_async_iterator(iterator))
+        task.add_done_callback(self._consume_background_cleanup_task_result)
+
+    @staticmethod
+    def _consume_background_cleanup_task_result(task: asyncio.Task[Any]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug(f"Background stream cleanup failed after cancellation: {exc}")
 
     def _validate_official_openai_input_content_types(
         self, request_input: str | list[TResponseInputItem]
@@ -307,16 +334,35 @@ class OpenAIChatCompletionsModel(Model):
             else:
                 stream_for_handler = stream
 
-            async for chunk in ChatCmplStreamHandler.handle_stream(
-                response,
-                cast(AsyncStream[ChatCompletionChunk], stream_for_handler),
-                model=self.model,
-                strict_feature_validation=self._strict_feature_validation,
-            ):
-                yield chunk
+            close_stream_in_background = False
+            yielded_terminal_event = False
+            try:
+                async for chunk in ChatCmplStreamHandler.handle_stream(
+                    response,
+                    cast(AsyncStream[ChatCompletionChunk], stream_for_handler),
+                    model=self.model,
+                    strict_feature_validation=self._strict_feature_validation,
+                ):
+                    if chunk.type == "response.completed":
+                        final_response = chunk.response
+                        yielded_terminal_event = True
 
-                if chunk.type == "response.completed":
-                    final_response = chunk.response
+                    yield chunk
+            except asyncio.CancelledError:
+                close_stream_in_background = True
+                self._schedule_async_iterator_close(stream)
+                raise
+            finally:
+                if not close_stream_in_background:
+                    try:
+                        await self._maybe_aclose_async_iterator(stream)
+                    except Exception as exc:
+                        if yielded_terminal_event:
+                            logger.debug(
+                                f"Ignoring stream cleanup error after terminal event: {exc}"
+                            )
+                        else:
+                            raise
 
             if tracing.include_data() and final_response:
                 span_generation.span_data.output = [final_response.model_dump()]
