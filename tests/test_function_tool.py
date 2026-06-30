@@ -155,6 +155,26 @@ async def test_simple_function():
         )
 
 
+def test_function_tool_exposes_original_function_without_wrapping() -> None:
+    tool = function_tool(simple_function)
+
+    assert tool.func is simple_function
+    assert not callable(tool)
+    assert copy.copy(tool).func is simple_function
+    assert dataclasses.replace(tool, name="renamed").func is simple_function
+
+
+def test_manual_function_tool_has_no_original_function() -> None:
+    tool = FunctionTool(
+        name="manual",
+        description="manual tool",
+        params_json_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        on_invoke_tool=lambda _ctx, _input: asyncio.sleep(0),
+    )
+
+    assert tool.func is None
+
+
 @pytest.mark.asyncio
 async def test_sync_function_runs_via_to_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"to_thread": 0, "func": 0}

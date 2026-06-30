@@ -493,6 +493,14 @@ class FunctionTool:
     _emit_tool_origin: bool = field(default=True, kw_only=True, repr=False)
     """Whether runtime item generation should emit tool origin metadata for this tool."""
 
+    _func: ToolFunction[...] | None = field(default=None, kw_only=True, repr=False)
+    """Original callable when this tool was created from @function_tool."""
+
+    @property
+    def func(self) -> ToolFunction[...] | None:
+        """Return the original callable for tools created with @function_tool."""
+        return self._func
+
     @property
     def qualified_name(self) -> str:
         """Return the public qualified name used to identify this function tool."""
@@ -619,6 +627,7 @@ def _build_wrapped_function_tool(
     sync_invoker: bool = False,
     mcp_title: str | None = None,
     tool_origin: ToolOrigin | None = None,
+    original_function: ToolFunction[...] | None = None,
 ) -> FunctionTool:
     """Create a FunctionTool with copied-tool-aware failure handling bound in one place."""
     on_invoke_tool = _with_context_function_tool_failure_error_handler(
@@ -646,6 +655,7 @@ def _build_wrapped_function_tool(
             custom_data_extractor=custom_data_extractor,
             _mcp_title=mcp_title,
             _tool_origin=tool_origin,
+            _func=original_function,
         ),
         failure_error_function,
     )
@@ -2034,6 +2044,7 @@ def function_tool(
             defer_loading=defer_loading,
             custom_data_extractor=custom_data_extractor,
             sync_invoker=is_sync_function_tool,
+            original_function=the_func,
         )
         return function_tool
 
