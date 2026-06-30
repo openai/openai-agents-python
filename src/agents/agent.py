@@ -60,6 +60,7 @@ from .util._types import MaybeAwaitable
 if TYPE_CHECKING:
     from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 
+    from .connectors import Connector
     from .items import ToolApprovalItem
     from .lifecycle import AgentHooks, RunHooks
     from .mcp import MCPServer
@@ -199,10 +200,23 @@ class AgentBase(Generic[TContext]):
     mcp_config: MCPConfig = field(default_factory=lambda: MCPConfig())
     """Configuration for MCP servers."""
 
+    def _get_connector_tools(self) -> list[Tool]:
+        connector_tools: list[Tool] = []
+        for connector in getattr(self, "connectors", ()):
+            connector_tools.extend(connector.tools)
+        return connector_tools
+
+    def _get_connector_mcp_servers(self) -> list[MCPServer]:
+        connector_mcp_servers: list[MCPServer] = []
+        for connector in getattr(self, "connectors", ()):
+            connector_mcp_servers.extend(connector.mcp_servers)
+        return connector_mcp_servers
+
     async def _get_mcp_tool_reserved_names(
         self, run_context: RunContextWrapper[TContext]
     ) -> set[str]:
-        reserved_tool_names = {tool.name for tool in self.tools if isinstance(tool, FunctionTool)}
+        direct_tools = [*self.tools, *self._get_connector_tools()]
+        reserved_tool_names = {tool.name for tool in direct_tools if isinstance(tool, FunctionTool)}
 
         async def _check_handoff_enabled(handoff_obj: Handoff[Any, Any]) -> bool:
             attr = handoff_obj.is_enabled
@@ -233,8 +247,9 @@ class AgentBase(Generic[TContext]):
             if include_server_in_tool_names
             else None
         )
+        mcp_servers = [*self.mcp_servers, *self._get_connector_mcp_servers()]
         return await MCPUtil.get_all_function_tools(
-            self.mcp_servers,
+            mcp_servers,
             convert_schemas_to_strict,
             run_context,
             self,
@@ -259,8 +274,9 @@ class AgentBase(Generic[TContext]):
                 return bool(await res)
             return bool(res)
 
-        results = await asyncio.gather(*(_check_tool_enabled(t) for t in self.tools))
-        enabled: list[Tool] = [t for t, ok in zip(self.tools, results, strict=False) if ok]
+        direct_tools = [*self.tools, *self._get_connector_tools()]
+        results = await asyncio.gather(*(_check_tool_enabled(t) for t in direct_tools))
+        enabled: list[Tool] = [t for t, ok in zip(direct_tools, results, strict=False) if ok]
         all_tools: list[Tool] = prune_orphaned_tool_search_tools([*mcp_tools, *enabled])
         _validate_codex_tool_name_collisions(all_tools)
         return all_tools
@@ -367,6 +383,9 @@ class Agent(AgentBase, Generic[TContext]):
     reset_tool_choice: bool = True
     """Whether to reset the tool choice to the default value after a tool has been called. Defaults
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
+
+    connectors: list[Connector] = field(default_factory=list)
+    """Connector packages that provide reusable tools and MCP servers for this agent."""
 
     def __post_init__(self):
         from typing import get_origin
@@ -483,6 +502,20 @@ class Agent(AgentBase, Generic[TContext]):
                 f"Agent reset_tool_choice must be a boolean, "
                 f"got {type(self.reset_tool_choice).__name__}"
             )
+
+        if not isinstance(self.connectors, list):
+            raise TypeError(
+                f"Agent connectors must be a list, got {type(self.connectors).__name__}"
+            )
+        if self.connectors:
+            from .connectors import Connector
+
+            for connector in self.connectors:
+                if not isinstance(connector, Connector):
+                    raise TypeError(
+                        "Agent connectors must contain Connector instances, "
+                        f"got {type(connector).__name__}"
+                    )
 
     def clone(self, **kwargs: Any) -> Agent[TContext]:
         """Make a copy of the agent, with the given arguments changed.
