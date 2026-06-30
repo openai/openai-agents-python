@@ -53,6 +53,8 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
+_STREAMING_CANCEL_TASK_DRAIN_SECONDS = 0.25
+
 
 @dataclass(frozen=True)
 class AgentToolInvocation:
@@ -677,15 +679,14 @@ class RunResultStreaming(RunResultBase):
         if mode == "immediate":
             # Existing behavior - immediate shutdown
             self._cleanup_tasks()  # Cancel all running tasks
-            self.is_complete = True  # Mark the run as complete to stop event streaming
 
             while not self._input_guardrail_queue.empty():
                 self._input_guardrail_queue.get_nowait()
 
             # Unblock any streamers waiting on the event queue.
-            self._event_queue.put_nowait(QueueCompleteSentinel())
             if not self._waiting_on_event_queue:
                 self._drain_event_queue()
+            self._event_queue.put_nowait(QueueCompleteSentinel())
 
         elif mode == "after_turn":
             # Soft cancel - just set the flag
@@ -735,7 +736,8 @@ class RunResultStreaming(RunResultBase):
                 if isinstance(item, QueueCompleteSentinel):
                     # Await input guardrails if they are still running, so late
                     # exceptions are captured.
-                    await self._await_task_safely(self._input_guardrails_task)
+                    if self._cancel_mode != "immediate":
+                        await self._await_task_safely(self._input_guardrails_task)
 
                     self._event_queue.task_done()
 
@@ -752,6 +754,11 @@ class RunResultStreaming(RunResultBase):
                     # Cancellation should return promptly, so avoid waiting on long-running tasks.
                     # Tasks have already been cancelled above.
                     self._cleanup_tasks()
+                    self.is_complete = True
+                elif self._cancel_mode == "immediate":
+                    await self._drain_cancelled_tasks()
+                    self._check_errors()
+                    self.is_complete = True
                 else:
                     # Ensure main execution completes before cleanup to avoid race conditions
                     # with session operations.
@@ -764,7 +771,7 @@ class RunResultStreaming(RunResultBase):
                     # Safely terminate all background tasks after main execution has finished.
                     self._cleanup_tasks()
 
-                if not cancelled:
+                if not cancelled and self._cancel_mode != "immediate":
                     await self._run_sandbox_cleanup()
             finally:
                 # Allow any pending callbacks (e.g., cancellation handlers) to enqueue their
@@ -845,6 +852,45 @@ class RunResultStreaming(RunResultBase):
 
         if self._output_guardrails_task and not self._output_guardrails_task.done():
             self._output_guardrails_task.cancel()
+
+    def _owned_background_tasks(self) -> list[asyncio.Task[Any]]:
+        return [
+            task
+            for task in (
+                self.run_loop_task,
+                self._input_guardrails_task,
+                self._output_guardrails_task,
+            )
+            if task is not None
+        ]
+
+    async def _drain_cancelled_tasks(self) -> None:
+        tasks = self._owned_background_tasks()
+        if not tasks:
+            return
+
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+
+        done, pending = await asyncio.wait(
+            tasks,
+            timeout=_STREAMING_CANCEL_TASK_DRAIN_SECONDS,
+        )
+        if done:
+            await asyncio.gather(*done, return_exceptions=True)
+
+        for task in pending:
+            task.add_done_callback(self._consume_background_task_result)
+
+    @staticmethod
+    def _consume_background_task_result(task: asyncio.Task[Any]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug(f"Background streaming task failed after cancellation: {exc}")
 
     def __str__(self) -> str:
         return pretty_print_run_result_streaming(self)

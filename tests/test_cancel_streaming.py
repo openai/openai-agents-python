@@ -5,7 +5,8 @@ import time
 import pytest
 from openai.types.responses import ResponseCompletedEvent
 
-from agents import Agent, Runner
+from agents import Agent, Runner, RunResultStreaming
+from agents.run_context import RunContextWrapper
 from agents.stream_events import RawResponsesStreamEvent
 
 from .fake_model import FakeModel
@@ -126,12 +127,96 @@ async def test_cancel_cleans_up_resources():
     async for _ in result.stream_events():
         result.cancel()
         break
+    remaining_events = [event async for event in result.stream_events()]
     # After cancel, queues should be empty and is_complete True
+    assert remaining_events == []
     assert result.is_complete, "Result should be marked complete after cancel."
     assert result._event_queue.empty(), "Event queue should be empty after cancel."
     assert result._input_guardrail_queue.empty(), (
         "Input guardrail queue should be empty after cancel."
     )
+
+
+@pytest.mark.asyncio
+async def test_cancel_immediate_drains_owned_tasks_before_marking_complete():
+    result = RunResultStreaming(
+        input="hi",
+        new_items=[],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=RunContextWrapper(context=None),
+        current_agent=Agent(name="A", model=FakeModel()),
+        current_turn=0,
+        max_turns=1,
+        _current_agent_output_schema=None,
+        trace=None,
+    )
+    cleanup_finished = [asyncio.Event() for _ in range(3)]
+
+    async def wait_until_cancelled(cleanup_event: asyncio.Event) -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            cleanup_event.set()
+
+    tasks = [asyncio.create_task(wait_until_cancelled(event)) for event in cleanup_finished]
+    (
+        result.run_loop_task,
+        result._input_guardrails_task,
+        result._output_guardrails_task,
+    ) = tasks
+
+    await asyncio.sleep(0)
+    result.cancel(mode="immediate")
+
+    assert result.is_complete is False
+
+    events = [event async for event in result.stream_events()]
+
+    assert events == []
+    assert result.is_complete is True
+    assert all(task.done() for task in tasks)
+    assert all(event.is_set() for event in cleanup_finished)
+
+
+@pytest.mark.asyncio
+async def test_stream_events_timeout_marks_result_complete_without_sentinel():
+    result = RunResultStreaming(
+        input="hi",
+        new_items=[],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=RunContextWrapper(context=None),
+        current_agent=Agent(name="A", model=FakeModel()),
+        current_turn=0,
+        max_turns=1,
+        _current_agent_output_schema=None,
+        trace=None,
+    )
+
+    async def wait_forever() -> None:
+        await asyncio.Event().wait()
+
+    result.run_loop_task = asyncio.create_task(wait_forever())
+    event_iter = result.stream_events().__aiter__()
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(event_iter.__anext__(), timeout=0.01)
+
+    assert result.is_complete is True
+
+    remaining_events = [event async for event in result.stream_events()]
+
+    assert remaining_events == []
 
 
 @pytest.mark.asyncio
@@ -145,7 +230,9 @@ async def test_cancel_immediate_mode_explicit():
     async for _ in result.stream_events():
         result.cancel(mode="immediate")
         break
+    remaining_events = [event async for event in result.stream_events()]
 
+    assert remaining_events == []
     assert result.is_complete
     assert result._event_queue.empty()
     assert result._cancel_mode == "immediate"
