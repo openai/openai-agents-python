@@ -448,6 +448,32 @@ async def test_add_empty_items_list(fake_dapr_client: FakeDaprClient):
         await session.close()
 
 
+async def test_metadata_preserves_created_at(fake_dapr_client: FakeDaprClient):
+    """add_items must preserve created_at across writes; only updated_at advances."""
+    session = await _create_test_session(fake_dapr_client)
+    try:
+        await session.add_items([{"role": "user", "content": "first"}])
+        first_meta_raw = fake_dapr_client._state[session._metadata_key].decode("utf-8")
+        first_meta = json.loads(first_meta_raw)
+        first_created = first_meta["created_at"]
+        first_updated = first_meta["updated_at"]
+
+        # Wait one second so timestamps are guaranteed to differ.
+        import time as _time
+
+        _time.sleep(1)
+
+        await session.add_items([{"role": "user", "content": "second"}])
+        second_meta = json.loads(fake_dapr_client._state[session._metadata_key].decode("utf-8"))
+
+        assert second_meta["created_at"] == first_created, (
+            "created_at must be preserved across add_items calls"
+        )
+        assert int(second_meta["updated_at"]) >= int(first_updated)
+    finally:
+        await session.close()
+
+
 async def test_unicode_content(fake_dapr_client: FakeDaprClient):
     """Test that session correctly stores and retrieves unicode/non-ASCII content."""
     session = await _create_test_session(fake_dapr_client)
