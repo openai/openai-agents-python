@@ -372,3 +372,41 @@ async def test_voicepipeline_multi_turn_on_start_exception_does_not_abort() -> N
 
     assert events[-1] == "session_ended"
     assert "error" not in events
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_empty_workflow_yield_emits_turn_ended() -> None:
+    # Workflow yields only an empty string (e.g. an LLM keepalive delta).
+    # `turn_started` must still be balanced by `turn_ended` even though no
+    # audio is synthesized.
+    fake_stt = FakeSTT(["first"])
+    workflow = FakeWorkflow([[""]])
+    fake_tts = FakeTTS()
+    config = VoicePipelineConfig(tts_settings=TTSModelSettings(buffer_size=1))
+    pipeline = VoicePipeline(
+        workflow=workflow, stt_model=fake_stt, tts_model=fake_tts, config=config
+    )
+    audio_input = AudioInput(buffer=np.zeros(2, dtype=np.int16))
+    result = await pipeline.run(audio_input)
+    events, audio_chunks = await asyncio.wait_for(extract_events(result), timeout=2.0)
+    assert events == ["turn_started", "turn_ended", "session_ended"]
+    assert audio_chunks == []
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_empty_turn_followed_by_real_turn_balances_lifecycle() -> None:
+    # An empty workflow yield followed by a non-empty turn must still
+    # produce `turn_started` for the second turn; otherwise the dispatcher's
+    # stale `turn_ended` could finish a span that belongs to the next turn.
+    fake_stt = FakeSTT(["first", "second"])
+    workflow = FakeWorkflow([[""], ["hello"]])
+    fake_tts = FakeTTS()
+    config = VoicePipelineConfig(tts_settings=TTSModelSettings(buffer_size=1))
+    pipeline = VoicePipeline(
+        workflow=workflow, stt_model=fake_stt, tts_model=fake_tts, config=config
+    )
+    streamed_audio_input = await FakeStreamedAudioInput.get(count=2)
+    result = await pipeline.run(streamed_audio_input)
+    events, _ = await asyncio.wait_for(extract_events(result), timeout=2.0)
+    lifecycle = [e for e in events if e in {"turn_started", "turn_ended"}]
+    assert lifecycle == ["turn_started", "turn_ended", "turn_started", "turn_ended"]
