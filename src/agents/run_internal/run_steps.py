@@ -208,6 +208,12 @@ class SingleStepResult:
     processed_response: ProcessedResponse | None = None
     """The processed model response. This is needed for resuming from interruptions."""
 
+    preceding_model_responses: list[ModelResponse] = dataclasses.field(default_factory=list)
+    """Additional model responses produced earlier in this step that precede ``model_response``.
+    Used when a single step makes more than one model call (e.g. deferred structured output makes a
+    free-text call and then a structuring call); the runner appends these to ``raw_responses``
+    before ``model_response`` so the raw-response count matches the number of model calls."""
+
     @property
     def generated_items(self) -> list[RunItem]:
         """Items generated during the agent run (i.e. everything generated after

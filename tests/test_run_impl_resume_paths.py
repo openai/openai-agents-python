@@ -5,7 +5,7 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 import agents.run as run_module
-from agents import Agent, Runner, function_tool
+from agents import Agent, ModelSettings, Runner, function_tool
 from agents.agent import ToolsToFinalOutputResult
 from agents.items import (
     MessageOutputItem,
@@ -218,7 +218,11 @@ async def test_resumed_run_again_resets_persisted_count(monkeypatch) -> None:
             tool_output_guardrail_results=[],
         )
 
-    monkeypatch.setattr(run_module, "resolve_interrupted_turn", fake_resolve_interrupted_turn)
+    monkeypatch.setattr(
+        run_module,
+        "resolve_interrupted_turn_with_deferred_structuring",
+        fake_resolve_interrupted_turn,
+    )
     monkeypatch.setattr(run_module, "run_single_turn", fake_run_single_turn)
 
     runner = run_module.AgentRunner()
@@ -289,7 +293,11 @@ async def test_resumed_interruption_passes_server_managed_conversation_flag(
             tool_output_guardrail_results=[],
         )
 
-    monkeypatch.setattr(run_module, "resolve_interrupted_turn", fake_resolve_interrupted_turn)
+    monkeypatch.setattr(
+        run_module,
+        "resolve_interrupted_turn_with_deferred_structuring",
+        fake_resolve_interrupted_turn,
+    )
 
     runner = run_module.AgentRunner()
     result = await runner.run(agent, state, run_config=RunConfig())
@@ -446,3 +454,63 @@ async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_appro
             isinstance(item, ToolCallOutputItem) and item.output == "one"
             for item in result.new_step_items
         )
+
+
+@pytest.mark.asyncio
+async def test_resumed_deferred_structured_output_with_approved_stop_on_first_tool() -> None:
+    """Deferred structured output must still apply when a run pauses for tool approval and the
+    approved tool finalizes the turn (tool_use_behavior='stop_on_first_tool'). The resumed run must
+    return the declared structured output (not the raw tool result) and fire end hooks exactly once.
+    """
+    from pydantic import BaseModel
+
+    class _Weather(BaseModel):
+        city: str
+        temp: int
+
+    async def get_weather() -> str:
+        return "sunny"
+
+    tool = function_tool(get_weather, name_override="get_weather", needs_approval=True)
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[tool],
+        output_type=_Weather,
+        tool_use_behavior="stop_on_first_tool",
+        model_settings=ModelSettings(defer_structured_output_until_done=True),
+    )
+    # Turn 1 (first run): the model calls the approval-gated tool -> run interrupts.
+    # Resume: the approved tool finalizes the turn (stop_on_first_tool), then the deferred
+    # structuring pass makes one model call that returns the schema-valid JSON.
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("get_weather", "{}", call_id="call-1")],
+            [get_text_message(json.dumps({"city": "Oakland", "temp": 21}))],
+        ]
+    )
+
+    end_outputs: list[Any] = []
+
+    class _CountingRunHooks(RunHooks[Any]):
+        async def on_agent_end(self, context, agent, output):
+            end_outputs.append(output)
+
+    hooks = _CountingRunHooks()
+
+    first = await Runner.run(agent, input="what's the weather?", hooks=hooks)
+    assert first.interruptions
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    resumed = await Runner.run(agent, state, hooks=hooks)
+
+    expected = _Weather(city="Oakland", temp=21)
+    assert isinstance(resumed.final_output, _Weather)
+    assert resumed.final_output == expected
+    # End hooks fire exactly once, with the structured output (not the raw tool text).
+    assert end_outputs == [expected]
+    # raw_responses must not duplicate the interrupted response: the resumed turn adds only the
+    # new structuring response on top of the (already-recorded) interrupted tool-call response.
+    assert len(resumed.raw_responses) == 2

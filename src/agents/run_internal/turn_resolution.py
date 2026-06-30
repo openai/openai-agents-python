@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, cast
@@ -180,6 +181,10 @@ async def _maybe_finalize_from_tool_results(
     context_wrapper: RunContextWrapper[TContext],
     tool_input_guardrail_results: list[ToolInputGuardrailResult],
     tool_output_guardrail_results: list[ToolOutputGuardrailResult],
+    run_final_output_hooks_fn: Callable[
+        [Agent[Any], RunHooks[Any], RunContextWrapper[Any], Any], Awaitable[None]
+    ]
+    | None = None,
 ) -> SingleStepResult | None:
     check_tool_use = await check_for_final_output_from_tools(
         public_agent, function_results, context_wrapper
@@ -207,6 +212,7 @@ async def _maybe_finalize_from_tool_results(
         context_wrapper=context_wrapper,
         tool_input_guardrail_results=tool_input_guardrail_results,
         tool_output_guardrail_results=tool_output_guardrail_results,
+        run_final_output_hooks_fn=run_final_output_hooks_fn,
     )
 
 
@@ -639,11 +645,21 @@ async def execute_tools_and_side_effects(
     run_config: RunConfig,
     error_handlers: RunErrorHandlers[TContext] | None = None,
     server_manages_conversation: bool = False,
+    run_final_output_hooks_fn: Callable[
+        [Agent[Any], RunHooks[Any], RunContextWrapper[Any], Any], Awaitable[None]
+    ]
+    | None = None,
 ) -> SingleStepResult:
     """Run one turn of the loop, coordinating tools, approvals, guardrails, and handoffs."""
     public_agent = bindings.public_agent
 
     execute_final_output_call = execute_final_output
+    if run_final_output_hooks_fn is not None:
+        # Override the end-of-run hooks for every final-output branch in this turn (e.g. to suppress
+        # them on the intermediate turn of a deferred-structured-output run).
+        execute_final_output_call = functools.partial(
+            execute_final_output, run_final_output_hooks_fn=run_final_output_hooks_fn
+        )
     execute_handoffs_call = execute_handoffs
 
     pre_step_items = list(pre_step_items)
@@ -756,6 +772,7 @@ async def execute_tools_and_side_effects(
         context_wrapper=context_wrapper,
         tool_input_guardrail_results=tool_input_guardrail_results,
         tool_output_guardrail_results=tool_output_guardrail_results,
+        run_final_output_hooks_fn=run_final_output_hooks_fn,
     )
     if tool_final_output is not None:
         return tool_final_output
@@ -858,6 +875,10 @@ async def resolve_interrupted_turn(
     server_manages_conversation: bool = False,
     run_state: RunState | None = None,
     nest_handoff_history_fn: Callable[..., HandoffInputData] | None = None,
+    run_final_output_hooks_fn: Callable[
+        [Agent[Any], RunHooks[Any], RunContextWrapper[Any], Any], Awaitable[None]
+    ]
+    | None = None,
 ) -> SingleStepResult:
     """Continue a turn that was previously interrupted waiting for tool approval."""
     public_agent = bindings.public_agent
@@ -1533,6 +1554,7 @@ async def resolve_interrupted_turn(
         context_wrapper=context_wrapper,
         tool_input_guardrail_results=tool_input_guardrail_results,
         tool_output_guardrail_results=tool_output_guardrail_results,
+        run_final_output_hooks_fn=run_final_output_hooks_fn,
     )
     if tool_final_output is not None:
         return tool_final_output
@@ -2018,6 +2040,10 @@ async def get_single_step_result_from_response(
     server_manages_conversation: bool = False,
     event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] | None = None,
     before_side_effects: Callable[[], Awaitable[None]] | None = None,
+    run_final_output_hooks_fn: Callable[
+        [Agent[Any], RunHooks[Any], RunContextWrapper[Any], Any], Awaitable[None]
+    ]
+    | None = None,
 ) -> SingleStepResult:
     item_agent = bindings.public_agent
     processed_response = process_model_response(
@@ -2054,4 +2080,5 @@ async def get_single_step_result_from_response(
         run_config=run_config,
         error_handlers=error_handlers,
         server_manages_conversation=server_manages_conversation,
+        run_final_output_hooks_fn=run_final_output_hooks_fn,
     )

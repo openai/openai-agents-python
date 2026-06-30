@@ -15,6 +15,7 @@ from openai import APIConnectionError, BadRequestError
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_output_text import AnnotationFileCitation, ResponseOutputText
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
+from pydantic import BaseModel
 from typing_extensions import TypedDict
 
 from agents import (
@@ -57,8 +58,14 @@ from agents.items import (
     ToolCallOutputItem,
     TResponseInputItem,
 )
-from agents.lifecycle import RunHooks
-from agents.run import AgentRunner, get_default_agent_runner, set_default_agent_runner
+from agents.lifecycle import AgentHooks, RunHooks
+from agents.run import (
+    AgentRunner,
+    CallModelData,
+    ModelInputData,
+    get_default_agent_runner,
+    set_default_agent_runner,
+)
 from agents.run_config import _default_trace_include_sensitive_data
 from agents.run_internal.agent_bindings import bind_public_agent
 from agents.run_internal.items import (
@@ -5305,3 +5312,360 @@ async def test_execute_approved_tools_timeout_can_raise_exception() -> None:
             approval_item=approval_item,
             approve=True,
         )
+
+
+class _DeferStructuredOutput(BaseModel):
+    city: str
+    temp: int
+
+
+class _RecordingFakeModel(FakeModel):
+    """FakeModel that records the ``output_schema``/``tools`` of every (non-streamed) call."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.recorded_calls: list[dict[str, Any]] = []
+
+    async def get_response(
+        self,
+        system_instructions: str | None,
+        input: Any,
+        model_settings: Any,
+        tools: Any,
+        output_schema: Any,
+        handoffs: Any,
+        tracing: Any,
+        *,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt: Any | None,
+    ) -> ModelResponse:
+        self.recorded_calls.append(
+            {
+                "output_schema": output_schema,
+                "tools": list(tools),
+                "tool_choice": getattr(model_settings, "tool_choice", None),
+                "system_instructions": system_instructions,
+                "input": input,
+            }
+        )
+        return await super().get_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+
+
+@pytest.mark.asyncio
+async def test_defer_structured_output_until_done_defers_schema():
+    """With the opt-in flag, the schema is suppressed while tools run and applied in an extra
+    tool-free structuring call once the model produces a plain-text answer."""
+    model = _RecordingFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("get_weather", return_value="sunny")],
+        output_type=_DeferStructuredOutput,
+        model_settings=ModelSettings(defer_structured_output_until_done=True),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            # Turn 1: the model calls a tool.
+            [get_function_tool_call("get_weather", "{}")],
+            # Turn 2: the model produces a plain-text (non-JSON) final answer.
+            [get_text_message("It is sunny and warm in Oakland today.")],
+            # Turn 3 (the structuring pass): the JSON matching the schema.
+            [get_text_message(json.dumps({"city": "Oakland", "temp": 21}))],
+        ]
+    )
+
+    result = await Runner.run(agent, input="what's the weather?")
+
+    assert isinstance(result.final_output, _DeferStructuredOutput)
+    assert result.final_output == _DeferStructuredOutput(city="Oakland", temp=21)
+
+    # Three model calls: the tool turn, the free-text turn, and the structuring turn.
+    assert len(model.recorded_calls) == 3
+    # The schema is suppressed on the tool-call and free-text turns.
+    assert model.recorded_calls[0]["output_schema"] is None
+    assert model.recorded_calls[1]["output_schema"] is None
+    # The structuring turn uses the real schema with no tools competing for it.
+    assert model.recorded_calls[2]["output_schema"] is not None
+    assert model.recorded_calls[2]["tools"] == []
+
+
+@pytest.mark.asyncio
+async def test_defer_structured_output_disabled_by_default_keeps_schema():
+    """With the flag off (default), behavior is unchanged: the schema is enforced on each turn
+    and no extra structuring call is made."""
+    model = _RecordingFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("get_weather", return_value="sunny")],
+        output_type=_DeferStructuredOutput,
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("get_weather", "{}")],
+            [get_text_message(json.dumps({"city": "Oakland", "temp": 21}))],
+        ]
+    )
+
+    result = await Runner.run(agent, input="what's the weather?")
+
+    assert result.final_output == _DeferStructuredOutput(city="Oakland", temp=21)
+    # No extra structuring call; the schema is present on every turn.
+    assert len(model.recorded_calls) == 2
+    assert model.recorded_calls[0]["output_schema"] is not None
+    assert model.recorded_calls[1]["output_schema"] is not None
+
+
+@pytest.mark.asyncio
+async def test_defer_structured_output_fires_end_hooks_exactly_once():
+    """The deferred run is a single logical run: end-of-run hooks fire once, and with the final
+    structured output -- not twice (once with the intermediate plain text, once with the object)."""
+    end_outputs: list[Any] = []
+
+    class _CountingRunHooks(RunHooks[Any]):
+        async def on_agent_end(self, context, agent, output):
+            end_outputs.append(output)
+
+    agent_end_outputs: list[Any] = []
+
+    class _CountingAgentHooks(AgentHooks[Any]):
+        async def on_end(self, context, agent, output):
+            agent_end_outputs.append(output)
+
+    model = _RecordingFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("get_weather", return_value="sunny")],
+        output_type=_DeferStructuredOutput,
+        model_settings=ModelSettings(defer_structured_output_until_done=True),
+        hooks=_CountingAgentHooks(),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("get_weather", "{}")],
+            [get_text_message("It is sunny and warm in Oakland today.")],
+            [get_text_message(json.dumps({"city": "Oakland", "temp": 21}))],
+        ]
+    )
+
+    result = await Runner.run(agent, input="what's the weather?", hooks=_CountingRunHooks())
+
+    expected = _DeferStructuredOutput(city="Oakland", temp=21)
+    assert result.final_output == expected
+    # Each end hook fires exactly once, with the structured output (not the intermediate text).
+    assert end_outputs == [expected]
+    assert agent_end_outputs == [expected]
+
+
+@pytest.mark.asyncio
+async def test_defer_structured_output_neutralizes_tool_choice_on_structuring_call():
+    """The deferred structuring call is tool-free, so a forcing ``tool_choice`` (e.g. "required")
+    must not be sent with an empty tool list -- it is neutralized to "auto" for that call."""
+    model = _RecordingFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("get_weather", return_value="sunny")],
+        output_type=_DeferStructuredOutput,
+        model_settings=ModelSettings(
+            defer_structured_output_until_done=True,
+            tool_choice="required",
+        ),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("get_weather", "{}")],
+            [get_text_message("It is sunny and warm in Oakland today.")],
+            [get_text_message(json.dumps({"city": "Oakland", "temp": 21}))],
+        ]
+    )
+
+    result = await Runner.run(agent, input="what's the weather?")
+
+    assert result.final_output == _DeferStructuredOutput(city="Oakland", temp=21)
+    assert len(model.recorded_calls) == 3
+    # The structuring turn carries no tools and a non-forcing tool_choice (the forcing "required"
+    # is neutralized so it can't conflict with the empty tool list).
+    assert model.recorded_calls[2]["tools"] == []
+    assert model.recorded_calls[2]["tool_choice"] in (None, "auto", "none")
+
+
+@pytest.mark.asyncio
+async def test_defer_structured_output_applies_model_input_filter_to_structuring_call():
+    """RunConfig.call_model_input_filter must run for the deferred structuring call too, not just
+    the tool/free-text turns -- otherwise app-level redaction is bypassed for the final call."""
+    model = _RecordingFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("get_weather", return_value="sunny")],
+        output_type=_DeferStructuredOutput,
+        model_settings=ModelSettings(defer_structured_output_until_done=True),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("get_weather", "{}")],
+            [get_text_message("It is sunny and warm in Oakland today.")],
+            [get_text_message(json.dumps({"city": "Oakland", "temp": 21}))],
+        ]
+    )
+
+    def filter_fn(data: CallModelData[Any]) -> ModelInputData:
+        return ModelInputData(input=list(data.model_data.input), instructions="FILTERED")
+
+    result = await Runner.run(
+        agent,
+        input="what's the weather?",
+        run_config=RunConfig(call_model_input_filter=filter_fn),
+    )
+
+    assert result.final_output == _DeferStructuredOutput(city="Oakland", temp=21)
+    assert len(model.recorded_calls) == 3
+    # Every model call -- including the structuring call -- saw the filtered instructions.
+    assert all(call["system_instructions"] == "FILTERED" for call in model.recorded_calls)
+
+
+@pytest.mark.asyncio
+async def test_defer_structured_output_fires_end_hooks_once_with_stop_on_first_tool():
+    """With defer + tool_use_behavior='stop_on_first_tool', the tool-finalization path must not
+    fire end hooks for the intermediate tool output -- only the structuring pass fires them once."""
+    end_outputs: list[Any] = []
+
+    class _CountingRunHooks(RunHooks[Any]):
+        async def on_agent_end(self, context, agent, output):
+            end_outputs.append(output)
+
+    model = _RecordingFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("get_weather", return_value="sunny")],
+        output_type=_DeferStructuredOutput,
+        tool_use_behavior="stop_on_first_tool",
+        model_settings=ModelSettings(defer_structured_output_until_done=True),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("get_weather", "{}")],
+            [get_text_message(json.dumps({"city": "Oakland", "temp": 21}))],
+        ]
+    )
+
+    result = await Runner.run(agent, input="what's the weather?", hooks=_CountingRunHooks())
+
+    expected = _DeferStructuredOutput(city="Oakland", temp=21)
+    assert result.final_output == expected
+    # Exactly one end-hook call, carrying the structured output (not the intermediate tool output).
+    assert end_outputs == [expected]
+
+
+@pytest.mark.asyncio
+async def test_defer_structured_output_preserves_all_raw_responses():
+    """The deferred turn makes two model calls (free-text + structuring); both must appear in
+    raw_responses so the count matches the number of model calls."""
+    model = _RecordingFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("get_weather", return_value="sunny")],
+        output_type=_DeferStructuredOutput,
+        model_settings=ModelSettings(defer_structured_output_until_done=True),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("get_weather", "{}")],
+            [get_text_message("It is sunny and warm in Oakland today.")],
+            [get_text_message(json.dumps({"city": "Oakland", "temp": 21}))],
+        ]
+    )
+
+    result = await Runner.run(agent, input="what's the weather?")
+
+    assert result.final_output == _DeferStructuredOutput(city="Oakland", temp=21)
+    # Three model calls -> three raw responses (tool turn, free-text turn, structuring turn).
+    assert len(model.recorded_calls) == 3
+    assert len(result.raw_responses) == 3
+
+
+@pytest.mark.asyncio
+async def test_defer_structured_output_pairs_llm_start_and_end_hooks():
+    """The deferred structuring call must emit on_llm_start like every other model call, so start
+    and end hooks stay paired -- one start and one end per model call."""
+    starts = 0
+    ends = 0
+
+    class _CountingRunHooks(RunHooks[Any]):
+        async def on_llm_start(self, context, agent, system_prompt, input_items):
+            nonlocal starts
+            starts += 1
+
+        async def on_llm_end(self, context, agent, response):
+            nonlocal ends
+            ends += 1
+
+    model = _RecordingFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("get_weather", return_value="sunny")],
+        output_type=_DeferStructuredOutput,
+        model_settings=ModelSettings(defer_structured_output_until_done=True),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("get_weather", "{}")],
+            [get_text_message("It is sunny and warm in Oakland today.")],
+            [get_text_message(json.dumps({"city": "Oakland", "temp": 21}))],
+        ]
+    )
+
+    result = await Runner.run(agent, input="what's the weather?", hooks=_CountingRunHooks())
+
+    assert result.final_output == _DeferStructuredOutput(city="Oakland", temp=21)
+    # Three model calls (tool, free-text, structuring) -> three paired start/end hooks.
+    assert starts == 3
+    assert ends == 3
+
+
+@pytest.mark.asyncio
+async def test_defer_structured_output_defers_for_handoff_only_agent():
+    """A structured-output agent whose only model tools are handoffs must still defer, so the
+    schema doesn't suppress the handoff tool-call on strict servers."""
+    model = _RecordingFakeModel()
+    handoff_target = Agent(name="target", model=FakeModel())
+    agent = Agent(
+        name="test",
+        model=model,
+        handoffs=[handoff_target],
+        output_type=_DeferStructuredOutput,
+        model_settings=ModelSettings(defer_structured_output_until_done=True),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            # Turn 1: the model answers in free text (does not hand off) -> final output.
+            [get_text_message("It is sunny and warm in Oakland today.")],
+            # Turn 2 (structuring pass): JSON matching the schema.
+            [get_text_message(json.dumps({"city": "Oakland", "temp": 21}))],
+        ]
+    )
+
+    result = await Runner.run(agent, input="what's the weather?")
+
+    assert result.final_output == _DeferStructuredOutput(city="Oakland", temp=21)
+    # Deferred: schema suppressed on the free-text turn, applied only on the structuring call.
+    assert len(model.recorded_calls) == 2
+    assert model.recorded_calls[0]["output_schema"] is None
+    assert model.recorded_calls[1]["output_schema"] is not None

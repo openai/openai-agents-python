@@ -86,7 +86,7 @@ from .run_internal.run_loop import (
     get_handoffs,
     get_output_schema,
     initialize_computer_tools,
-    resolve_interrupted_turn,
+    resolve_interrupted_turn_with_deferred_structuring,
     run_final_output_hooks,
     run_input_guardrails,
     run_output_guardrails,
@@ -846,7 +846,7 @@ class AgentRunner:
                             ):
                                 raise UserError("No model response found in previous state")
 
-                            turn_result = await resolve_interrupted_turn(
+                            turn_result = await resolve_interrupted_turn_with_deferred_structuring(
                                 bindings=current_bindings,
                                 original_input=original_input,
                                 original_pre_step_items=generated_items,
@@ -857,6 +857,10 @@ class AgentRunner:
                                 run_config=run_config,
                                 server_manages_conversation=server_conversation_tracker is not None,
                                 run_state=run_state,
+                                server_conversation_tracker=server_conversation_tracker,
+                                tool_use_tracker=tool_use_tracker,
+                                session=session,
+                                prompt_cache_key_resolver=prompt_cache_key_resolver,
                             )
 
                             if run_state._last_processed_response is not None:
@@ -1281,6 +1285,7 @@ class AgentRunner:
                     last_saved_input_snapshot_for_rewind = None
                     should_run_agent_start_hooks = False
 
+                    model_responses.extend(turn_result.preceding_model_responses)
                     model_responses.append(turn_result.model_response)
                     original_input = turn_result.original_input
                     # For model input, use new_step_items (filtered on handoffs).

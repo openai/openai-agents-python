@@ -79,6 +79,7 @@ _TRACEABLE_MODEL_SETTING_FIELDS = (
     "top_logprobs",
     "retry",
     "context_management",
+    "defer_structured_output_until_done",
 )
 
 
@@ -189,6 +190,18 @@ class ModelSettings:
 
     For example, use ``[{"type": "compaction", "compact_threshold": 200000}]``
     to enable server-side compaction when the rendered context crosses a token threshold.
+    """
+
+    defer_structured_output_until_done: bool | None = None
+    """Opt-in: defer structured output until the model stops calling tools.
+
+    When an agent has both tools and a non-plain ``output_type`` (structured output), enabling
+    this flag stops the runner from enforcing the ``response_format``/``output_schema`` on every
+    model call. Instead the model is allowed to call tools and produce a free-text answer first,
+    and the structured output is requested in a single extra, tool-free model call once the model
+    is done. This is for compatibility with OpenAI-compatible servers that enforce
+    ``response_format`` strictly from the first token (e.g. vLLM), which would otherwise suppress
+    tool calls. Defaults to ``None`` (disabled), in which case behavior is unchanged.
     """
 
     def resolve(self, override: ModelSettings | None) -> ModelSettings:

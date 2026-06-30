@@ -76,6 +76,7 @@ def test_all_fields_serialization() -> None:
             ),
         ),
         context_management=[{"type": "compaction", "compact_threshold": 200000}],
+        defer_structured_output_until_done=True,
     )
 
     # Verify that every single field is set to a non-None value

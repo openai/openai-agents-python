@@ -16,6 +16,7 @@ from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
+    ResponseOutputMessage,
 )
 from openai.types.responses.response_output_item import McpCall, McpListTools, ResponseOutputItem
 from openai.types.responses.response_prompt_param import ResponsePromptParam
@@ -39,10 +40,11 @@ from ..exceptions import (
     RunErrorDetails,
     UserError,
 )
-from ..handoffs import Handoff
+from ..handoffs import Handoff, HandoffInputData
 from ..items import (
     HandoffCallItem,
     ItemHelpers,
+    MessageOutputItem,
     ModelResponse,
     ReasoningItem,
     RunItem,
@@ -58,6 +60,7 @@ from ..items import (
 from ..lifecycle import RunHooks
 from ..logger import logger
 from ..memory import Session
+from ..model_settings import ModelSettings
 from ..models._response_terminal import (
     response_error_event_failure_error,
     response_terminal_failure_error,
@@ -88,6 +91,7 @@ from ..usage import Usage
 from ..util import _coro, _error_tracing
 from .agent_bindings import AgentBindings, bind_public_agent
 from .agent_runner_helpers import (
+    append_model_response_if_new,
     apply_resumed_conversation_settings,
     attach_usage_to_span,
     get_unsent_tool_call_ids_for_interrupted_state,
@@ -222,6 +226,7 @@ __all__ = [
     "QueueCompleteSentinel",
     "execute_tools_and_side_effects",
     "resolve_interrupted_turn",
+    "resolve_interrupted_turn_with_deferred_structuring",
     "execute_function_tool_calls",
     "execute_local_shell_calls",
     "execute_shell_calls",
@@ -734,7 +739,7 @@ async def start_streaming(
 
                     last_model_response = run_state._model_responses[-1]
 
-                    turn_result = await resolve_interrupted_turn(
+                    turn_result = await resolve_interrupted_turn_with_deferred_structuring(
                         bindings=current_bindings,
                         original_input=run_state._original_input,
                         original_pre_step_items=run_state._generated_items,
@@ -745,6 +750,17 @@ async def start_streaming(
                         run_config=run_config,
                         server_manages_conversation=server_conversation_tracker is not None,
                         run_state=run_state,
+                        server_conversation_tracker=server_conversation_tracker,
+                        tool_use_tracker=tool_use_tracker,
+                        session=session,
+                        prompt_cache_key_resolver=prompt_cache_key_resolver,
+                    )
+
+                    # A deferred resume makes a new (structuring) model call; record it in
+                    # raw_responses. Use if-new semantics so a non-deferred resume -- whose
+                    # model_response is the already-seeded interrupted response -- isn't duplicated.
+                    append_model_response_if_new(
+                        streamed_result.raw_responses, turn_result.model_response
                     )
 
                     tool_use_tracker.record_processed_response(
@@ -1058,9 +1074,11 @@ async def start_streaming(
                     ),
                 )
 
-                streamed_result.raw_responses = streamed_result.raw_responses + [
-                    turn_result.model_response
-                ]
+                streamed_result.raw_responses = (
+                    streamed_result.raw_responses
+                    + turn_result.preceding_model_responses
+                    + [turn_result.model_response]
+                )
                 streamed_result.input = turn_result.original_input
                 if isinstance(turn_result.next_step, NextStepHandoff):
                     streamed_result._original_input = copy_input_items(turn_result.original_input)
@@ -1345,6 +1363,12 @@ async def run_single_turn_streamed(
     model_settings = get_model_settings(execution_agent, run_config)
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
+    defer = _should_defer_structured_output(model_settings, output_schema, all_tools, handoffs)
+    # When deferring, suppress the schema on this streamed call so strict servers don't block tool
+    # calls and the free-text answer isn't validated as JSON; structured output is re-requested
+    # via a single non-streamed call once the model is done (see below).
+    effective_output_schema = None if defer else output_schema
+
     final_response: ModelResponse | None = None
     streamed_response_output: list[ResponseOutputItem] = []
 
@@ -1463,7 +1487,7 @@ async def run_single_turn_streamed(
             filtered.input,
             model_settings,
             all_tools,
-            output_schema,
+            effective_output_schema,
             handoffs,
             get_model_tracing_impl(
                 run_config.tracing_disabled, run_config.trace_include_sensitive_data
@@ -1649,7 +1673,7 @@ async def run_single_turn_streamed(
         original_input=streamed_result.input,
         pre_step_items=streamed_result._model_input_items,
         new_response=final_response,
-        output_schema=output_schema,
+        output_schema=effective_output_schema,
         all_tools=all_tools,
         handoffs=handoffs,
         hooks=hooks,
@@ -1660,7 +1684,34 @@ async def run_single_turn_streamed(
         server_manages_conversation=server_conversation_tracker is not None,
         event_queue=streamed_result._event_queue,
         before_side_effects=raise_if_input_guardrail_tripwire_known,
+        run_final_output_hooks_fn=_skip_final_output_hooks if defer else None,
     )
+
+    if (
+        defer
+        and output_schema is not None
+        and isinstance(single_step_result.next_step, NextStepFinalOutput)
+    ):
+        # The model finished calling tools and produced a free-text answer; make one extra
+        # non-streamed call to structure it. The tool-calling turns already streamed -- only the
+        # final structured object comes from this call.
+        single_step_result = await _run_deferred_structuring_pass(
+            bindings=bindings,
+            single_step_result=single_step_result,
+            original_input=streamed_result.input,
+            generated_items=single_step_result.generated_items,
+            system_instructions=system_prompt,
+            prompt_config=prompt_config,
+            output_schema=output_schema,
+            run_config=run_config,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            tool_use_tracker=tool_use_tracker,
+            server_conversation_tracker=server_conversation_tracker,
+            reasoning_item_id_policy=reasoning_item_id_policy,
+            session=session,
+            prompt_cache_key_resolver=prompt_cache_key_resolver,
+        )
 
     items_to_filter = session_items_for_turn(single_step_result)
 
@@ -1703,6 +1754,255 @@ async def run_single_turn_streamed(
     filtered_result = _dc.replace(single_step_result, new_step_items=items_to_filter)
     stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
     return single_step_result
+
+
+async def _skip_final_output_hooks(
+    agent: Agent[Any],
+    hooks: RunHooks[Any],
+    context_wrapper: RunContextWrapper[Any],
+    final_output: Any,
+) -> None:
+    """No-op end-of-run hooks for the intermediate turn of a deferred-structured-output run.
+
+    When structured output is deferred, the free-text turn reaches ``NextStepFinalOutput`` but is
+    not actually the end of the run -- the deferred structuring pass runs the real end hooks once
+    it produces the structured output (or, if it cannot, fires them itself with the plain-text
+    output). Without this, ``on_agent_end``/``Agent.hooks.on_end`` would fire twice per run.
+    """
+    return None
+
+
+def _should_defer_structured_output(
+    model_settings: ModelSettings,
+    output_schema: AgentOutputSchemaBase | None,
+    all_tools: list[Tool],
+    handoffs: list[Handoff],
+) -> bool:
+    """Decide whether structured output should be deferred until the model stops calling tools.
+
+    Only opt-in (``defer_structured_output_until_done``) agents with a non-plain structured
+    ``output_type`` and at least one model-side tool defer; everything else keeps today's behavior.
+    Handoffs count as model tools (they are sent as tool definitions), so a structured-output agent
+    with only handoffs is exactly the case this opt-in is meant to protect.
+    """
+    return bool(
+        model_settings.defer_structured_output_until_done
+        and output_schema is not None
+        and not output_schema.is_plain_text()
+        and (len(all_tools) > 0 or len(handoffs) > 0)
+    )
+
+
+async def _run_deferred_structuring_pass(
+    *,
+    bindings: AgentBindings[TContext],
+    single_step_result: SingleStepResult,
+    original_input: str | list[TResponseInputItem],
+    generated_items: list[RunItem],
+    system_instructions: str | None,
+    prompt_config: ResponsePromptParam | None,
+    output_schema: AgentOutputSchemaBase,
+    run_config: RunConfig,
+    hooks: RunHooks[TContext],
+    context_wrapper: RunContextWrapper[TContext],
+    tool_use_tracker: AgentToolUseTracker,
+    server_conversation_tracker: OpenAIServerConversationTracker | None,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None,
+    session: Session | None = None,
+    prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
+) -> SingleStepResult:
+    """Make one extra tool-free model call to structure the model's free-text final answer.
+
+    Used when structured output was deferred (see ``_should_defer_structured_output``): the model
+    has finished calling tools and produced a plain-text answer, so we re-ask the model -- with no
+    tools and the real ``output_schema`` -- to emit the structured output. The call goes through the
+    normal ``get_new_response`` path, so input filtering, lifecycle hooks, retries, prompt caching
+    and usage accounting are all reused. The validated object replaces the step's final output and
+    the structuring response's items are appended to history.
+    """
+    public_agent = bindings.public_agent
+
+    # Acknowledge the free-text response that triggered deferral before building the structuring
+    # input, so server-managed conversations (previous_response_id / conversation_id) continue from
+    # it instead of re-sending the assistant message from stale state. The streamed path already
+    # tracks the terminal response before reaching here; track_server_items is idempotent.
+    if server_conversation_tracker is not None:
+        server_conversation_tracker.track_server_items(single_step_result.model_response)
+
+    # Build the same input the next turn would have used (accumulated input + this turn's items).
+    if server_conversation_tracker is not None:
+        structuring_input = server_conversation_tracker.prepare_input(
+            original_input, generated_items
+        )
+    else:
+        structuring_input = _prepare_turn_input_items(
+            original_input, generated_items, reasoning_item_id_policy
+        )
+
+    # Reuse the normal model-call path with no tools/handoffs and the real schema. get_new_response
+    # neutralizes any forcing tool_choice for the empty tool list, and handles input filtering,
+    # on_llm_start/on_llm_end, retries, prompt caching, server-input tracking and usage.
+    structuring_response = await get_new_response(
+        bindings,
+        system_instructions,
+        structuring_input,
+        output_schema,
+        [],
+        [],
+        hooks,
+        context_wrapper,
+        run_config,
+        tool_use_tracker,
+        server_conversation_tracker,
+        prompt_config,
+        session=session,
+        prompt_cache_key_resolver=prompt_cache_key_resolver,
+    )
+
+    # Wrap the structuring response's message items and capture the text to validate.
+    structured_text: str | None = None
+    structuring_items: list[RunItem] = []
+    for raw_item in structuring_response.output:
+        if isinstance(raw_item, ResponseOutputMessage):
+            structuring_items.append(MessageOutputItem(raw_item=raw_item, agent=public_agent))
+            extracted = ItemHelpers.extract_text(raw_item)
+            if extracted:
+                structured_text = extracted
+
+    if structured_text is None:
+        # The structuring call produced no text; fall back to the deferred plain-text result. End
+        # hooks were suppressed on the deferred turn, so fire them now with the plain-text output --
+        # this branch is the actual end of the run.
+        if isinstance(single_step_result.next_step, NextStepFinalOutput):
+            await run_final_output_hooks(
+                public_agent, hooks, context_wrapper, single_step_result.next_step.output
+            )
+        # The structuring model call still happened (its usage and on_llm_end already fired), so
+        # record it in raw_responses after the free-text response. Keep the free-text result as the
+        # final output; model_response becomes the structuring response (the last actual call) so
+        # the raw-response order and last_response_id stay correct.
+        single_step_result.preceding_model_responses = [
+            *single_step_result.preceding_model_responses,
+            single_step_result.model_response,
+        ]
+        single_step_result.model_response = structuring_response
+        return single_step_result
+
+    final_output = output_schema.validate_json(structured_text)
+
+    new_step_items = list(single_step_result.new_step_items) + structuring_items
+
+    structured_step_result = await execute_final_output(
+        public_agent=public_agent,
+        original_input=single_step_result.original_input,
+        new_response=structuring_response,
+        pre_step_items=single_step_result.pre_step_items,
+        new_step_items=new_step_items,
+        final_output=final_output,
+        hooks=hooks,
+        context_wrapper=context_wrapper,
+        tool_input_guardrail_results=single_step_result.tool_input_guardrail_results,
+        tool_output_guardrail_results=single_step_result.tool_output_guardrail_results,
+    )
+    # This step made two model calls -- the free-text response and the structuring response above.
+    # Carry the free-text response so the runner records both in raw_responses (in call order),
+    # keeping the raw-response count aligned with the number of model calls.
+    structured_step_result.preceding_model_responses = [
+        *single_step_result.preceding_model_responses,
+        single_step_result.model_response,
+    ]
+    return structured_step_result
+
+
+async def resolve_interrupted_turn_with_deferred_structuring(
+    *,
+    bindings: AgentBindings[TContext],
+    original_input: str | list[TResponseInputItem],
+    original_pre_step_items: list[RunItem],
+    new_response: ModelResponse,
+    processed_response: ProcessedResponse,
+    hooks: RunHooks[TContext],
+    context_wrapper: RunContextWrapper[TContext],
+    run_config: RunConfig,
+    server_manages_conversation: bool = False,
+    run_state: RunState | None = None,
+    nest_handoff_history_fn: Callable[..., HandoffInputData] | None = None,
+    server_conversation_tracker: OpenAIServerConversationTracker | None = None,
+    tool_use_tracker: AgentToolUseTracker,
+    session: Session | None = None,
+    prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
+) -> SingleStepResult:
+    """Resume an interrupted (HITL-approval) turn, applying deferred structured output if enabled.
+
+    Wraps ``resolve_interrupted_turn`` so a resumed turn that finalizes from an approved tool
+    (e.g. ``tool_use_behavior="stop_on_first_tool"``) with ``defer_structured_output_until_done``
+    still suppresses the intermediate end hooks and runs the structuring pass -- matching the
+    fresh-turn path. Non-deferred resumes are unaffected (no extra work, identical behavior).
+    """
+    execution_agent = bindings.execution_agent
+    model_settings = get_model_settings(execution_agent, run_config)
+    output_schema = get_output_schema(execution_agent)
+
+    # Only do the (slightly more expensive) tool/handoff lookups when the opt-in flag could apply.
+    defer = False
+    if (
+        model_settings.defer_structured_output_until_done
+        and output_schema is not None
+        and not output_schema.is_plain_text()
+    ):
+        all_tools = await get_all_tools(execution_agent, context_wrapper)
+        handoffs = await get_handoffs(execution_agent, context_wrapper)
+        defer = _should_defer_structured_output(model_settings, output_schema, all_tools, handoffs)
+
+    turn_result = await resolve_interrupted_turn(
+        bindings=bindings,
+        original_input=original_input,
+        original_pre_step_items=original_pre_step_items,
+        new_response=new_response,
+        processed_response=processed_response,
+        hooks=hooks,
+        context_wrapper=context_wrapper,
+        run_config=run_config,
+        server_manages_conversation=server_manages_conversation,
+        run_state=run_state,
+        nest_handoff_history_fn=nest_handoff_history_fn,
+        run_final_output_hooks_fn=_skip_final_output_hooks if defer else None,
+    )
+
+    if (
+        defer
+        and output_schema is not None
+        and isinstance(turn_result.next_step, NextStepFinalOutput)
+    ):
+        system_prompt, prompt_config = await asyncio.gather(
+            execution_agent.get_system_prompt(context_wrapper),
+            execution_agent.get_prompt(context_wrapper),
+        )
+        turn_result = await _run_deferred_structuring_pass(
+            bindings=bindings,
+            single_step_result=turn_result,
+            original_input=turn_result.original_input,
+            generated_items=turn_result.generated_items,
+            system_instructions=system_prompt,
+            prompt_config=prompt_config,
+            output_schema=output_schema,
+            run_config=run_config,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            tool_use_tracker=tool_use_tracker,
+            server_conversation_tracker=server_conversation_tracker,
+            reasoning_item_id_policy=(
+                run_state._reasoning_item_id_policy if run_state is not None else None
+            ),
+            session=session,
+            prompt_cache_key_resolver=prompt_cache_key_resolver,
+        )
+        # On the resume path the free-text/interrupted response is already in raw_responses (the
+        # runner seeds it from RunState._model_responses), so drop the preceding response the
+        # structuring pass carried -- only the new structuring response should be appended here.
+        turn_result.preceding_model_responses = []
+
+    return turn_result
 
 
 async def run_single_turn(
@@ -1755,6 +2055,13 @@ async def run_single_turn(
 
     output_schema = get_output_schema(execution_agent)
     handoffs = await get_handoffs(execution_agent, context_wrapper)
+
+    model_settings = get_model_settings(execution_agent, run_config)
+    defer = _should_defer_structured_output(model_settings, output_schema, all_tools, handoffs)
+    # When deferring, suppress the schema on this call so strict servers don't block tool calls
+    # and so the free-text answer isn't validated as JSON; we re-request structured output below.
+    effective_output_schema = None if defer else output_schema
+
     if server_conversation_tracker is not None:
         input = server_conversation_tracker.prepare_input(original_input, generated_items)
     else:
@@ -1764,7 +2071,7 @@ async def run_single_turn(
         bindings,
         system_prompt,
         input,
-        output_schema,
+        effective_output_schema,
         all_tools,
         handoffs,
         hooks,
@@ -1778,12 +2085,12 @@ async def run_single_turn(
         prompt_cache_key_resolver=prompt_cache_key_resolver,
     )
 
-    return await get_single_step_result_from_response(
+    single_step_result = await get_single_step_result_from_response(
         bindings=bindings,
         original_input=original_input,
         pre_step_items=generated_items,
         new_response=new_response,
-        output_schema=output_schema,
+        output_schema=effective_output_schema,
         all_tools=all_tools,
         handoffs=handoffs,
         hooks=hooks,
@@ -1792,7 +2099,33 @@ async def run_single_turn(
         error_handlers=error_handlers,
         tool_use_tracker=tool_use_tracker,
         server_manages_conversation=server_conversation_tracker is not None,
+        run_final_output_hooks_fn=_skip_final_output_hooks if defer else None,
     )
+
+    if (
+        defer
+        and output_schema is not None
+        and isinstance(single_step_result.next_step, NextStepFinalOutput)
+    ):
+        single_step_result = await _run_deferred_structuring_pass(
+            bindings=bindings,
+            single_step_result=single_step_result,
+            original_input=original_input,
+            generated_items=single_step_result.generated_items,
+            system_instructions=system_prompt,
+            prompt_config=prompt_config,
+            output_schema=output_schema,
+            run_config=run_config,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            tool_use_tracker=tool_use_tracker,
+            server_conversation_tracker=server_conversation_tracker,
+            reasoning_item_id_policy=reasoning_item_id_policy,
+            session=session,
+            prompt_cache_key_resolver=prompt_cache_key_resolver,
+        )
+
+    return single_step_result
 
 
 async def get_new_response(
@@ -1828,6 +2161,10 @@ async def get_new_response(
     model = get_model(execution_agent, run_config)
     model_settings = get_model_settings(execution_agent, run_config)
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
+    if not all_tools and model_settings.tool_choice not in (None, "auto", "none"):
+        # A tool-free call must not force a tool choice (e.g. the deferred structuring call), or
+        # strict servers reject "required"/named tool_choice paired with an empty tool list.
+        model_settings = _dc.replace(model_settings, tool_choice="auto")
 
     if server_conversation_tracker is not None:
         server_conversation_tracker.mark_input_as_sent(filtered.input)

@@ -15,6 +15,7 @@ from openai.types.responses import (
     ResponseIncompleteEvent,
 )
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
+from pydantic import BaseModel
 from typing_extensions import TypedDict
 
 from agents import (
@@ -39,6 +40,7 @@ from agents import (
     retry_policies,
 )
 from agents.items import RunItem, ToolApprovalItem, TResponseInputItem
+from agents.lifecycle import AgentHooks, RunHooks
 from agents.memory.openai_conversations_session import OpenAIConversationsSession
 from agents.run import RunConfig
 from agents.run_internal import run_loop
@@ -2041,3 +2043,239 @@ async def test_streaming_hitl_server_conversation_tracker_priming():
     # Should complete successfully without message duplication
     assert result2.final_output == "Second response"
     assert len(result2.new_items) >= 1
+
+
+class _DeferStructuredOutput(BaseModel):
+    city: str
+    temp: int
+
+
+class _RecordingStreamFakeModel(FakeModel):
+    """FakeModel that records ``output_schema``/``tools`` for both streamed turns and the extra
+    non-streamed structuring call."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.recorded_calls: list[dict[str, Any]] = []
+
+    async def get_response(
+        self,
+        system_instructions: Any,
+        input: Any,
+        model_settings: Any,
+        tools: Any,
+        output_schema: Any,
+        handoffs: Any,
+        tracing: Any,
+        *,
+        previous_response_id: Any = None,
+        conversation_id: Any = None,
+        prompt: Any = None,
+    ) -> Any:
+        self.recorded_calls.append(
+            {"kind": "get_response", "output_schema": output_schema, "tools": list(tools)}
+        )
+        return await super().get_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+
+    def stream_response(
+        self,
+        system_instructions: Any,
+        input: Any,
+        model_settings: Any,
+        tools: Any,
+        output_schema: Any,
+        handoffs: Any,
+        tracing: Any,
+        *,
+        previous_response_id: Any = None,
+        conversation_id: Any = None,
+        prompt: Any = None,
+    ) -> Any:
+        self.recorded_calls.append(
+            {"kind": "stream_response", "output_schema": output_schema, "tools": list(tools)}
+        )
+        return super().stream_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+
+
+@pytest.mark.asyncio
+async def test_streamed_defer_structured_output_until_done_defers_schema():
+    model = _RecordingStreamFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("get_weather", return_value="sunny")],
+        output_type=_DeferStructuredOutput,
+        model_settings=ModelSettings(defer_structured_output_until_done=True),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            # Turn 1 (streamed): tool call.
+            [get_function_tool_call("get_weather", "{}")],
+            # Turn 2 (streamed): plain-text final answer (not JSON).
+            [get_text_message("It is sunny and warm in Oakland today.")],
+            # Turn 3 (non-streamed structuring pass): JSON matching the schema.
+            [get_text_message(json.dumps({"city": "Oakland", "temp": 21}))],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="what's the weather?")
+    await consume_stream(result)
+
+    assert isinstance(result.final_output, _DeferStructuredOutput)
+    assert result.final_output == _DeferStructuredOutput(city="Oakland", temp=21)
+
+    assert len(model.recorded_calls) == 3
+    # Both tool/free-text turns are streamed with the schema suppressed.
+    assert model.recorded_calls[0]["kind"] == "stream_response"
+    assert model.recorded_calls[0]["output_schema"] is None
+    assert model.recorded_calls[1]["kind"] == "stream_response"
+    assert model.recorded_calls[1]["output_schema"] is None
+    # The structuring pass is a non-streamed call with the real schema and no tools.
+    assert model.recorded_calls[2]["kind"] == "get_response"
+    assert model.recorded_calls[2]["output_schema"] is not None
+    assert model.recorded_calls[2]["tools"] == []
+
+
+@pytest.mark.asyncio
+async def test_streamed_defer_structured_output_disabled_by_default_keeps_schema():
+    model = _RecordingStreamFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("get_weather", return_value="sunny")],
+        output_type=_DeferStructuredOutput,
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("get_weather", "{}")],
+            [get_text_message(json.dumps({"city": "Oakland", "temp": 21}))],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="what's the weather?")
+    await consume_stream(result)
+
+    assert result.final_output == _DeferStructuredOutput(city="Oakland", temp=21)
+    # No extra structuring call; every streamed turn carries the schema.
+    assert len(model.recorded_calls) == 2
+    assert all(call["kind"] == "stream_response" for call in model.recorded_calls)
+    assert model.recorded_calls[0]["output_schema"] is not None
+    assert model.recorded_calls[1]["output_schema"] is not None
+
+
+@pytest.mark.asyncio
+async def test_streamed_defer_structured_output_fires_end_hooks_exactly_once():
+    """Streamed deferred run: end-of-run hooks fire once, with the final structured output."""
+    end_outputs: list[Any] = []
+    agent_end_outputs: list[Any] = []
+
+    class _CountingRunHooks(RunHooks[Any]):
+        async def on_agent_end(self, context, agent, output):
+            end_outputs.append(output)
+
+    class _CountingAgentHooks(AgentHooks[Any]):
+        async def on_end(self, context, agent, output):
+            agent_end_outputs.append(output)
+
+    model = _RecordingStreamFakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("get_weather", return_value="sunny")],
+        output_type=_DeferStructuredOutput,
+        model_settings=ModelSettings(defer_structured_output_until_done=True),
+        hooks=_CountingAgentHooks(),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("get_weather", "{}")],
+            [get_text_message("It is sunny and warm in Oakland today.")],
+            [get_text_message(json.dumps({"city": "Oakland", "temp": 21}))],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="what's the weather?", hooks=_CountingRunHooks())
+    await consume_stream(result)
+
+    expected = _DeferStructuredOutput(city="Oakland", temp=21)
+    assert result.final_output == expected
+    assert end_outputs == [expected]
+    assert agent_end_outputs == [expected]
+
+
+@pytest.mark.asyncio
+async def test_streamed_resumed_deferred_structured_output_with_approved_stop_on_first_tool():
+    """Streamed analogue of the non-streamed HITL+defer resume test: the resumed turn's extra
+    structuring model call must be recorded in raw_responses (regression for the streamed resume
+    path, which previously never appended it)."""
+    from pydantic import BaseModel
+
+    class _Weather(BaseModel):
+        city: str
+        temp: int
+
+    async def get_weather() -> str:
+        return "sunny"
+
+    tool = function_tool(get_weather, name_override="get_weather", needs_approval=True)
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[tool],
+        output_type=_Weather,
+        tool_use_behavior="stop_on_first_tool",
+        model_settings=ModelSettings(defer_structured_output_until_done=True),
+    )
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("get_weather", "{}", call_id="call-1")],
+            [get_text_message(json.dumps({"city": "Oakland", "temp": 21}))],
+        ]
+    )
+
+    end_outputs: list[Any] = []
+
+    class _CountingRunHooks(RunHooks[Any]):
+        async def on_agent_end(self, context, agent, output):
+            end_outputs.append(output)
+
+    hooks = _CountingRunHooks()
+
+    first = Runner.run_streamed(agent, input="what's the weather?", hooks=hooks)
+    await consume_stream(first)
+    assert first.interruptions
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    resumed = Runner.run_streamed(agent, state, hooks=hooks)
+    await consume_stream(resumed)
+
+    expected = _Weather(city="Oakland", temp=21)
+    assert isinstance(resumed.final_output, _Weather)
+    assert resumed.final_output == expected
+    assert end_outputs == [expected]
+    # The resumed structuring call must be recorded: interrupted tool-call response + structuring.
+    assert len(resumed.raw_responses) == 2
