@@ -309,6 +309,25 @@ for tool in agent.tools:
 3.  Functions can optionally take the `context` (must be the first argument). You can also set overrides, like the name of the tool, description, which docstring style to use, etc.
 4.  You can pass the decorated functions to the list of tools.
 
+You can also decorate instance methods. Access the tool from an instance before passing it to
+`Agent.tools`; the implicit `self` parameter is bound to that instance and omitted from the tool
+schema.
+
+```python
+class CustomerTools:
+    def __init__(self, tenant_id: str) -> None:
+        self.tenant_id = tenant_id
+
+    @function_tool
+    def lookup_customer(self, customer_id: str) -> str:
+        """Look up a customer by ID."""
+        return f"{self.tenant_id}:{customer_id}"
+
+
+customer_tools = CustomerTools("tenant_123")
+agent = Agent(name="Assistant", tools=[customer_tools.lookup_customer])
+```
+
 ??? note "Expand to see output"
 
     ```
