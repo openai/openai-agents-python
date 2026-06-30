@@ -166,6 +166,42 @@ async def test_stream_audio_sends_correct_json():
 
 
 @pytest.mark.asyncio
+async def test_close_awaits_cancelled_background_tasks():
+    input_audio = await FakeStreamedAudioInput.get(count=0)
+    stt_settings = STTModelSettings()
+    session = OpenAISTTTranscriptionSession(
+        input=input_audio,
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="whisper-1",
+        settings=stt_settings,
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+
+    cleanup_events = [asyncio.Event() for _ in range(4)]
+
+    async def wait_until_cancelled(cleanup_event: asyncio.Event) -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_event.set()
+
+    tasks = [asyncio.create_task(wait_until_cancelled(event)) for event in cleanup_events]
+    (
+        session._listener_task,
+        session._process_events_task,
+        session._stream_audio_task,
+        session._connection_task,
+    ) = tasks
+
+    await asyncio.sleep(0)
+    await session.close()
+
+    assert all(task.done() for task in tasks)
+    assert all(event.is_set() for event in cleanup_events)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "created,updated,completed",
     [
