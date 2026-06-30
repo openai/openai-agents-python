@@ -625,6 +625,17 @@ class BatchTraceProcessor(TracingProcessor):
             # No background thread: process any remaining items synchronously.
             self._export_batches(force=True, deadline=deadline)
 
+        # Close the exporter so the underlying HTTP client and connection pool are released.
+        close_fn = getattr(self._exporter, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception as exc:
+                logger.warning(
+                    "[non-fatal] Tracing: exporter close failed: %s",
+                    exc,
+                )
+
     def force_flush(self):
         """
         Forces an immediate flush of all queued spans.
