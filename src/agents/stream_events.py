@@ -58,5 +58,23 @@ class AgentUpdatedStreamEvent:
     type: Literal["agent_updated_stream_event"] = "agent_updated_stream_event"
 
 
-StreamEvent: TypeAlias = RawResponsesStreamEvent | RunItemStreamEvent | AgentUpdatedStreamEvent
+@dataclass
+class ToolProgressStreamEvent:
+    """Streaming event emitted by a tool to report intermediate progress."""
+
+    tool_name: str
+    """The name of the tool emitting progress."""
+
+    tool_call_id: str
+    """The tool call ID this progress event belongs to."""
+
+    data: Any
+    """Arbitrary progress payload provided by the tool."""
+
+    type: Literal["tool_progress_stream_event"] = "tool_progress_stream_event"
+
+
+StreamEvent: TypeAlias = (
+    RawResponsesStreamEvent | RunItemStreamEvent | AgentUpdatedStreamEvent | ToolProgressStreamEvent
+)
 """A streaming event from an agent."""
